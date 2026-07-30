@@ -15,3 +15,6 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 - The live meeting view keeps a meeting library on the left, an editable document in the center, live transcript/AI tabs on the right, and a floating recording toolbar at the bottom.
 - Data is stored locally by default. Remote model calls only occur after the user configures a provider.
 - Chinese and mixed Chinese/English meetings are the first-release language priority.
+- The iOS edition is a native SwiftUI universal app targeting iOS/iPadOS 18+, with an adaptive iPhone navigation stack and a three-column iPad workspace.
+- The iOS edition remains local-first, uses SwiftData for meeting content, Apple Speech for the built-in transcription path, and Keychain for third-party API credentials.
+- iOS records microphone audio only; it must not imply that it can capture another app's protected system audio.

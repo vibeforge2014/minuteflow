@@ -7,3 +7,10 @@ coverage/
 .vite/
 *.partial
 
+# iOS
+ios/**/build/
+ios/**/DerivedData/
+ios/**/*.xcresult
+ios/**/*.xcodeproj/xcuserdata/
+ios/**/*.xcworkspace/xcuserdata/
+ios/**/artifacts/

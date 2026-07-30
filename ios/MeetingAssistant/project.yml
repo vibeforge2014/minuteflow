@@ -1,0 +1,117 @@
+name: MeetingAssistant
+
+options:
+  bundleIdPrefix: com.zqian
+  deploymentTarget:
+    iOS: "18.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    SUPPORTS_MACCATALYST: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+
+targets:
+  MeetingAssistant:
+    type: application
+    platform: iOS
+    sources:
+      - MeetingAssistant
+    resources:
+      - path: MeetingAssistant/Resources
+    info:
+      path: MeetingAssistant/Info.plist
+      properties:
+        CFBundleDisplayName: 会议助手
+        CFBundleName: MeetingAssistant
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        NSMicrophoneUsageDescription: 会议助手需要使用麦克风录制会议，并将语音转换为文字。
+        NSSpeechRecognitionUsageDescription: 会议助手使用系统语音识别生成实时转录和导入音频的文字稿。
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: 音频与视频
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.audio
+              - public.movie
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zqian.meetingassistant
+        PRODUCT_NAME: MeetingAssistant
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 1.0
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: -Onone
+        Release:
+          SWIFT_OPTIMIZATION_LEVEL: -Osize
+
+  MeetingAssistantTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - MeetingAssistantTests
+    dependencies:
+      - target: MeetingAssistant
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zqian.meetingassistant.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+  MeetingAssistantUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - MeetingAssistantUITests
+    dependencies:
+      - target: MeetingAssistant
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zqian.meetingassistant.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: MeetingAssistant
+
+schemes:
+  MeetingAssistant:
+    build:
+      targets:
+        MeetingAssistant: all
+        MeetingAssistantTests: [test]
+        MeetingAssistantUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: true
+      targets:
+        - MeetingAssistantTests
+        - MeetingAssistantUITests
+    profile:
+      config: Release
+    archive:
+      config: Release

@@ -46,3 +46,16 @@ npm run package
 ## 隐私与数据
 
 会议、转录、笔记、索引和录音默认位于 Electron 的应用数据目录。未配置远程模型时不会上传会议内容；配置远程服务后，只将对应转录片段或总结输入发送到用户选择的服务商。
+
+## iPhone 与 iPad
+
+原生 SwiftUI 通用应用位于 [`ios/MeetingAssistant`](ios/MeetingAssistant)，最低支持 iOS/iPadOS 18。
+
+- iPhone：会议、行动项、设置三标签导航，会议详情内切换文档、转录与 AI 纪要
+- iPad：自适应 `NavigationSplitView` 工作区，可并排编辑会议文档并查看实时转录
+- SwiftData 本地数据库、麦克风录音、Apple Speech 实时/导入转录
+- 本地基础纪要与 OpenAI 兼容远程纪要，远程 Whisper 导入适配器
+- Keychain 密钥保存、音视频导入、Markdown/TXT/SRT/JSON 导出
+- 收藏、搜索、软删除恢复、说话人改名和统一行动项列表
+
+iOS 受系统沙箱限制，仅录制麦克风，不能捕获其他 App 的受保护系统音频。工程、构建和测试说明见 [`ios/MeetingAssistant/README.md`](ios/MeetingAssistant/README.md)。
