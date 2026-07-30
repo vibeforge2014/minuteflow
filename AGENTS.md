@@ -18,3 +18,4 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 - The iOS edition is a native SwiftUI universal app targeting iOS/iPadOS 18+, with an adaptive iPhone navigation stack and a three-column iPad workspace.
 - The iOS edition remains local-first, uses SwiftData for meeting content, Apple Speech for the built-in transcription path, and Keychain for third-party API credentials.
 - iOS records microphone audio only; it must not imply that it can capture another app's protected system audio.
+- The iOS edition's overall color system should follow the local TuneSync iOS app: restrained neutral surfaces, TuneSync's warm orange primary tint, soft tinted cards, and semantic status colors, while preserving the meeting assistant's existing layout and information hierarchy.

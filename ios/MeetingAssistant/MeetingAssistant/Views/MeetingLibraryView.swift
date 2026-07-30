@@ -39,7 +39,7 @@ struct MeetingLibraryView: View {
       HStack(spacing: 10) {
         Image(systemName: "waveform.badge.mic")
           .font(.title3.weight(.semibold))
-          .foregroundStyle(MeetingTheme.blue)
+          .foregroundStyle(MeetingTheme.primary)
         Text("会议助手")
           .font(.headline)
         Spacer()
@@ -76,7 +76,7 @@ struct MeetingLibraryView: View {
     }
     .padding(.horizontal, 10)
     .frame(height: 38)
-    .background(.background, in: RoundedRectangle(cornerRadius: 9))
+    .background(MeetingTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 9))
     .overlay {
       RoundedRectangle(cornerRadius: 9)
         .stroke(MeetingTheme.divider)
@@ -168,7 +168,7 @@ struct MeetingLibraryRow: View {
       HStack(spacing: 7) {
         if meeting.status == .recording {
           Circle()
-            .fill(MeetingTheme.blue)
+            .fill(.red)
             .frame(width: 7, height: 7)
         }
         Text(meeting.title)

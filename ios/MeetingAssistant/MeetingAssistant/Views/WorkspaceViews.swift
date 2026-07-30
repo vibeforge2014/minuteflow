@@ -178,7 +178,7 @@ private struct PhoneMeetingDetailView: View {
       .pickerStyle(.segmented)
       .padding(.horizontal)
       .padding(.vertical, 10)
-      .background(.background)
+      .background(MeetingTheme.surface)
 
       switch selectedSection {
       case .document:

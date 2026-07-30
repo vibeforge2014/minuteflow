@@ -31,7 +31,7 @@ struct AppRootView: View {
         )
       }
     }
-    .tint(MeetingTheme.blue)
+    .tint(MeetingTheme.primary)
     .background(MeetingTheme.canvas)
     .sheet(item: $appState.presentedSheet) { sheet in
       switch sheet {

@@ -1,13 +1,19 @@
 import SwiftUI
+import UIKit
 
 enum MeetingTheme {
-  static let blue = Color(red: 0.08, green: 0.31, blue: 0.92)
-  static let paleBlue = Color(red: 0.93, green: 0.95, blue: 1)
-  static let canvas = Color(red: 0.97, green: 0.97, blue: 0.96)
-  static let sidebar = Color(red: 0.965, green: 0.968, blue: 0.975)
-  static let divider = Color.black.opacity(0.08)
-  static let success = Color(red: 0.17, green: 0.57, blue: 0.31)
-  static let warning = Color(red: 0.92, green: 0.47, blue: 0.12)
+  // TuneSync-inspired palette: warm coral actions on quiet, system-native surfaces.
+  static let primary = Color(red: 0.906, green: 0.435, blue: 0.318)
+  static let primarySoft = primary.opacity(0.12)
+  static let canvas = Color(uiColor: .systemGroupedBackground)
+  static let surface = Color(uiColor: .secondarySystemGroupedBackground)
+  static let surfaceRaised = Color(uiColor: .tertiarySystemGroupedBackground)
+  static let sidebar = Color(uiColor: .secondarySystemGroupedBackground)
+  static let divider = Color(uiColor: .separator).opacity(0.32)
+  static let success = Color(red: 0.20, green: 0.58, blue: 0.36)
+  static let warning = Color(red: 0.86, green: 0.49, blue: 0.14)
+  static let info = Color(red: 0.25, green: 0.52, blue: 0.82)
+  static let speakerViolet = Color(red: 0.52, green: 0.36, blue: 0.78)
 }
 
 struct DocumentCard<Content: View>: View {
@@ -33,10 +39,10 @@ struct DocumentCard<Content: View>: View {
       content
     }
     .padding(18)
-    .background(.background)
-    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    .background(MeetingTheme.surface)
+    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     .overlay {
-      RoundedRectangle(cornerRadius: 14, style: .continuous)
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
         .stroke(MeetingTheme.divider)
     }
   }
@@ -64,7 +70,7 @@ struct StatusPill: View {
     case .draft: .secondary
     case .recording: MeetingTheme.success
     case .processing: MeetingTheme.warning
-    case .completed: MeetingTheme.blue
+    case .completed: MeetingTheme.primary
     }
   }
 }

@@ -23,7 +23,7 @@ struct RecorderBar: View {
       } else {
         Image(systemName: "mic.circle.fill")
           .font(.title2)
-          .foregroundStyle(MeetingTheme.blue)
+          .foregroundStyle(MeetingTheme.primary)
         Text("准备录音")
           .font(.subheadline.weight(.semibold))
       }

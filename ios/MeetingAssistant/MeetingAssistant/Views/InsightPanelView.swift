@@ -19,7 +19,7 @@ struct InsightPanelView: View {
         Spacer(minLength: 8)
       }
       .padding(14)
-      .background(.background)
+      .background(MeetingTheme.surface)
       Divider()
 
       switch appState.inspectorTab {
@@ -29,7 +29,7 @@ struct InsightPanelView: View {
         SummaryPanelView(meeting: meeting)
       }
     }
-    .background(.background)
+    .background(MeetingTheme.surface)
     .navigationSplitViewColumnWidth(min: 300, ideal: 350, max: 430)
   }
 }
@@ -45,7 +45,7 @@ struct TranscriptPanelView: View {
           HStack {
             Label("实时转录", systemImage: "waveform")
               .font(.caption.weight(.semibold))
-              .foregroundStyle(MeetingTheme.blue)
+              .foregroundStyle(MeetingTheme.primary)
             Spacer()
             Text("\(meeting.orderedSegments.count) 段")
               .font(.caption)
@@ -129,7 +129,7 @@ private struct TranscriptSegmentRow: View {
         .foregroundStyle(
           segment.isFinal
             ? Color.secondary.opacity(0.45)
-            : MeetingTheme.blue
+            : MeetingTheme.primary
         )
     }
     .padding(.horizontal, 14)
@@ -138,8 +138,8 @@ private struct TranscriptSegmentRow: View {
 
   private var speakerColor: Color {
     switch segment.speaker {
-    case "我": MeetingTheme.blue
-    case "刘婷": .purple
+    case "我": MeetingTheme.primary
+    case "刘婷": MeetingTheme.speakerViolet
     case "周哲": MeetingTheme.warning
     default: .secondary
     }
@@ -160,7 +160,7 @@ private struct LiveTranscriptRow: View {
         HStack(spacing: 6) {
           Text("我")
             .font(.caption.weight(.semibold))
-            .foregroundStyle(MeetingTheme.blue)
+            .foregroundStyle(MeetingTheme.primary)
           Text("临时转写中")
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -174,7 +174,7 @@ private struct LiveTranscriptRow: View {
         .controlSize(.small)
     }
     .padding(14)
-    .background(MeetingTheme.paleBlue.opacity(0.55))
+    .background(MeetingTheme.primarySoft)
   }
 }
 
@@ -294,7 +294,7 @@ private struct SummarySectionCard: View {
     }
     .padding(13)
     .background(
-      Color(uiColor: .secondarySystemBackground),
+      MeetingTheme.surfaceRaised,
       in: RoundedRectangle(cornerRadius: 12)
     )
   }

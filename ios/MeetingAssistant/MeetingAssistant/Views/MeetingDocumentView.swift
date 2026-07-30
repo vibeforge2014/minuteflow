@@ -97,7 +97,7 @@ struct MeetingDocumentView: View {
       .padding(.bottom, 12)
       Divider()
     }
-    .background(.background)
+    .background(MeetingTheme.surface)
   }
 
   private var goalAndAgenda: some View {
@@ -157,7 +157,7 @@ struct MeetingDocumentView: View {
         .scrollContentBackground(.hidden)
         .frame(minHeight: 180)
         .padding(10)
-        .background(MeetingTheme.paleBlue.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+        .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 10))
         .accessibilityLabel("可编辑会议纪要")
     }
   }

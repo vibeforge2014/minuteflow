@@ -404,7 +404,7 @@ struct OnboardingView: View {
       Spacer()
       Image(systemName: systemImage)
         .font(.system(size: 64, weight: .medium))
-        .foregroundStyle(MeetingTheme.blue)
+        .foregroundStyle(MeetingTheme.primary)
         .symbolRenderingMode(.hierarchical)
       Text(title)
         .font(.largeTitle.bold())
@@ -429,7 +429,7 @@ struct ImportHelpView: View {
       VStack(spacing: 22) {
         Image(systemName: "waveform.badge.plus")
           .font(.system(size: 58))
-          .foregroundStyle(MeetingTheme.blue)
+          .foregroundStyle(MeetingTheme.primary)
         Text("导入录音或视频")
           .font(.title2.bold())
         Text("支持系统文件选择器中的常见音频与视频格式。导入后会复制到本地并进入同一套转录和纪要流程。")
