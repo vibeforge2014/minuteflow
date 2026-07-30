@@ -272,6 +272,7 @@
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					5D68C60BA1C59CB2A79D13F0 = {
+						DevelopmentTeam = LPW4Z3BN69;
 						ProvisioningStyle = Automatic;
 					};
 					CC6CF04E9161299E6940D1D4 = {
@@ -400,6 +401,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = LPW4Z3BN69;
 				INFOPLIST_FILE = MeetingAssistant/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -488,6 +490,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = LPW4Z3BN69;
 				INFOPLIST_FILE = MeetingAssistant/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
