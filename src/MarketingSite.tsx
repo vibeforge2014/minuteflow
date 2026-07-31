@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import {
   AppleLogo,
   ArrowRight,
@@ -77,10 +78,15 @@ export function MarketingSite() {
   }, []);
 
   useEffect(() => {
+    let currentRoute = getRoute();
     const handleRoute = () => {
-      setRoute(getRoute());
+      const nextRoute = getRoute();
+      if (nextRoute !== currentRoute) {
+        currentRoute = nextRoute;
+        setRoute(nextRoute);
+        window.scrollTo({ top: 0, behavior: "auto" });
+      }
       setMenuOpen(false);
-      window.scrollTo({ top: 0, behavior: "auto" });
     };
     window.addEventListener("hashchange", handleRoute);
     return () => window.removeEventListener("hashchange", handleRoute);
@@ -116,8 +122,24 @@ function SiteHeader({
           <a href="#/" aria-current={route === "home" ? "page" : undefined}>产品</a>
           {route === "home" ? (
             <>
-              <a href="#features">功能</a>
-              <a href="#privacy">隐私</a>
+              <a
+                href="#features"
+                onClick={(event) => {
+                  setMenuOpen(false);
+                  scrollToSection(event, "features");
+                }}
+              >
+                功能
+              </a>
+              <a
+                href="#privacy"
+                onClick={(event) => {
+                  setMenuOpen(false);
+                  scrollToSection(event, "privacy");
+                }}
+              >
+                隐私
+              </a>
             </>
           ) : (
             <a href="#/specs">概览</a>
@@ -731,4 +753,13 @@ function SiteFooter() {
 
 function getRoute(): SiteRoute {
   return window.location.hash.startsWith("#/specs") ? "specs" : "home";
+}
+
+function scrollToSection(event: ReactMouseEvent<HTMLAnchorElement>, id: string) {
+  event.preventDefault();
+  window.history.replaceState(null, "", `#${id}`);
+  document.getElementById(id)?.scrollIntoView({
+    block: "start",
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+  });
 }

@@ -200,9 +200,13 @@ body.marketing-mode #root {
 }
 
 .site-button--dark {
-  color: white;
   background: #1d2026;
   box-shadow: 0 6px 16px rgba(21, 24, 31, 0.13);
+}
+
+.marketing-site .site-button--dark,
+.marketing-site .site-button--primary {
+  color: white;
 }
 
 .site-button--dark:hover {
@@ -210,7 +214,6 @@ body.marketing-mode #root {
 }
 
 .site-button--primary {
-  color: white;
   background: var(--site-blue);
   box-shadow:
     0 12px 26px rgba(49, 85, 217, 0.22),
@@ -232,8 +235,8 @@ body.marketing-mode #root {
 }
 
 .site-menu-button {
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   display: none;
   place-items: center;
   border: 0;
@@ -557,6 +560,11 @@ body.marketing-mode #root {
   padding: 132px 0;
 }
 
+#features,
+#privacy {
+  scroll-margin-top: 88px;
+}
+
 .section-heading {
   max-width: 680px;
 }
@@ -833,12 +841,10 @@ body.marketing-mode #root {
   from {
     opacity: 0;
     transform: translateY(7px) scale(0.992);
-    filter: blur(3px);
   }
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
-    filter: blur(0);
   }
 }
 
@@ -1009,6 +1015,8 @@ body.marketing-mode #root {
   width: 4px;
   border-radius: 3px;
   background: currentColor;
+  transform-origin: center;
+  will-change: transform;
   animation: wave 1.2s ease-in-out infinite alternate;
 }
 
@@ -1890,17 +1898,21 @@ body.marketing-mode #root {
     backdrop-filter: blur(22px);
     transform: translateY(-6px) scale(0.98);
     transform-origin: top right;
-    transition: 190ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    transition:
+      opacity 190ms ease,
+      transform 190ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      visibility 0s linear 190ms;
   }
 
   .site-links.is-open {
     visibility: visible;
     opacity: 1;
     transform: translateY(0) scale(1);
+    transition-delay: 0s;
   }
 
   .site-links a {
-    height: 42px;
+    height: 44px;
     padding: 0 12px;
     border-radius: 8px;
   }
@@ -1971,7 +1983,9 @@ body.marketing-mode #root {
 
   .hero h1 {
     margin-top: 24px;
-    font-size: clamp(3rem, 15vw, 4.5rem);
+    font-size: clamp(2.35rem, 10vw, 3rem);
+    line-height: 1.04;
+    letter-spacing: -0.055em;
   }
 
   .hero__lede {
@@ -2172,6 +2186,7 @@ body.marketing-mode #root {
 
   .spec-sidebar a {
     flex: 0 0 auto;
+    height: 44px;
   }
 
   .spec-section {

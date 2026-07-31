@@ -1,13 +1,11 @@
 import { lazy, StrictMode, Suspense, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { isElectronRuntime } from "./lib/api";
+import { MarketingSite } from "./MarketingSite";
 import "./styles.css";
 import "./marketing.css";
 
 const DesktopApp = lazy(() => import("./App").then((module) => ({ default: module.App })));
-const MarketingSite = lazy(() =>
-  import("./MarketingSite").then((module) => ({ default: module.MarketingSite }))
-);
 
 function Root() {
   const [hash, setHash] = useState(window.location.hash);
