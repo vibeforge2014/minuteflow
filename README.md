@@ -2,6 +2,8 @@
 
 本地优先的 Electron 跨平台会议工作台，支持边录音、边转录、边记录，并以两分钟为默认节奏生成结构化滚动纪要。
 
+产品官网与在线演示：[vibeforge2014.github.io/meeting-assistant](https://vibeforge2014.github.io/meeting-assistant/)
+
 ## 已实现
 
 - Windows/macOS 麦克风与系统音频双轨采集，15 秒音频块落盘
