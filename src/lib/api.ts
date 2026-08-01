@@ -59,6 +59,7 @@ const browserApi: MeetingAPI = {
         if (!normalized) return true;
         return [
           meeting.title,
+          meeting.notesMarkdown || "",
           ...meeting.notes,
           ...meeting.goals,
           ...meeting.tags,
@@ -82,6 +83,7 @@ const browserApi: MeetingAPI = {
         tags: input.tags ?? [],
         goals: input.goals,
         notes: [],
+        notesMarkdown: "",
         summary: {
           topics: [], keyPoints: [], decisions: [], actionItems: [],
           openQuestions: [], risks: [], nextSteps: [], stale: false
@@ -168,7 +170,59 @@ const browserApi: MeetingAPI = {
       await new Promise((resolve) => setTimeout(resolve, 500));
       return { ok: true, message: "浏览器预览配置有效；Electron 中会发起真实连接测试。" };
     },
-    async deleteSecret() {}
+    async deleteSecret() {},
+    async scanLocal() {
+      return { models: [], runtimes: {} };
+    },
+    async chooseLocal() {
+      return null;
+    },
+    async catalog() {
+      return [
+        {
+          id: "ggml-base",
+          name: "Whisper Base（GGML）",
+          description: "速度优先，适合普通办公电脑。",
+          engine: "whisper-cpp" as const,
+          format: "GGML",
+          sizeBytes: 148_000_000,
+          fileName: "ggml-base.bin",
+          source: "ggerganov/whisper.cpp",
+          license: "MIT",
+          installed: false
+        },
+        {
+          id: "pt-small",
+          name: "Whisper Small（PyTorch）",
+          description: "支持 OpenAI Whisper .pt 权重。",
+          engine: "whisper-python" as const,
+          format: "PyTorch PT",
+          sizeBytes: 461_000_000,
+          fileName: "small.pt",
+          source: "openai/whisper",
+          license: "MIT",
+          installed: false
+        }
+      ];
+    },
+    async download() {
+      throw new Error("请在 Electron 桌面应用中下载本地模型。");
+    },
+    onDownloadProgress() { return () => {}; }
+  },
+  notes: {
+    async importMarkdown() {
+      return new Promise((resolve) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".md,.markdown,.mdown,.txt,text/markdown,text/plain";
+        input.addEventListener("change", async () => {
+          const file = input.files?.[0];
+          resolve(file ? { filePath: file.name, content: await file.text() } : null);
+        }, { once: true });
+        input.click();
+      });
+    }
   },
   imports: {
     async choose() {
@@ -203,6 +257,7 @@ const browserApi: MeetingAPI = {
     }
   },
   system: {
+    platform: "web",
     async openSettings() {},
     onSuspend() { return () => {}; },
     onResume() { return () => {}; }

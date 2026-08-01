@@ -20,3 +20,8 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 - iOS records microphone audio only; it must not imply that it can capture another app's protected system audio.
 - The iOS edition's overall color system should follow the local TuneSync iOS app: restrained neutral surfaces, TuneSync's warm orange primary tint, soft tinted cards, and semantic status colors, while preserving the meeting assistant's existing layout and information hierarchy.
 - The public product site uses an Apple-inspired, restrained visual language: system typography, lightweight document surfaces, translucent floating navigation, immediate press feedback, critically damped-feeling transitions, and full reduced-motion/transparency support.
+- On macOS, the Electron title bar must reserve clear space for the native close/minimize/zoom controls; product branding and interactive elements must never overlap the traffic lights.
+- Desktop transcription setup should prioritize guided presets: discover local Whisper models, support GGML/GGUF through whisper.cpp and OpenAI Whisper `.pt` checkpoints through the Python runtime, offer verified in-app model downloads, and retain an advanced manual-path fallback.
+- Remote transcription and meeting-summary providers must include first-class New API presets and tolerate common OpenAI-compatible endpoint and response-shape variations.
+- Personal meeting notes must preserve Markdown source, support `.md` import, render Markdown safely, and remain editable and locally persisted.
+- Recording finalization must wait for all pending audio chunks to reach disk before closing or renaming files, so stopping a meeting cannot lose the final chunk or leave an unsavable recording.

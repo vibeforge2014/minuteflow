@@ -15,6 +15,7 @@ interface RecorderBinding {
   stream: MediaStream;
   archive: MediaRecorder;
   sequence: number;
+  pendingWrites: Set<Promise<void>>;
 }
 
 const supportedMimeType = () => [
@@ -22,6 +23,14 @@ const supportedMimeType = () => [
   "audio/webm",
   "audio/mp4"
 ].find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
+
+function createAudioRecorder(stream: MediaStream, audioBitsPerSecond: number) {
+  const mimeType = supportedMimeType();
+  return new MediaRecorder(stream, {
+    ...(mimeType ? { mimeType } : {}),
+    audioBitsPerSecond
+  });
+}
 
 export class MeetingRecorder {
   private meeting: Meeting;
@@ -37,6 +46,8 @@ export class MeetingRecorder {
   private audioContext: AudioContext | null = null;
   private analyserFrame = 0;
   private transcriptionQueue = 0;
+  private startCancelled = false;
+  private rejectStart: ((error: Error) => void) | null = null;
 
   constructor(
     meeting: Meeting,
@@ -55,22 +66,22 @@ export class MeetingRecorder {
     this.sessionId = session.sessionId;
     this.startedAt = session.startedAt;
     try {
-      const microphone = await navigator.mediaDevices.getUserMedia({
+      const microphone = await this.requestMedia({
         audio: {
           echoCancellation: this.meeting.mode === "online",
           noiseSuppression: true,
           autoGainControl: true,
           channelCount: 1
         }
-      });
+      }, 30_000, "等待麦克风授权超时，请在系统设置中允许录音后重试。");
       await this.bindStream("microphone", microphone);
 
       if (this.meeting.mode === "online") {
         try {
-          const display = await navigator.mediaDevices.getDisplayMedia({
+          const display = await this.requestDisplayMedia({
             video: { width: { ideal: 2 }, height: { ideal: 2 }, frameRate: { ideal: 1, max: 1 } },
             audio: true
-          });
+          }, 30_000);
           const audioTracks = display.getAudioTracks();
           if (audioTracks.length) {
             await this.bindStream("system", new MediaStream(audioTracks));
@@ -80,6 +91,7 @@ export class MeetingRecorder {
             for (const track of display.getTracks()) track.stop();
           }
         } catch (error) {
+          if (this.startCancelled) throw error;
           this.callbacks.onWarning(
             error instanceof Error && error.name === "NotAllowedError"
               ? "未授权系统音频，将继续录制麦克风。"
@@ -87,6 +99,7 @@ export class MeetingRecorder {
           );
         }
       }
+      if (this.startCancelled) throw new Error("录音启动已取消。");
       this.startLevelMeter();
       return session;
     } catch (error) {
@@ -102,28 +115,90 @@ export class MeetingRecorder {
     }
   }
 
-  private async bindStream(track: CaptureTrack, stream: MediaStream) {
-    const archive = new MediaRecorder(stream, {
-      mimeType: supportedMimeType(),
-      audioBitsPerSecond: 96_000
+  cancelStart() {
+    this.startCancelled = true;
+    this.rejectStart?.(new Error("录音启动已取消。"));
+    for (const binding of this.bindings) {
+      if (binding.archive.state !== "inactive") binding.archive.stop();
+      for (const track of binding.stream.getTracks()) track.stop();
+    }
+  }
+
+  private requestMedia(constraints: MediaStreamConstraints, timeoutMs: number, timeoutMessage: string) {
+    return this.withStartDeadline(
+      navigator.mediaDevices.getUserMedia(constraints),
+      timeoutMs,
+      timeoutMessage
+    );
+  }
+
+  private requestDisplayMedia(constraints: DisplayMediaStreamOptions, timeoutMs: number) {
+    return this.withStartDeadline(
+      navigator.mediaDevices.getDisplayMedia(constraints),
+      timeoutMs,
+      "等待系统音频授权超时，将继续录制麦克风。"
+    );
+  }
+
+  private withStartDeadline(request: Promise<MediaStream>, timeoutMs: number, timeoutMessage: string) {
+    let settled = false;
+    const cancellation = new Promise<MediaStream>((_resolve, reject) => {
+      this.rejectStart = reject;
     });
-    const binding: RecorderBinding = { track, stream, archive, sequence: 0 };
-    archive.addEventListener("dataavailable", async (event) => {
-      if (!event.data.size) return;
-      try {
-        const data = await event.data.arrayBuffer();
-        await api.recordings.append({
-          meetingId: this.meeting.id,
-          sessionId: this.sessionId,
-          track,
-          sequence: binding.sequence++,
-          data
-        });
-      } catch (error) {
-        this.callbacks.onWarning(
-          error instanceof Error ? error.message : "录音块写入失败，请检查磁盘空间。"
-        );
+    const timeout = new Promise<MediaStream>((_resolve, reject) => {
+      window.setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    });
+    request.then((stream) => {
+      if (settled || this.startCancelled) {
+        for (const track of stream.getTracks()) track.stop();
       }
+    }).catch(() => {});
+    return Promise.race([request, cancellation, timeout]).then((stream) => {
+      settled = true;
+      this.rejectStart = null;
+      if (this.startCancelled) {
+        for (const track of stream.getTracks()) track.stop();
+        throw new Error("录音启动已取消。");
+      }
+      return stream;
+    }, (error) => {
+      settled = true;
+      this.rejectStart = null;
+      throw error;
+    });
+  }
+
+  private async bindStream(track: CaptureTrack, stream: MediaStream) {
+    const archive = createAudioRecorder(stream, 96_000);
+    const binding: RecorderBinding = {
+      track,
+      stream,
+      archive,
+      sequence: 0,
+      pendingWrites: new Set()
+    };
+    archive.addEventListener("dataavailable", (event) => {
+      if (!event.data.size) return;
+      const write = (async () => {
+        try {
+          const data = await event.data.arrayBuffer();
+          await api.recordings.append({
+            meetingId: this.meeting.id,
+            sessionId: this.sessionId,
+            track,
+            sequence: binding.sequence++,
+            data,
+            mimeType: event.data.type || archive.mimeType
+          });
+        } catch (error) {
+          this.callbacks.onWarning(
+            error instanceof Error ? error.message : "录音块写入失败，请检查磁盘空间。"
+          );
+          throw error;
+        }
+      })();
+      binding.pendingWrites.add(write);
+      void write.catch(() => {}).finally(() => binding.pendingWrites.delete(write));
     });
     archive.start(15_000);
     this.bindings.push(binding);
@@ -170,10 +245,7 @@ export class MeetingRecorder {
     return new Promise<Blob | null>((resolve) => {
       if (this.stopTranscription || !stream.active) return resolve(null);
       const chunks: BlobPart[] = [];
-      const recorder = new MediaRecorder(stream, {
-        mimeType: supportedMimeType(),
-        audioBitsPerSecond: 64_000
-      });
+      const recorder = createAudioRecorder(stream, 64_000);
       let timeout = 0;
       recorder.addEventListener("dataavailable", (event) => {
         if (event.data.size) chunks.push(event.data);
@@ -238,6 +310,7 @@ export class MeetingRecorder {
       binding.archive.stop();
     }));
     await Promise.all(stops);
+    await Promise.allSettled(this.bindings.flatMap((binding) => Array.from(binding.pendingWrites)));
     for (const binding of this.bindings) {
       for (const track of binding.stream.getTracks()) track.stop();
     }

@@ -1,18 +1,25 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowClockwise,
   CheckSquare,
+  Eye,
+  FileArrowUp,
   FileText,
   LinkSimple,
   ListBullets,
   NotePencil,
+  PencilSimple,
   Plus,
   Target
 } from "@phosphor-icons/react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
+import DOMPurify from "dompurify";
+import { marked } from "marked";
+import TurndownService from "turndown";
 import type { Meeting } from "../types";
+import { api } from "../lib/api";
 import { lockSummaryField } from "../lib/summary";
 import { useMeetingStore } from "../store/meetingStore";
 
@@ -30,27 +37,49 @@ export function DocumentWorkspace({
   summaryBusy
 }: DocumentWorkspaceProps) {
   const summaryIntervalSeconds = useMeetingStore((state) => state.preferences.summaryIntervalSeconds);
+  const [noteMode, setNoteMode] = useState<"rich" | "markdown" | "preview">("rich");
+  const [importedFile, setImportedFile] = useState<string | null>(null);
+  const meetingRef = useRef(meeting);
+  const onChangeRef = useRef(onChange);
+  meetingRef.current = meeting;
+  onChangeRef.current = onChange;
   const editor = useEditor({
     extensions: [
       StarterKit,
       Placeholder.configure({ placeholder: "写下你听到的内容，时间戳会自动关联当前会议…" })
     ],
-    content: notesToHtml(meeting.notes),
+    content: markdownToHtml(meetingMarkdown(meeting)),
     editorProps: { attributes: { class: "note-editor__content" } },
     onUpdate({ editor: currentEditor }) {
+      const currentMeeting = meetingRef.current;
+      const markdown = htmlToMarkdown(currentEditor.getHTML());
       const notes = currentEditor.getText({ blockSeparator: "\n" })
         .split("\n")
         .map((item) => item.trim())
         .filter(Boolean);
-      onChange({ ...meeting, notes });
+      onChangeRef.current({ ...currentMeeting, notes, notesMarkdown: markdown });
     }
   });
 
   useEffect(() => {
     if (!editor || editor.isFocused) return;
-    const next = notesToHtml(meeting.notes);
-    if (editor.getHTML() !== next) editor.commands.setContent(next);
-  }, [editor, meeting.id, meeting.notes]);
+    const next = markdownToHtml(meetingMarkdown(meeting));
+    if (editor.getHTML() !== next) editor.commands.setContent(next, { emitUpdate: false });
+  }, [editor, meeting.id, meeting.notes, meeting.notesMarkdown]);
+
+  const importMarkdown = async () => {
+    const imported = await api.notes.importMarkdown();
+    if (!imported) return;
+    const markdown = imported.content.replace(/\r\n/g, "\n");
+    editor?.commands.setContent(markdownToHtml(markdown), { emitUpdate: false });
+    onChange({
+      ...meetingRef.current,
+      notes: markdownToPlainText(markdown),
+      notesMarkdown: markdown
+    });
+    setImportedFile(imported.filePath.split(/[\\/]/).pop() ?? "Markdown 笔记");
+    setNoteMode("preview");
+  };
 
   const setStringList = (key: "goals", values: string[]) =>
     onChange({ ...meeting, [key]: values });
@@ -105,28 +134,63 @@ export function DocumentWorkspace({
         </DocumentSection>
 
         <DocumentSection icon={<NotePencil size={20} weight="duotone" />} title="我的记录">
-          <div className="editor-toolbar" aria-label="笔记格式工具栏">
-            <button
-              className={editor?.isActive("bold") ? "is-active" : ""}
-              onClick={() => editor?.chain().focus().toggleBold().run()}
-              aria-label="粗体"
-            >B</button>
-            <button
-              className={editor?.isActive("italic") ? "is-active" : ""}
-              onClick={() => editor?.chain().focus().toggleItalic().run()}
-              aria-label="斜体"
-            ><em>I</em></button>
-            <button
-              className={editor?.isActive("bulletList") ? "is-active" : ""}
-              onClick={() => editor?.chain().focus().toggleBulletList().run()}
-              aria-label="项目符号"
-            ><ListBullets size={17} /></button>
-            <button
-              onClick={() => editor?.chain().focus().insertContent(`[${formatDuration(meeting.durationSeconds)}] `).run()}
-              aria-label="插入时间戳"
-            ><LinkSimple size={16} /></button>
+          <div className="note-toolbar-row">
+            <div className="editor-toolbar" aria-label="笔记格式工具栏">
+              <button
+                className={editor?.isActive("bold") ? "is-active" : ""}
+                onClick={() => editor?.chain().focus().toggleBold().run()}
+                aria-label="粗体"
+                disabled={noteMode !== "rich"}
+              >B</button>
+              <button
+                className={editor?.isActive("italic") ? "is-active" : ""}
+                onClick={() => editor?.chain().focus().toggleItalic().run()}
+                aria-label="斜体"
+                disabled={noteMode !== "rich"}
+              ><em>I</em></button>
+              <button
+                className={editor?.isActive("bulletList") ? "is-active" : ""}
+                onClick={() => editor?.chain().focus().toggleBulletList().run()}
+                aria-label="项目符号"
+                disabled={noteMode !== "rich"}
+              ><ListBullets size={17} /></button>
+              <button
+                onClick={() => editor?.chain().focus().insertContent(`[${formatDuration(meeting.durationSeconds)}] `).run()}
+                aria-label="插入时间戳"
+                disabled={noteMode !== "rich"}
+              ><LinkSimple size={16} /></button>
+            </div>
+            <div className="note-mode-switch" aria-label="笔记显示模式">
+              <button className={noteMode === "rich" ? "is-active" : ""} onClick={() => setNoteMode("rich")}><PencilSimple size={14} />编辑</button>
+              <button className={noteMode === "markdown" ? "is-active" : ""} onClick={() => setNoteMode("markdown")}><span>MD</span>源码</button>
+              <button className={noteMode === "preview" ? "is-active" : ""} onClick={() => setNoteMode("preview")}><Eye size={14} />预览</button>
+              <button onClick={importMarkdown}><FileArrowUp size={14} />导入 .md</button>
+            </div>
           </div>
-          <EditorContent editor={editor} className="note-editor" />
+          {importedFile && <div className="note-imported-file">已导入并保存：{importedFile}</div>}
+          {noteMode === "rich" && <EditorContent editor={editor} className="note-editor" />}
+          {noteMode === "markdown" && (
+            <textarea
+              className="note-markdown-source"
+              aria-label="Markdown 笔记源码"
+              value={meetingMarkdown(meeting)}
+              onChange={(event) => {
+                const notesMarkdown = event.target.value;
+                onChange({
+                  ...meeting,
+                  notesMarkdown,
+                  notes: markdownToPlainText(notesMarkdown)
+                });
+              }}
+              placeholder="# 标题\n\n- 会议笔记"
+            />
+          )}
+          {noteMode === "preview" && (
+            <div
+              className="note-preview markdown-body"
+              dangerouslySetInnerHTML={{ __html: markdownToHtml(meetingMarkdown(meeting)) }}
+            />
+          )}
         </DocumentSection>
 
         <DocumentSection
@@ -361,13 +425,36 @@ function EditableList({
   );
 }
 
-function notesToHtml(notes: string[]) {
-  if (!notes.length) return "<p></p>";
-  return `<ul>${notes.map((item) => `<li><p>${escapeHtml(item)}</p></li>`).join("")}</ul>`;
+const turndown = new TurndownService({
+  bulletListMarker: "-",
+  codeBlockStyle: "fenced",
+  headingStyle: "atx"
+});
+
+function meetingMarkdown(meeting: Meeting) {
+  if (typeof meeting.notesMarkdown === "string") return meeting.notesMarkdown;
+  return meeting.notes.map((item) => `- ${item}`).join("\n");
 }
 
-function escapeHtml(value: string) {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+function markdownToHtml(markdown: string) {
+  const rendered = marked.parse(markdown || "", { async: false, gfm: true });
+  return DOMPurify.sanitize(String(rendered), {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ["style", "iframe", "object", "embed"]
+  }) || "<p></p>";
+}
+
+function htmlToMarkdown(html: string) {
+  return turndown.turndown(html).trim();
+}
+
+function markdownToPlainText(markdown: string) {
+  const container = document.createElement("div");
+  container.innerHTML = markdownToHtml(markdown);
+  return (container.textContent ?? "")
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function formatMeetingDate(value: string) {

@@ -50,6 +50,7 @@ export interface Meeting {
   tags: string[];
   goals: string[];
   notes: string[];
+  notesMarkdown?: string;
   summary: MeetingSummary;
   transcript: TranscriptSegment[];
   createdAt: string;
@@ -61,18 +62,23 @@ export interface ModelProfile {
   id?: string;
   name: string;
   kind: "llm" | "stt" | "diarization";
-  transport: "openai-chat" | "openai-audio" | "ollama" | "whisper-cpp" | "sherpa-onnx";
+  transport: "openai-chat" | "openai-audio" | "ollama" | "whisper-cpp" | "whisper-python" | "sherpa-onnx";
   baseUrl: string;
   model: string;
   secretId?: string;
   options: {
     timeoutMs?: number;
     executablePath?: string;
+    pythonExecutablePath?: string;
     modelPath?: string;
     ffmpegPath?: string;
     segmentationModelPath?: string;
     embeddingModelPath?: string;
     clusteringThreshold?: number;
+    apiFlavor?: "openai" | "new-api";
+    responseFormat?: "json" | "verbose_json" | "text";
+    chatEndpoint?: string;
+    transcriptionEndpoint?: string;
     headers?: Record<string, string>;
   };
   enabled: boolean;
@@ -154,6 +160,46 @@ export interface RecordingStartResult {
   startedAt: number;
 }
 
+export interface LocalModelFile {
+  path: string;
+  name: string;
+  format: string;
+  engine: "whisper-cpp" | "whisper-python";
+  sizeBytes: number;
+}
+
+export interface LocalRuntimeDiscovery {
+  whisperCpp?: string;
+  python?: string;
+  ffmpeg?: string;
+}
+
+export interface LocalModelScanResult {
+  models: LocalModelFile[];
+  runtimes: LocalRuntimeDiscovery;
+}
+
+export interface DownloadableModel {
+  id: string;
+  name: string;
+  description: string;
+  engine: "whisper-cpp" | "whisper-python";
+  format: string;
+  sizeBytes: number;
+  fileName: string;
+  source: string;
+  license: string;
+  installed: boolean;
+  localPath?: string;
+}
+
+export interface ModelDownloadProgress {
+  modelId: string;
+  downloadedBytes: number;
+  totalBytes: number;
+  status: "downloading" | "complete";
+}
+
 export interface MeetingAPI {
   meetings: {
     list(query?: string, includeDeleted?: boolean): Promise<Meeting[]>;
@@ -171,6 +217,7 @@ export interface MeetingAPI {
       track: AudioTrackKind;
       sequence: number;
       data: ArrayBuffer;
+      mimeType?: string;
     }): Promise<{ ok: true }>;
     stop(payload: {
       meetingId: string;
@@ -209,6 +256,14 @@ export interface MeetingAPI {
     save(profile: ModelProfile, apiKey?: string): Promise<ModelProfile>;
     test(profile: ModelProfile, apiKey?: string): Promise<{ ok: boolean; message: string }>;
     deleteSecret(secretId: string): Promise<void>;
+    scanLocal(): Promise<LocalModelScanResult>;
+    chooseLocal(): Promise<LocalModelFile | null>;
+    catalog(): Promise<DownloadableModel[]>;
+    download(modelId: string): Promise<LocalModelFile>;
+    onDownloadProgress(callback: (progress: ModelDownloadProgress) => void): () => void;
+  };
+  notes: {
+    importMarkdown(): Promise<{ filePath: string; content: string } | null>;
   };
   imports: {
     choose(): Promise<string[]>;
@@ -227,6 +282,7 @@ export interface MeetingAPI {
     save(preferences: MeetingPreferences): Promise<MeetingPreferences>;
   };
   system: {
+    platform: "darwin" | "win32" | "linux" | "web";
     openSettings(): Promise<void>;
     onSuspend(callback: () => void): () => void;
     onResume(callback: () => void): () => void;

@@ -135,6 +135,7 @@ function createSchema(db) {
       tags_json TEXT NOT NULL DEFAULT '[]',
       goals_json TEXT NOT NULL DEFAULT '[]',
       notes_json TEXT NOT NULL DEFAULT '[]',
+      notes_markdown TEXT NOT NULL DEFAULT '',
       summary_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
@@ -198,6 +199,10 @@ function createSchema(db) {
       tokenize = 'unicode61'
     );
   `);
+  const meetingColumns = db.prepare("PRAGMA table_info(meetings)").all();
+  if (!meetingColumns.some((column) => column.name === "notes_markdown")) {
+    db.exec("ALTER TABLE meetings ADD COLUMN notes_markdown TEXT NOT NULL DEFAULT ''");
+  }
 }
 
 function rowToMeeting(db, row) {
@@ -216,6 +221,7 @@ function rowToMeeting(db, row) {
     confidence: segment.confidence ?? undefined
   }));
 
+  const notes = safeJson(row.notes_json, []);
   return {
     id: row.id,
     title: row.title,
@@ -227,7 +233,8 @@ function rowToMeeting(db, row) {
     participants: safeJson(row.participants_json, []),
     tags: safeJson(row.tags_json, []),
     goals: safeJson(row.goals_json, []),
-    notes: safeJson(row.notes_json, []),
+    notes,
+    notesMarkdown: row.notes_markdown || notes.map((item) => `- ${item}`).join("\n"),
     summary: safeJson(row.summary_json, {}),
     transcript,
     createdAt: row.created_at,
@@ -244,7 +251,7 @@ function indexMeeting(db, meeting) {
   `).run(
     meeting.id,
     meeting.title,
-    meeting.notes.join("\n"),
+    meeting.notesMarkdown || meeting.notes.join("\n"),
     JSON.stringify(meeting.summary),
     meeting.transcript.map((item) => item.text).join("\n")
   );
@@ -255,9 +262,9 @@ function persistMeeting(db, meeting) {
   db.prepare(`
     INSERT INTO meetings(
       id, title, scheduled_at, duration_seconds, status, mode, favorite,
-      participants_json, tags_json, goals_json, notes_json, summary_json,
+      participants_json, tags_json, goals_json, notes_json, notes_markdown, summary_json,
       created_at, updated_at, deleted_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title,
       scheduled_at = excluded.scheduled_at,
@@ -269,6 +276,7 @@ function persistMeeting(db, meeting) {
       tags_json = excluded.tags_json,
       goals_json = excluded.goals_json,
       notes_json = excluded.notes_json,
+      notes_markdown = excluded.notes_markdown,
       summary_json = excluded.summary_json,
       updated_at = excluded.updated_at,
       deleted_at = excluded.deleted_at
@@ -284,6 +292,7 @@ function persistMeeting(db, meeting) {
     JSON.stringify(meeting.tags ?? []),
     JSON.stringify(meeting.goals ?? []),
     JSON.stringify(meeting.notes ?? []),
+    meeting.notesMarkdown ?? (meeting.notes ?? []).map((item) => `- ${item}`).join("\n"),
     JSON.stringify(meeting.summary ?? {}),
     meeting.createdAt ?? timestamp,
     timestamp,
@@ -395,6 +404,7 @@ export function createMeeting(input) {
     tags: input.tags ?? [],
     goals: input.goals ?? [],
     notes: [],
+    notesMarkdown: "",
     summary: {
       topics: [],
       keyPoints: [],

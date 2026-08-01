@@ -27,7 +27,19 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     list: () => invoke("models:list"),
     save: (profile, apiKey) => invoke("models:save", profile, apiKey),
     test: (profile, apiKey) => invoke("models:test", profile, apiKey),
-    deleteSecret: (secretId) => invoke("models:delete-secret", secretId)
+    deleteSecret: (secretId) => invoke("models:delete-secret", secretId),
+    scanLocal: () => invoke("models:scan-local"),
+    chooseLocal: () => invoke("models:choose-local"),
+    catalog: () => invoke("models:catalog"),
+    download: (modelId) => invoke("models:download", modelId),
+    onDownloadProgress: (callback) => {
+      const listener = (_event, progress) => callback(progress);
+      ipcRenderer.on("models:download-progress", listener);
+      return () => ipcRenderer.removeListener("models:download-progress", listener);
+    }
+  },
+  notes: {
+    importMarkdown: () => invoke("notes:import-markdown")
   },
   imports: {
     choose: () => invoke("imports:choose"),
@@ -41,6 +53,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     save: (preferences) => invoke("preferences:save", preferences)
   },
   system: {
+    platform: process.platform,
     openSettings: () => invoke("system:open-settings"),
     onSuspend: (callback) => {
       const listener = () => callback();

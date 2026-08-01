@@ -115,7 +115,8 @@ export function App() {
       });
       await updateMeeting(imported.id, (current) => ({
         ...current,
-        notes: [`已导入：${file}`, "等待选择转录模型后开始处理。"]
+        notes: [`已导入：${file}`, "等待选择转录模型后开始处理。"],
+        notesMarkdown: `已导入：${file}\n\n等待选择转录模型后开始处理。`
       }));
     }
     setToast(`已加入 ${files.length} 个导入任务；配置转录模型后即可处理。`);
@@ -237,7 +238,12 @@ export function App() {
               onStop={recorder.stop}
               onMark={() => {
                 const time = formatDuration(recorder.elapsed);
-                handleMeetingChange({ ...meeting, notes: [...meeting.notes, `[${time}] 重点标记`] });
+                const marker = `[${time}] 重点标记`;
+                handleMeetingChange({
+                  ...meeting,
+                  notes: [...meeting.notes, marker],
+                  notesMarkdown: [meeting.notesMarkdown || meeting.notes.join("\n\n"), marker].filter(Boolean).join("\n\n")
+                });
                 setToast(`已在 ${time} 添加重点标记。`);
               }}
             />

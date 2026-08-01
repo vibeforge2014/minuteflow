@@ -36,6 +36,7 @@ export function RecorderBar({
 }: RecorderBarProps) {
   const [mini, setMini] = useState(false);
   const live = ["recording", "paused", "starting", "stopping"].includes(phase);
+  const active = phase === "recording" || phase === "paused";
   const visualElapsed = live ? elapsed : meeting.durationSeconds;
 
   return (
@@ -44,7 +45,7 @@ export function RecorderBar({
         <span className={`record-dot ${live ? "is-live" : ""}`} />
         <div>
           <strong>{formatDuration(visualElapsed)}</strong>
-          <span>{phase === "paused" ? "已暂停" : live ? "录制中" : meeting.status === "complete" ? "会议已结束" : "准备录音"}</span>
+          <span>{phase === "starting" ? "正在申请录音权限" : phase === "stopping" ? "正在完成写盘" : phase === "paused" ? "已暂停" : live ? "录制中" : meeting.status === "complete" ? "会议已结束" : "准备录音"}</span>
         </div>
       </div>
 
@@ -61,7 +62,15 @@ export function RecorderBar({
           <button className="record-action record-action--start" onClick={onStart}>
             <Play size={18} weight="fill" />开始
           </button>
-        ) : (
+        ) : phase === "starting" ? (
+          <button className="record-action record-action--stop" onClick={onStop}>
+            <Stop size={18} weight="fill" />取消
+          </button>
+        ) : phase === "stopping" ? (
+          <button className="record-action" disabled>
+            正在保存…
+          </button>
+        ) : active ? (
           <>
             <button className="record-action" onClick={onMark}><BookmarkSimple size={19} />标记</button>
             <button className="record-action" onClick={onPause}>
@@ -72,7 +81,7 @@ export function RecorderBar({
               <Stop size={18} weight="fill" />停止
             </button>
           </>
-        )}
+        ) : null}
         <button
           className="icon-button recorder-mini"
           aria-label="切换迷你录音窗口"
@@ -110,4 +119,3 @@ function formatDuration(seconds: number) {
   const remaining = seconds % 60;
   return [hours, minutes, remaining].map((value) => String(value).padStart(2, "0")).join(":");
 }
-

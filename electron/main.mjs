@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   desktopCapturer,
+  dialog,
   ipcMain,
   powerMonitor,
   session,
@@ -11,6 +12,7 @@ import { mkdir, open, readFile, rename, stat, statfs, unlink, writeFile } from "
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import {
   appendAudioChunk,
   createMeeting,
@@ -33,10 +35,17 @@ import {
   summarizeWithOpenAICompatible,
   testModelProfile,
   transcribeRemote,
-  transcribeWithWhisperCpp
+  transcribeWithWhisperCpp,
+  transcribeWithPythonWhisper
 } from "./services/providers.mjs";
 import { chooseImportFiles, exportMeeting } from "./services/exports.mjs";
 import { applyDiarization, diarizeWithSherpa } from "./services/diarization.mjs";
+import {
+  describeLocalModel,
+  discoverLocalModels,
+  downloadModel,
+  listDownloadableModels
+} from "./services/local-models.mjs";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 let mainWindow;
@@ -52,6 +61,16 @@ const defaultPreferences = {
 
 function preferencesPath() {
   return path.join(app.getPath("userData"), "config", "preferences.json");
+}
+
+function localModelDirectory() {
+  return path.join(app.getPath("userData"), "models", "whisper");
+}
+
+function transcribeLocally(profile, audio, fileName, language, glossary) {
+  return profile.transport === "whisper-python"
+    ? transcribeWithPythonWhisper(profile, audio, fileName, language, glossary)
+    : transcribeWithWhisperCpp(profile, audio, fileName, language, glossary);
 }
 
 async function loadPreferences() {
@@ -186,8 +205,14 @@ function registerIpc() {
     const directory = path.join(app.getPath("userData"), "meetings", meetingId, "audio");
     await mkdir(directory, { recursive: true });
     for (const track of ["microphone", "system"]) {
-      const filePath = path.join(directory, `${sessionId}-${track}.webm.partial`);
-      recordingFiles.set(`${sessionId}:${track}`, { filePath, handle: await open(filePath, "a") });
+      const filePath = path.join(directory, `${sessionId}-${track}.partial`);
+      recordingFiles.set(`${sessionId}:${track}`, {
+        filePath,
+        handle: await open(filePath, "a"),
+        mimeType: "audio/webm",
+        writeQueue: Promise.resolve(),
+        closing: false
+      });
     }
     saveMeeting({ ...meeting, status: "recording", updatedAt: new Date().toISOString() });
     return { sessionId, startedAt: Date.now() };
@@ -196,37 +221,52 @@ function registerIpc() {
   trustedHandle("recordings:append", async (_event, payload) => {
     const record = recordingFiles.get(`${payload.sessionId}:${payload.track}`);
     if (!record) throw new Error("录音会话已失效。");
-    const fileSystem = await statfs(path.dirname(record.filePath));
-    const availableBytes = Number(fileSystem.bavail) * Number(fileSystem.bsize);
-    if (availableBytes < 256 * 1024 * 1024) {
-      throw new Error("磁盘剩余空间低于 256MB，请尽快停止录音并清理空间。");
-    }
-    const buffer = Buffer.from(payload.data);
-    await record.handle.write(buffer);
-    appendAudioChunk({
-      meetingId: payload.meetingId,
-      sessionId: payload.sessionId,
-      track: payload.track,
-      sequence: payload.sequence,
-      byteLength: buffer.byteLength,
-      path: record.filePath
+    if (record.closing) throw new Error("录音正在完成写盘，请勿重复提交音频块。");
+    record.mimeType = payload.mimeType || record.mimeType;
+    record.writeQueue = record.writeQueue.then(async () => {
+      const fileSystem = await statfs(path.dirname(record.filePath));
+      const availableBytes = Number(fileSystem.bavail) * Number(fileSystem.bsize);
+      if (availableBytes < 256 * 1024 * 1024) {
+        throw new Error("磁盘剩余空间低于 256MB，请尽快停止录音并清理空间。");
+      }
+      const buffer = Buffer.from(payload.data);
+      await record.handle.write(buffer);
+      appendAudioChunk({
+        meetingId: payload.meetingId,
+        sessionId: payload.sessionId,
+        track: payload.track,
+        sequence: payload.sequence,
+        byteLength: buffer.byteLength,
+        path: record.filePath
+      });
     });
+    await record.writeQueue;
     return { ok: true };
   });
 
   trustedHandle("recordings:stop", async (_event, payload) => {
     const output = {};
+    let writeError;
     for (const track of ["microphone", "system"]) {
       const key = `${payload.sessionId}:${track}`;
       const record = recordingFiles.get(key);
       if (!record) continue;
-      await record.handle.close();
-      const target = record.filePath.replace(/\.partial$/, "");
+      record.closing = true;
+      try {
+        await record.writeQueue;
+      } catch (error) {
+        writeError ??= error;
+      }
+      await record.handle.close().catch((error) => { writeError ??= error; });
+      const extension = record.mimeType?.includes("mp4") ? ".m4a" : ".webm";
+      const target = record.filePath.replace(/\.partial$/, extension);
       const fileStat = await stat(record.filePath).catch(() => null);
       if (fileStat?.size) {
         await rename(record.filePath, target);
         finalizeAudioPath(payload.sessionId, track, target);
         output[track] = target;
+      } else {
+        await unlink(record.filePath).catch(() => {});
       }
       recordingFiles.delete(key);
     }
@@ -238,6 +278,9 @@ function registerIpc() {
         durationSeconds: payload.durationSeconds,
         updatedAt: new Date().toISOString()
       });
+    }
+    if (writeError) {
+      throw new Error(`录音文件写入未完成：${writeError instanceof Error ? writeError.message : "未知错误"}`);
     }
     return output;
   });
@@ -263,8 +306,8 @@ function registerIpc() {
     const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "stt");
     if (!profile) throw new Error("尚未配置转录模型。");
     const audio = Buffer.from(payload.data);
-    const result = profile.transport === "whisper-cpp"
-      ? await transcribeWithWhisperCpp(profile, audio, payload.fileName, payload.language, payload.glossary)
+    const result = ["whisper-cpp", "whisper-python"].includes(profile.transport)
+      ? await transcribeLocally(profile, audio, payload.fileName, payload.language, payload.glossary)
       : await transcribeRemote(
         profile,
         readSecret(profile.secretId),
@@ -303,6 +346,49 @@ function registerIpc() {
   trustedHandle("models:test", (_event, profile, apiKey) =>
     testModelProfile(profile, apiKey || readSecret(profile.secretId)));
   trustedHandle("models:delete-secret", (_event, secretId) => deleteSecret(secretId));
+  trustedHandle("models:scan-local", async () => discoverLocalModels({
+    modelDirectory: localModelDirectory(),
+    roots: [
+      app.getPath("downloads"),
+      path.join(homedir(), ".cache", "whisper"),
+      path.join(homedir(), ".cache", "huggingface", "hub")
+    ]
+  }));
+  trustedHandle("models:choose-local", async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "选择本地 Whisper 模型",
+      properties: ["openFile"],
+      filters: [
+        { name: "Whisper 模型", extensions: ["pt", "bin", "gguf"] },
+        { name: "所有文件", extensions: ["*"] }
+      ]
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    const filePath = result.filePaths[0];
+    const fileStat = await stat(filePath);
+    const model = describeLocalModel(filePath, fileStat.size);
+    if (!model) throw new Error("暂不支持该模型格式，请选择 .pt、.bin 或 .gguf 文件。");
+    return model;
+  });
+  trustedHandle("models:catalog", () => listDownloadableModels(localModelDirectory()));
+  trustedHandle("models:download", (event, modelId) => downloadModel(
+    modelId,
+    localModelDirectory(),
+    (progress) => event.sender.send("models:download-progress", progress)
+  ));
+
+  trustedHandle("notes:import-markdown", async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "导入 Markdown 笔记",
+      properties: ["openFile"],
+      filters: [
+        { name: "Markdown", extensions: ["md", "markdown", "mdown", "txt"] }
+      ]
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    const filePath = result.filePaths[0];
+    return { filePath, content: await readFile(filePath, "utf8") };
+  });
 
   trustedHandle("imports:choose", () => chooseImportFiles(mainWindow));
   trustedHandle("imports:process", async (_event, payload) => {
@@ -327,8 +413,8 @@ function registerIpc() {
 
     try {
       const audio = await readFile(payload.filePath);
-      const result = sttProfile.transport === "whisper-cpp"
-        ? await transcribeWithWhisperCpp(
+      const result = ["whisper-cpp", "whisper-python"].includes(sttProfile.transport)
+        ? await transcribeLocally(
           sttProfile,
           audio,
           fileName,
@@ -395,6 +481,7 @@ function registerIpc() {
         status: "complete",
         durationSeconds,
         notes: [`导入文件：${fileName}`],
+        notesMarkdown: `导入文件：${fileName}`,
         transcript,
         summary: {
           ...summary,
@@ -409,7 +496,8 @@ function registerIpc() {
         notes: [
           `导入文件：${fileName}`,
           `处理失败：${error instanceof Error ? error.message : "未知错误"}`
-        ]
+        ],
+        notesMarkdown: `导入文件：${fileName}\n\n处理失败：${error instanceof Error ? error.message : "未知错误"}`
       });
       throw error;
     }
@@ -469,6 +557,8 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", async () => {
   for (const record of recordingFiles.values()) {
+    record.closing = true;
+    await record.writeQueue.catch(() => {});
     await record.handle.close().catch(() => {});
   }
 });

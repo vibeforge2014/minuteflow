@@ -122,7 +122,9 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     } catch (error) {
       recorderRef.current = null;
       setPhase("idle");
-      setWarning(error instanceof Error ? error.message : "无法开始录音");
+      if (!(error instanceof Error) || error.message !== "录音启动已取消。") {
+        setWarning(error instanceof Error ? error.message : "无法开始录音");
+      }
     }
   }, [appendTranscript, generateSummary, meeting, phase, preferences.glossary, preferences.summaryIntervalSeconds, sttProfile, updateMeeting]);
 
@@ -142,7 +144,12 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   }, [elapsed, meeting, phase, updateMeeting]);
 
   const stop = useCallback(async () => {
-    if (!meeting || !["recording", "paused"].includes(phase)) return;
+    if (!meeting || !["starting", "recording", "paused"].includes(phase)) return;
+    if (phase === "starting") {
+      setPhase("stopping");
+      recorderRef.current?.cancelStart();
+      return;
+    }
     setPhase("stopping");
     if (timerRef.current) window.clearInterval(timerRef.current);
     timerRef.current = null;
@@ -181,7 +188,11 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
         updateMeeting(current.id, (value) => ({
           ...value,
           status: "paused",
-          notes: [...value.notes, `[${formatDuration(elapsedRef.current)}] 系统进入睡眠，录音自动暂停`]
+          notes: [...value.notes, `[${formatDuration(elapsedRef.current)}] 系统进入睡眠，录音自动暂停`],
+          notesMarkdown: [
+            value.notesMarkdown || value.notes.join("\n\n"),
+            `[${formatDuration(elapsedRef.current)}] 系统进入睡眠，录音自动暂停`
+          ].filter(Boolean).join("\n\n")
         }));
       }
     });

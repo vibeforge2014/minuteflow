@@ -1,6 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { markdown, subtitle } from "../electron/services/formatters.mjs";
-import { summarizeLocally, validateSummary } from "../electron/services/providers.mjs";
+import {
+  resolveProviderEndpoint,
+  summarizeLocally,
+  transcribeRemote,
+  validateSummary
+} from "../electron/services/providers.mjs";
+import { describeLocalModel, looksLikeWhisperModel } from "../electron/services/local-models.mjs";
 import { applyDiarization } from "../electron/services/diarization.mjs";
 import { mergeSpeakerLabels, mergeTranscriptSegments } from "../src/lib/transcript";
 import { lockSummaryField, mergeSummaryRevision } from "../src/lib/summary";
@@ -35,6 +41,7 @@ const meeting: Meeting = {
   tags: ["产品"],
   goals: ["确认发布方案"],
   notes: ["关注上线风险"],
+  notesMarkdown: "## 我的判断\n\n- 关注上线风险",
   transcript: [segment("s1", 1_250, 4_500, "决定周四完成灰度发布。")],
   summary: {
     topics: ["发布方案"],
@@ -56,6 +63,8 @@ const meeting: Meeting = {
   createdAt: "2026-07-30T09:50:00+08:00",
   updatedAt: "2026-07-30T11:05:00+08:00"
 };
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("transcript window merge", () => {
   it("replaces an overlapping provisional window with the final segment", () => {
@@ -126,6 +135,48 @@ describe("structured meeting summary", () => {
     };
     expect(mergeSummaryRevision(current, incoming).keyPoints)
       .toEqual(["人工确认的结论", "新增进展"]);
+  });
+});
+
+describe("model provider compatibility", () => {
+  it("normalizes New API base URLs with or without /v1", () => {
+    const base = { baseUrl: "https://new-api.example", options: {} };
+    expect(resolveProviderEndpoint(base, "chat/completions"))
+      .toBe("https://new-api.example/v1/chat/completions");
+    expect(resolveProviderEndpoint({ ...base, baseUrl: "https://new-api.example/v1/" }, "audio/transcriptions"))
+      .toBe("https://new-api.example/v1/audio/transcriptions");
+  });
+
+  it("falls back to the alternate New API transcription endpoint and unwraps data", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("not found", { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { text: "测试转录" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      }));
+    const result = await transcribeRemote({
+      baseUrl: "https://new-api.example",
+      model: "whisper-1",
+      options: { apiFlavor: "new-api" }
+    }, "secret", new Uint8Array([1, 2, 3]), "sample.webm");
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://new-api.example/v1/audio/transcriptions",
+      "https://new-api.example/v1/audio/openai/create-transcription"
+    ]);
+    expect(result.text).toBe("测试转录");
+  });
+
+  it("routes PT checkpoints to Python and GGML/GGUF to whisper.cpp", () => {
+    expect(describeLocalModel("/models/small.pt")?.engine).toBe("whisper-python");
+    expect(describeLocalModel("/models/ggml-small.bin")?.engine).toBe("whisper-cpp");
+    expect(describeLocalModel("/models/model.gguf")?.engine).toBe("whisper-cpp");
+    expect(describeLocalModel("/models/model.onnx")).toBeNull();
+  });
+
+  it("does not discover unrelated small .bin files as Whisper models", async () => {
+    expect(looksLikeWhisperModel("/Downloads/data.bin", 5_000_000)).toBe(false);
+    expect(looksLikeWhisperModel("/Downloads/ggml-small.bin", 488_000_000)).toBe(true);
+    expect(looksLikeWhisperModel("/Downloads/small.pt", 461_000_000)).toBe(true);
   });
 });
 
