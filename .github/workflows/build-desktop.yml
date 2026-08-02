@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths-ignore:
+      - public/releases/latest-macos.json
+      - public/downloads/**
   pull_request:
 
 jobs:
@@ -38,4 +41,3 @@ jobs:
         with:
           name: meeting-assistant-${{ runner.os }}
           path: out/make/**
-
