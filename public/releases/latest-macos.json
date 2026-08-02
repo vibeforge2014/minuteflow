@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "version": "0.1.1",
+  "platform": "darwin",
+  "architectures": ["arm64"],
+  "publishedAt": "2026-08-02T06:20:37Z",
+  "minimumSystemVersion": "14.2",
+  "notes": "TuneSync 暖橙视觉版本，包含本地 Whisper 模型发现与下载、New API 兼容、Markdown 笔记导入，以及录音停止时等待最后音频块落盘的修复。",
+  "downloadUrl": "../downloads/macos/latest/",
+  "releasePageUrl": "https://github.com/vibeforge2014/meeting-assistant/releases/tag/v0.1.1",
+  "assetUrl": "https://github.com/vibeforge2014/meeting-assistant/releases/download/v0.1.1/Meeting-Assistant-0.1.1-macOS-arm64.dmg",
+  "sha256": "4985395d376e34d703bf07068331ac92600544c45ed38071d936ac00501b186f"
+}
