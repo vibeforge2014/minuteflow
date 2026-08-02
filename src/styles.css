@@ -7,9 +7,14 @@
   background: #f7f7f8;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --blue: #2855e7;
-  --blue-strong: #1f48d8;
-  --blue-soft: #edf2ff;
+  --accent: #e76f51;
+  --accent-strong: #c65138;
+  --accent-pressed: #ad432f;
+  --accent-soft: #fcf1e9;
+  --blue: var(--accent);
+  --blue-strong: var(--accent-strong);
+  --blue-pressed: var(--accent-pressed);
+  --blue-soft: var(--accent-soft);
   --green: #31a45b;
   --green-soft: #edf8f0;
   --red: #e54043;
@@ -64,7 +69,7 @@ button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
-  box-shadow: 0 0 0 3px rgba(40, 85, 231, 0.16);
+  box-shadow: 0 0 0 3px rgba(231, 111, 81, 0.2);
 }
 
 button {
@@ -108,12 +113,15 @@ button {
 .app-loading__mark {
   width: 25px;
   height: 25px;
-  display: grid;
-  place-items: center;
-  color: white;
-  background: var(--blue);
-  border-radius: 6px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+  display: block;
+  object-fit: contain;
+  user-select: none;
+  filter: drop-shadow(0 3px 6px rgba(206, 70, 43, 0.18));
+}
+
+.app-loading__mark {
+  width: 42px;
+  height: 42px;
 }
 
 .new-meeting {
@@ -122,18 +130,18 @@ button {
   border: 0;
   border-radius: 7px;
   color: white;
-  background: var(--blue);
+  background: var(--blue-strong);
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   font-weight: 570;
-  box-shadow: 0 3px 10px rgba(40, 85, 231, 0.18);
+  box-shadow: 0 3px 12px rgba(198, 81, 56, 0.22);
   transition: 160ms ease;
 }
 
 .new-meeting:hover {
-  background: var(--blue-strong);
+  background: var(--blue-pressed);
   transform: translateY(-1px);
 }
 
@@ -151,8 +159,8 @@ button {
 }
 
 .search-box:focus-within {
-  border-color: #a9bbfa;
-  box-shadow: 0 0 0 3px rgba(40, 85, 231, 0.08);
+  border-color: #e8aa98;
+  box-shadow: 0 0 0 3px rgba(231, 111, 81, 0.1);
 }
 
 .search-box input {
@@ -203,11 +211,11 @@ button {
 }
 
 .meeting-row:hover {
-  background: #f0f2f7;
+  background: #faf5f2;
 }
 
 .meeting-row.is-selected {
-  background: #e9eefc;
+  background: var(--blue-soft);
 }
 
 .meeting-row__title {
@@ -377,14 +385,14 @@ button {
 
 .button--primary {
   color: white;
-  background: var(--blue);
-  border-color: var(--blue);
+  background: var(--blue-strong);
+  border-color: var(--blue-strong);
 }
 
 .button--primary:hover {
   color: white;
-  background: var(--blue-strong);
-  border-color: var(--blue-strong);
+  background: var(--blue-pressed);
+  border-color: var(--blue-pressed);
 }
 
 .button--small {
@@ -633,7 +641,7 @@ button {
   margin-left: 0;
   padding-left: 11px;
   color: #717781;
-  border-left: 3px solid #cdd5ec;
+  border-left: 3px solid #e7d7d1;
 }
 .note-preview code {
   padding: 1px 4px;
@@ -987,7 +995,7 @@ button {
   margin-left: 4px;
   padding: 2px 5px;
   color: var(--blue);
-  background: #eaf0ff;
+  background: var(--blue-soft);
   border-radius: 4px;
   font-size: 9px;
 }
@@ -1043,7 +1051,7 @@ button {
 }
 
 .speaker-dot--blue {
-  background: var(--blue);
+  background: #5277c8;
 }
 
 .speaker-dot--orange {
@@ -1115,7 +1123,7 @@ button {
 }
 
 .speaker-name--blue {
-  color: var(--blue);
+  color: #4569b7;
 }
 
 .speaker-name--orange {
@@ -1376,14 +1384,14 @@ button {
 .record-action--start {
   padding: 0 16px;
   color: white;
-  background: var(--blue);
+  background: var(--blue-strong);
   border: 0;
   border-radius: 7px;
 }
 
 .record-action--start:hover {
   color: white;
-  background: var(--blue-strong);
+  background: var(--blue-pressed);
 }
 
 .record-action--stop {
@@ -1763,7 +1771,7 @@ button {
 .field input:focus,
 .field textarea:focus,
 .field select:focus {
-  border-color: #9fb2f7;
+  border-color: #e5a18e;
 }
 
 .field textarea {
@@ -1796,7 +1804,7 @@ button {
 .segmented button.is-active {
   color: var(--blue);
   background: var(--blue-soft);
-  border-color: #aebef5;
+  border-color: #e8b4a5;
 }
 
 .new-meeting-dialog > footer {
@@ -1857,7 +1865,7 @@ button {
 
 .settings-layout > nav button.is-active {
   color: var(--blue);
-  background: #e9eefc;
+  background: var(--blue-soft);
 }
 
 .settings-content {
@@ -1906,8 +1914,8 @@ button {
 }
 
 .model-quick-start > button:hover {
-  border-color: #aebbea;
-  background: #fbfcff;
+  border-color: #e7b3a4;
+  background: #fffaf7;
 }
 
 .model-quick-start span {
@@ -1950,8 +1958,8 @@ button {
 }
 
 .profile-list > button.is-selected {
-  border-color: #9cafef;
-  box-shadow: 0 0 0 2px rgba(40, 85, 231, 0.07);
+  border-color: #e39c88;
+  box-shadow: 0 0 0 2px rgba(231, 111, 81, 0.09);
 }
 
 .profile-list > button > svg {
@@ -2099,8 +2107,8 @@ button {
 
 .local-model-list > button.is-selected {
   color: var(--blue);
-  border-color: #aebbea;
-  background: #f7f9ff;
+  border-color: #e7b3a4;
+  background: #fff8f4;
 }
 
 .local-model-list span,

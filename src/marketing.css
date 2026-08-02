@@ -1,7 +1,12 @@
 .marketing-site {
-  --site-blue: #3155d9;
-  --site-blue-strong: #2346c4;
-  --site-blue-soft: #eef2ff;
+  --site-accent: #e76f51;
+  --site-accent-strong: #c65138;
+  --site-accent-pressed: #ad432f;
+  --site-accent-soft: #fcf1e9;
+  --site-blue: var(--site-accent);
+  --site-blue-strong: var(--site-accent-strong);
+  --site-blue-pressed: var(--site-accent-pressed);
+  --site-blue-soft: var(--site-accent-soft);
   --site-ink: #16181d;
   --site-muted: #686d78;
   --site-line: rgba(21, 26, 37, 0.1);
@@ -86,6 +91,12 @@ body.marketing-mode #root {
   -webkit-tap-highlight-color: transparent;
 }
 
+.marketing-site a:focus-visible,
+.marketing-site button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(231, 111, 81, 0.2);
+}
+
 .site-header {
   position: fixed;
   z-index: 50;
@@ -128,14 +139,10 @@ body.marketing-mode #root {
 .site-brand__mark {
   width: 29px;
   height: 29px;
-  display: inline-grid;
-  place-items: center;
-  color: white;
-  background: var(--site-blue);
-  border-radius: 8px;
-  box-shadow:
-    0 5px 14px rgba(49, 85, 217, 0.22),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.24);
+  display: block;
+  object-fit: contain;
+  user-select: none;
+  filter: drop-shadow(0 5px 10px rgba(210, 73, 43, 0.2));
 }
 
 .site-links {
@@ -214,16 +221,16 @@ body.marketing-mode #root {
 }
 
 .site-button--primary {
-  background: var(--site-blue);
+  background: var(--site-blue-strong);
   box-shadow:
-    0 12px 26px rgba(49, 85, 217, 0.22),
+    0 12px 26px rgba(198, 81, 56, 0.24),
     inset 0 0 0 1px rgba(255, 255, 255, 0.15);
 }
 
 .site-button--primary:hover {
-  background: var(--site-blue-strong);
+  background: var(--site-blue-pressed);
   box-shadow:
-    0 14px 32px rgba(49, 85, 217, 0.27),
+    0 14px 32px rgba(198, 81, 56, 0.3),
     inset 0 0 0 1px rgba(255, 255, 255, 0.16);
 }
 
@@ -250,7 +257,7 @@ body.marketing-mode #root {
   padding: 170px 24px 100px;
   overflow: hidden;
   background:
-    linear-gradient(180deg, #fafbff 0%, #f8f9fc 48%, #ffffff 100%);
+    linear-gradient(180deg, #fffaf7 0%, #fbf9f8 48%, #ffffff 100%);
 }
 
 .hero::before {
@@ -259,8 +266,8 @@ body.marketing-mode #root {
   inset: 0;
   opacity: 0.32;
   background-image:
-    linear-gradient(rgba(49, 85, 217, 0.055) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(49, 85, 217, 0.055) 1px, transparent 1px);
+    linear-gradient(rgba(231, 111, 81, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(231, 111, 81, 0.06) 1px, transparent 1px);
   background-size: 48px 48px;
   mask-image: linear-gradient(to bottom, black 0%, transparent 68%);
 }
@@ -277,7 +284,7 @@ body.marketing-mode #root {
   height: 540px;
   left: calc(50% - 650px);
   top: 70px;
-  background: rgba(207, 220, 255, 0.55);
+  background: rgba(250, 205, 190, 0.62);
   filter: blur(80px);
 }
 
@@ -286,7 +293,7 @@ body.marketing-mode #root {
   height: 440px;
   right: calc(50% - 610px);
   top: 220px;
-  background: rgba(235, 226, 255, 0.45);
+  background: rgba(255, 234, 221, 0.64);
   filter: blur(90px);
 }
 
@@ -380,7 +387,7 @@ body.marketing-mode #root {
   bottom: -6%;
   height: 30%;
   border-radius: 50%;
-  background: rgba(65, 94, 219, 0.25);
+  background: rgba(231, 111, 81, 0.22);
   filter: blur(70px);
 }
 
@@ -622,7 +629,7 @@ body.marketing-mode #root {
 }
 
 .anatomy-card--featured {
-  background: #eff3ff;
+  background: #fff7f3;
 }
 
 .anatomy-card__number {
@@ -677,7 +684,7 @@ body.marketing-mode #root {
 }
 
 .anatomy-card__visual--library i.is-selected {
-  background: #e8edff;
+  background: #fae3d4;
   box-shadow: inset 3px 0 var(--site-blue);
 }
 
@@ -1007,7 +1014,7 @@ body.marketing-mode #root {
   justify-content: center;
   gap: 5px;
   color: var(--site-blue);
-  background: #f4f6ff;
+  background: #fff5f1;
   border-radius: 12px;
 }
 
@@ -1089,8 +1096,8 @@ body.marketing-mode #root {
 
 .action-rows p:first-child i {
   color: white;
-  background: var(--site-blue);
-  border-color: var(--site-blue);
+  background: var(--site-blue-strong);
+  border-color: var(--site-blue-strong);
 }
 
 .action-rows b {
@@ -1125,7 +1132,7 @@ body.marketing-mode #root {
   right: -120px;
   top: -180px;
   border-radius: 50%;
-  background: rgba(66, 91, 200, 0.24);
+  background: rgba(231, 111, 81, 0.22);
   filter: blur(25px);
 }
 
@@ -1136,7 +1143,7 @@ body.marketing-mode #root {
 }
 
 .section-kicker--light {
-  color: #9fb3ff;
+  color: #f3a18b;
 }
 
 .privacy-card h2 {
@@ -1187,7 +1194,7 @@ body.marketing-mode #root {
 .privacy-device svg,
 .privacy-provider svg {
   margin-bottom: 18px;
-  color: #9eb2ff;
+  color: #f0a28e;
 }
 
 .privacy-device strong,
@@ -1261,7 +1268,7 @@ body.marketing-mode #root {
   display: grid;
   place-items: center;
   color: var(--site-blue);
-  background: #e5ebff;
+  background: #fae3d4;
   border-radius: 12px;
 }
 
@@ -1373,8 +1380,8 @@ body.marketing-mode #root {
   align-items: center;
   overflow: hidden;
   text-align: center;
-  background: #f2f5ff;
-  border-top: 1px solid rgba(49, 85, 217, 0.07);
+  background: #fff7f3;
+  border-top: 1px solid rgba(231, 111, 81, 0.09);
 }
 
 .closing-cta__orb {
@@ -1385,7 +1392,7 @@ body.marketing-mode #root {
   top: -270px;
   transform: translateX(-50%);
   border-radius: 50%;
-  background: rgba(177, 195, 255, 0.35);
+  background: rgba(245, 185, 164, 0.42);
   filter: blur(45px);
 }
 
@@ -1466,8 +1473,8 @@ body.marketing-mode #root {
   align-items: center;
   text-align: center;
   background:
-    radial-gradient(circle at 50% 15%, rgba(211, 221, 255, 0.68), transparent 43%),
-    #f7f8fb;
+    radial-gradient(circle at 50% 15%, rgba(250, 215, 201, 0.72), transparent 43%),
+    #fbf9f8;
   border-bottom: 1px solid var(--site-line);
 }
 
@@ -1861,8 +1868,8 @@ body.marketing-mode #root {
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  background: #eef2ff;
-  border: 1px solid #dfe6ff;
+  background: var(--site-blue-soft);
+  border: 1px solid #f2ddcf;
   border-radius: 16px;
 }
 

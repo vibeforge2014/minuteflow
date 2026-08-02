@@ -2,7 +2,6 @@ import { useMemo } from "react";
 import {
   CalendarBlank,
   FileArrowUp,
-  FileText,
   GearSix,
   MagnifyingGlass,
   Plus,
@@ -10,6 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import type { Meeting } from "../types";
 import { useMeetingStore } from "../store/meetingStore";
+import { BrandMark } from "./BrandMark";
 
 interface SidebarProps {
   meetings: Meeting[];
@@ -30,7 +30,7 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, onTem
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="brand__mark"><FileText size={17} weight="duotone" /></div>
+        <BrandMark className="brand__mark" size={25} />
         <span>会议助手</span>
       </div>
 

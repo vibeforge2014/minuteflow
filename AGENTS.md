@@ -25,3 +25,5 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 - Remote transcription and meeting-summary providers must include first-class New API presets and tolerate common OpenAI-compatible endpoint and response-shape variations.
 - Personal meeting notes must preserve Markdown source, support `.md` import, render Markdown safely, and remain editable and locally persisted.
 - Recording finalization must wait for all pending audio chunks to reach disk before closing or renaming files, so stopping a meeting cannot lose the final chunk or leave an unsavable recording.
+- The meeting assistant logo follows TuneSync's friendly coral-orange rounded tile, soft dimensional material, and generous icon spacing, while using an original raised meeting-document-and-waveform symbol across desktop, web, loading, and favicon surfaces.
+- The public product site and browser-based meeting workspace use TuneSync's `#E76F51` warm-orange accent, deeper accessible coral for filled actions, warm off-white surfaces, and pale peach selected states; blue remains only where it conveys speaker identity or another distinct semantic category.

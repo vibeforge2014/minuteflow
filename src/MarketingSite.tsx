@@ -28,9 +28,12 @@ import {
   X
 } from "@phosphor-icons/react";
 import productWorkspace from "../implementation-1440x1024-final.png";
+import { BrandMark } from "./components/BrandMark";
 
 type SiteRoute = "home" | "specs";
 type DemoMode = "record" | "organize" | "act";
+
+const desktopReleaseUrl = "https://github.com/vibeforge2014/meeting-assistant/releases/latest";
 
 const featureDemo: Record<DemoMode, {
   eyebrow: string;
@@ -114,7 +117,7 @@ function SiteHeader({
     <header className="site-header">
       <div className="site-nav">
         <a className="site-brand" href="#/" aria-label="会议助手首页">
-          <span className="site-brand__mark"><FileText size={18} weight="fill" /></span>
+          <BrandMark className="site-brand__mark" size={29} />
           <span>会议助手</span>
         </a>
 
@@ -145,6 +148,9 @@ function SiteHeader({
             <a href="#/specs">概览</a>
           )}
           <a href="#/specs" aria-current={route === "specs" ? "page" : undefined}>规格</a>
+          <a href={desktopReleaseUrl} target="_blank" rel="noreferrer">
+            下载 <ArrowUpRight size={13} />
+          </a>
           <a
             href="https://github.com/vibeforge2014/meeting-assistant"
             target="_blank"
@@ -193,11 +199,11 @@ function LandingPage() {
             从开会到行动，不必再切换工具。
           </p>
           <div className="hero__actions">
-            <a className="site-button site-button--primary" href="#/app">
-              体验在线演示 <ArrowRight size={17} weight="bold" />
+            <a className="site-button site-button--primary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">
+              <Desktop size={17} weight="bold" /> 下载桌面版
             </a>
-            <a className="site-button site-button--ghost" href="#/specs">
-              查看功能规格
+            <a className="site-button site-button--ghost" href="#/app">
+              体验在线演示 <ArrowRight size={16} />
             </a>
           </div>
           <div className="hero__meta" aria-label="平台与隐私特性">
@@ -376,10 +382,10 @@ function LandingPage() {
         <h2>下一场会议，<br />让结果自然留下来。</h2>
         <p>无需注册即可打开浏览器演示。你的修改只保存在当前设备。</p>
         <div className="hero__actions">
-          <a className="site-button site-button--primary" href="#/app">
-            打开在线演示 <ArrowRight size={17} weight="bold" />
+          <a className="site-button site-button--primary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">
+            <Desktop size={17} weight="bold" /> 下载桌面版
           </a>
-          <a className="site-button site-button--ghost" href="#/specs">查看完整规格</a>
+          <a className="site-button site-button--ghost" href="#/app">打开在线演示</a>
         </div>
       </section>
     </main>
@@ -649,8 +655,8 @@ function SpecsPage() {
                 <span>准备好亲自看看了吗？</span>
                 <strong>打开一场示例会议，体验完整工作流。</strong>
               </div>
-              <a className="site-button site-button--primary" href="#/app">
-                在线体验 <ArrowRight size={16} weight="bold" />
+              <a className="site-button site-button--primary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">
+                下载桌面版 <ArrowUpRight size={16} weight="bold" />
               </a>
             </div>
           </SpecSection>
@@ -735,13 +741,14 @@ function SiteFooter() {
   return (
     <footer className="site-footer">
       <div className="site-footer__brand">
-        <span className="site-brand__mark"><FileText size={17} weight="fill" /></span>
+        <BrandMark className="site-brand__mark" size={29} />
         <div><strong>会议助手</strong><span>让每一次讨论，都有清晰的下一步。</span></div>
       </div>
       <div className="site-footer__links">
         <a href="#/">产品</a>
         <a href="#/specs">规格</a>
         <a href="#/app">在线体验</a>
+        <a href={desktopReleaseUrl} target="_blank" rel="noreferrer">下载桌面版</a>
         <a href="https://github.com/vibeforge2014/meeting-assistant" target="_blank" rel="noreferrer">
           <GithubLogo size={16} /> GitHub
         </a>

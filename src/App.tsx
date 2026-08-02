@@ -4,7 +4,6 @@ import {
   CloudCheck,
   DotsThree,
   Export,
-  FileAudio,
   GearSix,
   SidebarSimple,
   Star,
@@ -25,6 +24,7 @@ import { useMeetingStore } from "./store/meetingStore";
 import { useMeetingRecorder } from "./hooks/useMeetingRecorder";
 import { api } from "./lib/api";
 import type { CreateMeetingInput, Meeting } from "./types";
+import { BrandMark } from "./components/BrandMark";
 
 export function App() {
   const {
@@ -129,7 +129,7 @@ export function App() {
   if (loading && !meeting) {
     return (
       <div className="app-loading">
-        <div className="app-loading__mark"><FileAudio size={22} weight="duotone" /></div>
+        <BrandMark className="app-loading__mark" size={42} />
         <p>正在打开会议助手…</p>
       </div>
     );
