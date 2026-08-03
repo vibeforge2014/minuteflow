@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "platform": "darwin",
   "architectures": ["arm64"],
-  "publishedAt": "2026-08-02T06:20:37Z",
+  "publishedAt": "2026-08-03T06:23:48Z",
   "minimumSystemVersion": "14.2",
-  "notes": "TuneSync 暖橙视觉版本，包含本地 Whisper 模型发现与下载、New API 兼容、Markdown 笔记导入，以及录音停止时等待最后音频块落盘的修复。",
+  "notes": "修复应用左上角品牌图标、统一 MinuteFlow 安装包与 GitHub 命名，并修复本地模型下载后点击“使用”未保存启用状态的问题。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.1",
-  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.1/Meeting-Assistant-0.1.1-macOS-arm64.dmg",
-  "sha256": "4985395d376e34d703bf07068331ac92600544c45ed38071d936ac00501b186f"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.2",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.2/MinuteFlow-0.1.2-macOS-arm64.dmg",
+  "sha256": "c5946a6ff66039419fd2a908821c9f289f3df0ef6f18cf1abe6421bfe2d7fe43"
 }
