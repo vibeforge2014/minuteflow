@@ -31,7 +31,7 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, onTem
     <aside className="sidebar">
       <div className="brand">
         <BrandMark className="brand__mark" size={25} />
-        <span>会议助手</span>
+        <span>MinuteFlow</span>
       </div>
 
       <button className="new-meeting" onClick={onNew}>

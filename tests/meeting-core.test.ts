@@ -8,6 +8,12 @@ import {
 } from "../electron/services/providers.mjs";
 import { describeLocalModel, looksLikeWhisperModel } from "../electron/services/local-models.mjs";
 import { applyDiarization } from "../electron/services/diarization.mjs";
+import {
+  checkForMacUpdate,
+  compareVersions,
+  normalizeGitHubMacRelease,
+  validateMacUpdateManifest
+} from "../electron/services/updates.mjs";
 import { mergeSpeakerLabels, mergeTranscriptSegments } from "../src/lib/transcript";
 import { lockSummaryField, mergeSummaryRevision } from "../src/lib/summary";
 import type { Meeting, TranscriptSegment } from "../src/types";
@@ -177,6 +183,83 @@ describe("model provider compatibility", () => {
     expect(looksLikeWhisperModel("/Downloads/data.bin", 5_000_000)).toBe(false);
     expect(looksLikeWhisperModel("/Downloads/ggml-small.bin", 488_000_000)).toBe(true);
     expect(looksLikeWhisperModel("/Downloads/small.pt", 461_000_000)).toBe(true);
+  });
+});
+
+describe("macOS website updates", () => {
+  const updateManifest = {
+    schemaVersion: 1,
+    version: "0.2.0",
+    platform: "darwin",
+    architectures: ["arm64"],
+    publishedAt: "2026-08-02T06:20:37Z",
+    notes: "更新说明",
+    downloadUrl: "../downloads/macos/latest/",
+    releasePageUrl: "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.2.0",
+    assetUrl: "https://github.com/vibeforge2014/minuteflow/releases/download/v0.2.0/app.dmg",
+    sha256: "abc"
+  };
+
+  it("compares stable and prerelease semantic versions", () => {
+    expect(compareVersions("0.2.0", "0.1.9")).toBe(1);
+    expect(compareVersions("v0.2.0", "0.2.0")).toBe(0);
+    expect(compareVersions("0.2.0-beta.2", "0.2.0-beta.1")).toBe(1);
+    expect(compareVersions("0.2.0", "0.2.0-beta.2")).toBe(1);
+  });
+
+  it("rejects update manifests that point outside official HTTPS hosts", () => {
+    expect(() => validateMacUpdateManifest({
+      ...updateManifest,
+      downloadUrl: "https://example.com/app.dmg"
+    })).toThrow("受信任");
+  });
+
+  it("detects a newer compatible macOS release from the website manifest", async () => {
+    const result = await checkForMacUpdate({
+      currentVersion: "0.1.1",
+      platform: "darwin",
+      arch: "arm64",
+      fetchImpl: vi.fn().mockResolvedValue(new Response(JSON.stringify(updateManifest), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      }))
+    });
+    expect(result).toMatchObject({
+      status: "available",
+      currentVersion: "0.1.1",
+      update: { version: "0.2.0" }
+    });
+  });
+
+  it("falls back to the official GitHub release when the website manifest is unavailable", async () => {
+    const githubRelease = {
+      tag_name: "v0.2.0",
+      published_at: "2026-08-03T00:00:00Z",
+      html_url: "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.2.0",
+      body: "修复与改进",
+      assets: [{
+        name: "MinuteFlow-0.2.0-macOS-arm64.dmg",
+        browser_download_url: "https://github.com/vibeforge2014/minuteflow/releases/download/v0.2.0/MinuteFlow-0.2.0-macOS-arm64.dmg",
+        digest: "sha256:1234"
+      }]
+    };
+    expect(normalizeGitHubMacRelease(githubRelease, "arm64")).toMatchObject({
+      version: "0.2.0",
+      architectures: ["arm64"],
+      sha256: "1234"
+    });
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(new Response("missing", { status: 404 }))
+      .mockResolvedValueOnce(new Response("private", { status: 403 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(githubRelease), { status: 200 }));
+    const result = await checkForMacUpdate({
+      currentVersion: "0.1.1",
+      platform: "darwin",
+      arch: "arm64",
+      fetchImpl
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({ status: "available", update: { version: "0.2.0" } });
   });
 });
 

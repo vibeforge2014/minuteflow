@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import {
+  ArrowClockwise,
   CheckCircle,
   CloudArrowDown,
   Cpu,
   Database,
+  DownloadSimple,
   FolderOpen,
   HardDrives,
   Key,
@@ -20,7 +22,8 @@ import type {
   LocalModelFile,
   LocalModelScanResult,
   ModelDownloadProgress,
-  ModelProfile
+  ModelProfile,
+  AppUpdateCheckResult
 } from "../types";
 
 const emptyProfile: ModelProfile = {
@@ -125,15 +128,29 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
   const preferences = useMeetingStore((state) => state.preferences);
   const loadProfiles = useMeetingStore((state) => state.loadProfiles);
   const updatePreferences = useMeetingStore((state) => state.updatePreferences);
-  const [tab, setTab] = useState<"models" | "general" | "storage">("models");
+  const [tab, setTab] = useState<"models" | "general" | "storage" | "updates">("models");
   const [editing, setEditing] = useState<ModelProfile | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [updateState, setUpdateState] = useState<AppUpdateCheckResult | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   useEffect(() => {
     if (open) loadProfiles();
   }, [loadProfiles, open]);
+
+  useEffect(() => {
+    if (!open || tab !== "updates") return;
+    api.updates.getState().then(setUpdateState).catch((error) => {
+      setUpdateState({
+        status: "error",
+        currentVersion: "",
+        checkedAt: new Date().toISOString(),
+        message: error instanceof Error ? error.message : "无法读取更新状态。"
+      });
+    });
+  }, [open, tab]);
   if (!open) return null;
 
   const startPreset = (key: keyof typeof providerPresets) => {
@@ -178,6 +195,35 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
     }
   };
 
+  const checkUpdate = async () => {
+    setCheckingUpdate(true);
+    try {
+      setUpdateState(await api.updates.check());
+    } catch (error) {
+      setUpdateState({
+        status: "error",
+        currentVersion: updateState?.currentVersion || "",
+        checkedAt: new Date().toISOString(),
+        message: error instanceof Error ? error.message : "检查更新失败。"
+      });
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const openUpdateDownload = async () => {
+    try {
+      await api.updates.openDownload();
+    } catch (error) {
+      setUpdateState((current) => ({
+        status: "error",
+        currentVersion: current?.currentVersion || "",
+        checkedAt: new Date().toISOString(),
+        message: error instanceof Error ? error.message : "无法打开官网下载地址。"
+      }));
+    }
+  };
+
   return (
     <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div className="dialog settings-dialog">
@@ -190,6 +236,9 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
             <button className={tab === "models" ? "is-active" : ""} onClick={() => setTab("models")}><Key size={18} />模型服务</button>
             <button className={tab === "general" ? "is-active" : ""} onClick={() => setTab("general")}><SlidersHorizontal size={18} />会议偏好</button>
             <button className={tab === "storage" ? "is-active" : ""} onClick={() => setTab("storage")}><Database size={18} />存储与隐私</button>
+            {api.system.platform === "darwin" && (
+              <button className={tab === "updates" ? "is-active" : ""} onClick={() => setTab("updates")}><ArrowClockwise size={18} />软件更新</button>
+            )}
           </nav>
           <div className="settings-content">
             {tab === "models" && (
@@ -343,6 +392,55 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
                 <p className="runtime-note">{isElectronRuntime ? "当前运行在 Electron 安全环境中。" : "当前是浏览器预览；桌面权限与加密存储会在 Electron 中启用。"}</p>
               </div>
             )}
+            {tab === "updates" && (
+              <div className="update-settings">
+                <div className="settings-section-heading">
+                  <div><h3>软件更新</h3><p>从MinuteFlow官网检查新版本，并在浏览器中直接下载安装包。</p></div>
+                </div>
+                <div className={`update-card update-card--${updateState?.status || "idle"}`}>
+                  <div className="update-card__icon">
+                    {updateState?.status === "available"
+                      ? <CloudArrowDown size={28} weight="duotone" />
+                      : <CheckCircle size={28} weight="duotone" />}
+                  </div>
+                  <div className="update-card__body">
+                    <span className="update-card__eyebrow">当前版本 {updateState?.currentVersion || "读取中…"}</span>
+                    <h4>{updateState?.status === "available"
+                      ? `新版本 ${updateState.update?.version} 可用`
+                      : updateState?.status === "error"
+                        ? "暂时无法检查更新"
+                        : updateState?.status === "up-to-date"
+                          ? "已经是最新版本"
+                          : "保持MinuteFlow为最新版本"}</h4>
+                    <p>{updateState?.message || "应用启动后会静默检查一次，你也可以随时手动检查。"}</p>
+                    {updateState?.update?.notes && updateState.status === "available" && (
+                      <div className="update-notes">
+                        <strong>本次更新</strong>
+                        <p>{updateState.update.notes}</p>
+                      </div>
+                    )}
+                    {updateState?.checkedAt && (
+                      <small>上次检查：{new Date(updateState.checkedAt).toLocaleString("zh-CN")}</small>
+                    )}
+                  </div>
+                </div>
+                <div className="update-actions">
+                  <button className="button" disabled={checkingUpdate} onClick={checkUpdate}>
+                    <ArrowClockwise size={16} className={checkingUpdate ? "spin" : ""} />
+                    {checkingUpdate ? "正在检查" : "检查更新"}
+                  </button>
+                  {updateState?.status === "available" && (
+                    <button className="button button--primary" onClick={openUpdateDownload}>
+                      <DownloadSimple size={16} />从官网下载
+                    </button>
+                  )}
+                </div>
+                <div className="update-security-note">
+                  <CheckCircle size={17} weight="fill" />
+                  <p>应用只接受 HTTPS 官网清单和官方发布地址。下载完成后，请打开 DMG 并将新版本拖入“应用程序”。</p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -362,6 +460,8 @@ function LocalModelManager({
   const [progress, setProgress] = useState<ModelDownloadProgress | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const loadProfiles = useMeetingStore((state) => state.loadProfiles);
 
   useEffect(() => {
     let active = true;
@@ -373,12 +473,17 @@ function LocalModelManager({
     };
   }, []);
 
-  const applyModel = (model: LocalModelFile, runtimes = scan?.runtimes) => {
-    onChange({
+  const applyModel = async (model: LocalModelFile, runtimes = scan?.runtimes) => {
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const nextProfile: ModelProfile = {
       ...profile,
       kind: "stt",
       transport: model.engine,
       model: model.name.replace(/\.(?:pt|bin|gguf)$/i, ""),
+      enabled: true,
       options: {
         ...profile.options,
         modelPath: model.path,
@@ -390,7 +495,21 @@ function LocalModelManager({
           : profile.options.pythonExecutablePath,
         ffmpegPath: profile.options.ffmpegPath || runtimes?.ffmpeg
       }
-    });
+      };
+      const saved = await api.models.save(nextProfile);
+      onChange(saved);
+      await loadProfiles();
+      const runtimeMissing = model.engine === "whisper-cpp"
+        ? !saved.options.executablePath
+        : !saved.options.pythonExecutablePath;
+      setSuccess(runtimeMissing
+        ? `已启用 ${model.name}；模型路径已保存。还需要在下方补充${model.engine === "whisper-cpp" ? " whisper-cli" : "已安装 openai-whisper 的 Python"}路径。`
+        : `已启用 ${model.name}，后续会议将使用此模型转写。`);
+    } catch (applyError) {
+      setError(applyError instanceof Error ? applyError.message : "无法启用本地模型");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const scanModels = async () => {
@@ -399,7 +518,7 @@ function LocalModelManager({
     try {
       const result = await api.models.scanLocal();
       setScan(result);
-      if (result.models.length === 1) applyModel(result.models[0], result.runtimes);
+      if (result.models.length === 1) await applyModel(result.models[0], result.runtimes);
     } catch (scanError) {
       setError(scanError instanceof Error ? scanError.message : "本地模型搜索失败");
     } finally {
@@ -411,7 +530,11 @@ function LocalModelManager({
     setError(null);
     try {
       const model = await api.models.chooseLocal();
-      if (model) applyModel(model);
+      if (model) {
+        const discovery = scan ?? await api.models.scanLocal();
+        setScan(discovery);
+        await applyModel(model, discovery.runtimes);
+      }
     } catch (chooseError) {
       setError(chooseError instanceof Error ? chooseError.message : "无法打开模型文件");
     }
@@ -423,7 +546,9 @@ function LocalModelManager({
     setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "downloading" });
     try {
       const model = await api.models.download(modelId);
-      applyModel(model);
+      const discovery = await api.models.scanLocal();
+      setScan(discovery);
+      await applyModel(model, discovery.runtimes);
       setCatalog(await api.models.catalog());
     } catch (downloadError) {
       setError(downloadError instanceof Error ? downloadError.message : "模型下载失败");
@@ -451,7 +576,7 @@ function LocalModelManager({
       {scan && (
         <div className="local-model-list">
           {scan.models.length ? scan.models.map((model) => (
-            <button key={model.path} className={profile.options.modelPath === model.path ? "is-selected" : ""} onClick={() => applyModel(model, scan.runtimes)}>
+            <button key={model.path} disabled={busy} className={profile.options.modelPath === model.path ? "is-selected" : ""} onClick={() => void applyModel(model, scan.runtimes)}>
               <Cpu size={18} weight="duotone" />
               <span><strong>{model.name}</strong><small>{model.format} · {formatBytes(model.sizeBytes)}</small></span>
               {profile.options.modelPath === model.path && <CheckCircle size={17} weight="fill" />}
@@ -469,7 +594,11 @@ function LocalModelManager({
             <div className="download-model-card" key={model.id}>
               <div><strong>{model.name}</strong><small>{model.description}</small><span>{model.format} · {formatBytes(model.sizeBytes)} · {model.license}</span></div>
               {model.installed && model.localPath ? (
-                <button className="button button--small" onClick={() => applyModel({ path: model.localPath!, name: model.fileName, format: model.format, engine: model.engine, sizeBytes: model.sizeBytes })}>使用</button>
+                <button className="button button--small" disabled={busy} onClick={async () => {
+                  const discovery = scan ?? await api.models.scanLocal();
+                  setScan(discovery);
+                  await applyModel({ path: model.localPath!, name: model.fileName, format: model.format, engine: model.engine, sizeBytes: model.sizeBytes }, discovery.runtimes);
+                }}>{profile.options.modelPath === model.localPath ? "使用中" : "使用"}</button>
               ) : (
                 <button className="button button--small" disabled={busy} onClick={() => downloadModel(model.id)}><CloudArrowDown size={15} />{currentProgress ? `${percent}%` : "下载"}</button>
               )}
@@ -479,6 +608,7 @@ function LocalModelManager({
         })}
       </div>
       {error && <div className="connection-status is-error">{error}</div>}
+      {success && <div className="connection-status is-success">{success}</div>}
     </section>
   );
 }

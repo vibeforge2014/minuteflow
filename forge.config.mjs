@@ -1,22 +1,41 @@
 import { FusesPlugin } from "@electron-forge/plugin-fuses";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
 
+const isMac = process.platform === "darwin";
+const appleIdentity = process.env.APPLE_IDENTITY;
+const appleNotaryProfile = process.env.APPLE_NOTARY_PROFILE;
+const appleApiKey = process.env.APPLE_API_KEY;
+const appleApiKeyId = process.env.APPLE_API_KEY_ID;
+const appleApiIssuer = process.env.APPLE_API_ISSUER;
+
+const notarizeOptions = appleNotaryProfile
+  ? { keychainProfile: appleNotaryProfile }
+  : appleApiKey && appleApiKeyId && appleApiIssuer
+    ? { appleApiKey, appleApiKeyId, appleApiIssuer }
+    : undefined;
+
 export default {
   packagerConfig: {
     asar: {
       unpack: "**/*.{node,dylib,so,dll}"
     },
+    ignore: [
+      /^\/ios(?:\/|$)/
+    ],
     appBundleId: "com.meetingassistant.desktop",
     appCategoryType: "public.app-category.productivity",
-    executableName: "meeting-assistant",
+    executableName: "MinuteFlow",
     icon: "./assets/app-icon",
     extraResource: ["./assets/licenses"],
-    osxSign: process.platform === "darwin"
+    osxSign: isMac
       ? {
-          identity: process.env.APPLE_IDENTITY || "-",
-          identityValidation: Boolean(process.env.APPLE_IDENTITY),
-          ...(process.env.APPLE_IDENTITY
-            ? {}
+          identity: appleIdentity || "-",
+          identityValidation: Boolean(appleIdentity),
+          ...(appleIdentity
+            ? {
+                hardenedRuntime: true,
+                ignore: "\\.pak$"
+              }
             : {
                 optionsForFile: () => ({
                   hardenedRuntime: false,
@@ -25,11 +44,12 @@ export default {
               })
         }
       : undefined,
+    osxNotarize: isMac ? notarizeOptions : undefined,
     extendInfo: {
-      CFBundleDisplayName: "会议助手",
-      NSMicrophoneUsageDescription: "会议助手需要访问麦克风，以录制并转录会议内容。",
-      NSAudioCaptureUsageDescription: "会议助手需要访问系统音频，以录制线上会议中的其他参与者。",
-      NSScreenCaptureUsageDescription: "会议助手需要屏幕与系统音频权限，以捕获线上会议声音。"
+      CFBundleDisplayName: "MinuteFlow",
+      NSMicrophoneUsageDescription: "MinuteFlow需要访问麦克风，以录制并转录会议内容。",
+      NSAudioCaptureUsageDescription: "MinuteFlow需要访问系统音频，以录制线上会议中的其他参与者。",
+      NSScreenCaptureUsageDescription: "MinuteFlow需要屏幕与系统音频权限，以捕获线上会议声音。"
     }
   },
   rebuildConfig: {},
@@ -37,9 +57,9 @@ export default {
     {
       name: "@electron-forge/maker-squirrel",
       config: {
-        name: "meeting_assistant",
-        setupExe: "会议助手-Setup.exe",
-        authors: "会议助手",
+        name: "minuteflow",
+        setupExe: "MinuteFlow-Setup.exe",
+        authors: "MinuteFlow",
         description: "本地优先的跨平台会议记录、转录与纪要工作台。"
       }
     },
@@ -50,7 +70,7 @@ export default {
     {
       name: "@electron-forge/maker-dmg",
       config: {
-        name: "会议助手"
+        name: "MinuteFlow"
       }
     }
   ],

@@ -16,7 +16,7 @@ export function OnboardingDialog({
       <section className="dialog onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
         <header>
           <div>
-            <h2 id="onboarding-title">欢迎使用会议助手</h2>
+            <h2 id="onboarding-title">欢迎使用MinuteFlow</h2>
             <p>开始前，用一分钟确认录音权限、隐私和模型配置。</p>
           </div>
         </header>

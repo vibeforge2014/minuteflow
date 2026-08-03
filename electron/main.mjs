@@ -6,7 +6,8 @@ import {
   ipcMain,
   powerMonitor,
   session,
-  shell
+  shell,
+  systemPreferences
 } from "electron";
 import { mkdir, open, readFile, rename, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -46,9 +47,21 @@ import {
   downloadModel,
   listDownloadableModels
 } from "./services/local-models.mjs";
+import {
+  checkForMacUpdate,
+  isOfficialHttpsUrl
+} from "./services/updates.mjs";
+import {
+  activateLicense,
+  checkoutUrl,
+  deactivateLicense,
+  getLicenseStatus,
+  requireLicense
+} from "./services/licensing.mjs";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 let mainWindow;
+let latestUpdateCheck;
 const recordingFiles = new Map();
 let preferenceWriteQueue = Promise.resolve();
 const defaultPreferences = {
@@ -56,7 +69,8 @@ const defaultPreferences = {
   defaultMode: "online",
   glossary: [],
   retentionDays: null,
-  onboardingCompleted: false
+  onboardingCompleted: false,
+  systemPermissionsCompleted: false
 };
 
 function preferencesPath() {
@@ -91,7 +105,8 @@ async function persistPreferences(preferences) {
     retentionDays: preferences.retentionDays === null
       ? null
       : Math.max(0, Number(preferences.retentionDays) || 0),
-    onboardingCompleted: Boolean(preferences.onboardingCompleted)
+    onboardingCompleted: Boolean(preferences.onboardingCompleted),
+    systemPermissionsCompleted: Boolean(preferences.systemPermissionsCompleted)
   };
   const target = preferencesPath();
   const temporary = `${target}.tmp`;
@@ -126,7 +141,7 @@ async function createMainWindow() {
     minWidth: 1080,
     minHeight: 720,
     backgroundColor: "#f7f7f8",
-    title: "会议助手",
+    title: "MinuteFlow",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     trafficLightPosition: { x: 18, y: 18 },
     webPreferences: {
@@ -190,6 +205,38 @@ function trustedHandle(channel, handler) {
   });
 }
 
+function idleUpdateState() {
+  return {
+    status: process.platform === "darwin" ? "idle" : "unsupported",
+    currentVersion: app.getVersion(),
+    checkedAt: "",
+    message: process.platform === "darwin"
+      ? "尚未检查更新。"
+      : "当前仅为 macOS 提供官网更新检测。"
+  };
+}
+
+async function runMacUpdateCheck({ notify = false } = {}) {
+  try {
+    latestUpdateCheck = await checkForMacUpdate({
+      currentVersion: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch
+    });
+  } catch (error) {
+    latestUpdateCheck = {
+      status: "error",
+      currentVersion: app.getVersion(),
+      checkedAt: new Date().toISOString(),
+      message: error instanceof Error ? error.message : "检查更新失败。"
+    };
+  }
+  if (notify && latestUpdateCheck.status === "available") {
+    mainWindow?.webContents.send("updates:available", latestUpdateCheck);
+  }
+  return latestUpdateCheck;
+}
+
 function registerIpc() {
   trustedHandle("meetings:list", (_event, query, includeDeleted) => listMeetings(query, includeDeleted));
   trustedHandle("meetings:get", (_event, id) => loadMeeting(id));
@@ -199,6 +246,7 @@ function registerIpc() {
   trustedHandle("meetings:restore", (_event, id) => restoreMeeting(id));
 
   trustedHandle("recordings:start", async (_event, meetingId) => {
+    await requireLicense();
     const meeting = loadMeeting(meetingId);
     if (!meeting) throw new Error("会议不存在。");
     const sessionId = randomUUID();
@@ -302,6 +350,7 @@ function registerIpc() {
   });
 
   trustedHandle("transcription:chunk", async (_event, payload) => {
+    await requireLicense();
     const profiles = listModelProfiles();
     const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "stt");
     if (!profile) throw new Error("尚未配置转录模型。");
@@ -329,6 +378,7 @@ function registerIpc() {
   });
 
   trustedHandle("summary:generate", async (_event, payload) => {
+    await requireLicense();
     const profiles = listModelProfiles();
     const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "llm");
     const summary = profile
@@ -392,6 +442,7 @@ function registerIpc() {
 
   trustedHandle("imports:choose", () => chooseImportFiles(mainWindow));
   trustedHandle("imports:process", async (_event, payload) => {
+    await requireLicense();
     const profiles = listModelProfiles();
     const sttProfile = profiles.find((item) =>
       item.id === payload.sttProfileId && item.kind === "stt" && item.enabled);
@@ -502,8 +553,10 @@ function registerIpc() {
       throw error;
     }
   });
-  trustedHandle("exports:save", (_event, meeting, format) =>
-    exportMeeting(meeting, format, mainWindow, listMeetingAudioPaths(meeting.id)));
+  trustedHandle("exports:save", async (_event, meeting, format) => {
+    await requireLicense();
+    return exportMeeting(meeting, format, mainWindow, listMeetingAudioPaths(meeting.id));
+  });
   trustedHandle("preferences:get", () => loadPreferences());
   trustedHandle("preferences:save", (_event, preferences) => {
     preferenceWriteQueue = preferenceWriteQueue.then(
@@ -512,11 +565,54 @@ function registerIpc() {
     );
     return preferenceWriteQueue;
   });
-  trustedHandle("system:open-settings", () => {
-    if (process.platform === "darwin") {
-      return shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone");
+  trustedHandle("updates:get-state", () => latestUpdateCheck ?? idleUpdateState());
+  trustedHandle("updates:check", () => runMacUpdateCheck());
+  trustedHandle("updates:open-download", async () => {
+    if (latestUpdateCheck?.status !== "available" || !latestUpdateCheck.update?.downloadUrl) {
+      throw new Error("请先检查更新。");
     }
-    return shell.openExternal("ms-settings:privacy-microphone");
+    if (!isOfficialHttpsUrl(latestUpdateCheck.update.downloadUrl)) {
+      throw new Error("更新下载地址未通过安全校验。");
+    }
+    await shell.openExternal(latestUpdateCheck.update.downloadUrl);
+    return { opened: true };
+  });
+  trustedHandle("licensing:get-status", (_event, refresh = false) => getLicenseStatus({ refresh }));
+  trustedHandle("licensing:activate", (_event, licenseKey) => activateLicense(licenseKey));
+  trustedHandle("licensing:deactivate", () => deactivateLicense());
+  trustedHandle("licensing:open-checkout", async () => {
+    await shell.openExternal(await checkoutUrl());
+    return { opened: true };
+  });
+  trustedHandle("system:get-permissions", () => {
+    if (process.platform === "darwin") {
+      return {
+        microphone: systemPreferences.getMediaAccessStatus("microphone"),
+        screen: systemPreferences.getMediaAccessStatus("screen"),
+        systemAudioRequired: true
+      };
+    }
+    if (process.platform === "win32") {
+      return {
+        microphone: systemPreferences.getMediaAccessStatus("microphone"),
+        screen: "granted",
+        systemAudioRequired: false
+      };
+    }
+    return { microphone: "unknown", screen: "unknown", systemAudioRequired: false };
+  });
+  trustedHandle("system:request-microphone", async () => {
+    if (process.platform === "darwin") await systemPreferences.askForMediaAccess("microphone");
+    return process.platform === "darwin" || process.platform === "win32"
+      ? systemPreferences.getMediaAccessStatus("microphone")
+      : "unknown";
+  });
+  trustedHandle("system:open-settings", (_event, kind = "microphone") => {
+    if (process.platform === "darwin") {
+      const pane = kind === "screen" ? "Privacy_ScreenCapture" : "Privacy_Microphone";
+      return shell.openExternal(`x-apple.systempreferences:com.apple.preference.security?${pane}`);
+    }
+    return shell.openExternal(kind === "screen" ? "ms-settings:privacy-broadfilesystemaccess" : "ms-settings:privacy-microphone");
   });
   trustedHandle("window:toggle-mini", (_event, enabled) => {
     if (!mainWindow) return false;
@@ -542,6 +638,10 @@ app.whenReady().then(async () => {
     console.error("录音保留策略清理失败：", error);
   });
   await createMainWindow();
+
+  if (process.platform === "darwin" && app.isPackaged) {
+    setTimeout(() => runMacUpdateCheck({ notify: true }), 5_000);
+  }
 
   powerMonitor.on("suspend", () => mainWindow?.webContents.send("system:suspend"));
   powerMonitor.on("resume", () => mainWindow?.webContents.send("system:resume"));

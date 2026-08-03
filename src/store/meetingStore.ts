@@ -36,7 +36,8 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     defaultMode: "online",
     glossary: [],
     retentionDays: null,
-    onboardingCompleted: false
+    onboardingCompleted: false,
+    systemPermissionsCompleted: false
   },
   loading: true,
   saving: false,

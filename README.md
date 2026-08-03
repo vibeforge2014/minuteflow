@@ -1,8 +1,8 @@
-# 会议助手
+# MinuteFlow
 
 本地优先的 Electron 跨平台会议工作台，支持边录音、边转录、边记录，并以两分钟为默认节奏生成结构化滚动纪要。
 
-产品官网与在线演示：[vibeforge2014.github.io/meeting-assistant](https://vibeforge2014.github.io/meeting-assistant/)
+产品官网：[vibeforge2014.github.io/meeting-assistant-site](https://vibeforge2014.github.io/meeting-assistant-site/)
 
 ## 已实现
 
@@ -61,3 +61,12 @@ npm run package
 - 收藏、搜索、软删除恢复、说话人改名和统一行动项列表
 
 iOS 受系统沙箱限制，仅录制麦克风，不能捕获其他 App 的受保护系统音频。工程、构建和测试说明见 [`ios/MeetingAssistant/README.md`](ios/MeetingAssistant/README.md)。
+
+## 桌面版购买与授权
+
+正式构建通过 `public/config/licensing.json`（或以下同名运行时环境变量）连接 Paddle 购买流程与自有授权服务：
+
+- `MINUTEFLOW_CHECKOUT_URL`：Paddle 批准后的 HTTPS Checkout 链接；未配置时打开官网定价页。
+- `MINUTEFLOW_LICENSE_VERIFY_URL`：服务端 HTTPS 验权端点，接收激活码、匿名设备 ID、产品 ID、应用版本和平台信息，返回 `{ "valid": true, "entitlementId": "…", "customerEmail": "…" }`。
+
+Paddle API 密钥和 webhook secret 只能保存在服务端，不能写入 Electron 客户端。激活码在本机使用 Electron `safeStorage` 加密保存；应用每 72 小时尝试复验，并为最近一次有效授权保留最多 30 天离线使用期。

@@ -9,7 +9,8 @@ const defaultPreferences: MeetingPreferences = {
   defaultMode: "online",
   glossary: [],
   retentionDays: null,
-  onboardingCompleted: false
+  onboardingCompleted: false,
+  systemPermissionsCompleted: false
 };
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -256,8 +257,60 @@ const browserApi: MeetingAPI = {
       return preferences;
     }
   },
+  licensing: {
+    async getStatus() {
+      return {
+        state: "unlicensed" as const,
+        productId: "minuteflow-desktop",
+        offline: false,
+        verificationConfigured: false,
+        checkoutConfigured: false
+      };
+    },
+    async activate() {
+      throw new Error("请在 MinuteFlow 桌面应用中激活授权。");
+    },
+    async deactivate() {
+      return {
+        state: "unlicensed" as const,
+        productId: "minuteflow-desktop",
+        offline: false,
+        verificationConfigured: false,
+        checkoutConfigured: false
+      };
+    },
+    async openCheckout() {
+      window.open("https://vibeforge2014.github.io/meeting-assistant-site/pricing/", "_blank", "noopener,noreferrer");
+      return { opened: true as const };
+    }
+  },
+  updates: {
+    async getState() {
+      return {
+        status: "unsupported",
+        currentVersion: "0.1.1",
+        checkedAt: "",
+        message: "请在 macOS 桌面应用中检查更新。"
+      };
+    },
+    async check() {
+      return {
+        status: "unsupported",
+        currentVersion: "0.1.1",
+        checkedAt: new Date().toISOString(),
+        message: "请在 macOS 桌面应用中检查更新。"
+      };
+    },
+    async openDownload() {
+      window.open("https://vibeforge2014.github.io/meeting-assistant-site/downloads/macos/latest/", "_blank", "noopener,noreferrer");
+      return { opened: true } as const;
+    },
+    onAvailable() { return () => {}; }
+  },
   system: {
     platform: "web",
+    async getPermissions() { return { microphone: "granted", screen: "granted", systemAudioRequired: false }; },
+    async requestMicrophone() { return "granted"; },
     async openSettings() {},
     onSuspend() { return () => {}; },
     onResume() { return () => {}; }
