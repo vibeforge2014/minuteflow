@@ -264,7 +264,8 @@ const browserApi: MeetingAPI = {
         productId: "minuteflow-desktop",
         offline: false,
         verificationConfigured: false,
-        checkoutConfigured: false
+        checkoutConfigured: false,
+        insecureStorage: false
       };
     },
     async activate() {
@@ -276,7 +277,8 @@ const browserApi: MeetingAPI = {
         productId: "minuteflow-desktop",
         offline: false,
         verificationConfigured: false,
-        checkoutConfigured: false
+        checkoutConfigured: false,
+        insecureStorage: false
       };
     },
     async openCheckout() {
@@ -288,7 +290,7 @@ const browserApi: MeetingAPI = {
     async getState() {
       return {
         status: "unsupported",
-        currentVersion: "0.1.1",
+        currentVersion: "0.1.3",
         checkedAt: "",
         message: "请在 macOS 桌面应用中检查更新。"
       };
@@ -296,7 +298,7 @@ const browserApi: MeetingAPI = {
     async check() {
       return {
         status: "unsupported",
-        currentVersion: "0.1.1",
+        currentVersion: "0.1.3",
         checkedAt: new Date().toISOString(),
         message: "请在 macOS 桌面应用中检查更新。"
       };
@@ -309,7 +311,7 @@ const browserApi: MeetingAPI = {
   },
   system: {
     platform: "web",
-    async getPermissions() { return { microphone: "granted", screen: "granted", systemAudioRequired: false }; },
+    async getPermissions() { return { microphone: "granted", screen: "granted", systemAudioRequired: false, systemAudioPickerHint: false }; },
     async requestMicrophone() { return "granted"; },
     async openSettings() {},
     onSuspend() { return () => {}; },

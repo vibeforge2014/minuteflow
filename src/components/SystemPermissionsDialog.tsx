@@ -6,7 +6,8 @@ import type { SystemPermissionStatus, SystemPermissionValue } from "../types";
 const initialStatus: SystemPermissionStatus = {
   microphone: "unknown",
   screen: "unknown",
-  systemAudioRequired: api.system.platform === "darwin"
+  systemAudioRequired: api.system.platform === "darwin",
+  systemAudioPickerHint: api.system.platform === "darwin"
 };
 
 export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; onComplete(): Promise<void> }) {
@@ -61,6 +62,9 @@ export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; o
           onPrimary={() => api.system.openSettings("screen")}
           hideAction={!status.systemAudioRequired || status.screen === "granted"}
         />
+        {status.systemAudioPickerHint && status.systemAudioRequired && (
+          <p className="permission-wall__hint">macOS 提示：开始线上会议录音时，请在系统弹窗中勾选“共享电脑音频”，否则只能录到本地麦克风、远程参会者将无声。</p>
+        )}
       </div>
       <div className="permission-wall__note"><ShieldCheck size={16} /><span>录音前，请先获得所有参会者同意。你可以随时在系统设置中撤销权限。</span></div>
       <footer>

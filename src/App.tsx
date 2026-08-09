@@ -42,7 +42,6 @@ export function App() {
     selectMeeting,
     createMeeting,
     updateMeeting,
-    appendTranscript,
     deleteMeeting,
     updatePreferences,
     clearError
@@ -93,8 +92,32 @@ export function App() {
   const recorder = useMeetingRecorder(meeting);
 
   useEffect(() => {
-    if (recorder.warning) setToast(recorder.warning);
+    if (recorder.warning) {
+      // Surface license-required errors from the main process as the paywall
+      // rather than a generic toast. The code is prefixed in the message
+      // because custom Error properties do not survive the contextBridge.
+      if (recorder.warning.startsWith("[LICENSE_REQUIRED]")) {
+        setPaywallReason(recorder.warning.replace(/^\[LICENSE_REQUIRED\]\s*/, ""));
+        setPaywallOpen(true);
+        return;
+      }
+      setToast(recorder.warning);
+    }
   }, [recorder.warning]);
+
+  // Flush the recorder when the window closes so the last audio chunk is not
+  // lost; the main-process before-quit handler is the backstop.
+  useEffect(() => {
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (recorder.phase === "recording" || recorder.phase === "paused") {
+        event.preventDefault();
+        event.returnValue = "";
+        void recorder.stop();
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [recorder]);
 
   const handleCreate = async (input: CreateMeetingInput) => {
     const created = await createMeeting(input);
@@ -289,7 +312,6 @@ export function App() {
         <TranscriptPanel
           meeting={meeting}
           onChange={handleMeetingChange}
-          onAppend={appendTranscript}
           onClose={() => setRightPanelOpen(false)}
         />
       )}

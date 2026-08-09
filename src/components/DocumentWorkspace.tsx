@@ -21,6 +21,7 @@ import TurndownService from "turndown";
 import type { Meeting } from "../types";
 import { api } from "../lib/api";
 import { lockSummaryField } from "../lib/summary";
+import { formatDuration, formatInterval } from "../lib/format";
 import { useMeetingStore } from "../store/meetingStore";
 
 interface DocumentWorkspaceProps {
@@ -70,7 +71,7 @@ export function DocumentWorkspace({
   const importMarkdown = async () => {
     const imported = await api.notes.importMarkdown();
     if (!imported) return;
-    const markdown = imported.content.replace(/\r\n/g, "\n");
+    const markdown = imported.content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
     editor?.commands.setContent(markdownToHtml(markdown), { emitUpdate: false });
     onChange({
       ...meetingRef.current,
@@ -219,8 +220,8 @@ export function DocumentWorkspace({
           )}
           <div className="summary-timeline">
             {meeting.summary.keyPoints.length ? meeting.summary.keyPoints.map((item, index) => (
-              <div key={`${item}-${index}`} className={index >= meeting.summary.keyPoints.length - 3 ? "is-new" : ""}>
-                <time>{formatSummaryTime(index)}</time>
+              <div key={`kp-${index}`} className={index >= meeting.summary.keyPoints.length - 3 ? "is-new" : ""}>
+                <time>{index + 1}</time>
                 <textarea
                   aria-label={`编辑纪要 ${index + 1}`}
                   value={item}
@@ -228,7 +229,7 @@ export function DocumentWorkspace({
                   onChange={(event) => setSummaryList(
                     "keyPoints",
                     meeting.summary.keyPoints.map((value, itemIndex) =>
-                      itemIndex === index ? event.target.value : value),
+                          itemIndex === index ? event.target.value : value),
                     index
                   )}
                 />
@@ -238,11 +239,6 @@ export function DocumentWorkspace({
               <div className="section-empty">开始录音后，AI 会在这里整理关键进展。</div>
             )}
           </div>
-          {meeting.summary.keyPoints.length > 4 && (
-            <button className="text-button summary-more">
-              查看全部纪要（{meeting.summary.keyPoints.length} 条）
-            </button>
-          )}
         </DocumentSection>
 
         <DocumentSection icon={<CheckSquare size={20} weight="duotone" />} title="行动项">
@@ -392,10 +388,18 @@ function EditableList({
   placeholder: string;
   onChange(values: string[]): void;
 }) {
+  const [draft, setDraft] = useState("");
+  const commit = () => {
+    const trimmed = draft.trim();
+    if (trimmed) {
+      onChange([...values, trimmed]);
+      setDraft("");
+    }
+  };
   return (
     <ul className="editable-list">
       {values.map((value, index) => (
-        <li key={`${index}-${value}`}>
+        <li key={`el-${index}`}>
           <input
             value={value}
             onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? event.target.value : item))}
@@ -414,10 +418,15 @@ function EditableList({
       ))}
       <li className="editable-list__add">
         <input
-          value=""
+          value={draft}
           placeholder={placeholder}
-          onChange={(event) => {
-            if (event.target.value) onChange([...values, event.target.value]);
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commit();
+            }
           }}
         />
       </li>
@@ -460,18 +469,4 @@ function markdownToPlainText(markdown: string) {
 function formatMeetingDate(value: string) {
   const date = new Date(value);
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-function formatDuration(seconds: number) {
-  const minutes = Math.floor(seconds / 60);
-  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
-}
-
-function formatInterval(seconds: number) {
-  return seconds % 60 === 0 ? `${seconds / 60} 分钟` : `${seconds} 秒`;
-}
-
-function formatSummaryTime(index: number) {
-  const minutes = index * 2;
-  return `10:${String(minutes).padStart(2, "0")}`;
 }

@@ -162,6 +162,7 @@ export interface SystemPermissionStatus {
   microphone: SystemPermissionValue;
   screen: SystemPermissionValue;
   systemAudioRequired: boolean;
+  systemAudioPickerHint: boolean;
 }
 
 export interface LicenseStatus {
@@ -175,6 +176,7 @@ export interface LicenseStatus {
   message?: string;
   verificationConfigured: boolean;
   checkoutConfigured: boolean;
+  insecureStorage: boolean;
 }
 
 export interface MacUpdateInfo {

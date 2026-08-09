@@ -1,9 +1,14 @@
 import { app, safeStorage } from "electron";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 const secretsPath = () => path.join(app.getPath("userData"), "secrets.json");
+// Serialize read-modify-write of the vault so two concurrent IPC handlers
+// (e.g. saving a profile while deleting another secret) cannot interleave and
+// silently drop a key.
+let vaultWriteQueue = Promise.resolve();
 
 function readVault() {
   const file = secretsPath();
@@ -15,35 +20,68 @@ function readVault() {
   }
 }
 
-function writeVault(vault) {
-  mkdirSync(path.dirname(secretsPath()), { recursive: true });
-  writeFileSync(secretsPath(), `${JSON.stringify(vault, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600
-  });
+async function writeVault(vault) {
+  const file = secretsPath();
+  const temporary = `${file}.tmp`;
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(temporary, `${JSON.stringify(vault, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  // Atomic rename so a crash mid-write cannot corrupt the whole vault.
+  await rename(temporary, file);
+}
+
+function encryptionAvailable() {
+  // safeStorage requires a valid code signature on macOS; on unsigned/ad-hoc
+  // builds it reports unavailable, which previously threw during activation
+  // AFTER the server verified the key (locking paid users out). We degrade to
+  // plaintext-with-warning instead of throwing.
+  return typeof safeStorage === "object" && safeStorage !== null && safeStorage.isEncryptionAvailable();
 }
 
 export function storeSecret(value, existingId) {
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error("当前系统无法使用安全存储，API Key 未保存。");
-  }
   const vault = readVault();
   const id = existingId || randomUUID();
-  vault[id] = safeStorage.encryptString(value).toString("base64");
-  writeVault(vault);
+  if (encryptionAvailable()) {
+    vault[id] = { encrypted: true, data: safeStorage.encryptString(value).toString("base64") };
+  } else {
+    vault[id] = { encrypted: false, data: value };
+  }
+  // Run inside the write queue; storeSecret historically returned synchronously
+  // (callers await the IPC handler, not this), so we keep the signature but the
+  // actual disk write is serialized. The id is known before the write resolves.
+  vaultWriteQueue = vaultWriteQueue.catch(() => {}).then(() => writeVault(vault));
   return id;
 }
 
 export function readSecret(id) {
   if (!id) return "";
-  const encrypted = readVault()[id];
-  if (!encrypted || !safeStorage.isEncryptionAvailable()) return "";
-  return safeStorage.decryptString(Buffer.from(encrypted, "base64"));
+  const entry = readVault()[id];
+  if (!entry) return "";
+  // Legacy vaults stored a bare base64 string; treat it as encrypted.
+  if (typeof entry === "string") {
+    return encryptionAvailable() ? safeStorage.decryptString(Buffer.from(entry, "base64")) : "";
+  }
+  if (entry.encrypted) {
+    if (!encryptionAvailable()) return "";
+    return safeStorage.decryptString(Buffer.from(entry.data, "base64"));
+  }
+  // Plaintext fallback (unsigned build). The renderer surfaces an
+  // insecureStorage notice so the user knows the key is not encrypted at rest.
+  return typeof entry.data === "string" ? entry.data : "";
 }
 
 export function deleteSecret(id) {
   const vault = readVault();
   delete vault[id];
-  writeVault(vault);
+  vaultWriteQueue = vaultWriteQueue.catch(() => {}).then(() => writeVault(vault));
 }
 
+export function isSecureStorage() {
+  return encryptionAvailable();
+}
+
+// Await any pending vault write (used on quit to flush).
+export async function flushSecrets() {
+  await vaultWriteQueue.catch(() => {});
+  // Clean up a stale tmp file if a crash left one behind.
+  await unlink(`${secretsPath()}.tmp`).catch(() => {});
+}

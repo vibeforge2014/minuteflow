@@ -30,14 +30,14 @@ targets:
     info:
       path: MeetingAssistant/Info.plist
       properties:
-        CFBundleDisplayName: 会议助手
+        CFBundleDisplayName: MinuteFlow
         CFBundleName: MeetingAssistant
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
         UILaunchScreen:
           UIColorName: LaunchBackground
-        NSMicrophoneUsageDescription: 会议助手需要使用麦克风录制会议，并将语音转换为文字。
-        NSSpeechRecognitionUsageDescription: 会议助手使用系统语音识别生成实时转录和导入音频的文字稿。
+        NSMicrophoneUsageDescription: MinuteFlow需要使用麦克风录制会议，并将语音转换为文字。
+        NSSpeechRecognitionUsageDescription: MinuteFlow使用系统语音识别生成实时转录和导入音频的文字稿。
         ITSAppUsesNonExemptEncryption: false
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true

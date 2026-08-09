@@ -31,12 +31,20 @@ export default {
       ? {
           identity: appleIdentity || "-",
           identityValidation: Boolean(appleIdentity),
+          // Entitlements are required under hardened runtime to load the
+          // whisper.cpp/.node native modules (library validation) and capture
+          // audio. Without them a properly-signed build crashes at launch.
+          entitlements: "./entitlements.mac.plist",
           ...(appleIdentity
             ? {
                 hardenedRuntime: true,
                 ignore: "\\.pak$"
               }
             : {
+                // Ad-hoc (no APPLE_IDENTITY): unsigned dev build. Hardened
+                // runtime is off because entitlements are ignored for ad-hoc
+                // signatures; use a signed build for distribution.
+                hardenedRuntime: false,
                 optionsForFile: () => ({
                   hardenedRuntime: false,
                   timestamp: "none"
@@ -47,9 +55,11 @@ export default {
     osxNotarize: isMac ? notarizeOptions : undefined,
     extendInfo: {
       CFBundleDisplayName: "MinuteFlow",
+      LSMinimumSystemVersion: "14.2",
       NSMicrophoneUsageDescription: "MinuteFlow需要访问麦克风，以录制并转录会议内容。",
       NSAudioCaptureUsageDescription: "MinuteFlow需要访问系统音频，以录制线上会议中的其他参与者。",
-      NSScreenCaptureUsageDescription: "MinuteFlow需要屏幕与系统音频权限，以捕获线上会议声音。"
+      NSScreenCaptureUsageDescription: "MinuteFlow需要屏幕与系统音频权限，以捕获线上会议声音。",
+      NSHighResolutionCapable: true
     }
   },
   rebuildConfig: {},

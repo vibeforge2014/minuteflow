@@ -12,7 +12,7 @@ enum RecordingError: LocalizedError {
   var errorDescription: String? {
     switch self {
     case .microphoneDenied:
-      "未获得麦克风权限，请在系统设置中允许“会议助手”访问麦克风。"
+      "未获得麦克风权限，请在系统设置中允许“MinuteFlow”访问麦克风。"
     case .speechRecognitionDenied:
       "未获得语音识别权限，录音仍可保存，但无法生成实时转录。"
     case .speechRecognizerUnavailable:

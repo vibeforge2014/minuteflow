@@ -183,7 +183,20 @@ export async function checkForMacUpdate({
       message: `最新版本暂不支持当前 ${arch} 架构。`
     };
   }
-  const available = compareVersions(manifest.version, currentVersion) > 0;
+  // Dev/unpackaged builds may report a non-semver app version; treat that as
+  // "cannot compare" rather than throwing and breaking the update card.
+  let available;
+  try {
+    available = compareVersions(manifest.version, currentVersion) > 0;
+  } catch {
+    return {
+      status: "up-to-date",
+      currentVersion,
+      checkedAt,
+      update: manifest,
+      message: "当前为开发版本，无法比较版本号。"
+    };
+  }
   return {
     status: available ? "available" : "up-to-date",
     currentVersion,

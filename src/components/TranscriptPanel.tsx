@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowsMerge,
   CheckCircle,
@@ -6,13 +6,12 @@ import {
   PencilSimple,
   X
 } from "@phosphor-icons/react";
-import type { Meeting, TranscriptSegment } from "../types";
+import type { Meeting } from "../types";
 import { mergeSpeakerLabels } from "../lib/transcript";
 
 interface TranscriptPanelProps {
   meeting: Meeting;
   onChange(meeting: Meeting): void;
-  onAppend(id: string, segment: TranscriptSegment): Promise<void>;
   onClose(): void;
 }
 
@@ -23,6 +22,8 @@ export function TranscriptPanel({ meeting, onChange, onClose }: TranscriptPanelP
   const [mergeSource, setMergeSource] = useState("");
   const [mergeTarget, setMergeTarget] = useState("");
   const [visibleCount, setVisibleCount] = useState(200);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const speakers = useMemo(() => Array.from(new Map(
     meeting.transcript.map((segment) => [segment.speakerId, segment.speakerName])
   )), [meeting.transcript]);
@@ -31,6 +32,17 @@ export function TranscriptPanel({ meeting, onChange, onClose }: TranscriptPanelP
   useEffect(() => {
     setVisibleCount(200);
   }, [meeting.id]);
+
+  // Auto-scroll to keep the newest transcript in view during a live meeting.
+  // Only sticks when the user is already near the bottom so reading older
+  // segments is not interrupted — a standard "follow tail" behavior.
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || !autoScroll || meeting.transcript.length === 0) return;
+    const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+    if (distanceFromBottom > 80) return;
+    list.scrollTop = list.scrollHeight;
+  }, [meeting.transcript.length, autoScroll, visibleCount]);
 
   const renameSpeaker = (speakerId: string, name: string) => {
     onChange({
@@ -68,10 +80,6 @@ export function TranscriptPanel({ meeting, onChange, onClose }: TranscriptPanelP
 
       {tab === "transcript" ? (
         <>
-          <div className="transcript-subnav">
-            <button className="is-active">实时转写</button>
-            <button>最终版</button>
-          </div>
           <div className="speaker-strip">
             {speakers.slice(0, 3).map(([id, name]) => (
               <button key={id} onClick={() => setSpeakerEditor(id)}>
@@ -133,7 +141,7 @@ export function TranscriptPanel({ meeting, onChange, onClose }: TranscriptPanelP
             </section>
           )}
           <p className="transcript-hint">AI 实时转写中，临时内容仅供参考</p>
-          <div className="transcript-list">
+          <div className="transcript-list" ref={listRef}>
             {meeting.transcript.length > visibleCount && (
               <button className="load-earlier" onClick={() => setVisibleCount((value) => value + 200)}>
                 加载更早的 {Math.min(200, meeting.transcript.length - visibleCount)} 条
@@ -168,7 +176,12 @@ export function TranscriptPanel({ meeting, onChange, onClose }: TranscriptPanelP
             )}
           </div>
           <label className="auto-scroll">
-            <input type="checkbox" defaultChecked /> 自动滚动
+            <input
+              type="checkbox"
+              checked={autoScroll}
+              onChange={(event) => setAutoScroll(event.target.checked)}
+            />{" "}
+            自动滚动
           </label>
         </>
       ) : (
@@ -211,8 +224,14 @@ export function TranscriptPanel({ meeting, onChange, onClose }: TranscriptPanelP
 }
 
 function formatTranscriptTime(ms: number) {
-  const total = 10 * 3600 + Math.floor(ms / 1000);
-  return `${String(Math.floor(total / 3600)).padStart(2, "0")}:${String(Math.floor((total % 3600) / 60)).padStart(2, "0")}`;
+  // Relative to recording start (00:00:00), with seconds. startMs is measured
+  // from when recording began, so this aligns with the audio timeline.
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours > 0 ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
 }
 
 function speakerColor(id: string) {

@@ -211,14 +211,24 @@ export async function transcribeRemote(
 }
 
 function runProcess(command, args, options = {}) {
+  // Default to a generous bound so a wedged whisper process cannot hang the IPC
+  // handler (and pile up audio blobs in the renderer) indefinitely. Callers
+  // pass a smaller timeoutMs for quick checks like model tests.
+  const timeoutMs = options.timeoutMs ?? 10 * 60 * 1_000;
+  const { timeoutMs: _ignored, ...spawnOptions } = options;
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true, ...options });
+    const child = spawn(command, args, { windowsHide: true, ...spawnOptions });
     let stdout = "";
     let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`本地模型进程超时（${Math.round(timeoutMs / 1000)} 秒）。`));
+    }, timeoutMs);
     child.stdout.on("data", (data) => { stdout += data.toString(); });
     child.stderr.on("data", (data) => { stderr += data.toString(); });
-    child.on("error", reject);
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
     child.on("close", (code) => {
+      clearTimeout(timer);
       if (code === 0) resolve({ stdout, stderr });
       else reject(new Error(stderr || `本地模型进程退出，代码 ${code}`));
     });
@@ -341,7 +351,14 @@ export async function testModelProfile(profile, apiKey) {
     if (!profile.options?.executablePath || !profile.options?.modelPath) {
       throw new Error("请配置 whisper.cpp 可执行文件和模型路径。");
     }
-    return { ok: true, message: "本地路径配置完整。" };
+    // Actually invoke the executable so a missing/non-executable path or an
+    // incompatible build fails here, not silently mid-meeting.
+    try {
+      await runProcess(profile.options.executablePath, ["--help"], { timeoutMs: 8_000 });
+    } catch (error) {
+      throw new Error(`无法运行 whisper.cpp：${error instanceof Error ? error.message : "请检查可执行文件路径与权限。"}`);
+    }
+    return { ok: true, message: "whisper.cpp 可执行文件可运行，模型路径已配置。" };
   }
   if (profile.transport === "whisper-python") {
     const pythonPath = profile.options?.pythonExecutablePath
@@ -349,7 +366,7 @@ export async function testModelProfile(profile, apiKey) {
       || (process.platform === "win32" ? "python" : "python3");
     if (!profile.options?.modelPath) throw new Error("请选择 .pt 模型文件。");
     await access(profile.options.modelPath);
-    const result = await runProcess(pythonPath, ["-c", "import whisper; print(whisper.__version__)"]);
+    const result = await runProcess(pythonPath, ["-c", "import whisper; print(whisper.__version__)"], { timeoutMs: 15_000 });
     return { ok: true, message: `Python Whisper 已就绪（${result.stdout.trim() || "版本未知"}）。` };
   }
   if (profile.transport === "sherpa-onnx") {
@@ -360,7 +377,12 @@ export async function testModelProfile(profile, apiKey) {
     ) {
       throw new Error("请配置 sherpa-onnx 可执行文件、segmentation 和 embedding 模型路径。");
     }
-    return { ok: true, message: "说话人分离运行时与模型路径配置完整。" };
+    try {
+      await runProcess(profile.options.executablePath, ["--help"], { timeoutMs: 8_000 });
+    } catch (error) {
+      throw new Error(`无法运行 sherpa-onnx：${error instanceof Error ? error.message : "请检查可执行文件路径与权限。"}`);
+    }
+    return { ok: true, message: "sherpa-onnx 可执行文件可运行，模型路径已配置。" };
   }
   if (profile.kind === "llm") {
     const response = await fetch(apiUrl(profile, "chat/completions", profile.options?.chatEndpoint), {
@@ -394,9 +416,12 @@ export async function testModelProfile(profile, apiKey) {
   return { ok: true, message: "连接成功。" };
 }
 
-function extractMessageContent(payload) {
-  if (payload?.data && payload.data !== payload) return extractMessageContent(payload.data);
-  if (payload?.result && payload.result !== payload) return extractMessageContent(payload.result);
+function extractMessageContent(payload, depth = 0) {
+  // Bound the recursion so a malformed/cyclic gateway payload cannot overflow
+  // the stack and crash the main process.
+  if (depth > 8) return "";
+  if (payload?.data && payload.data !== payload) return extractMessageContent(payload.data, depth + 1);
+  if (payload?.result && payload.result !== payload) return extractMessageContent(payload.result, depth + 1);
   const content = payload.choices?.[0]?.message?.content ?? payload.output_text;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {

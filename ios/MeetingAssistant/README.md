@@ -1,4 +1,4 @@
-# 会议助手 iOS
+# MinuteFlow iOS
 
 SwiftUI 编写的 iPhone 与 iPad 通用版本，目标系统为 iOS/iPadOS 18 及以上。
 

@@ -10,13 +10,15 @@ const DesktopApp = lazy(() => import("./App").then((module) => ({ default: modul
 document.documentElement.dataset.platform = api.system.platform;
 
 function Root() {
+  const isLocalDesktopPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "desktop";
+
   useEffect(() => {
-    if (!isElectronRuntime && window.location.hash.startsWith("#/app")) {
+    if (!isElectronRuntime && !isLocalDesktopPreview && window.location.hash.startsWith("#/app")) {
       window.history.replaceState(null, "", "#/");
     }
-  }, []);
+  }, [isLocalDesktopPreview]);
 
-  if (isElectronRuntime) return <DesktopApp />;
+  if (isElectronRuntime || isLocalDesktopPreview) return <DesktopApp />;
   return <MarketingSite />;
 }
 

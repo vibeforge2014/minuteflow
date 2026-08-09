@@ -59,8 +59,12 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
       </div> : null}
       {error && <p className="paywall-error" role="alert">{error}</p>}
       {status && !status.verificationConfigured && !error && <p className="paywall-config-note">购买入口已就绪；激活验证服务将在 Paddle 审核完成后启用。</p>}
+      {status?.insecureStorage && !error && <p className="paywall-config-note">当前为未签名版本，密钥将以未加密方式保存在本地，建议安装官方签名版本。</p>}
       <div className="paywall-actions">
-        <button className="button button--primary paywall-buy" onClick={() => api.licensing.openCheckout()}><Sparkle size={16} weight="fill" />{status?.checkoutConfigured ? "购买并解锁" : "查看购买方式"}</button>
+        <button className="button button--primary paywall-buy" onClick={async () => {
+          try { await api.licensing.openCheckout(); }
+          catch (caught) { setError(caught instanceof Error ? caught.message : "无法打开购买页面，请稍后再试。"); }
+        }}><Sparkle size={16} weight="fill" />{status?.checkoutConfigured ? "购买并解锁" : "查看购买方式"}</button>
         <button className="button" onClick={() => setShowActivation((value) => !value)}><Key size={15} />{showActivation ? "收起激活" : "输入激活码"}</button>
         <button className="text-button" disabled={busy} onClick={refresh}><ArrowClockwise size={14} className={busy ? "spin" : ""} />{busy ? "正在验证" : "恢复购买"}</button>
       </div>

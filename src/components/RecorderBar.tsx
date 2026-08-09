@@ -10,6 +10,7 @@ import {
 } from "@phosphor-icons/react";
 import type { Meeting } from "../types";
 import { api } from "../lib/api";
+import { formatDuration } from "../lib/format";
 
 interface RecorderBarProps {
   meeting: Meeting;
@@ -111,11 +112,4 @@ function Level({ label, icon, value }: { label: string; icon: React.ReactNode; v
       </div>
     </div>
   );
-}
-
-function formatDuration(seconds: number) {
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remaining = seconds % 60;
-  return [hours, minutes, remaining].map((value) => String(value).padStart(2, "0")).join(":");
 }

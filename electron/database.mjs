@@ -5,6 +5,13 @@ import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 
 let database;
+// node:sqlite's DatabaseSync is a single shared connection and all its
+// operations are synchronous/blocking, so two writes cannot truly interleave
+// within Node's single thread. This guard catches the case where a re-entrant
+// call (e.g. an IPC handler invoking saveMeeting while another saveMeeting is
+// already mid-transaction on the same tick) would otherwise throw
+// "cannot start a transaction within a transaction" and lose the write.
+let transactionInProgress = false;
 
 const nowIso = () => new Date().toISOString();
 
@@ -123,6 +130,7 @@ function createSchema(db) {
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;
+    PRAGMA busy_timeout = 5000;
     CREATE TABLE IF NOT EXISTS meetings (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -322,7 +330,6 @@ function persistMeeting(db, meeting) {
     );
   }
   const persisted = getMeeting(db, meeting.id);
-  indexMeeting(db, persisted);
   return persisted;
 }
 
@@ -338,12 +345,24 @@ export function openDatabase() {
   database = new DatabaseSync(path.join(dataDirectory, "meetings.sqlite"));
   createSchema(database);
 
+  // Rebuild the FTS5 index if it was left corrupt by a crash/force-quit.
+  // This is best-effort: a failure only degrades search, never core data.
+  try {
+    database.exec("INSERT INTO meeting_search(meeting_search) VALUES('rebuild')");
+  } catch (error) {
+    console.error("重建会议搜索索引失败：", error);
+  }
+
   const count = database.prepare("SELECT COUNT(*) AS count FROM meetings").get().count;
   if (count === 0) {
     database.exec("BEGIN");
     try {
-      for (const meeting of seedMeetings) persistMeeting(database, meeting);
+      const seeded = [];
+      for (const meeting of seedMeetings) seeded.push(persistMeeting(database, meeting));
       database.exec("COMMIT");
+      for (const meeting of seeded) {
+        try { indexMeeting(database, meeting); } catch (error) { console.error("索引种子会议失败：", error); }
+      }
     } catch (error) {
       database.exec("ROLLBACK");
       throw error;
@@ -379,15 +398,33 @@ export function loadMeeting(id) {
 
 export function saveMeeting(meeting) {
   const db = openDatabase();
+  if (transactionInProgress) {
+    // A re-entrant save would throw "cannot start a transaction within a
+    // transaction". Persist directly without a nested transaction; the outer
+    // transaction will make the change durable.
+    return persistMeeting(db, meeting);
+  }
+  transactionInProgress = true;
   db.exec("BEGIN");
+  let saved;
   try {
-    const saved = persistMeeting(db, meeting);
+    saved = persistMeeting(db, meeting);
     db.exec("COMMIT");
-    return saved;
   } catch (error) {
     db.exec("ROLLBACK");
+    transactionInProgress = false;
     throw error;
   }
+  transactionInProgress = false;
+  // Index the meeting for full-text search OUTSIDE the main transaction so a
+  // corrupt FTS5 index (common after a force-quit) cannot roll back real
+  // meeting data. FTS is best-effort; a failure only degrades search.
+  try {
+    indexMeeting(db, saved);
+  } catch (error) {
+    console.error("更新会议搜索索引失败：", error);
+  }
+  return saved;
 }
 
 export function createMeeting(input) {

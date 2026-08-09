@@ -4,6 +4,7 @@ import { MeetingRecorder } from "../services/recording";
 import { useMeetingStore } from "../store/meetingStore";
 import type { Meeting } from "../types";
 import { mergeSummaryRevision } from "../lib/summary";
+import { formatDuration } from "../lib/format";
 
 export function useMeetingRecorder(meeting: Meeting | undefined) {
   const profiles = useMeetingStore((state) => state.profiles);
@@ -22,6 +23,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   const summaryTimerRef = useRef<number | null>(null);
   const meetingRef = useRef(meeting);
   const elapsedRef = useRef(elapsed);
+  const preferencesSummaryIntervalRef = useRef(preferences.summaryIntervalSeconds);
 
   useEffect(() => {
     meetingRef.current = meeting;
@@ -30,6 +32,10 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   useEffect(() => {
     elapsedRef.current = elapsed;
   }, [elapsed]);
+
+  useEffect(() => {
+    preferencesSummaryIntervalRef.current = preferences.summaryIntervalSeconds;
+  }, [preferences.summaryIntervalSeconds]);
 
   useEffect(() => {
     if (recorderRef.current) return;
@@ -98,6 +104,11 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     }
   }, [llmProfile?.id, summaryBusy, updateMeeting, updateSummary]);
 
+  const generateSummaryRef = useRef(generateSummary);
+  useEffect(() => {
+    generateSummaryRef.current = generateSummary;
+  }, [generateSummary]);
+
   const start = useCallback(async () => {
     if (!meeting || phase !== "idle") return;
     setPhase("starting");
@@ -121,6 +132,12 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       );
     } catch (error) {
       recorderRef.current = null;
+      // A failed/cancelled start must not leave a dangling summary timer that
+      // would fire generateSummary against a meeting that never started.
+      if (summaryTimerRef.current) {
+        window.clearInterval(summaryTimerRef.current);
+        summaryTimerRef.current = null;
+      }
       setPhase("idle");
       if (!(error instanceof Error) || error.message !== "录音启动已取消。") {
         setWarning(error instanceof Error ? error.message : "无法开始录音");
@@ -197,9 +214,19 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       }
     });
     const removeResume = api.system.onResume(() => {
-      if (recorderRef.current) {
-        setWarning("系统已唤醒，请检查录音设备后手动继续。");
-      }
+      if (!recorderRef.current) return;
+      // After sleep/wake the recorder is paused; resume capture and restart the
+      // periodic summary timer so rolling AI minutes keep updating. Without this,
+      // a single sleep silently stops all automatic summaries for the session.
+      try { recorderRef.current.resume(); } catch { /* recorder may already be stopped */ }
+      setPhase("recording");
+      if (summaryTimerRef.current) window.clearInterval(summaryTimerRef.current);
+      const intervalSeconds = meetingRef.current ? preferencesSummaryIntervalRef.current : 120;
+      summaryTimerRef.current = window.setInterval(
+        () => generateSummaryRef.current(false),
+        intervalSeconds * 1_000
+      );
+      setWarning("系统已唤醒，已自动继续录音，请确认设备正常。");
     });
     return () => {
       removeSuspend();
@@ -220,11 +247,4 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     stop,
     generateSummary
   };
-}
-
-function formatDuration(seconds: number) {
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remaining = seconds % 60;
-  return [hours, minutes, remaining].map((value) => String(value).padStart(2, "0")).join(":");
 }

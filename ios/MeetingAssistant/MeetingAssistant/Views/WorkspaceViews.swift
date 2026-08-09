@@ -90,7 +90,7 @@ private struct PhoneMeetingsView: View {
         }
       }
       .searchable(text: $searchText, prompt: "搜索标题、笔记或转录")
-      .navigationTitle("会议助手")
+      .navigationTitle("MinuteFlow")
       .toolbar {
         ToolbarItem(placement: .topBarLeading) {
           Button(action: onImport) {
