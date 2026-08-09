@@ -5,11 +5,11 @@
   "architectures": [
     "arm64"
   ],
-  "publishedAt": "2026-08-09T08:00:00Z",
+  "publishedAt": "2026-08-09T09:11:15Z",
   "minimumSystemVersion": "14.2",
   "notes": "MinuteFlow 0.1.3 已发布。包含最新的功能改进、兼容性优化与问题修复。",
   "downloadUrl": "../downloads/macos/latest/",
   "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.3",
   "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.3/MinuteFlow-0.1.3-macOS-arm64.dmg",
-  "sha256": "0f898637121aefddd2a9fe17ce3c4bfcf4c370848659a8b7dbca69814e1098c3"
+  "sha256": "fa406ba3a977e7dcdb2185abbe6f2b7c5358107274a9ce061b16bfa40c5287af"
 }
