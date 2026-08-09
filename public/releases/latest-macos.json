@@ -1,13 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.2",
+  "version": "0.1.3",
   "platform": "darwin",
-  "architectures": ["arm64"],
-  "publishedAt": "2026-08-03T06:23:48Z",
+  "architectures": [
+    "arm64"
+  ],
+  "publishedAt": "2026-08-09T08:00:00Z",
   "minimumSystemVersion": "14.2",
-  "notes": "修复应用左上角品牌图标、统一 MinuteFlow 安装包与 GitHub 命名，并修复本地模型下载后点击“使用”未保存启用状态的问题。",
+  "notes": "MinuteFlow 0.1.3 已发布。包含最新的功能改进、兼容性优化与问题修复。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.2",
-  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.2/MinuteFlow-0.1.2-macOS-arm64.dmg",
-  "sha256": "c5946a6ff66039419fd2a908821c9f289f3df0ef6f18cf1abe6421bfe2d7fe43"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.3",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.3/MinuteFlow-0.1.3-macOS-arm64.dmg",
+  "sha256": "0f898637121aefddd2a9fe17ce3c4bfcf4c370848659a8b7dbca69814e1098c3"
 }
