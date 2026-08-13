@@ -1,0 +1,63 @@
+name: Attach Windows asset to release
+
+# Downloads the Windows build artifact from a "Build desktop apps" run and
+# uploads the installer (renamed + checksummed) to an existing GitHub release.
+# Used when the macOS release is signed/notarized locally but the Windows
+# installer should be attached without a slow cross-network download.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Build desktop apps run ID that produced the Windows artifact"
+        required: true
+        type: string
+      version:
+        description: "Release version without leading v, e.g. 0.1.6"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: MinuteFlow-Windows
+          path: artifacts/windows
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rename installer and compute checksum
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          installer="$(find artifacts/windows -type f -iname '*Setup.exe' -print -quit)"
+          if [ -z "$installer" ]; then
+            echo "::error::No *Setup.exe found in the Windows artifact"
+            find artifacts/windows -type f | head -50
+            exit 1
+          fi
+          echo "Found installer: $installer"
+          out="MinuteFlow-Setup-${VERSION}-Windows-x64.exe"
+          cp "$installer" "$out"
+          sha256sum "$out" | awk '{print $1}' > "${out}.sha256"
+          echo "::set-output name=size::$(stat -c%s "$out")"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          out="MinuteFlow-Setup-${VERSION}-Windows-x64.exe"
+          gh release upload "$tag" "$out" "${out}.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+          echo "Uploaded $out to release $tag"
