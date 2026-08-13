@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.1",
+  "version": "0.1.4",
   "platform": "darwin",
   "architectures": ["arm64"],
-  "publishedAt": "2026-08-02T06:20:37Z",
+  "publishedAt": "2026-08-13T07:51:33Z",
   "minimumSystemVersion": "14.2",
-  "notes": "TuneSync 暖橙视觉版本，包含本地 Whisper 模型发现与下载、New API 兼容、Markdown 笔记导入，以及录音停止时等待最后音频块落盘的修复。",
+  "notes": "在 Paddle 授权服务完成前加入限时、设备绑定的临时激活通道，并保留正式远程授权流程。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/meeting-assistant/releases/tag/v0.1.1",
-  "assetUrl": "https://github.com/vibeforge2014/meeting-assistant/releases/download/v0.1.1/Meeting-Assistant-0.1.1-macOS-arm64.dmg",
-  "sha256": "4985395d376e34d703bf07068331ac92600544c45ed38071d936ac00501b186f"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.4",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.4/MinuteFlow-0.1.4-macOS-arm64.dmg",
+  "sha256": "e59c0626d0bd4078320f5c51fea4a35cf2e0b1182c083caff151783255cb3306"
 }
