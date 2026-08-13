@@ -112,15 +112,33 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
   throw lastError;
 }
 
+function splitSentences(text) {
+  return String(text || "")
+    .split(/(?<=[。！？!?…])\s*/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+}
+
 export function summarizeLocally(input) {
   const recent = input.transcript.filter((segment) => segment.status === "final").slice(-8);
   const keyPoints = recent
     .map((segment) => segment.text.trim())
     .filter(Boolean)
     .slice(-5);
-  const decisionPattern = /(决定|确认|同意|采用|确定|结论)/;
-  const actionPattern = /(需要|负责|完成|跟进|输出|整理|评估|邀请)/;
+  const decisionPattern = /(决定|決定|确认|確認|同意|采用|採用|确定|確定|结论|結論)/;
+  const actionPattern = /(需要|负责|負責|完成|跟进|跟進|输出|輸出|整理|评估|評估|邀请|邀請)/;
   const questionPattern = /[？?]$/;
+
+  // Match at sentence granularity (split on Chinese/English terminal punctuation)
+  // so a single long segment containing several points yields individual
+  // decisions, actions, and questions instead of one undifferentiated block.
+  const sentences = recent.flatMap((segment) =>
+    splitSentences(segment.text).map((sentence) => ({
+      text: sentence,
+      speakerName: segment.speakerName,
+      segmentId: segment.id
+    }))
+  );
 
   return validateSummary({
     topics: input.previousSummary?.topics?.length
@@ -129,26 +147,26 @@ export function summarizeLocally(input) {
     keyPoints: Array.from(new Set([...(input.previousSummary?.keyPoints ?? []), ...keyPoints])).slice(-8),
     decisions: Array.from(new Set([
       ...(input.previousSummary?.decisions ?? []),
-      ...recent.filter((segment) => decisionPattern.test(segment.text)).map((segment) => segment.text)
+      ...sentences.filter((unit) => decisionPattern.test(unit.text)).map((unit) => unit.text)
     ])).slice(-5),
     actionItems: Array.from(new Map([
       ...(input.previousSummary?.actionItems ?? []),
-      ...recent
-        .filter((segment) => actionPattern.test(segment.text))
+      ...sentences
+        .filter((unit) => actionPattern.test(unit.text))
         .slice(-3)
-        .map((segment) => ({
+        .map((unit) => ({
           id: randomUUID(),
-          title: segment.text,
-          owner: segment.speakerName,
+          title: unit.text,
+          owner: unit.speakerName,
           dueDate: "待确认",
           status: "todo",
           done: false,
-          evidenceSegmentIds: [segment.id]
+          evidenceSegmentIds: [unit.segmentId]
         }))
     ].map((item) => [item.title, item])).values()).slice(-8),
     openQuestions: Array.from(new Set([
       ...(input.previousSummary?.openQuestions ?? []),
-      ...recent.filter((segment) => questionPattern.test(segment.text)).map((segment) => segment.text)
+      ...sentences.filter((unit) => questionPattern.test(unit.text)).map((unit) => unit.text)
     ])).slice(-5),
     risks: input.previousSummary?.risks ?? [],
     nextSteps: input.previousSummary?.nextSteps ?? []
@@ -332,7 +350,14 @@ export async function transcribeWithWhisperCpp(
       "-oj",
       "-of", outputBase
     ];
-    if (glossary.length) args.push("--prompt", glossary.slice(0, 200).join("，"));
+    // Whisper defaults to Traditional Chinese for Mandarin even with -l zh.
+    // Prime the decoder with a Simplified-Chinese prompt so the transcript
+    // matches the product's Simplified-first language priority, then append
+    // the user glossary as additional prompt context.
+    const promptSegments = [];
+    if (language === "zh") promptSegments.push("以下是简体中文的会议记录。");
+    if (glossary.length) promptSegments.push(glossary.slice(0, 200).join("，"));
+    if (promptSegments.length) args.push("--prompt", promptSegments.join(""));
     await runProcess(whisperPath, args, { signal });
     const result = JSON.parse(await readFile(`${outputBase}.json`, "utf8"));
     const segments = (result.transcription ?? []).map((item) => ({
