@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.7",
+  "version": "0.1.8",
   "platform": "darwin",
   "architectures": [
     "arm64"
   ],
-  "publishedAt": "2026-08-13T14:43:49Z",
+  "publishedAt": "2026-08-13T16:01:05Z",
   "minimumSystemVersion": "14.2",
-  "notes": "新增音频导入与会议播放：拖拽/选择文件后台排队完成转录、分离与摘要（缺模型可暂停恢复、不弹系统对话框）；会议文档上方播放器支持点击转录时间戳跳转、当前段同步高亮。macOS 仍为 Developer ID 签名 + Apple 公证版本，可直接双击安装。",
+  "notes": "中文转录默认输出简体中文（whisper.cpp 简体引导）；本地纪要按句子粒度抽取决定/行动/待解问题，单段多要点不再合并、段中问题不再漏掉。macOS 仍为签名+公证版本。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.7",
-  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.7/MinuteFlow-0.1.7-macOS-arm64.dmg",
-  "sha256": "2f19982d49f304135ca7734158e74ed5307ea5eb4d7005497bfd72ee363b5e8e"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.8",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.8/MinuteFlow-0.1.8-macOS-arm64.dmg",
+  "sha256": "5a45b22fd1164367a77145d3f31dd62179e529d5caf5adaa6afcb87d9db626fd"
 }
