@@ -893,7 +893,12 @@ function getRoute(): SiteRoute {
 }
 
 function siteHref(path: string) {
-  const base = window.location.pathname.startsWith("/meeting-assistant-site") ? "/meeting-assistant-site" : "";
+  // GitHub Pages project sites are served under /<repo>/; root-served hosts
+  // (chatgpt.site, custom domains) need no prefix. Derive the leading path
+  // segment so the same build renders correctly on any github.io project page.
+  const base = window.location.hostname.endsWith(".github.io")
+    ? `/${window.location.pathname.split("/").filter(Boolean)[0] ?? ""}`.replace(/\/+$/, "")
+    : "";
   return `${base}${path}`;
 }
 

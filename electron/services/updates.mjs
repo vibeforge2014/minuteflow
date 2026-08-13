@@ -1,14 +1,15 @@
+// Public update sources, tried in order. The official product site manifest
+// is primary; the GitHub API is a resilient fallback that always reflects the
+// latest release. The legacy private chatgpt.site host is no longer queried.
 const DEFAULT_MANIFEST_URLS = [
-  "https://vibeforge2014.github.io/meeting-assistant-site/releases/latest-macos.json",
-  "https://huiyi-zhushou.xiaohe998.chatgpt.site/releases/latest-macos.json",
+  "https://vibeforge2014.github.io/minuteflow/releases/latest-macos.json",
   "https://api.github.com/repos/vibeforge2014/minuteflow/releases/latest"
 ];
 
 const OFFICIAL_HOSTS = new Set([
   "vibeforge2014.github.io",
   "github.com",
-  "api.github.com",
-  "huiyi-zhushou.xiaohe998.chatgpt.site"
+  "api.github.com"
 ]);
 
 const VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;

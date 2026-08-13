@@ -250,7 +250,6 @@ describe("macOS website updates", () => {
     });
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(new Response("missing", { status: 404 }))
-      .mockResolvedValueOnce(new Response("private", { status: 403 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(githubRelease), { status: 200 }));
     const result = await checkForMacUpdate({
       currentVersion: "0.1.1",
@@ -258,7 +257,7 @@ describe("macOS website updates", () => {
       arch: "arm64",
       fetchImpl
     });
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ status: "available", update: { version: "0.2.0" } });
   });
 });

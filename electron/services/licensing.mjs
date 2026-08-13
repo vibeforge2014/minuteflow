@@ -324,7 +324,7 @@ export async function requireLicense() {
 
 export async function checkoutUrl() {
   const config = await getConfig();
-  const candidate = config.checkoutUrl || "https://vibeforge2014.github.io/meeting-assistant-site/pricing/";
+  const candidate = config.checkoutUrl || "https://vibeforge2014.github.io/minuteflow/pricing/";
   let url;
   try {
     url = new URL(candidate);
