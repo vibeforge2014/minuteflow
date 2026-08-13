@@ -3,13 +3,18 @@ import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { hostname, networkInterfaces, cpus, platform, arch } from "node:os";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { deleteSecret, readSecret, storeSecret } from "./secrets.mjs";
 
 const productId = "minuteflow-desktop";
 const licenseSecretId = "minuteflow-desktop-license";
 const offlineGraceMs = 30 * 24 * 60 * 60 * 1_000;
 const cacheTtlMs = 72 * 60 * 60 * 1_000;
+// Temporary bridge while the Paddle-backed verification service is being
+// completed. Keep only the digest in the shipped client, bind activation to
+// the first device, and stop honoring it after the fixed deadline.
+const temporaryLicenseHash = "b073dfd808f321b85324cbc40592a8f8eebfb1c756551c47226258e236a2b999";
+const temporaryLicenseExpiresAt = "2026-10-01T00:00:00.000Z";
 // A wall-clock-vs-uptime skew beyond this many seconds signals the clock was
 // rolled back: if the wall claims less time elapsed than uptime advanced, or
 // the stored lastVerifiedAt is in the future, treat as tampering.
@@ -187,10 +192,30 @@ function nowUptimeMs() {
   return process.uptime() * 1_000;
 }
 
+function isTemporaryLicenseKey(value) {
+  const supplied = createHash("sha256").update(value).digest();
+  const expected = Buffer.from(temporaryLicenseHash, "hex");
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function temporaryLicenseIsValid(state) {
+  return state.entitlementId === "temporary-paddle-bridge"
+    && state.temporaryExpiresAt === temporaryLicenseExpiresAt
+    && Date.now() < Date.parse(temporaryLicenseExpiresAt);
+}
+
 export async function getLicenseStatus({ refresh = false } = {}) {
   const config = await getConfig();
   const state = await readState();
   if (state.status !== "licensed") return publicStatus(state, config);
+  if (state.entitlementId === "temporary-paddle-bridge") {
+    if (state.machineFingerprint !== machineFingerprint()) {
+      return publicStatus(state, config, { state: "unlicensed", message: "临时授权已绑定其他设备。" });
+    }
+    if (temporaryLicenseIsValid(state)) return publicStatus(state, config);
+    await writeState({ deviceId: state.deviceId, machineFingerprint: state.machineFingerprint });
+    return publicStatus({}, config, { state: "unlicensed", message: "临时授权已过期，请使用正式授权激活。" });
+  }
   const lastVerified = Date.parse(state.lastVerifiedAt || "");
   // Clock rollback always forces a remote re-check; the cached/offline paths
   // must not honor a tampered clock.
@@ -237,6 +262,26 @@ export async function activateLicense(licenseKey) {
   if (normalized.length < 8 || normalized.length > 256) throw new Error("请输入有效的激活码。");
   const state = await readState();
   const { deviceId, fingerprint } = await ensureDeviceId(state);
+  if (isTemporaryLicenseKey(normalized)) {
+    if (Date.now() >= Date.parse(temporaryLicenseExpiresAt)) {
+      throw new Error("临时激活码已过期，请使用正式授权激活。");
+    }
+    const now = new Date().toISOString();
+    const next = {
+      deviceId,
+      machineFingerprint: fingerprint,
+      status: "licensed",
+      entitlementId: "temporary-paddle-bridge",
+      customerEmail: "temporary@minuteflow.local",
+      activatedAt: state.activatedAt || now,
+      lastVerifiedAt: now,
+      lastVerifiedUptimeMs: nowUptimeMs(),
+      temporaryExpiresAt: temporaryLicenseExpiresAt
+    };
+    deleteSecret(licenseSecretId);
+    await writeState(next);
+    return publicStatus(next, config);
+  }
   const result = await verifyRemotely(normalized, deviceId, config);
   // storeSecret now degrades to plaintext instead of throwing when safeStorage
   // is unavailable, so an unsigned build no longer loses a verified license.
