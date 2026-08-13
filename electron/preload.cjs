@@ -15,7 +15,8 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     start: (meetingId) => invoke("recordings:start", meetingId),
     append: (payload) => invoke("recordings:append", payload),
     stop: (payload) => invoke("recordings:stop", payload),
-    abort: (payload) => invoke("recordings:abort", payload)
+    abort: (payload) => invoke("recordings:abort", payload),
+    open: (meetingId) => invoke("recordings:open", meetingId)
   },
   transcription: {
     processChunk: (payload) => invoke("transcription:chunk", payload)

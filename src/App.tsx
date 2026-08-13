@@ -6,6 +6,7 @@ import {
   Export,
   GearSix,
   LockKey,
+  FolderOpen,
   SidebarSimple,
   Star,
   Trash
@@ -71,8 +72,8 @@ export function App() {
   }), []);
 
   useEffect(() => {
-    if (!loading && !preferences.systemPermissionsCompleted) setPermissionsOpen(true);
-  }, [loading, preferences.systemPermissionsCompleted]);
+    if (!loading && (!preferences.systemPermissionsCompleted || preferences.permissionsVersion < 2)) setPermissionsOpen(true);
+  }, [loading, preferences.permissionsVersion, preferences.systemPermissionsCompleted]);
 
   useEffect(() => {
     if (!loading && preferences.systemPermissionsCompleted && !preferences.onboardingCompleted) setOnboardingOpen(true);
@@ -244,6 +245,16 @@ export function App() {
                   </button>
                   {moreOpen && (
                     <div className="more-menu">
+                      <button onClick={async () => {
+                        try {
+                          await api.recordings.open(meeting.id);
+                        } catch (error) {
+                          setToast(error instanceof Error ? error.message : "无法打开录音位置。");
+                        }
+                        setMoreOpen(false);
+                      }}>
+                        <FolderOpen size={16} />打开录音文件夹
+                      </button>
                       <button onClick={() => {
                         handleMeetingChange({ ...meeting, favorite: !meeting.favorite });
                         setMoreOpen(false);
@@ -342,7 +353,7 @@ export function App() {
       <SystemPermissionsDialog
         open={permissionsOpen}
         onComplete={async () => {
-          await updatePreferences({ ...preferences, systemPermissionsCompleted: true });
+          await updatePreferences({ ...preferences, systemPermissionsCompleted: true, permissionsVersion: 2 });
           setPermissionsOpen(false);
         }}
       />

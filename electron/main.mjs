@@ -30,7 +30,7 @@ import {
   saveModelProfile,
   softDeleteMeeting
 } from "./database.mjs";
-import { deleteSecret, flushSecrets, readSecret, storeSecret } from "./services/secrets.mjs";
+import { deleteSecret, flushSecrets, readSecret, storeSecret, warmSecretCache } from "./services/secrets.mjs";
 import {
   summarizeLocally,
   summarizeWithOpenAICompatible,
@@ -90,7 +90,8 @@ const defaultPreferences = {
   glossary: [],
   retentionDays: null,
   onboardingCompleted: false,
-  systemPermissionsCompleted: false
+  systemPermissionsCompleted: false,
+  permissionsVersion: 0
 };
 
 function preferencesPath() {
@@ -105,6 +106,37 @@ function transcribeLocally(profile, audio, fileName, language, glossary) {
   return profile.transport === "whisper-python"
     ? transcribeWithPythonWhisper(profile, audio, fileName, language, glossary)
     : transcribeWithWhisperCpp(profile, audio, fileName, language, glossary);
+}
+
+async function resolveLocalTranscriptionProfile(profile) {
+  if (profile.transport !== "whisper-cpp" && profile.transport !== "whisper-python") return profile;
+  const needsRuntime = profile.transport === "whisper-cpp"
+    ? !profile.options?.executablePath
+    : !profile.options?.pythonExecutablePath && !profile.options?.executablePath;
+  const needsModel = !profile.options?.modelPath;
+  if (!needsRuntime && !needsModel) return profile;
+
+  const discovery = await discoverLocalModels({
+    modelDirectory: localModelDirectory(),
+    roots: [
+      app.getPath("downloads"),
+      path.join(homedir(), ".cache", "whisper"),
+      path.join(homedir(), ".cache", "huggingface", "hub")
+    ]
+  });
+  const matchingModel = discovery.models.find((model) => model.engine === profile.transport);
+  const options = {
+    ...profile.options,
+    ...(profile.transport === "whisper-cpp" && !profile.options?.executablePath && discovery.runtimes.whisperCpp
+      ? { executablePath: discovery.runtimes.whisperCpp } : {}),
+    ...(profile.transport === "whisper-python" && !profile.options?.pythonExecutablePath && discovery.runtimes.python
+      ? { pythonExecutablePath: discovery.runtimes.python } : {}),
+    ...(!profile.options?.ffmpegPath && discovery.runtimes.ffmpeg ? { ffmpegPath: discovery.runtimes.ffmpeg } : {}),
+    ...(!profile.options?.modelPath && matchingModel ? { modelPath: matchingModel.path } : {})
+  };
+  const resolved = { ...profile, options };
+  if (JSON.stringify(options) !== JSON.stringify(profile.options ?? {})) saveModelProfile(resolved);
+  return resolved;
 }
 
 async function loadPreferences() {
@@ -126,7 +158,8 @@ async function persistPreferences(preferences) {
       ? null
       : Math.max(0, Number(preferences.retentionDays) || 0),
     onboardingCompleted: Boolean(preferences.onboardingCompleted),
-    systemPermissionsCompleted: Boolean(preferences.systemPermissionsCompleted)
+    systemPermissionsCompleted: Boolean(preferences.systemPermissionsCompleted),
+    permissionsVersion: Math.max(0, Number(preferences.permissionsVersion) || 0)
   };
   const target = preferencesPath();
   const temporary = `${target}.tmp`;
@@ -206,12 +239,12 @@ function configurePermissions() {
       if (!sources.length) return callback({});
       callback({
         video: sources[0],
-        ...(process.platform === "win32" ? { audio: "loopback" } : {})
+        ...(["darwin", "win32"].includes(process.platform) ? { audio: "loopback" } : {})
       });
     } catch {
       callback({});
     }
-  }, { useSystemPicker: process.platform === "darwin" });
+  });
 }
 
 function senderIsTrusted(event) {
@@ -407,14 +440,26 @@ function registerIpc() {
     return { ok: true };
   });
 
+  trustedHandle("recordings:open", async (_event, meetingId) => {
+    assertUuid(meetingId, "会议 ID");
+    const paths = listMeetingAudioPaths(meetingId);
+    const target = paths[0];
+    if (!target) throw new Error("这场会议还没有可访问的录音文件。");
+    shell.showItemInFolder(target);
+    return { path: target };
+  });
+
   trustedHandle("transcription:chunk", async (_event, payload) => {
     await requireLicense();
     const profiles = listModelProfiles();
     const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "stt");
     if (!profile) throw new Error("尚未配置转录模型。");
     const audio = Buffer.from(payload.data);
+    const localProfile = ["whisper-cpp", "whisper-python"].includes(profile.transport)
+      ? await resolveLocalTranscriptionProfile(profile)
+      : profile;
     const result = ["whisper-cpp", "whisper-python"].includes(profile.transport)
-      ? await transcribeLocally(profile, audio, payload.fileName, payload.language, payload.glossary)
+      ? await transcribeLocally(localProfile, audio, payload.fileName, payload.language, payload.glossary)
       : await transcribeRemote(
         profile,
         readSecret(profile.secretId),
@@ -669,9 +714,9 @@ function registerIpc() {
         microphone: systemPreferences.getMediaAccessStatus("microphone"),
         screen: systemPreferences.getMediaAccessStatus("screen"),
         systemAudioRequired: true,
-        // macOS captures system audio via the native screen picker's "Share
-        // computer audio" checkbox; flag it so the renderer can guide the user.
-        systemAudioPickerHint: true
+        // CoreAudio Tap authorization is completed during first-run setup; the
+        // app-controlled source avoids reopening the native picker per meeting.
+        systemAudioPickerHint: false
       };
     }
     if (process.platform === "win32") {
@@ -717,6 +762,9 @@ function registerIpc() {
 }
 
 app.whenReady().then(async () => {
+  // Resolve any existing Keychain-backed credentials once at app startup so
+  // recording and finalization never become the first surprise access point.
+  warmSecretCache();
   configurePermissions();
   registerIpc();
   markInterruptedRecordings();

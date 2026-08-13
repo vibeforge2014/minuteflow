@@ -10,7 +10,8 @@ const defaultPreferences: MeetingPreferences = {
   glossary: [],
   retentionDays: null,
   onboardingCompleted: false,
-  systemPermissionsCompleted: false
+  systemPermissionsCompleted: false,
+  permissionsVersion: 0
 };
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -131,6 +132,9 @@ const browserApi: MeetingAPI = {
     },
     async abort() {
       return { ok: true };
+    },
+    async open() {
+      throw new Error("浏览器预览无法打开本地录音。");
     }
   },
   transcription: {

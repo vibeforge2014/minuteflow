@@ -7,12 +7,14 @@ const initialStatus: SystemPermissionStatus = {
   microphone: "unknown",
   screen: "unknown",
   systemAudioRequired: api.system.platform === "darwin",
-  systemAudioPickerHint: api.system.platform === "darwin"
+  systemAudioPickerHint: false
 };
 
 export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; onComplete(): Promise<void> }) {
   const [status, setStatus] = useState(initialStatus);
   const [checking, setChecking] = useState(false);
+  const [capturePrepared, setCapturePrepared] = useState(api.system.platform !== "darwin");
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setChecking(true);
@@ -30,6 +32,37 @@ export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; o
   if (!open) return null;
   const microphoneReady = status.microphone === "granted";
   const screenReady = !status.systemAudioRequired || status.screen === "granted";
+  const allReady = microphoneReady && screenReady && capturePrepared;
+
+  const authorizeOnce = async () => {
+    setChecking(true);
+    setError(null);
+    try {
+      let microphone = status.microphone;
+      if (microphone !== "granted") microphone = await api.system.requestMicrophone();
+      if (microphone !== "granted") throw new Error("麦克风权限未允许，请在系统设置中允许后重新检查。");
+
+      if (status.systemAudioRequired) {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          audio: true,
+          video: { width: { ideal: 2 }, height: { ideal: 2 }, frameRate: { ideal: 1, max: 1 } }
+        });
+        // Let Chromium initialize the CoreAudio Tap before immediately
+        // releasing this one-time permission probe.
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+        const audioReady = stream.getAudioTracks().some((track) => track.readyState === "live");
+        for (const track of stream.getTracks()) track.stop();
+        if (!audioReady) throw new Error("系统音频授权未完成，请检查系统设置后重试。");
+        setCapturePrepared(true);
+      }
+      setStatus(await api.system.getPermissions());
+    } catch (authorizeError) {
+      setError(authorizeError instanceof Error ? authorizeError.message : "权限授权未完成，请重试。");
+      setStatus(await api.system.getPermissions().catch(() => status));
+    } finally {
+      setChecking(false);
+    }
+  };
 
   return <div className="modal-backdrop permission-wall-backdrop">
     <section className="dialog permission-wall" role="dialog" aria-modal="true" aria-labelledby="permission-wall-title">
@@ -43,15 +76,8 @@ export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; o
           title="麦克风"
           description="录制你的声音，并用于本地或你选择的转写服务。"
           value={status.microphone}
-          primaryLabel={status.microphone === "not-determined" ? "允许访问" : "打开设置"}
-          onPrimary={async () => {
-            if (status.microphone === "not-determined") {
-              const microphone = await api.system.requestMicrophone();
-              setStatus((current) => ({ ...current, microphone }));
-              return;
-            }
-            await api.system.openSettings("microphone");
-          }}
+          primaryLabel="打开设置"
+          onPrimary={() => api.system.openSettings("microphone")}
         />
         <PermissionRow
           icon={<Monitor size={21} />}
@@ -62,14 +88,20 @@ export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; o
           onPrimary={() => api.system.openSettings("screen")}
           hideAction={!status.systemAudioRequired || status.screen === "granted"}
         />
-        {status.systemAudioPickerHint && status.systemAudioRequired && (
-          <p className="permission-wall__hint">macOS 提示：开始线上会议录音时，请在系统弹窗中勾选“共享电脑音频”，否则只能录到本地麦克风、远程参会者将无声。</p>
-        )}
+        <p className="permission-wall__hint">请在这里一次完成系统授权。之后开始或结束录音时，MinuteFlow 不会再主动申请权限或打开系统选择器。</p>
+        {error && <p className="permission-wall__error"><WarningCircle size={14} />{error}</p>}
       </div>
       <div className="permission-wall__note"><ShieldCheck size={16} /><span>录音前，请先获得所有参会者同意。你可以随时在系统设置中撤销权限。</span></div>
       <footer>
         <button className="button" onClick={refresh} disabled={checking}><ArrowClockwise size={15} className={checking ? "spin" : ""} />重新检查</button>
-        <div><span>{microphoneReady && screenReady ? "权限已就绪" : microphoneReady ? "可先使用线下会议" : "也可以仅记笔记，稍后授权"}</span><button className="button button--primary" onClick={onComplete}>继续</button></div>
+        <div>
+          <span>{allReady ? "权限已就绪，之后不会再主动弹出授权" : "需要一次完成麦克风与系统音频授权"}</span>
+          {!allReady ? (
+            <button className="button button--primary" onClick={authorizeOnce} disabled={checking}>{checking ? "正在授权…" : "一次完成授权"}</button>
+          ) : (
+            <button className="button button--primary" onClick={onComplete}>开始使用</button>
+          )}
+        </div>
       </footer>
     </section>
   </div>;

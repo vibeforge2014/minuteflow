@@ -1,5 +1,4 @@
 import { Brain, Microphone, ShieldCheck } from "@phosphor-icons/react";
-import { api } from "../lib/api";
 
 export function OnboardingDialog({
   open,
@@ -23,8 +22,7 @@ export function OnboardingDialog({
         <div className="onboarding-items">
           <article>
             <Microphone size={23} weight="duotone" />
-            <div><strong>录音权限</strong><p>线上会议会分别采集麦克风和系统音频；线下会议只采集麦克风。</p></div>
-            <button className="button button--small" onClick={() => api.system.openSettings()}>打开系统设置</button>
+            <div><strong>录音权限已就绪</strong><p>授权已在上一步集中完成；之后录音不会再主动弹出系统申请。</p></div>
           </article>
           <article>
             <ShieldCheck size={23} weight="duotone" />

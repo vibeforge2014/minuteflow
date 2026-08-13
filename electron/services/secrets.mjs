@@ -9,6 +9,7 @@ const secretsPath = () => path.join(app.getPath("userData"), "secrets.json");
 // (e.g. saving a profile while deleting another secret) cannot interleave and
 // silently drop a key.
 let vaultWriteQueue = Promise.resolve();
+const decryptedCache = new Map();
 
 function readVault() {
   const file = secretsPath();
@@ -49,29 +50,44 @@ export function storeSecret(value, existingId) {
   // (callers await the IPC handler, not this), so we keep the signature but the
   // actual disk write is serialized. The id is known before the write resolves.
   vaultWriteQueue = vaultWriteQueue.catch(() => {}).then(() => writeVault(vault));
+  decryptedCache.set(id, value);
   return id;
 }
 
 export function readSecret(id) {
   if (!id) return "";
+  if (decryptedCache.has(id)) return decryptedCache.get(id);
   const entry = readVault()[id];
   if (!entry) return "";
   // Legacy vaults stored a bare base64 string; treat it as encrypted.
   if (typeof entry === "string") {
-    return encryptionAvailable() ? safeStorage.decryptString(Buffer.from(entry, "base64")) : "";
+    const value = encryptionAvailable() ? safeStorage.decryptString(Buffer.from(entry, "base64")) : "";
+    if (value) decryptedCache.set(id, value);
+    return value;
   }
   if (entry.encrypted) {
     if (!encryptionAvailable()) return "";
-    return safeStorage.decryptString(Buffer.from(entry.data, "base64"));
+    const value = safeStorage.decryptString(Buffer.from(entry.data, "base64"));
+    if (value) decryptedCache.set(id, value);
+    return value;
   }
   // Plaintext fallback (unsigned build). The renderer surfaces an
   // insecureStorage notice so the user knows the key is not encrypted at rest.
-  return typeof entry.data === "string" ? entry.data : "";
+  const value = typeof entry.data === "string" ? entry.data : "";
+  if (value) decryptedCache.set(id, value);
+  return value;
+}
+
+export function warmSecretCache() {
+  for (const id of Object.keys(readVault())) {
+    try { readSecret(id); } catch { /* A locked vault is surfaced by the feature that needs it. */ }
+  }
 }
 
 export function deleteSecret(id) {
   const vault = readVault();
   delete vault[id];
+  decryptedCache.delete(id);
   vaultWriteQueue = vaultWriteQueue.catch(() => {}).then(() => writeVault(vault));
 }
 

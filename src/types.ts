@@ -154,6 +154,7 @@ export interface MeetingPreferences {
   retentionDays: number | null;
   onboardingCompleted: boolean;
   systemPermissionsCompleted: boolean;
+  permissionsVersion: number;
 }
 
 export type SystemPermissionValue = "granted" | "denied" | "restricted" | "not-determined" | "unknown";
@@ -271,6 +272,7 @@ export interface MeetingAPI {
       durationSeconds: number;
     }): Promise<Record<string, string>>;
     abort(payload: { meetingId: string; sessionId: string }): Promise<{ ok: true }>;
+    open(meetingId: string): Promise<{ path: string }>;
   };
   transcription: {
     processChunk(payload: {

@@ -37,7 +37,8 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     glossary: [],
     retentionDays: null,
     onboardingCompleted: false,
-    systemPermissionsCompleted: false
+    systemPermissionsCompleted: false,
+    permissionsVersion: 0
   },
   loading: true,
   saving: false,

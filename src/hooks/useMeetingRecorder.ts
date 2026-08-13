@@ -178,7 +178,6 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
         status: "complete",
         durationSeconds: elapsed
       }));
-      await generateSummary(true);
     } catch (error) {
       setWarning(error instanceof Error ? error.message : "停止录音时发生错误");
     } finally {
@@ -186,7 +185,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       setPhase("idle");
       setLevels({ microphone: 0, system: 0 });
     }
-  }, [elapsed, generateSummary, meeting, phase, updateMeeting]);
+  }, [elapsed, meeting, phase, updateMeeting]);
 
   useEffect(() => () => {
     if (timerRef.current) window.clearInterval(timerRef.current);

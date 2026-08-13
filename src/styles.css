@@ -1733,6 +1733,20 @@ button {
   line-height: 1.55;
 }
 
+.permission-wall__error {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: -5px 24px 13px;
+  padding: 9px 12px;
+  color: #9a4937;
+  background: #fff4f1;
+  border: 1px solid #f3d7d0;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .permission-wall > footer {
   display: flex;
   align-items: center;
