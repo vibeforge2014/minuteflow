@@ -12,7 +12,7 @@ final class MeetingAssistantUITests: XCTestCase {
     app.launch()
 
     XCTAssertTrue(
-      app.navigationBars["会议助手"].waitForExistence(timeout: 5)
+      app.navigationBars["MinuteFlow"].waitForExistence(timeout: 5)
     )
     let meeting = app.staticTexts["产品团队周会"].firstMatch
     XCTAssertTrue(meeting.waitForExistence(timeout: 5))

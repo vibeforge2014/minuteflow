@@ -9,6 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import type { Meeting } from "../types";
 import { useMeetingStore } from "../store/meetingStore";
+import { formatDuration } from "../lib/format";
 import { BrandMark } from "./BrandMark";
 
 interface SidebarProps {
@@ -31,7 +32,7 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, onTem
     <aside className="sidebar">
       <div className="brand">
         <BrandMark className="brand__mark" size={25} />
-        <span>会议助手</span>
+        <span>MinuteFlow</span>
       </div>
 
       <button className="new-meeting" onClick={onNew}>
@@ -93,7 +94,7 @@ function groupMeetings(meetings: Meeting[]) {
     { label: "本周", meetings: [] as Meeting[] },
     { label: "更早", meetings: [] as Meeting[] }
   ];
-  const anchor = new Date("2026-07-30T12:00:00+08:00").getTime();
+  const anchor = Date.now();
   for (const meeting of meetings) {
     const difference = (anchor - new Date(meeting.scheduledAt).getTime()) / 86_400_000;
     if (difference < 1) groups[0].meetings.push(meeting);
@@ -106,9 +107,4 @@ function groupMeetings(meetings: Meeting[]) {
 function formatDate(value: string) {
   const date = new Date(value);
   return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-function formatDuration(seconds: number) {
-  const minutes = Math.floor(seconds / 60);
-  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }

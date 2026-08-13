@@ -5,6 +5,8 @@ import {
   DotsThree,
   Export,
   GearSix,
+  LockKey,
+  FolderOpen,
   SidebarSimple,
   Star,
   Trash
@@ -20,10 +22,12 @@ import { Toast } from "./components/Toast";
 import { EmptyState } from "./components/EmptyState";
 import { DeletedMeetingsDialog } from "./components/DeletedMeetingsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
+import { PaywallDialog } from "./components/PaywallDialog";
+import { SystemPermissionsDialog } from "./components/SystemPermissionsDialog";
 import { useMeetingStore } from "./store/meetingStore";
 import { useMeetingRecorder } from "./hooks/useMeetingRecorder";
 import { api } from "./lib/api";
-import type { CreateMeetingInput, Meeting } from "./types";
+import type { CreateMeetingInput, LicenseStatus, Meeting } from "./types";
 import { BrandMark } from "./components/BrandMark";
 
 export function App() {
@@ -39,7 +43,6 @@ export function App() {
     selectMeeting,
     createMeeting,
     updateMeeting,
-    appendTranscript,
     deleteMeeting,
     updatePreferences,
     clearError
@@ -48,6 +51,10 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [permissionsOpen, setPermissionsOpen] = useState(false);
+  const [paywallOpen, setPaywallOpen] = useState(false);
+  const [paywallReason, setPaywallReason] = useState<string>();
+  const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [exportOpen, setExportOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -55,11 +62,29 @@ export function App() {
 
   useEffect(() => {
     initialize();
+    api.licensing.getStatus().then(setLicenseStatus).catch(() => setLicenseStatus(null));
   }, [initialize]);
 
+  useEffect(() => api.updates.onAvailable((result) => {
+    if (result.update) {
+      setToast(`发现新版本 ${result.update.version}，可前往“设置 → 软件更新”下载。`);
+    }
+  }), []);
+
   useEffect(() => {
-    if (!loading && !preferences.onboardingCompleted) setOnboardingOpen(true);
-  }, [loading, preferences.onboardingCompleted]);
+    if (!loading && (!preferences.systemPermissionsCompleted || preferences.permissionsVersion < 2)) setPermissionsOpen(true);
+  }, [loading, preferences.permissionsVersion, preferences.systemPermissionsCompleted]);
+
+  useEffect(() => {
+    if (!loading && preferences.systemPermissionsCompleted && !preferences.onboardingCompleted) setOnboardingOpen(true);
+  }, [loading, preferences.onboardingCompleted, preferences.systemPermissionsCompleted]);
+
+  const requirePremium = (reason: string) => {
+    if (licenseStatus?.state === "licensed") return true;
+    setPaywallReason(reason);
+    setPaywallOpen(true);
+    return false;
+  };
 
   const meeting = useMemo(
     () => meetings.find((item) => item.id === selectedId),
@@ -68,8 +93,32 @@ export function App() {
   const recorder = useMeetingRecorder(meeting);
 
   useEffect(() => {
-    if (recorder.warning) setToast(recorder.warning);
+    if (recorder.warning) {
+      // Surface license-required errors from the main process as the paywall
+      // rather than a generic toast. The code is prefixed in the message
+      // because custom Error properties do not survive the contextBridge.
+      if (recorder.warning.startsWith("[LICENSE_REQUIRED]")) {
+        setPaywallReason(recorder.warning.replace(/^\[LICENSE_REQUIRED\]\s*/, ""));
+        setPaywallOpen(true);
+        return;
+      }
+      setToast(recorder.warning);
+    }
   }, [recorder.warning]);
+
+  // Flush the recorder when the window closes so the last audio chunk is not
+  // lost; the main-process before-quit handler is the backstop.
+  useEffect(() => {
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (recorder.phase === "recording" || recorder.phase === "paused") {
+        event.preventDefault();
+        event.returnValue = "";
+        void recorder.stop();
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [recorder]);
 
   const handleCreate = async (input: CreateMeetingInput) => {
     const created = await createMeeting(input);
@@ -79,6 +128,7 @@ export function App() {
   };
 
   const handleImport = async () => {
+    if (!requirePremium("导入录音并自动处理")) return;
     const files = await api.imports.choose();
     if (!files.length) {
       setToast("在 Electron 应用中可选择 MP3、M4A、WAV、FLAC、WebM、MP4 或 MOV。");
@@ -130,7 +180,7 @@ export function App() {
     return (
       <div className="app-loading">
         <BrandMark className="app-loading__mark" size={42} />
-        <p>正在打开会议助手…</p>
+        <p>正在打开MinuteFlow…</p>
       </div>
     );
   }
@@ -172,7 +222,9 @@ export function App() {
                   {saving ? "正在保存" : "已自动保存"}
                 </span>
                 <div className="export-wrap">
-                  <button className="button button--primary button--small" onClick={() => setExportOpen((value) => !value)}>
+                  <button className="button button--primary button--small" onClick={() => {
+                    if (requirePremium("导出会议文档与完整备份")) setExportOpen((value) => !value);
+                  }}>
                     <Export size={16} /> 导出
                   </button>
                   {exportOpen && (
@@ -193,6 +245,16 @@ export function App() {
                   </button>
                   {moreOpen && (
                     <div className="more-menu">
+                      <button onClick={async () => {
+                        try {
+                          await api.recordings.open(meeting.id);
+                        } catch (error) {
+                          setToast(error instanceof Error ? error.message : "无法打开录音位置。");
+                        }
+                        setMoreOpen(false);
+                      }}>
+                        <FolderOpen size={16} />打开录音文件夹
+                      </button>
                       <button onClick={() => {
                         handleMeetingChange({ ...meeting, favorite: !meeting.favorite });
                         setMoreOpen(false);
@@ -223,7 +285,9 @@ export function App() {
             <DocumentWorkspace
               meeting={meeting}
               onChange={handleMeetingChange}
-              onGenerateSummary={() => recorder.generateSummary(false)}
+              onGenerateSummary={() => {
+                if (requirePremium("生成 AI 会议纪要")) recorder.generateSummary(false);
+              }}
               summaryBusy={recorder.summaryBusy}
             />
 
@@ -233,7 +297,9 @@ export function App() {
               elapsed={recorder.elapsed}
               levels={recorder.levels}
               queue={recorder.queue}
-              onStart={recorder.start}
+              onStart={async () => {
+                if (requirePremium("录音、实时转写与自动纪要")) await recorder.start();
+              }}
               onPause={recorder.pause}
               onStop={recorder.stop}
               onMark={() => {
@@ -257,7 +323,6 @@ export function App() {
         <TranscriptPanel
           meeting={meeting}
           onChange={handleMeetingChange}
-          onAppend={appendTranscript}
           onClose={() => setRightPanelOpen(false)}
         />
       )}
@@ -285,6 +350,20 @@ export function App() {
           setSettingsOpen(true);
         }}
       />
+      <SystemPermissionsDialog
+        open={permissionsOpen}
+        onComplete={async () => {
+          await updatePreferences({ ...preferences, systemPermissionsCompleted: true, permissionsVersion: 2 });
+          setPermissionsOpen(false);
+        }}
+      />
+      <PaywallDialog
+        open={paywallOpen}
+        reason={paywallReason}
+        status={licenseStatus}
+        onStatusChange={setLicenseStatus}
+        onClose={() => setPaywallOpen(false)}
+      />
 
       {(error || toast) && (
         <Toast
@@ -304,6 +383,11 @@ export function App() {
       >
         <GearSix size={19} />
       </button>
+      {licenseStatus?.state !== "licensed" && (
+        <button className="floating-unlock" onClick={() => { setPaywallReason("解锁完整工作流"); setPaywallOpen(true); }}>
+          <LockKey size={16} /> 解锁 MinuteFlow
+        </button>
+      )}
     </div>
   );
 }

@@ -62,6 +62,13 @@ export class MeetingRecorder {
   }
 
   async start() {
+    const permissions = await api.system.getPermissions();
+    if (permissions.microphone !== "granted") {
+      throw new Error("麦克风权限未就绪。请在系统设置中重新授权；MinuteFlow 不会在录音时弹出权限申请。");
+    }
+    if (this.meeting.mode === "online" && permissions.systemAudioRequired && permissions.screen !== "granted") {
+      throw new Error("系统音频权限未就绪。请在系统设置中重新授权；MinuteFlow 不会在录音时弹出权限申请。");
+    }
     const session = await api.recordings.start(this.meeting.id);
     this.sessionId = session.sessionId;
     this.startedAt = session.startedAt;

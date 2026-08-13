@@ -6,7 +6,7 @@ function trustedAssetUrl(value) {
     const url = new URL(value);
     return url.protocol === "https:"
       && url.hostname === "github.com"
-      && url.pathname.startsWith("/vibeforge2014/meeting-assistant/releases/download/");
+      && url.pathname.startsWith("/vibeforge2014/minuteflow/releases/download/");
   } catch {
     return false;
   }
@@ -19,7 +19,7 @@ fetch("../../../releases/latest-macos.json", { headers: { Accept: "application/j
   })
   .then((manifest) => {
     if (!trustedAssetUrl(manifest.assetUrl)) throw new Error("invalid asset URL");
-    statusElement.textContent = `会议助手 ${manifest.version} 即将开始下载。`;
+    statusElement.textContent = `MinuteFlow ${manifest.version} 即将开始下载。`;
     downloadElement.textContent = "如果没有自动下载，请点这里";
     downloadElement.href = manifest.assetUrl;
     window.location.assign(manifest.assetUrl);

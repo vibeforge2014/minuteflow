@@ -184,7 +184,22 @@ export async function listDownloadableModels(modelDirectory) {
   }));
 }
 
+// Dedupe concurrent downloads of the same model and throttle progress events so
+// a large model download does not flood the renderer with one IPC per ~16KB chunk.
+const activeDownloads = new Map();
+
 export async function downloadModel(modelId, modelDirectory, onProgress = () => {}) {
+  if (activeDownloads.has(modelId)) return activeDownloads.get(modelId);
+  const promise = doDownloadModel(modelId, modelDirectory, onProgress);
+  activeDownloads.set(modelId, promise);
+  try {
+    return await promise;
+  } finally {
+    activeDownloads.delete(modelId);
+  }
+}
+
+async function doDownloadModel(modelId, modelDirectory, onProgress = () => {}) {
   const item = catalog.find((candidate) => candidate.id === modelId);
   if (!item) throw new Error("未找到可下载的模型。");
   await mkdir(modelDirectory, { recursive: true });
@@ -198,13 +213,19 @@ export async function downloadModel(modelId, modelDirectory, onProgress = () => 
   const hash = createHash(item.digestAlgorithm);
   const file = await open(temporary, "w");
   let downloadedBytes = 0;
+  let lastProgressAt = 0;
   try {
     for await (const chunk of response.body) {
       const buffer = Buffer.from(chunk);
       await file.write(buffer);
       hash.update(buffer);
       downloadedBytes += buffer.byteLength;
-      onProgress({ modelId, downloadedBytes, totalBytes, status: "downloading" });
+      // Throttle progress to at most once per 250ms to avoid IPC flooding.
+      const now = Date.now();
+      if (now - lastProgressAt >= 250 || downloadedBytes >= totalBytes) {
+        lastProgressAt = now;
+        onProgress({ modelId, downloadedBytes, totalBytes, status: "downloading" });
+      }
     }
   } catch (error) {
     await file.close().catch(() => {});

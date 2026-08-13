@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import {
   AppleLogo,
+  ArrowUp,
   ArrowRight,
   ArrowUpRight,
   BracketsCurly,
@@ -30,10 +31,10 @@ import {
 import productWorkspace from "../implementation-1440x1024-final.png";
 import { BrandMark } from "./components/BrandMark";
 
-type SiteRoute = "home" | "specs";
+type SiteRoute = "home" | "specs" | "pricing" | "terms" | "privacy" | "refund";
 type DemoMode = "record" | "organize" | "act";
 
-const desktopReleaseUrl = "https://github.com/vibeforge2014/meeting-assistant/releases/latest";
+const desktopReleaseUrl = "https://github.com/vibeforge2014/minuteflow/releases/latest";
 
 const featureDemo: Record<DemoMode, {
   eyebrow: string;
@@ -74,10 +75,22 @@ const specSections = [
 export function MarketingSite() {
   const [route, setRoute] = useState<SiteRoute>(() => getRoute());
   const [menuOpen, setMenuOpen] = useState(false);
+  const [isScrolled, setIsScrolled] = useState(() => window.scrollY > 24);
+
+  useLayoutEffect(() => {
+    document.documentElement.classList.add("marketing-mode");
+    document.body.classList.add("marketing-mode");
+    return () => {
+      document.documentElement.classList.remove("marketing-mode");
+      document.body.classList.remove("marketing-mode");
+    };
+  }, []);
 
   useEffect(() => {
-    document.body.classList.add("marketing-mode");
-    return () => document.body.classList.remove("marketing-mode");
+    const handleScroll = () => setIsScrolled(window.scrollY > 24);
+    handleScroll();
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
   useEffect(() => {
@@ -97,9 +110,30 @@ export function MarketingSite() {
 
   return (
     <div className="marketing-site">
-      <SiteHeader route={route} menuOpen={menuOpen} setMenuOpen={setMenuOpen} />
-      {route === "specs" ? <SpecsPage /> : <LandingPage />}
+      <a className="site-skip-link" href="#main-content">跳到主要内容</a>
+      <SiteHeader
+        route={route}
+        menuOpen={menuOpen}
+        setMenuOpen={setMenuOpen}
+        isScrolled={isScrolled}
+      />
+      {route === "specs" ? <SpecsPage /> : route === "home" ? <LandingPage /> : <PolicyPage route={route} />}
       <SiteFooter />
+      <button
+        className={`site-scroll-top ${isScrolled ? "is-visible" : ""}`}
+        type="button"
+        aria-label="返回页面顶部"
+        aria-hidden={!isScrolled}
+        tabIndex={isScrolled ? 0 : -1}
+        onClick={() => {
+          window.scrollTo({
+            top: 0,
+            behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+          });
+        }}
+      >
+        <ArrowUp size={18} weight="bold" />
+      </button>
     </div>
   );
 }
@@ -107,22 +141,24 @@ export function MarketingSite() {
 function SiteHeader({
   route,
   menuOpen,
-  setMenuOpen
+  setMenuOpen,
+  isScrolled
 }: {
   route: SiteRoute;
   menuOpen: boolean;
   setMenuOpen: (open: boolean) => void;
+  isScrolled: boolean;
 }) {
   return (
-    <header className="site-header">
+    <header className={`site-header ${isScrolled ? "is-scrolled" : ""}`}>
       <div className="site-nav">
-        <a className="site-brand" href="#/" aria-label="会议助手首页">
+        <a className="site-brand" href={siteHref("/")} aria-label="MinuteFlow首页">
           <BrandMark className="site-brand__mark" size={29} />
-          <span>会议助手</span>
+          <span>MinuteFlow</span>
         </a>
 
         <nav className={`site-links ${menuOpen ? "is-open" : ""}`} aria-label="主导航">
-          <a href="#/" aria-current={route === "home" ? "page" : undefined}>产品</a>
+          <a href={siteHref("/")} aria-current={route === "home" ? "page" : undefined}>产品</a>
           {route === "home" ? (
             <>
               <a
@@ -145,14 +181,15 @@ function SiteHeader({
               </a>
             </>
           ) : (
-            <a href="#/specs">概览</a>
+            <a href={siteHref("/#/specs")}>概览</a>
           )}
-          <a href="#/specs" aria-current={route === "specs" ? "page" : undefined}>规格</a>
+          <a href={siteHref("/#/specs")} aria-current={route === "specs" ? "page" : undefined}>规格</a>
+          <a href={siteHref("/pricing/")} aria-current={route === "pricing" ? "page" : undefined}>定价</a>
           <a href={desktopReleaseUrl} target="_blank" rel="noreferrer">
             下载 <ArrowUpRight size={13} />
           </a>
           <a
-            href="https://github.com/vibeforge2014/meeting-assistant"
+            href="https://github.com/vibeforge2014/minuteflow"
             target="_blank"
             rel="noreferrer"
           >
@@ -161,9 +198,6 @@ function SiteHeader({
         </nav>
 
         <div className="site-nav__actions">
-          <a className="site-button site-button--compact site-button--dark" href="#/app">
-            在线体验 <ArrowRight size={15} />
-          </a>
           <button
             className="site-menu-button"
             type="button"
@@ -184,7 +218,7 @@ function LandingPage() {
   const demo = featureDemo[demoMode];
 
   return (
-    <main>
+    <main id="main-content" tabIndex={-1}>
       <section className="hero">
         <div className="hero__ambient hero__ambient--one" />
         <div className="hero__ambient hero__ambient--two" />
@@ -202,9 +236,6 @@ function LandingPage() {
             <a className="site-button site-button--primary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">
               <Desktop size={17} weight="bold" /> 下载桌面版
             </a>
-            <a className="site-button site-button--ghost" href="#/app">
-              体验在线演示 <ArrowRight size={16} />
-            </a>
           </div>
           <div className="hero__meta" aria-label="平台与隐私特性">
             <span><AppleLogo size={17} weight="fill" /> macOS 14.2+</span>
@@ -213,7 +244,7 @@ function LandingPage() {
           </div>
         </div>
 
-        <div className="product-stage" aria-label="会议助手产品界面预览">
+        <div className="product-stage" aria-label="MinuteFlow产品界面预览">
           <div className="product-stage__glow" />
           <div className="product-window">
             <div className="product-window__bar">
@@ -221,7 +252,7 @@ function LandingPage() {
               <span>产品团队周会 · 正在记录</span>
               <span className="window-live"><i /> LIVE</span>
             </div>
-            <img src={productWorkspace} alt="会议助手桌面端三栏会议工作区" />
+            <img src={productWorkspace} alt="MinuteFlow桌面端三栏会议工作区" />
           </div>
           <div className="floating-note floating-note--summary">
             <span className="floating-note__icon"><Sparkle size={16} weight="fill" /></span>
@@ -380,12 +411,11 @@ function LandingPage() {
         <div className="closing-cta__orb" />
         <span className="section-kicker">少一点整理，多一点推进</span>
         <h2>下一场会议，<br />让结果自然留下来。</h2>
-        <p>无需注册即可打开浏览器演示。你的修改只保存在当前设备。</p>
+        <p>下载桌面版即可开始记录，会议内容默认只保存在你的设备。</p>
         <div className="hero__actions">
           <a className="site-button site-button--primary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">
             <Desktop size={17} weight="bold" /> 下载桌面版
           </a>
-          <a className="site-button site-button--ghost" href="#/app">打开在线演示</a>
         </div>
       </section>
     </main>
@@ -454,6 +484,14 @@ function SpecsPage() {
   const [activeSection, setActiveSection] = useState("overview");
 
   useEffect(() => {
+    const requestedSection = window.location.hash.split("/")[2];
+    if (!specSections.some(({ id }) => id === requestedSection)) return;
+    window.requestAnimationFrame(() => {
+      document.getElementById(requestedSection)?.scrollIntoView({ behavior: "auto", block: "start" });
+    });
+  }, []);
+
+  useEffect(() => {
     const onScroll = () => {
       const candidates = specSections
         .map(({ id }) => ({ id, element: document.getElementById(id) }))
@@ -467,11 +505,11 @@ function SpecsPage() {
   }, []);
 
   return (
-    <main className="spec-page">
+    <main className="spec-page" id="main-content" tabIndex={-1}>
       <section className="spec-hero">
         <span className="eyebrow-chip"><FileText size={15} weight="fill" /> 产品规格 · v0.1</span>
         <h1>功能边界，<br />清清楚楚。</h1>
-        <p>从支持的平台、采集方式到数据存储和模型连接，一页了解会议助手当前版本的完整能力。</p>
+        <p>从支持的平台、采集方式到数据存储和模型连接，一页了解MinuteFlow当前版本的完整能力。</p>
         <div className="spec-hero__meta">
           <span><CheckCircle size={17} weight="fill" /> 已实现</span>
           <span><Stack size={17} weight="fill" /> 本地优先架构</span>
@@ -487,9 +525,12 @@ function SpecsPage() {
               key={section.id}
               href={`#/specs/${section.id}`}
               className={activeSection === section.id ? "is-active" : ""}
+              aria-current={activeSection === section.id ? "location" : undefined}
               onClick={(event) => {
                 event.preventDefault();
+                window.history.replaceState(null, "", `#/specs/${section.id}`);
                 document.getElementById(section.id)?.scrollIntoView({
+                  block: "start",
                   behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
                 });
               }}
@@ -505,7 +546,7 @@ function SpecsPage() {
             index="01"
             kicker="产品概览"
             title="一份围绕会议持续生长的文档"
-            intro="会议助手是本地优先的跨平台会议工作台。它把会前目标、会中笔记、实时转录、滚动纪要和会后行动项放在一个连贯空间里。"
+            intro="MinuteFlow是本地优先的跨平台会议工作台。它把会前目标、会中笔记、实时转录、滚动纪要和会后行动项放在一个连贯空间里。"
           >
             <div className="spec-summary-grid">
               <SpecMetric icon={<Desktop />} label="桌面端" value="Windows + macOS" />
@@ -737,29 +778,123 @@ function FeatureRows({
   );
 }
 
+type PolicyRoute = Exclude<SiteRoute, "home" | "specs">;
+
+const policyMeta: Record<PolicyRoute, { eyebrow: string; title: string; summary: string }> = {
+  pricing: { eyebrow: "清晰定价", title: "一次购买，长期使用。", summary: "没有隐藏套餐，也没有自动续费。以人民币一次性购买 MinuteFlow 桌面版授权。" },
+  terms: { eyebrow: "服务条款", title: "使用 MinuteFlow 前，请了解这些约定。", summary: "本条款说明软件许可、可接受的使用方式、交易关系和双方责任。" },
+  privacy: { eyebrow: "隐私政策", title: "你的会议内容，默认留在你的设备上。", summary: "本政策说明 MinuteFlow 处理哪些信息、为什么处理，以及你可以如何联系我们行使权利。" },
+  refund: { eyebrow: "退款政策", title: "购买后 7 天内，可申请退款。", summary: "如果 MinuteFlow 不适合你，可在符合以下条件时通过 Paddle 申请退款。" }
+};
+
+function PolicyPage({ route }: { route: PolicyRoute }) {
+  const meta = policyMeta[route];
+  return (
+    <main id="main-content" className="policy-page" tabIndex={-1}>
+      <header className="policy-hero">
+        <span className="section-kicker">{meta.eyebrow}</span>
+        <h1>{meta.title}</h1>
+        <p>{meta.summary}</p>
+        {route !== "pricing" && <small>生效日期：2026 年 8 月 3 日</small>}
+      </header>
+      <div className="policy-layout">
+        <aside className="policy-index" aria-label="政策页面">
+          <a href={siteHref("/pricing/")} aria-current={route === "pricing" ? "page" : undefined}>定价</a>
+          <a href={siteHref("/terms/")} aria-current={route === "terms" ? "page" : undefined}>服务条款</a>
+          <a href={siteHref("/privacy/")} aria-current={route === "privacy" ? "page" : undefined}>隐私政策</a>
+          <a href={siteHref("/refund/")} aria-current={route === "refund" ? "page" : undefined}>退款政策</a>
+        </aside>
+        {route === "pricing" ? <PricingContent /> : route === "terms" ? <TermsContent /> : route === "privacy" ? <PrivacyContent /> : <RefundContent />}
+      </div>
+    </main>
+  );
+}
+
+function PricingContent() {
+  return <article className="policy-document pricing-document">
+    <section className="price-card">
+      <div><span>MinuteFlow 桌面版</span><h2><b>¥99</b> 人民币</h2><p>一次性购买 · 非订阅 · 不自动续费</p></div>
+      <ul><li><Check size={18} weight="bold" /> 完整桌面会议工作台</li><li><Check size={18} weight="bold" /> 本地录音、笔记与会议库</li><li><Check size={18} weight="bold" /> 自带模型或配置第三方 AI 服务</li><li><Check size={18} weight="bold" /> 7 天退款申请期</li></ul>
+      <a className="site-button site-button--primary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">获取 MinuteFlow <ArrowUpRight size={16} /></a>
+    </section>
+    <section><h2>付款与交付</h2><p>价格为人民币 99 元。Paddle 是本产品订单的 Merchant of Record（记录商户），负责安全结账、税费计算、付款凭证、账单支持与退款处理。结账页会在付款前显示最终应付金额及适用税费。</p></section>
+    <section><h2>授权范围</h2><p>购买后获得 MinuteFlow 桌面版的个人使用授权。授权不包含第三方模型、云端转写或 API 的使用费用；如果你自行配置此类服务，相关费用由对应服务商收取。</p></section>
+    <section><h2>购买前说明</h2><p>请先确认设备满足系统要求。当前支持 macOS 14.2+ 与 Windows 10 22H2+。购买即表示你同意我们的服务条款、隐私政策与退款政策。</p></section>
+  </article>;
+}
+
+function TermsContent() {
+  return <article className="policy-document">
+    <section><h2>1. 适用范围与销售主体</h2><p>本条款适用于 MinuteFlow 软件及官网。MinuteFlow 由位于中国的个人开发者运营。联系邮箱：<a href="mailto:xhdp123@126.com">xhdp123@126.com</a>；联系电话：<a href="tel:+8618705850056">+86 187 0585 0056</a>。</p></section>
+    <section><h2>2. 购买与 Paddle</h2><p>我们的订单流程由在线转售商 Paddle.com 执行。Paddle 是所有订单的 Merchant of Record，负责付款、账单客服、税务处理及退款。购买交易还受 <a href="https://www.paddle.com/legal/buyer-terms" target="_blank" rel="noreferrer">Paddle 买家条款</a>约束。</p></section>
+    <section><h2>3. 软件许可</h2><p>完成付款后，你获得一项个人、非独占、不可转让的 MinuteFlow 使用许可。你可以在本人拥有或控制的兼容设备上安装使用，但不得转售、出租、破解授权机制，或在法律禁止的范围外反向工程软件。</p></section>
+    <section><h2>4. 用户责任</h2><p>你应确保录音和处理会议内容具有必要的知情同意与合法依据，并妥善保护设备、会议数据及第三方 API 凭据。不得使用 MinuteFlow 侵犯他人隐私、知识产权或从事违法活动。</p></section>
+    <section><h2>5. 第三方服务</h2><p>你可以自行配置转写或 AI 服务商。此类服务由第三方独立提供，其可用性、费用和数据处理规则由对应服务商负责。MinuteFlow 不会代你向第三方提交内容，除非你主动完成配置并发起相关功能。</p></section>
+    <section><h2>6. 更新、可用性与免责声明</h2><p>我们可能提供错误修复、安全更新和功能改进。软件按“现状”和“可用”基础提供；在法律允许的最大范围内，不保证转写或 AI 输出完全准确。重要决策前请人工核对会议内容。</p></section>
+    <section><h2>7. 责任限制</h2><p>在适用法律允许的范围内，我们对间接、附带或后果性损失不承担责任。因本产品产生的累计责任不超过你为 MinuteFlow 支付的金额；法律不得排除或限制的责任不受此限制。</p></section>
+    <section><h2>8. 终止与法律</h2><p>严重违反本条款可能导致许可终止。条款适用中华人民共和国法律，但不影响你所在地法律赋予且不可放弃的消费者权利。争议应先通过上述联系方式友好协商。</p></section>
+  </article>;
+}
+
+function PrivacyContent() {
+  return <article className="policy-document">
+    <section><h2>1. 谁负责处理信息</h2><p>MinuteFlow 由位于中国的个人开发者运营。隐私问题或权利请求请发送至 <a href="mailto:xhdp123@126.com">xhdp123@126.com</a>，或致电 <a href="tel:+8618705850056">+86 187 0585 0056</a>。</p></section>
+    <section><h2>2. 本地会议数据</h2><p>会议录音、逐字稿、笔记、纪要、行动项与应用设置默认存储在你的设备上。我们不会运营一个用于收集这些内容的 MinuteFlow 云端账户或同步服务。卸载软件前请自行导出需要保留的数据。</p></section>
+    <section><h2>3. 你主动配置的第三方服务</h2><p>当你配置并使用第三方转写或 AI 服务时，完成请求所需的音频、文本或提示词会直接发送给你选择的提供商。处理行为受该提供商的隐私政策约束。API 凭据保存在设备的安全存储中。</p></section>
+    <section><h2>4. 购买与付款信息</h2><p>Paddle 作为 Merchant of Record 处理结账、付款、税务、收据、反欺诈和退款。我们可能收到订单状态、产品、金额、国家/地区、交易标识及用于履行许可和提供支持的有限买家信息，但不会收到完整银行卡资料。详见 <a href="https://www.paddle.com/legal/privacy" target="_blank" rel="noreferrer">Paddle 隐私政策</a>。</p></section>
+    <section><h2>5. 官网与支持</h2><p>本静态官网不要求登录，也不设置产品分析或广告跟踪 Cookie。托管服务可能为安全与运行目的处理常规访问日志。当你通过邮件或电话联系我们时，我们会处理你提供的联系方式、问题内容和必要的订单信息，以回应请求、排查故障或履行法律义务。</p></section>
+    <section><h2>6. 保存、安全与披露</h2><p>本地内容的保存期限由你决定。支持记录仅在处理请求、履行交易和法律义务所需期间保存。除受托服务商、法律要求或保护合法权利所必需的情形外，我们不会出售或披露你的个人信息。</p></section>
+    <section><h2>7. 你的权利</h2><p>根据适用法律，你可以请求访问、更正或删除我们持有的个人信息，或对特定处理提出异议。请通过上述邮箱联系；我们可能需要核验身份。设备上的本地数据可由你直接在应用内管理或删除。</p></section>
+    <section><h2>8. 政策更新</h2><p>如处理方式或法律要求发生变化，我们会更新本页并标注新的生效日期。重大变化会以合理方式提示。</p></section>
+  </article>;
+}
+
+function RefundContent() {
+  return <article className="policy-document">
+    <section className="refund-highlight"><h2>7 天退款保证</h2><p>自首次购买完成之日起 7 个自然日内，你可以申请退回 MinuteFlow 的一次性购买款项。</p></section>
+    <section><h2>如何申请</h2><p>打开 Paddle 发送的购买收据，使用其中的订单管理或退款入口；也可以访问 <a href="https://paddle.net" target="_blank" rel="noreferrer">paddle.net</a> 联系 Paddle 买家支持。为便于查询，请准备购买邮箱和交易编号。你也可以发送邮件至 <a href="mailto:xhdp123@126.com">xhdp123@126.com</a> 寻求协助。</p></section>
+    <section><h2>适用条件</h2><p>申请需在 7 天期限内提交。退款通常退回原付款方式，实际到账时间由 Paddle、银行或支付机构决定。退款完成后，对应软件许可将终止。</p></section>
+    <section><h2>例外情况</h2><p>法律允许时，对于欺诈、滥用退款机制、已发起拒付或无法验证的订单，我们可能拒绝退款。由第三方 API、模型或其他服务商收取的费用不属于 MinuteFlow 购买款，无法通过本政策退还。</p></section>
+    <section><h2>法定消费者权利</h2><p>本政策不限制适用法律赋予你的强制性消费者权利。如当地法律规定更长的撤销期、退款权或其他救济，以该法律为准。Paddle 也可能依据其政策和适用法律处理退款。</p></section>
+  </article>;
+}
+
 function SiteFooter() {
   return (
     <footer className="site-footer">
       <div className="site-footer__brand">
         <BrandMark className="site-brand__mark" size={29} />
-        <div><strong>会议助手</strong><span>让每一次讨论，都有清晰的下一步。</span></div>
+        <div><strong>MinuteFlow</strong><span>让每一次讨论，都有清晰的下一步。</span></div>
       </div>
       <div className="site-footer__links">
-        <a href="#/">产品</a>
-        <a href="#/specs">规格</a>
-        <a href="#/app">在线体验</a>
+        <a href={siteHref("/")}>产品</a>
+        <a href={siteHref("/#/specs")}>规格</a>
+        <a href={siteHref("/pricing/")}>定价</a>
+        <a href={siteHref("/terms/")}>服务条款</a>
+        <a href={siteHref("/privacy/")}>隐私政策</a>
+        <a href={siteHref("/refund/")}>退款政策</a>
         <a href={desktopReleaseUrl} target="_blank" rel="noreferrer">下载桌面版</a>
-        <a href="https://github.com/vibeforge2014/meeting-assistant" target="_blank" rel="noreferrer">
+        <a href="https://github.com/vibeforge2014/minuteflow" target="_blank" rel="noreferrer">
           <GithubLogo size={16} /> GitHub
         </a>
       </div>
-      <p>© 2026 会议助手 · 本地优先的会议工作台</p>
+      <p>© 2026 MinuteFlow · 本地优先的会议工作台</p>
     </footer>
   );
 }
 
 function getRoute(): SiteRoute {
+  const path = window.location.pathname.replace(/\/+$/, "");
+  if (path.endsWith("/pricing")) return "pricing";
+  if (path.endsWith("/terms")) return "terms";
+  if (path.endsWith("/privacy")) return "privacy";
+  if (path.endsWith("/refund")) return "refund";
   return window.location.hash.startsWith("#/specs") ? "specs" : "home";
+}
+
+function siteHref(path: string) {
+  const base = window.location.pathname.startsWith("/meeting-assistant-site") ? "/meeting-assistant-site" : "";
+  return `${base}${path}`;
 }
 
 function scrollToSection(event: ReactMouseEvent<HTMLAnchorElement>, id: string) {

@@ -15,7 +15,8 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     start: (meetingId) => invoke("recordings:start", meetingId),
     append: (payload) => invoke("recordings:append", payload),
     stop: (payload) => invoke("recordings:stop", payload),
-    abort: (payload) => invoke("recordings:abort", payload)
+    abort: (payload) => invoke("recordings:abort", payload),
+    open: (meetingId) => invoke("recordings:open", meetingId)
   },
   transcription: {
     processChunk: (payload) => invoke("transcription:chunk", payload)
@@ -52,9 +53,27 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     get: () => invoke("preferences:get"),
     save: (preferences) => invoke("preferences:save", preferences)
   },
+  licensing: {
+    getStatus: (refresh = false) => invoke("licensing:get-status", refresh),
+    activate: (licenseKey) => invoke("licensing:activate", licenseKey),
+    deactivate: () => invoke("licensing:deactivate"),
+    openCheckout: () => invoke("licensing:open-checkout")
+  },
+  updates: {
+    getState: () => invoke("updates:get-state"),
+    check: () => invoke("updates:check"),
+    openDownload: () => invoke("updates:open-download"),
+    onAvailable: (callback) => {
+      const listener = (_event, result) => callback(result);
+      ipcRenderer.on("updates:available", listener);
+      return () => ipcRenderer.removeListener("updates:available", listener);
+    }
+  },
   system: {
     platform: process.platform,
-    openSettings: () => invoke("system:open-settings"),
+    getPermissions: () => invoke("system:get-permissions"),
+    requestMicrophone: () => invoke("system:request-microphone"),
+    openSettings: (kind = "microphone") => invoke("system:open-settings", kind),
     onSuspend: (callback) => {
       const listener = () => callback();
       ipcRenderer.on("system:suspend", listener);

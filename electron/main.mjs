@@ -6,7 +6,8 @@ import {
   ipcMain,
   powerMonitor,
   session,
-  shell
+  shell,
+  systemPreferences
 } from "electron";
 import { mkdir, open, readFile, rename, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -29,7 +30,7 @@ import {
   saveModelProfile,
   softDeleteMeeting
 } from "./database.mjs";
-import { deleteSecret, readSecret, storeSecret } from "./services/secrets.mjs";
+import { deleteSecret, flushSecrets, readSecret, storeSecret, warmSecretCache } from "./services/secrets.mjs";
 import {
   summarizeLocally,
   summarizeWithOpenAICompatible,
@@ -46,17 +47,51 @@ import {
   downloadModel,
   listDownloadableModels
 } from "./services/local-models.mjs";
+import {
+  checkForMacUpdate,
+  isOfficialHttpsUrl
+} from "./services/updates.mjs";
+import {
+  activateLicense,
+  checkoutUrl,
+  deactivateLicense,
+  getLicenseStatus,
+  requireLicense
+} from "./services/licensing.mjs";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 let mainWindow;
+let latestUpdateCheck;
 const recordingFiles = new Map();
 let preferenceWriteQueue = Promise.resolve();
+// File paths the renderer obtained from a native dialog within this session.
+// imports:process may only read paths present here, then they are consumed.
+const recentImportPaths = new Set();
+
+// Last-resort handlers so an unawaited rejection (e.g. a progress callback
+// firing after the window closed) is logged instead of swallowed silently.
+process.on("unhandledRejection", (reason) => {
+  console.error("未处理的 Promise 拒绝：", reason);
+});
+process.on("uncaughtException", (error) => {
+  console.error("未捕获的异常：", error);
+});
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function assertUuid(value, label) {
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
+    throw new Error(`${label}格式无效。`);
+  }
+}
 const defaultPreferences = {
   summaryIntervalSeconds: 120,
   defaultMode: "online",
   glossary: [],
   retentionDays: null,
-  onboardingCompleted: false
+  onboardingCompleted: false,
+  systemPermissionsCompleted: false,
+  permissionsVersion: 0
 };
 
 function preferencesPath() {
@@ -71,6 +106,37 @@ function transcribeLocally(profile, audio, fileName, language, glossary) {
   return profile.transport === "whisper-python"
     ? transcribeWithPythonWhisper(profile, audio, fileName, language, glossary)
     : transcribeWithWhisperCpp(profile, audio, fileName, language, glossary);
+}
+
+async function resolveLocalTranscriptionProfile(profile) {
+  if (profile.transport !== "whisper-cpp" && profile.transport !== "whisper-python") return profile;
+  const needsRuntime = profile.transport === "whisper-cpp"
+    ? !profile.options?.executablePath
+    : !profile.options?.pythonExecutablePath && !profile.options?.executablePath;
+  const needsModel = !profile.options?.modelPath;
+  if (!needsRuntime && !needsModel) return profile;
+
+  const discovery = await discoverLocalModels({
+    modelDirectory: localModelDirectory(),
+    roots: [
+      app.getPath("downloads"),
+      path.join(homedir(), ".cache", "whisper"),
+      path.join(homedir(), ".cache", "huggingface", "hub")
+    ]
+  });
+  const matchingModel = discovery.models.find((model) => model.engine === profile.transport);
+  const options = {
+    ...profile.options,
+    ...(profile.transport === "whisper-cpp" && !profile.options?.executablePath && discovery.runtimes.whisperCpp
+      ? { executablePath: discovery.runtimes.whisperCpp } : {}),
+    ...(profile.transport === "whisper-python" && !profile.options?.pythonExecutablePath && discovery.runtimes.python
+      ? { pythonExecutablePath: discovery.runtimes.python } : {}),
+    ...(!profile.options?.ffmpegPath && discovery.runtimes.ffmpeg ? { ffmpegPath: discovery.runtimes.ffmpeg } : {}),
+    ...(!profile.options?.modelPath && matchingModel ? { modelPath: matchingModel.path } : {})
+  };
+  const resolved = { ...profile, options };
+  if (JSON.stringify(options) !== JSON.stringify(profile.options ?? {})) saveModelProfile(resolved);
+  return resolved;
 }
 
 async function loadPreferences() {
@@ -91,7 +157,9 @@ async function persistPreferences(preferences) {
     retentionDays: preferences.retentionDays === null
       ? null
       : Math.max(0, Number(preferences.retentionDays) || 0),
-    onboardingCompleted: Boolean(preferences.onboardingCompleted)
+    onboardingCompleted: Boolean(preferences.onboardingCompleted),
+    systemPermissionsCompleted: Boolean(preferences.systemPermissionsCompleted),
+    permissionsVersion: Math.max(0, Number(preferences.permissionsVersion) || 0)
   };
   const target = preferencesPath();
   const temporary = `${target}.tmp`;
@@ -126,7 +194,7 @@ async function createMainWindow() {
     minWidth: 1080,
     minHeight: 720,
     backgroundColor: "#f7f7f8",
-    title: "会议助手",
+    title: "MinuteFlow",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     trafficLightPosition: { x: 18, y: 18 },
     webPreferences: {
@@ -171,12 +239,12 @@ function configurePermissions() {
       if (!sources.length) return callback({});
       callback({
         video: sources[0],
-        ...(process.platform === "win32" ? { audio: "loopback" } : {})
+        ...(["darwin", "win32"].includes(process.platform) ? { audio: "loopback" } : {})
       });
     } catch {
       callback({});
     }
-  }, { useSystemPicker: process.platform === "darwin" });
+  });
 }
 
 function senderIsTrusted(event) {
@@ -190,6 +258,41 @@ function trustedHandle(channel, handler) {
   });
 }
 
+function idleUpdateState() {
+  return {
+    status: process.platform === "darwin" ? "idle" : "unsupported",
+    currentVersion: app.getVersion(),
+    checkedAt: "",
+    message: process.platform === "darwin"
+      ? "尚未检查更新。"
+      : "当前仅为 macOS 提供官网更新检测。"
+  };
+}
+
+async function runMacUpdateCheck({ notify = false } = {}) {
+  try {
+    latestUpdateCheck = await checkForMacUpdate({
+      currentVersion: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch
+    });
+  } catch (error) {
+    latestUpdateCheck = {
+      status: "error",
+      currentVersion: app.getVersion(),
+      checkedAt: new Date().toISOString(),
+      message: error instanceof Error ? error.message : "检查更新失败。"
+    };
+  }
+  if (notify && latestUpdateCheck.status === "available") {
+    // Guard against the window being closed during the 5s startup delay.
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send("updates:available", latestUpdateCheck);
+    }
+  }
+  return latestUpdateCheck;
+}
+
 function registerIpc() {
   trustedHandle("meetings:list", (_event, query, includeDeleted) => listMeetings(query, includeDeleted));
   trustedHandle("meetings:get", (_event, id) => loadMeeting(id));
@@ -199,6 +302,8 @@ function registerIpc() {
   trustedHandle("meetings:restore", (_event, id) => restoreMeeting(id));
 
   trustedHandle("recordings:start", async (_event, meetingId) => {
+    await requireLicense();
+    assertUuid(meetingId, "会议 ID");
     const meeting = loadMeeting(meetingId);
     if (!meeting) throw new Error("会议不存在。");
     const sessionId = randomUUID();
@@ -211,7 +316,8 @@ function registerIpc() {
         handle: await open(filePath, "a"),
         mimeType: "audio/webm",
         writeQueue: Promise.resolve(),
-        closing: false
+        closing: false,
+        lastError: null
       });
     }
     saveMeeting({ ...meeting, status: "recording", updatedAt: new Date().toISOString() });
@@ -219,11 +325,17 @@ function registerIpc() {
   });
 
   trustedHandle("recordings:append", async (_event, payload) => {
+    await requireLicense();
+    assertUuid(payload.sessionId, "录音会话 ID");
+    assertUuid(payload.meetingId, "会议 ID");
     const record = recordingFiles.get(`${payload.sessionId}:${payload.track}`);
     if (!record) throw new Error("录音会话已失效。");
     if (record.closing) throw new Error("录音正在完成写盘，请勿重复提交音频块。");
     record.mimeType = payload.mimeType || record.mimeType;
-    record.writeQueue = record.writeQueue.then(async () => {
+    // Recover the chain after any prior rejection so a single transient write
+    // failure (e.g. low disk) does not permanently poison every later chunk.
+    // Record the first error on the session and surface it at stop time.
+    record.writeQueue = record.writeQueue.catch(() => {}).then(async () => {
       const fileSystem = await statfs(path.dirname(record.filePath));
       const availableBytes = Number(fileSystem.bavail) * Number(fileSystem.bsize);
       if (availableBytes < 256 * 1024 * 1024) {
@@ -239,25 +351,43 @@ function registerIpc() {
         byteLength: buffer.byteLength,
         path: record.filePath
       });
+      // A successful write clears a prior transient error so the session can
+      // recover instead of being permanently poisoned.
+      record.lastError = null;
+    }).catch((error) => {
+      record.lastError ??= error instanceof Error ? error : new Error(String(error));
     });
     await record.writeQueue;
+    // A successful write clears a transient error (e.g. disk freed up), so the
+    // session can recover instead of being permanently poisoned. The error is
+    // still surfaced at stop time if it was never recovered.
     return { ok: true };
   });
 
   trustedHandle("recordings:stop", async (_event, payload) => {
+    assertUuid(payload.sessionId, "录音会话 ID");
+    assertUuid(payload.meetingId, "会议 ID");
     const output = {};
-    let writeError;
+    const errors = [];
     for (const track of ["microphone", "system"]) {
       const key = `${payload.sessionId}:${track}`;
       const record = recordingFiles.get(key);
       if (!record) continue;
       record.closing = true;
-      try {
-        await record.writeQueue;
-      } catch (error) {
-        writeError ??= error;
+      await record.writeQueue.catch((error) => {
+        record.lastError ??= error instanceof Error ? error : new Error(String(error));
+      });
+      await record.handle.close().catch((error) => {
+        record.lastError ??= error instanceof Error ? error : new Error(String(error));
+      });
+      if (record.lastError) {
+        // Keep the .partial file for diagnostics; do not finalize a corrupted
+        // track. Surface the error at the end so the meeting is marked
+        // interrupted rather than silently complete.
+        errors.push(`${track}: ${record.lastError.message}`);
+        recordingFiles.delete(key);
+        continue;
       }
-      await record.handle.close().catch((error) => { writeError ??= error; });
       const extension = record.mimeType?.includes("mp4") ? ".m4a" : ".webm";
       const target = record.filePath.replace(/\.partial$/, extension);
       const fileStat = await stat(record.filePath).catch(() => null);
@@ -272,24 +402,33 @@ function registerIpc() {
     }
     const meeting = loadMeeting(payload.meetingId);
     if (meeting) {
+      const hasError = errors.length > 0;
       saveMeeting({
         ...meeting,
-        status: "complete",
+        status: hasError ? "interrupted" : "complete",
         durationSeconds: payload.durationSeconds,
+        notes: hasError
+          ? [...meeting.notes, `[${new Date().toISOString()}] 录音未完整写盘：${errors.join("；")}`]
+          : meeting.notes,
         updatedAt: new Date().toISOString()
       });
-    }
-    if (writeError) {
-      throw new Error(`录音文件写入未完成：${writeError instanceof Error ? writeError.message : "未知错误"}`);
+      if (hasError) {
+        throw new Error(`录音文件写入未完成：${errors.join("；")}`);
+      }
     }
     return output;
   });
 
   trustedHandle("recordings:abort", async (_event, payload) => {
+    assertUuid(payload.sessionId, "录音会话 ID");
+    assertUuid(payload.meetingId, "会议 ID");
     for (const track of ["microphone", "system"]) {
       const key = `${payload.sessionId}:${track}`;
       const record = recordingFiles.get(key);
       if (!record) continue;
+      // Drain pending writes before unlinking so an in-flight buffer write
+      // cannot race with the close/unlink below.
+      await record.writeQueue.catch(() => {});
       await record.handle.close().catch(() => {});
       await unlink(record.filePath).catch(() => {});
       recordingFiles.delete(key);
@@ -301,13 +440,26 @@ function registerIpc() {
     return { ok: true };
   });
 
+  trustedHandle("recordings:open", async (_event, meetingId) => {
+    assertUuid(meetingId, "会议 ID");
+    const paths = listMeetingAudioPaths(meetingId);
+    const target = paths[0];
+    if (!target) throw new Error("这场会议还没有可访问的录音文件。");
+    shell.showItemInFolder(target);
+    return { path: target };
+  });
+
   trustedHandle("transcription:chunk", async (_event, payload) => {
+    await requireLicense();
     const profiles = listModelProfiles();
     const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "stt");
     if (!profile) throw new Error("尚未配置转录模型。");
     const audio = Buffer.from(payload.data);
+    const localProfile = ["whisper-cpp", "whisper-python"].includes(profile.transport)
+      ? await resolveLocalTranscriptionProfile(profile)
+      : profile;
     const result = ["whisper-cpp", "whisper-python"].includes(profile.transport)
-      ? await transcribeLocally(profile, audio, payload.fileName, payload.language, payload.glossary)
+      ? await transcribeLocally(localProfile, audio, payload.fileName, payload.language, payload.glossary)
       : await transcribeRemote(
         profile,
         readSecret(profile.secretId),
@@ -329,6 +481,7 @@ function registerIpc() {
   });
 
   trustedHandle("summary:generate", async (_event, payload) => {
+    await requireLicense();
     const profiles = listModelProfiles();
     const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "llm");
     const summary = profile
@@ -374,7 +527,11 @@ function registerIpc() {
   trustedHandle("models:download", (event, modelId) => downloadModel(
     modelId,
     localModelDirectory(),
-    (progress) => event.sender.send("models:download-progress", progress)
+    (progress) => {
+      // Guard against the window closing mid-download: sending to a destroyed
+      // webContents throws "Object has been destroyed" and aborts the download.
+      if (!event.sender.isDestroyed()) event.sender.send("models:download-progress", progress);
+    }
   ));
 
   trustedHandle("notes:import-markdown", async () => {
@@ -387,11 +544,29 @@ function registerIpc() {
     });
     if (result.canceled || !result.filePaths[0]) return null;
     const filePath = result.filePaths[0];
+    const fileStat = await stat(filePath).catch(() => null);
+    if (fileStat && fileStat.size > 5 * 1024 * 1024) {
+      throw new Error("Markdown 文件过大（超过 5MB），请拆分后再导入。");
+    }
     return { filePath, content: await readFile(filePath, "utf8") };
   });
 
-  trustedHandle("imports:choose", () => chooseImportFiles(mainWindow));
+  trustedHandle("imports:choose", async () => {
+    const files = await chooseImportFiles(mainWindow);
+    for (const filePath of files) recentImportPaths.add(filePath);
+    return files;
+  });
   trustedHandle("imports:process", async (_event, payload) => {
+    await requireLicense();
+    if (!payload.filePath || !path.isAbsolute(payload.filePath)) {
+      throw new Error("文件路径无效，请重新选择要导入的文件。");
+    }
+    // Only paths that originated from the native dialog in imports:choose are
+    // accepted, so a compromised renderer cannot read arbitrary files.
+    if (!recentImportPaths.has(payload.filePath)) {
+      throw new Error("文件路径无效，请重新选择要导入的文件。");
+    }
+    recentImportPaths.delete(payload.filePath);
     const profiles = listModelProfiles();
     const sttProfile = profiles.find((item) =>
       item.id === payload.sttProfileId && item.kind === "stt" && item.enabled);
@@ -502,8 +677,10 @@ function registerIpc() {
       throw error;
     }
   });
-  trustedHandle("exports:save", (_event, meeting, format) =>
-    exportMeeting(meeting, format, mainWindow, listMeetingAudioPaths(meeting.id)));
+  trustedHandle("exports:save", async (_event, meeting, format) => {
+    await requireLicense();
+    return exportMeeting(meeting, format, mainWindow, listMeetingAudioPaths(meeting.id));
+  });
   trustedHandle("preferences:get", () => loadPreferences());
   trustedHandle("preferences:save", (_event, preferences) => {
     preferenceWriteQueue = preferenceWriteQueue.then(
@@ -512,10 +689,60 @@ function registerIpc() {
     );
     return preferenceWriteQueue;
   });
-  trustedHandle("system:open-settings", () => {
-    if (process.platform === "darwin") {
-      return shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone");
+  trustedHandle("updates:get-state", () => latestUpdateCheck ?? idleUpdateState());
+  trustedHandle("updates:check", () => runMacUpdateCheck());
+  trustedHandle("updates:open-download", async () => {
+    if (latestUpdateCheck?.status !== "available" || !latestUpdateCheck.update?.downloadUrl) {
+      throw new Error("请先检查更新。");
     }
+    if (!isOfficialHttpsUrl(latestUpdateCheck.update.downloadUrl)) {
+      throw new Error("更新下载地址未通过安全校验。");
+    }
+    await shell.openExternal(latestUpdateCheck.update.downloadUrl);
+    return { opened: true };
+  });
+  trustedHandle("licensing:get-status", (_event, refresh = false) => getLicenseStatus({ refresh }));
+  trustedHandle("licensing:activate", (_event, licenseKey) => activateLicense(licenseKey));
+  trustedHandle("licensing:deactivate", () => deactivateLicense());
+  trustedHandle("licensing:open-checkout", async () => {
+    await shell.openExternal(await checkoutUrl());
+    return { opened: true };
+  });
+  trustedHandle("system:get-permissions", () => {
+    if (process.platform === "darwin") {
+      return {
+        microphone: systemPreferences.getMediaAccessStatus("microphone"),
+        screen: systemPreferences.getMediaAccessStatus("screen"),
+        systemAudioRequired: true,
+        // CoreAudio Tap authorization is completed during first-run setup; the
+        // app-controlled source avoids reopening the native picker per meeting.
+        systemAudioPickerHint: false
+      };
+    }
+    if (process.platform === "win32") {
+      return {
+        microphone: systemPreferences.getMediaAccessStatus("microphone"),
+        screen: "granted",
+        systemAudioRequired: false,
+        systemAudioPickerHint: false
+      };
+    }
+    return { microphone: "unknown", screen: "unknown", systemAudioRequired: false, systemAudioPickerHint: false };
+  });
+  trustedHandle("system:request-microphone", async () => {
+    if (process.platform === "darwin") await systemPreferences.askForMediaAccess("microphone");
+    return process.platform === "darwin" || process.platform === "win32"
+      ? systemPreferences.getMediaAccessStatus("microphone")
+      : "unknown";
+  });
+  trustedHandle("system:open-settings", (_event, kind = "microphone") => {
+    if (process.platform === "darwin") {
+      const pane = kind === "screen" ? "Privacy_ScreenCapture" : "Privacy_Microphone";
+      return shell.openExternal(`x-apple.systempreferences:com.apple.preference.security?${pane}`);
+    }
+    // Windows: route both microphone and screen capture to the microphone
+    // privacy page (Windows treats desktop/audio capture under microphone
+    // access). broadfilesystemaccess was the wrong pane.
     return shell.openExternal("ms-settings:privacy-microphone");
   });
   trustedHandle("window:toggle-mini", (_event, enabled) => {
@@ -535,6 +762,9 @@ function registerIpc() {
 }
 
 app.whenReady().then(async () => {
+  // Resolve any existing Keychain-backed credentials once at app startup so
+  // recording and finalization never become the first surprise access point.
+  warmSecretCache();
   configurePermissions();
   registerIpc();
   markInterruptedRecordings();
@@ -542,6 +772,10 @@ app.whenReady().then(async () => {
     console.error("录音保留策略清理失败：", error);
   });
   await createMainWindow();
+
+  if (process.platform === "darwin" && app.isPackaged) {
+    setTimeout(() => runMacUpdateCheck({ notify: true }), 5_000);
+  }
 
   powerMonitor.on("suspend", () => mainWindow?.webContents.send("system:suspend"));
   powerMonitor.on("resume", () => mainWindow?.webContents.send("system:resume"));
@@ -555,10 +789,23 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", async () => {
-  for (const record of recordingFiles.values()) {
-    record.closing = true;
-    await record.writeQueue.catch(() => {});
-    await record.handle.close().catch(() => {});
-  }
+let isQuitting = false;
+app.on("before-quit", (event) => {
+  // Electron does not await async before-quit handlers, so we must
+  // preventDefault, drain the recording write queues synchronously, then exit.
+  // Without this, the last audio chunk can be lost and .partial files are
+  // never renamed on quit-while-recording.
+  if (isQuitting || recordingFiles.size === 0) return;
+  event.preventDefault();
+  isQuitting = true;
+  void (async () => {
+    for (const record of recordingFiles.values()) {
+      record.closing = true;
+      await record.writeQueue.catch(() => {});
+      await record.handle.close().catch(() => {});
+    }
+    recordingFiles.clear();
+    await flushSecrets().catch(() => {});
+    app.exit();
+  })();
 });

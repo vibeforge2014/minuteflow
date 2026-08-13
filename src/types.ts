@@ -153,6 +153,53 @@ export interface MeetingPreferences {
   glossary: string[];
   retentionDays: number | null;
   onboardingCompleted: boolean;
+  systemPermissionsCompleted: boolean;
+  permissionsVersion: number;
+}
+
+export type SystemPermissionValue = "granted" | "denied" | "restricted" | "not-determined" | "unknown";
+
+export interface SystemPermissionStatus {
+  microphone: SystemPermissionValue;
+  screen: SystemPermissionValue;
+  systemAudioRequired: boolean;
+  systemAudioPickerHint: boolean;
+}
+
+export interface LicenseStatus {
+  state: "licensed" | "unlicensed" | "error";
+  productId: string;
+  customerEmail?: string;
+  entitlementId?: string;
+  activatedAt?: string;
+  lastVerifiedAt?: string;
+  offline: boolean;
+  message?: string;
+  verificationConfigured: boolean;
+  checkoutConfigured: boolean;
+  insecureStorage: boolean;
+}
+
+export interface MacUpdateInfo {
+  schemaVersion: 1;
+  version: string;
+  platform: "darwin";
+  architectures: string[];
+  publishedAt: string;
+  notes: string;
+  downloadUrl: string;
+  releasePageUrl: string;
+  assetUrl: string;
+  sha256: string;
+  minimumSystemVersion: string;
+}
+
+export interface AppUpdateCheckResult {
+  status: "idle" | "available" | "up-to-date" | "unsupported" | "error";
+  currentVersion: string;
+  checkedAt: string;
+  message: string;
+  update?: MacUpdateInfo;
 }
 
 export interface RecordingStartResult {
@@ -225,6 +272,7 @@ export interface MeetingAPI {
       durationSeconds: number;
     }): Promise<Record<string, string>>;
     abort(payload: { meetingId: string; sessionId: string }): Promise<{ ok: true }>;
+    open(meetingId: string): Promise<{ path: string }>;
   };
   transcription: {
     processChunk(payload: {
@@ -281,9 +329,23 @@ export interface MeetingAPI {
     get(): Promise<MeetingPreferences>;
     save(preferences: MeetingPreferences): Promise<MeetingPreferences>;
   };
+  licensing: {
+    getStatus(refresh?: boolean): Promise<LicenseStatus>;
+    activate(licenseKey: string): Promise<LicenseStatus>;
+    deactivate(): Promise<LicenseStatus>;
+    openCheckout(): Promise<{ opened: true }>;
+  };
+  updates: {
+    getState(): Promise<AppUpdateCheckResult>;
+    check(): Promise<AppUpdateCheckResult>;
+    openDownload(): Promise<{ opened: true }>;
+    onAvailable(callback: (result: AppUpdateCheckResult) => void): () => void;
+  };
   system: {
     platform: "darwin" | "win32" | "linux" | "web";
-    openSettings(): Promise<void>;
+    getPermissions(): Promise<SystemPermissionStatus>;
+    requestMicrophone(): Promise<SystemPermissionValue>;
+    openSettings(kind?: "microphone" | "screen"): Promise<void>;
     onSuspend(callback: () => void): () => void;
     onResume(callback: () => void): () => void;
   };

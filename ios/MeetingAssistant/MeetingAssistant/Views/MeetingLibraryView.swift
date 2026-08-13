@@ -40,7 +40,7 @@ struct MeetingLibraryView: View {
         Image(systemName: "waveform.badge.mic")
           .font(.title3.weight(.semibold))
           .foregroundStyle(MeetingTheme.primary)
-        Text("会议助手")
+        Text("MinuteFlow")
           .font(.headline)
         Spacer()
       }

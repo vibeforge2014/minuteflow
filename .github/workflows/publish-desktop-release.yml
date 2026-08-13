@@ -20,10 +20,15 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
-          name: meeting-assistant-Windows
+          name: MinuteFlow-Windows
           path: artifacts/windows
           repository: ${{ github.repository }}
           run-id: ${{ inputs.build_run_id }}
@@ -32,7 +37,7 @@ jobs:
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
         with:
-          name: meeting-assistant-macOS
+          name: MinuteFlow-macOS
           path: artifacts/macos
           repository: ${{ github.repository }}
           run-id: ${{ inputs.build_run_id }}
@@ -51,9 +56,9 @@ jobs:
           test -n "$mac_dmg"
           test -n "$mac_zip"
           mkdir -p release
-          cp "$windows_installer" "release/Meeting-Assistant-Setup-${release_version}-Windows-x64.exe"
-          cp "$mac_dmg" "release/Meeting-Assistant-${release_version}-macOS-arm64.dmg"
-          cp "$mac_zip" "release/Meeting-Assistant-${release_version}-macOS-arm64.zip"
+          cp "$windows_installer" "release/MinuteFlow-Setup-${release_version}-Windows-x64.exe"
+          cp "$mac_dmg" "release/MinuteFlow-${release_version}-macOS-arm64.dmg"
+          cp "$mac_zip" "release/MinuteFlow-${release_version}-macOS-arm64.zip"
           cd release
           sha256sum ./* > SHA256SUMS.txt
 
@@ -68,10 +73,32 @@ jobs:
             gh release create "$RELEASE_TAG" release/* \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "会议助手 $RELEASE_TAG" \
+              --title "MinuteFlow $RELEASE_TAG" \
               --notes "首个 TuneSync 暖橙视觉版本，包含全新会议文档与波形图标、简化的本地 Whisper 模型发现/下载、New API 兼容、Markdown 笔记导入与渲染，以及录音停止时等待最后音频块落盘的修复。
 
             下载说明：macOS 提供 Apple Silicon DMG/ZIP，Windows 提供 x64 安装程序，并附 SHA-256 校验文件。
 
             这是未签名的测试构建。macOS 首次打开可能需要右键选择“打开”，Windows 可能显示 SmartScreen 提示。"
           fi
+
+      - name: Update website macOS manifest
+        env:
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          release_version="${RELEASE_TAG#v}"
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          node scripts/write-release-manifest.mjs \
+            --version "$release_version" \
+            --dmg "release/MinuteFlow-${release_version}-macOS-arm64.dmg" \
+            --published-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if git diff --quiet -- public/releases/latest-macos.json; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/releases/latest-macos.json
+          git commit -m "更新 macOS 官网更新清单 ${RELEASE_TAG}"
+          git push origin main

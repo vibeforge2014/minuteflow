@@ -39,5 +39,5 @@ jobs:
       - run: npm run make
       - uses: actions/upload-artifact@v4
         with:
-          name: meeting-assistant-${{ runner.os }}
+          name: MinuteFlow-${{ runner.os }}
           path: out/make/**
