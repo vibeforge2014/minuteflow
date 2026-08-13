@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.6",
+  "version": "0.1.7",
   "platform": "darwin",
   "architectures": [
     "arm64"
   ],
-  "publishedAt": "2026-08-13T14:10:17Z",
+  "publishedAt": "2026-08-13T14:43:49Z",
   "minimumSystemVersion": "14.2",
-  "notes": "统一官方站点地址：更新检测、购买与下载链接全部指向公开官网，移除失效的旧站与私有站点源，并以 GitHub API 兜底；修复新官网品牌图标与客户端路由。macOS 仍为 Developer ID 签名 + Apple 公证版本，可直接双击安装。",
+  "notes": "新增音频导入与会议播放：拖拽/选择文件后台排队完成转录、分离与摘要（缺模型可暂停恢复、不弹系统对话框）；会议文档上方播放器支持点击转录时间戳跳转、当前段同步高亮。macOS 仍为 Developer ID 签名 + Apple 公证版本，可直接双击安装。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.6",
-  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.6/MinuteFlow-0.1.6-macOS-arm64.dmg",
-  "sha256": "84dd8ba9541821d7e40a2d3dca064cc9afab14d9932fa52a0d2840065b272c70"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.7",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.7/MinuteFlow-0.1.7-macOS-arm64.dmg",
+  "sha256": "2f19982d49f304135ca7734158e74ed5307ea5eb4d7005497bfd72ee363b5e8e"
 }
