@@ -103,6 +103,14 @@ export interface AudioAsset {
   durationMs?: number;
 }
 
+export interface PlaybackAsset {
+  id: string;
+  track: AudioTrackKind;
+  originalName: string;
+  durationMs?: number;
+  url: string;
+}
+
 export interface DiarizationOptions {
   expectedSpeakers?: number;
   threshold?: number;
@@ -247,6 +255,41 @@ export interface ModelDownloadProgress {
   status: "downloading" | "complete";
 }
 
+export interface ImportCandidate {
+  sourcePath: string;
+  name: string;
+  title: string;
+  extension: string;
+  mimeType: string;
+  sizeBytes: number;
+  lastModifiedAt: string;
+  durationMs?: number;
+}
+
+export type ImportStage = "copying" | "preparing" | "transcribing" | "diarizing" | "summarizing" | "complete";
+export type ImportStatus = "queued" | "copying" | "preparing" | "transcribing" | "diarizing" | "summarizing" |
+  "waiting_for_model" | "waiting_for_summary_model" | "waiting_for_audio_tool" | "complete" | "cancelled" | "failed";
+
+export interface ImportJob {
+  id: string;
+  meetingId: string;
+  type: "import";
+  title: string;
+  sourceName: string;
+  status: ImportStatus;
+  stage: ImportStage;
+  progress: number;
+  language: string;
+  sttProfileId?: string;
+  llmProfileId?: string;
+  diarizationEnabled: boolean;
+  autoSummarize: boolean;
+  audioAssetId?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface MeetingAPI {
   meetings: {
     list(query?: string, includeDeleted?: boolean): Promise<Meeting[]>;
@@ -273,6 +316,7 @@ export interface MeetingAPI {
     }): Promise<Record<string, string>>;
     abort(payload: { meetingId: string; sessionId: string }): Promise<{ ok: true }>;
     open(meetingId: string): Promise<{ path: string }>;
+    assets(meetingId: string): Promise<PlaybackAsset[]>;
   };
   transcription: {
     processChunk(payload: {
@@ -314,13 +358,19 @@ export interface MeetingAPI {
     importMarkdown(): Promise<{ filePath: string; content: string } | null>;
   };
   imports: {
-    choose(): Promise<string[]>;
-    process(payload: {
-      filePath: string;
-      sttProfileId: string;
+    choose(): Promise<ImportCandidate[]>;
+    fromDropped(files: File[]): Promise<ImportCandidate[]>;
+    enqueue(items: ImportCandidate[], options: {
+      sttProfileId?: string;
       llmProfileId?: string;
       language?: string;
-    }): Promise<Meeting>;
+      diarizationEnabled?: boolean;
+      autoSummarize?: boolean;
+    }): Promise<ImportJob[]>;
+    list(): Promise<ImportJob[]>;
+    retry(id: string): Promise<ImportJob>;
+    cancel(id: string): Promise<ImportJob>;
+    onJobUpdated(callback: (job: ImportJob) => void): () => void;
   };
   exports: {
     save(meeting: Meeting, format: string): Promise<{ canceled: boolean; filePath?: string }>;

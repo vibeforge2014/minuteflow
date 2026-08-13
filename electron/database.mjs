@@ -187,6 +187,19 @@ function createSchema(db) {
       path TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS audio_assets (
+      id TEXT PRIMARY KEY,
+      meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+      track TEXT NOT NULL DEFAULT 'mixed',
+      source_type TEXT NOT NULL DEFAULT 'recording',
+      original_name TEXT NOT NULL,
+      mime_type TEXT,
+      path TEXT NOT NULL,
+      playback_path TEXT,
+      byte_length INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER,
+      created_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       meeting_id TEXT,
@@ -198,6 +211,10 @@ function createSchema(db) {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS idx_jobs_type_status_updated
+      ON jobs(type, status, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_audio_assets_meeting
+      ON audio_assets(meeting_id, created_at);
     CREATE VIRTUAL TABLE IF NOT EXISTS meeting_search USING fts5(
       meeting_id UNINDEXED,
       title,
@@ -498,24 +515,142 @@ export function finalizeAudioPath(sessionId, track, targetPath) {
 }
 
 export function listMeetingAudioPaths(meetingId) {
-  return openDatabase().prepare(`
+  const db = openDatabase();
+  const chunkPaths = db.prepare(`
     SELECT DISTINCT path FROM audio_chunks
     WHERE meeting_id = ? ORDER BY path
   `).all(meetingId).map((row) => row.path);
+  const assetPaths = db.prepare(`
+    SELECT path, playback_path FROM audio_assets
+    WHERE meeting_id = ? ORDER BY created_at
+  `).all(meetingId).flatMap((row) => [row.path, row.playback_path].filter(Boolean));
+  return Array.from(new Set([...chunkPaths, ...assetPaths]));
 }
 
 export function listExpiredAudioPaths(retentionDays) {
   return openDatabase().prepare(`
-    SELECT DISTINCT ac.path
-    FROM audio_chunks ac
-    JOIN meetings m ON m.id = ac.meeting_id
-    WHERE m.status = 'complete'
-      AND julianday('now') - julianday(m.updated_at) >= ?
-  `).all(retentionDays).map((row) => row.path);
+    SELECT path FROM (
+      SELECT DISTINCT ac.path AS path FROM audio_chunks ac JOIN meetings m ON m.id = ac.meeting_id
+      WHERE m.status = 'complete' AND julianday('now') - julianday(m.updated_at) >= ?
+      UNION
+      SELECT DISTINCT aa.path AS path FROM audio_assets aa JOIN meetings m ON m.id = aa.meeting_id
+      WHERE m.status = 'complete' AND julianday('now') - julianday(m.updated_at) >= ?
+      UNION
+      SELECT DISTINCT aa.playback_path AS path FROM audio_assets aa JOIN meetings m ON m.id = aa.meeting_id
+      WHERE aa.playback_path IS NOT NULL AND m.status = 'complete' AND julianday('now') - julianday(m.updated_at) >= ?
+    )
+  `).all(retentionDays, retentionDays, retentionDays).map((row) => row.path);
 }
 
 export function deleteAudioPathRecord(audioPath) {
   openDatabase().prepare("DELETE FROM audio_chunks WHERE path = ?").run(audioPath);
+  openDatabase().prepare("DELETE FROM audio_assets WHERE path = ? OR playback_path = ?").run(audioPath, audioPath);
+}
+
+export function saveAudioAsset(asset) {
+  const id = asset.id || randomUUID();
+  openDatabase().prepare(`
+    INSERT INTO audio_assets(
+      id, meeting_id, track, source_type, original_name, mime_type,
+      path, playback_path, byte_length, duration_ms, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      playback_path = excluded.playback_path,
+      byte_length = excluded.byte_length,
+      duration_ms = excluded.duration_ms
+  `).run(
+    id, asset.meetingId, asset.track || "mixed", asset.sourceType || "recording",
+    asset.originalName, asset.mimeType || null, asset.path, asset.playbackPath || null,
+    asset.byteLength || 0, asset.durationMs ?? null, asset.createdAt || nowIso()
+  );
+  return { ...asset, id };
+}
+
+export function listMeetingAudioAssets(meetingId) {
+  return openDatabase().prepare(`
+    SELECT * FROM audio_assets WHERE meeting_id = ? ORDER BY created_at
+  `).all(meetingId).map((row) => ({
+    id: row.id,
+    meetingId: row.meeting_id,
+    track: row.track,
+    sourceType: row.source_type,
+    originalName: row.original_name,
+    mimeType: row.mime_type ?? undefined,
+    path: row.path,
+    playbackPath: row.playback_path ?? undefined,
+    byteLength: row.byte_length,
+    durationMs: row.duration_ms ?? undefined,
+    createdAt: row.created_at
+  }));
+}
+
+export function loadAudioAsset(id) {
+  return listMeetingAudioAssetsByRows(openDatabase().prepare("SELECT * FROM audio_assets WHERE id = ?").all(id))[0] || null;
+}
+
+function listMeetingAudioAssetsByRows(rows) {
+  return rows.map((row) => ({
+    id: row.id, meetingId: row.meeting_id, track: row.track, sourceType: row.source_type,
+    originalName: row.original_name, mimeType: row.mime_type ?? undefined, path: row.path,
+    playbackPath: row.playback_path ?? undefined, byteLength: row.byte_length,
+    durationMs: row.duration_ms ?? undefined, createdAt: row.created_at
+  }));
+}
+
+function rowToJob(row) {
+  if (!row) return null;
+  const payload = safeJson(row.payload_json, {});
+  return {
+    id: row.id,
+    meetingId: row.meeting_id ?? undefined,
+    type: row.type,
+    status: row.status,
+    progress: row.progress,
+    error: row.error ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...payload
+  };
+}
+
+export function saveJob(job) {
+  const timestamp = nowIso();
+  const id = job.id || randomUUID();
+  const payload = { ...job };
+  for (const key of ["id", "meetingId", "type", "status", "progress", "error", "createdAt", "updatedAt"]) delete payload[key];
+  openDatabase().prepare(`
+    INSERT INTO jobs(id, meeting_id, type, status, progress, payload_json, error, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      meeting_id = excluded.meeting_id,
+      status = excluded.status,
+      progress = excluded.progress,
+      payload_json = excluded.payload_json,
+      error = excluded.error,
+      updated_at = excluded.updated_at
+  `).run(
+    id, job.meetingId || null, job.type || "import", job.status || "queued",
+    Number(job.progress) || 0, JSON.stringify(payload), job.error || null,
+    job.createdAt || timestamp, timestamp
+  );
+  return loadJob(id);
+}
+
+export function loadJob(id) {
+  return rowToJob(openDatabase().prepare("SELECT * FROM jobs WHERE id = ?").get(id));
+}
+
+export function listJobs(type = "import") {
+  return openDatabase().prepare(`
+    SELECT * FROM jobs WHERE type = ? ORDER BY created_at DESC
+  `).all(type).map(rowToJob);
+}
+
+export function markRunningJobsInterrupted() {
+  openDatabase().prepare(`
+    UPDATE jobs SET status = 'queued', error = NULL, updated_at = ?
+    WHERE type = 'import' AND status IN ('copying','preparing','transcribing','diarizing','summarizing')
+  `).run(nowIso());
 }
 
 export function listModelProfiles() {

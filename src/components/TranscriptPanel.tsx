@@ -13,9 +13,11 @@ interface TranscriptPanelProps {
   meeting: Meeting;
   onChange(meeting: Meeting): void;
   onClose(): void;
+  playbackMs?: number;
+  onSeek?(ms: number): void;
 }
 
-export function TranscriptPanel({ meeting, onChange, onClose }: TranscriptPanelProps) {
+export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, onSeek }: TranscriptPanelProps) {
   const [tab, setTab] = useState<"transcript" | "summary">("transcript");
   const [speakerEditor, setSpeakerEditor] = useState<string | null>(null);
   const [managerOpen, setManagerOpen] = useState(false);
@@ -148,8 +150,8 @@ export function TranscriptPanel({ meeting, onChange, onClose }: TranscriptPanelP
               </button>
             )}
             {meeting.transcript.length ? visibleSegments.map((segment) => (
-              <article className={`transcript-item transcript-item--${segment.status}`} key={segment.id}>
-                <time>{formatTranscriptTime(segment.startMs)}</time>
+              <article className={`transcript-item transcript-item--${segment.status} ${playbackMs >= segment.startMs && playbackMs < segment.endMs ? "is-playing" : ""}`} key={segment.id}>
+                <button className="transcript-time" onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
                 <div>
                   <button className={`speaker-name speaker-name--${speakerColor(segment.speakerId)}`} onClick={() => setSpeakerEditor(segment.speakerId)}>
                     {segment.speakerName}

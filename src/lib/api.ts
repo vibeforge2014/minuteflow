@@ -1,9 +1,11 @@
 import { demoMeetings } from "../data/demo";
-import type { CreateMeetingInput, Meeting, MeetingAPI, MeetingPreferences, MeetingSummary, ModelProfile } from "../types";
+import type { CreateMeetingInput, ImportCandidate, ImportJob, Meeting, MeetingAPI, MeetingPreferences, MeetingSummary, ModelProfile } from "../types";
 
 const storageKey = "meeting-assistant-demo-state-v3";
 const profileKey = "meeting-assistant-demo-profiles-v1";
 const preferencesKey = "meeting-assistant-demo-preferences-v1";
+const importJobsKey = "meeting-assistant-demo-import-jobs-v1";
+const importListeners = new Set<(job: ImportJob) => void>();
 const defaultPreferences: MeetingPreferences = {
   summaryIntervalSeconds: 120,
   defaultMode: "online",
@@ -31,6 +33,29 @@ function loadBrowserMeetings(): Meeting[] {
 
 function saveBrowserMeetings(meetings: Meeting[]) {
   localStorage.setItem(storageKey, JSON.stringify(meetings));
+}
+
+const describeBrowserFiles = (files: File[]): ImportCandidate[] => files.map((file) => {
+  const extension = file.name.split(".").pop()?.toUpperCase() || "AUDIO";
+  return {
+    sourcePath: file.name,
+    name: file.name,
+    title: file.name.replace(/\.[^.]+$/, ""),
+    extension,
+    mimeType: file.type || "application/octet-stream",
+    sizeBytes: file.size,
+    lastModifiedAt: new Date(file.lastModified).toISOString()
+  };
+});
+
+function loadBrowserImportJobs(): ImportJob[] {
+  return JSON.parse(localStorage.getItem(importJobsKey) || "[]") as ImportJob[];
+}
+
+function saveBrowserImportJob(job: ImportJob) {
+  const jobs = [job, ...loadBrowserImportJobs().filter((item) => item.id !== job.id)];
+  localStorage.setItem(importJobsKey, JSON.stringify(jobs));
+  importListeners.forEach((listener) => listener(job));
 }
 
 function localSummary(input: {
@@ -135,7 +160,8 @@ const browserApi: MeetingAPI = {
     },
     async open() {
       throw new Error("浏览器预览无法打开本地录音。");
-    }
+    },
+    async assets() { return []; }
   },
   transcription: {
     async processChunk(payload) {
@@ -231,10 +257,61 @@ const browserApi: MeetingAPI = {
   },
   imports: {
     async choose() {
-      return [];
+      return new Promise((resolve) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.multiple = true;
+        input.accept = ".mp3,.m4a,.wav,.flac,.ogg,.webm,.mp4,.mov,audio/*,video/mp4,video/quicktime";
+        input.addEventListener("change", () => resolve(describeBrowserFiles(Array.from(input.files || []))), { once: true });
+        input.click();
+      });
     },
-    async process() {
-      throw new Error("浏览器预览无法读取本地录音，请在 Electron 应用中导入。");
+    async fromDropped(files) {
+      return describeBrowserFiles(files);
+    },
+    async enqueue(items, options) {
+      const now = new Date().toISOString();
+      const meetings = loadBrowserMeetings();
+      const jobs = items.map((item): ImportJob => {
+        const meetingId = crypto.randomUUID();
+        meetings.unshift({
+          id: meetingId, title: item.title, scheduledAt: now, durationSeconds: 0,
+          status: "draft", mode: "offline", favorite: false, participants: ["待识别"],
+          tags: ["导入"], goals: ["转录并整理导入的录音"], notes: [`已归档：${item.name}`],
+          notesMarkdown: `已归档：${item.name}`, transcript: [], createdAt: now, updatedAt: now,
+          summary: { topics: [], keyPoints: [], decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: [], stale: false }
+        });
+        return {
+          id: crypto.randomUUID(), meetingId, type: "import", title: item.title, sourceName: item.name,
+          status: options.sttProfileId ? "queued" : "waiting_for_model", stage: options.sttProfileId ? "copying" : "transcribing",
+          progress: options.sttProfileId ? 0.08 : 0.2, language: options.language || "auto",
+          sttProfileId: options.sttProfileId, llmProfileId: options.llmProfileId,
+          diarizationEnabled: options.diarizationEnabled !== false, autoSummarize: options.autoSummarize !== false,
+          createdAt: now, updatedAt: now
+        };
+      });
+      saveBrowserMeetings(meetings);
+      jobs.forEach(saveBrowserImportJob);
+      return jobs;
+    },
+    async list() { return loadBrowserImportJobs(); },
+    async retry(id) {
+      const current = loadBrowserImportJobs().find((job) => job.id === id);
+      if (!current) throw new Error("导入任务不存在。");
+      const job = { ...current, status: "queued" as const, error: undefined, updatedAt: new Date().toISOString() };
+      saveBrowserImportJob(job);
+      return job;
+    },
+    async cancel(id) {
+      const current = loadBrowserImportJobs().find((job) => job.id === id);
+      if (!current) throw new Error("导入任务不存在。");
+      const job = { ...current, status: "cancelled" as const, updatedAt: new Date().toISOString() };
+      saveBrowserImportJob(job);
+      return job;
+    },
+    onJobUpdated(callback) {
+      importListeners.add(callback);
+      return () => importListeners.delete(callback);
     }
   },
   exports: {
@@ -263,8 +340,9 @@ const browserApi: MeetingAPI = {
   },
   licensing: {
     async getStatus() {
+      const previewLicensed = new URLSearchParams(window.location.search).get("preview") === "desktop";
       return {
-        state: "unlicensed" as const,
+        state: previewLicensed ? "licensed" as const : "unlicensed" as const,
         productId: "minuteflow-desktop",
         offline: false,
         verificationConfigured: false,

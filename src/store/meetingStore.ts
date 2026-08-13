@@ -13,6 +13,7 @@ interface MeetingState {
   saving: boolean;
   error: string | null;
   initialize(): Promise<void>;
+  refreshMeetings(): Promise<void>;
   setSearch(value: string): Promise<void>;
   selectMeeting(id: string): void;
   createMeeting(input: CreateMeetingInput): Promise<Meeting>;
@@ -61,6 +62,15 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
       });
     } catch (error) {
       set({ loading: false, error: error instanceof Error ? error.message : "初始化失败" });
+    }
+  },
+
+  async refreshMeetings() {
+    try {
+      const meetings = await api.meetings.list(get().search);
+      set((state) => ({ meetings, selectedId: state.selectedId && meetings.some((item) => item.id === state.selectedId) ? state.selectedId : meetings[0]?.id ?? null }));
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : "刷新会议失败" });
     }
   },
 

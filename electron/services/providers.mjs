@@ -73,7 +73,7 @@ export function buildSummaryPrompt(input, final = false) {
   ].join("\n\n");
 }
 
-export async function summarizeWithOpenAICompatible(profile, apiKey, input, final = false) {
+export async function summarizeWithOpenAICompatible(profile, apiKey, input, final = false, signal) {
   const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -95,7 +95,7 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
           ...(profile.options?.headers ?? {})
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(profile.options?.timeoutMs ?? 60_000)
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(profile.options?.timeoutMs ?? 60_000)]) : AbortSignal.timeout(profile.options?.timeoutMs ?? 60_000)
       });
       if (!response.ok) {
         throw new Error(`总结模型请求失败：${response.status} ${await response.text()}`);
@@ -105,6 +105,7 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
       if (!content) throw new Error("总结模型没有返回内容。");
       return validateSummary(JSON.parse(extractJson(content)));
     } catch (error) {
+      if (signal?.aborted) throw error;
       lastError = error;
     }
   }
@@ -160,7 +161,8 @@ export async function transcribeRemote(
   audioBuffer,
   fileName,
   language = "zh",
-  glossary = []
+  glossary = [],
+  signal
 ) {
   const defaultResponseFormat = profile.options?.responseFormat
     ?? (profile.options?.apiFlavor === "new-api" || profile.model !== "whisper-1" ? "json" : "verbose_json");
@@ -186,7 +188,7 @@ export async function transcribeRemote(
         ...(profile.options?.headers ?? {})
       },
       body: form,
-      signal: AbortSignal.timeout(profile.options?.timeoutMs ?? 120_000)
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(profile.options?.timeoutMs ?? 120_000)]) : AbortSignal.timeout(profile.options?.timeoutMs ?? 120_000)
     });
     if (response.ok) break;
     errorBody = await response.text();
@@ -215,7 +217,7 @@ function runProcess(command, args, options = {}) {
   // handler (and pile up audio blobs in the renderer) indefinitely. Callers
   // pass a smaller timeoutMs for quick checks like model tests.
   const timeoutMs = options.timeoutMs ?? 10 * 60 * 1_000;
-  const { timeoutMs: _ignored, ...spawnOptions } = options;
+  const { timeoutMs: _ignored, signal, ...spawnOptions } = options;
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { windowsHide: true, ...spawnOptions });
     let stdout = "";
@@ -224,11 +226,15 @@ function runProcess(command, args, options = {}) {
       child.kill("SIGKILL");
       reject(new Error(`本地模型进程超时（${Math.round(timeoutMs / 1000)} 秒）。`));
     }, timeoutMs);
+    const abort = () => child.kill("SIGTERM");
+    signal?.addEventListener("abort", abort, { once: true });
     child.stdout.on("data", (data) => { stdout += data.toString(); });
     child.stderr.on("data", (data) => { stderr += data.toString(); });
-    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("error", (error) => { clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(error); });
     child.on("close", (code) => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      if (signal?.aborted) return reject(new Error("任务已取消。"));
       if (code === 0) resolve({ stdout, stderr });
       else reject(new Error(stderr || `本地模型进程退出，代码 ${code}`));
     });
@@ -240,7 +246,8 @@ export async function transcribeWithPythonWhisper(
   audioBuffer,
   fileName,
   language = "zh",
-  glossary = []
+  glossary = [],
+  signal
 ) {
   const modelPath = profile.options?.modelPath;
   const pythonPath = profile.options?.pythonExecutablePath
@@ -273,7 +280,7 @@ export async function transcribeWithPythonWhisper(
       inputPath,
       language,
       glossary.slice(0, 200).join("，")
-    ], { env: environment });
+    ], { env: environment, signal });
     const result = JSON.parse(stdout.trim().split("\n").at(-1));
     const segments = (result.segments ?? []).map((segment) => ({
       startMs: Math.round(Number(segment.start ?? 0) * 1000),
@@ -296,7 +303,8 @@ export async function transcribeWithWhisperCpp(
   audioBuffer,
   fileName,
   language = "zh",
-  glossary = []
+  glossary = [],
+  signal
 ) {
   const whisperPath = profile.options?.executablePath;
   const modelPath = profile.options?.modelPath;
@@ -311,7 +319,7 @@ export async function transcribeWithWhisperCpp(
   await writeFile(inputPath, audioBuffer);
   try {
     if (ffmpegPath) {
-      await runProcess(ffmpegPath, ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavePath]);
+      await runProcess(ffmpegPath, ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavePath], { signal });
     } else if (path.extname(fileName).toLowerCase() === ".wav") {
       await writeFile(wavePath, await readFile(inputPath));
     } else {
@@ -325,7 +333,7 @@ export async function transcribeWithWhisperCpp(
       "-of", outputBase
     ];
     if (glossary.length) args.push("--prompt", glossary.slice(0, 200).join("，"));
-    await runProcess(whisperPath, args);
+    await runProcess(whisperPath, args, { signal });
     const result = JSON.parse(await readFile(`${outputBase}.json`, "utf8"));
     const segments = (result.transcription ?? []).map((item) => ({
       startMs: Number(item.offsets?.from ?? item.start ?? 0),

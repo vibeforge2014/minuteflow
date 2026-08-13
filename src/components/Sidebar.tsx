@@ -18,12 +18,13 @@ interface SidebarProps {
   onSelect(id: string): void;
   onNew(): void;
   onImport(): void;
+  importCount?: number;
   onTemplates(): void;
   onTrash(): void;
   onSettings(): void;
 }
 
-export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, onTemplates, onTrash, onSettings }: SidebarProps) {
+export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, importCount = 0, onTemplates, onTrash, onSettings }: SidebarProps) {
   const search = useMeetingStore((state) => state.search);
   const setSearch = useMeetingStore((state) => state.setSearch);
   const groups = useMemo(() => groupMeetings(meetings), [meetings]);
@@ -79,7 +80,7 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, onTem
       </div>
 
       <nav className="sidebar-actions" aria-label="辅助功能">
-        <button onClick={onImport}><FileArrowUp size={18} />导入录音</button>
+        <button onClick={onImport}><FileArrowUp size={18} />导入录音{importCount > 0 && <span className="sidebar-task-count">{importCount}</span>}</button>
         <button onClick={onTemplates}><CalendarBlank size={18} />会议模板</button>
         <button onClick={onTrash}><Trash size={18} />最近删除</button>
         <button onClick={onSettings}><GearSix size={18} />设置</button>

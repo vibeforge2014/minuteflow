@@ -4,7 +4,9 @@ import {
   desktopCapturer,
   dialog,
   ipcMain,
+  net,
   powerMonitor,
+  protocol,
   session,
   shell,
   systemPreferences
@@ -12,7 +14,7 @@ import {
 import { mkdir, open, readFile, rename, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import {
   appendAudioChunk,
@@ -21,9 +23,12 @@ import {
   finalizeAudioPath,
   listExpiredAudioPaths,
   listMeetings,
+  listMeetingAudioAssets,
   listMeetingAudioPaths,
   listModelProfiles,
   loadMeeting,
+  loadAudioAsset,
+  markRunningJobsInterrupted,
   markInterruptedRecordings,
   restoreMeeting,
   saveMeeting,
@@ -40,7 +45,6 @@ import {
   transcribeWithPythonWhisper
 } from "./services/providers.mjs";
 import { chooseImportFiles, exportMeeting } from "./services/exports.mjs";
-import { applyDiarization, diarizeWithSherpa } from "./services/diarization.mjs";
 import {
   describeLocalModel,
   discoverLocalModels,
@@ -58,14 +62,24 @@ import {
   getLicenseStatus,
   requireLicense
 } from "./services/licensing.mjs";
+import {
+  cancelImport,
+  configureImportQueue,
+  describeImportFiles,
+  enqueueImports,
+  listImportJobs,
+  retryImport,
+  wakeImportQueue
+} from "./services/import-queue.mjs";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
+protocol.registerSchemesAsPrivileged([{ scheme: "minuteflow-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let mainWindow;
 let latestUpdateCheck;
 const recordingFiles = new Map();
 let preferenceWriteQueue = Promise.resolve();
 // File paths the renderer obtained from a native dialog within this session.
-// imports:process may only read paths present here, then they are consumed.
+// imports:enqueue may only read paths explicitly chosen or dropped this session.
 const recentImportPaths = new Set();
 
 // Last-resort handlers so an unawaited rejection (e.g. a progress callback
@@ -448,6 +462,16 @@ function registerIpc() {
     shell.showItemInFolder(target);
     return { path: target };
   });
+  trustedHandle("recordings:assets", (_event, meetingId) => {
+    assertUuid(meetingId, "会议 ID");
+    return listMeetingAudioAssets(meetingId).map((asset) => ({
+      id: asset.id,
+      track: asset.track,
+      originalName: asset.originalName,
+      durationMs: asset.durationMs,
+      url: `minuteflow-media://audio/${asset.id}`
+    }));
+  });
 
   trustedHandle("transcription:chunk", async (_event, payload) => {
     await requireLicense();
@@ -494,7 +518,9 @@ function registerIpc() {
   trustedHandle("models:save", (_event, profile, apiKey) => {
     let secretId = profile.secretId;
     if (apiKey) secretId = storeSecret(apiKey, secretId);
-    return saveModelProfile({ ...profile, secretId });
+    const saved = saveModelProfile({ ...profile, secretId });
+    wakeImportQueue();
+    return saved;
   });
   trustedHandle("models:test", (_event, profile, apiKey) =>
     testModelProfile(profile, apiKey || readSecret(profile.secretId)));
@@ -554,129 +580,27 @@ function registerIpc() {
   trustedHandle("imports:choose", async () => {
     const files = await chooseImportFiles(mainWindow);
     for (const filePath of files) recentImportPaths.add(filePath);
-    return files;
+    return describeImportFiles(files);
   });
-  trustedHandle("imports:process", async (_event, payload) => {
+  trustedHandle("imports:describe-dropped", async (_event, files) => {
+    const allowed = Array.isArray(files) ? files.filter((filePath) => typeof filePath === "string" && path.isAbsolute(filePath)) : [];
+    for (const filePath of allowed) recentImportPaths.add(filePath);
+    return describeImportFiles(allowed);
+  });
+  trustedHandle("imports:enqueue", async (_event, items, options) => {
     await requireLicense();
-    if (!payload.filePath || !path.isAbsolute(payload.filePath)) {
-      throw new Error("文件路径无效，请重新选择要导入的文件。");
-    }
-    // Only paths that originated from the native dialog in imports:choose are
-    // accepted, so a compromised renderer cannot read arbitrary files.
-    if (!recentImportPaths.has(payload.filePath)) {
-      throw new Error("文件路径无效，请重新选择要导入的文件。");
-    }
-    recentImportPaths.delete(payload.filePath);
-    const profiles = listModelProfiles();
-    const sttProfile = profiles.find((item) =>
-      item.id === payload.sttProfileId && item.kind === "stt" && item.enabled);
-    if (!sttProfile) throw new Error("导入前请先配置并启用转录模型。");
-    const llmProfile = profiles.find((item) =>
-      item.id === payload.llmProfileId && item.kind === "llm" && item.enabled);
-    const diarizationProfile = profiles.find((item) =>
-      item.kind === "diarization" && item.transport === "sherpa-onnx" && item.enabled);
-    const fileName = path.basename(payload.filePath);
-    const title = path.basename(fileName, path.extname(fileName));
-    const preferences = await loadPreferences();
-    const meeting = createMeeting({
-      title,
-      mode: "offline",
-      participants: ["待识别"],
-      goals: ["转录并整理导入的录音"],
-      tags: ["导入"]
-    });
-
-    try {
-      const audio = await readFile(payload.filePath);
-      const result = ["whisper-cpp", "whisper-python"].includes(sttProfile.transport)
-        ? await transcribeLocally(
-          sttProfile,
-          audio,
-          fileName,
-          payload.language || "zh",
-          preferences.glossary
-        )
-        : await transcribeRemote(
-          sttProfile,
-          readSecret(sttProfile.secretId),
-          audio,
-          fileName,
-          payload.language || "zh",
-          preferences.glossary
-        );
-      const durationSeconds = Math.max(0, Math.round(result.duration ?? 0));
-      let transcript = result.segments?.length
-        ? result.segments.map((segment) => ({
-          id: randomUUID(),
-          startMs: segment.startMs,
-          endMs: segment.endMs,
-          speakerId: "speaker-1",
-          speakerName: "Speaker 1",
-          text: segment.text,
-          status: "final",
-          track: "mixed"
-        }))
-        : result.text.trim()
-          ? [{
-            id: randomUUID(),
-            startMs: 0,
-            endMs: durationSeconds ? durationSeconds * 1000 : 1,
-            speakerId: "speaker-1",
-            speakerName: "Speaker 1",
-            text: result.text.trim(),
-            status: "final",
-            track: "mixed"
-          }]
-          : [];
-      if (diarizationProfile && transcript.length) {
-        const turns = await diarizeWithSherpa(
-          diarizationProfile,
-          payload.filePath,
-          { expectedSpeakers: -1 }
-        );
-        transcript = applyDiarization(transcript, turns);
+    if (!Array.isArray(items) || !items.length) throw new Error("没有可导入的文件。");
+    for (const item of items) {
+      if (!item?.sourcePath || !recentImportPaths.has(item.sourcePath)) {
+        throw new Error("文件路径无效，请重新选择要导入的文件。");
       }
-      const summaryInput = {
-        title: meeting.title,
-        goals: meeting.goals,
-        notes: [`导入文件：${fileName}`],
-        transcript,
-        previousSummary: meeting.summary
-      };
-      const summary = llmProfile
-        ? await summarizeWithOpenAICompatible(
-          llmProfile,
-          readSecret(llmProfile.secretId),
-          summaryInput,
-          true
-        )
-        : summarizeLocally(summaryInput);
-      return saveMeeting({
-        ...meeting,
-        status: "complete",
-        durationSeconds,
-        notes: [`导入文件：${fileName}`],
-        notesMarkdown: `导入文件：${fileName}`,
-        transcript,
-        summary: {
-          ...summary,
-          updatedAt: new Date().toISOString(),
-          stale: false
-        }
-      });
-    } catch (error) {
-      saveMeeting({
-        ...meeting,
-        status: "interrupted",
-        notes: [
-          `导入文件：${fileName}`,
-          `处理失败：${error instanceof Error ? error.message : "未知错误"}`
-        ],
-        notesMarkdown: `导入文件：${fileName}\n\n处理失败：${error instanceof Error ? error.message : "未知错误"}`
-      });
-      throw error;
     }
+    for (const item of items) recentImportPaths.delete(item.sourcePath);
+    return enqueueImports(items, options);
   });
+  trustedHandle("imports:list", () => listImportJobs());
+  trustedHandle("imports:retry", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return retryImport(id); });
+  trustedHandle("imports:cancel", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return cancelImport(id); });
   trustedHandle("exports:save", async (_event, meeting, format) => {
     await requireLicense();
     return exportMeeting(meeting, format, mainWindow, listMeetingAudioPaths(meeting.id));
@@ -765,13 +689,27 @@ app.whenReady().then(async () => {
   // Resolve any existing Keychain-backed credentials once at app startup so
   // recording and finalization never become the first surprise access point.
   warmSecretCache();
+  protocol.handle("minuteflow-media", (request) => {
+    const id = new URL(request.url).pathname.split("/").filter(Boolean).pop();
+    if (!id || !UUID_PATTERN.test(id)) return new Response("Not found", { status: 404 });
+    const asset = loadAudioAsset(id);
+    if (!asset) return new Response("Not found", { status: 404 });
+    return net.fetch(pathToFileURL(asset.playbackPath || asset.path).toString(), { headers: request.headers });
+  });
   configurePermissions();
   registerIpc();
   markInterruptedRecordings();
+  markRunningJobsInterrupted();
+  configureImportQueue({
+    notify: (job) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("imports:job-updated", job);
+    }
+  });
   await pruneExpiredRecordings().catch((error) => {
     console.error("录音保留策略清理失败：", error);
   });
   await createMainWindow();
+  wakeImportQueue();
 
   if (process.platform === "darwin" && app.isPackaged) {
     setTimeout(() => runMacUpdateCheck({ notify: true }), 5_000);

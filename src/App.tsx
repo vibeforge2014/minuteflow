@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowClockwise,
   CloudCheck,
@@ -24,10 +24,12 @@ import { DeletedMeetingsDialog } from "./components/DeletedMeetingsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { PaywallDialog } from "./components/PaywallDialog";
 import { SystemPermissionsDialog } from "./components/SystemPermissionsDialog";
+import { ImportDrawer } from "./components/ImportDrawer";
+import { MeetingPlayer } from "./components/MeetingPlayer";
 import { useMeetingStore } from "./store/meetingStore";
 import { useMeetingRecorder } from "./hooks/useMeetingRecorder";
 import { api } from "./lib/api";
-import type { CreateMeetingInput, LicenseStatus, Meeting } from "./types";
+import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Meeting } from "./types";
 import { BrandMark } from "./components/BrandMark";
 
 export function App() {
@@ -40,6 +42,7 @@ export function App() {
     profiles,
     preferences,
     initialize,
+    refreshMeetings,
     selectMeeting,
     createMeeting,
     updateMeeting,
@@ -59,6 +62,12 @@ export function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importCandidates, setImportCandidates] = useState<ImportCandidate[]>([]);
+  const [importJobs, setImportJobs] = useState<ImportJob[]>([]);
+  const [playbackMs, setPlaybackMs] = useState(0);
+  const [seekToMs, setSeekToMs] = useState<number | null>(null);
+  const completedImports = useRef(new Set<string>());
 
   useEffect(() => {
     initialize();
@@ -70,6 +79,21 @@ export function App() {
       setToast(`发现新版本 ${result.update.version}，可前往“设置 → 软件更新”下载。`);
     }
   }), []);
+
+  useEffect(() => {
+    api.imports.list().then((jobs) => {
+      setImportJobs(jobs);
+      jobs.filter((job) => job.status === "complete").forEach((job) => completedImports.current.add(job.id));
+    }).catch(() => {});
+    return api.imports.onJobUpdated((job) => {
+      setImportJobs((current) => [job, ...current.filter((item) => item.id !== job.id)].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)));
+      if (job.status === "complete" && !completedImports.current.has(job.id)) {
+        completedImports.current.add(job.id);
+        setToast(`“${job.title}”已完成导入，点击任务可查看结果。`);
+        void refreshMeetings();
+      }
+    });
+  }, [refreshMeetings]);
 
   useEffect(() => {
     if (!loading && (!preferences.systemPermissionsCompleted || preferences.permissionsVersion < 2)) setPermissionsOpen(true);
@@ -130,46 +154,19 @@ export function App() {
   const handleImport = async () => {
     if (!requirePremium("导入录音并自动处理")) return;
     const files = await api.imports.choose();
-    if (!files.length) {
-      setToast("在 Electron 应用中可选择 MP3、M4A、WAV、FLAC、WebM、MP4 或 MOV。");
-      return;
-    }
-    const sttProfile = profiles.find((profile) => profile.kind === "stt" && profile.enabled);
-    const llmProfile = profiles.find((profile) => profile.kind === "llm" && profile.enabled);
-    if (sttProfile?.id) {
-      setToast(`正在处理 ${files.length} 个文件，完成前请保持应用打开。`);
-      for (const filePath of files) {
-        try {
-          await api.imports.process({
-            filePath,
-            sttProfileId: sttProfile.id,
-            llmProfileId: llmProfile?.id,
-            language: "zh"
-          });
-        } catch (error) {
-          setToast(error instanceof Error ? error.message : "导入处理失败。");
-        }
-      }
-      await initialize();
-      setToast(`已完成 ${files.length} 个导入任务。`);
-      return;
-    }
-    for (const file of files) {
-      const name = file.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") || "导入的会议";
-      const imported = await createMeeting({
-        title: name,
-        mode: "offline",
-        participants: ["待识别"],
-        goals: ["转录并整理导入的录音"],
-        tags: ["导入"]
-      });
-      await updateMeeting(imported.id, (current) => ({
-        ...current,
-        notes: [`已导入：${file}`, "等待选择转录模型后开始处理。"],
-        notesMarkdown: `已导入：${file}\n\n等待选择转录模型后开始处理。`
-      }));
-    }
-    setToast(`已加入 ${files.length} 个导入任务；配置转录模型后即可处理。`);
+    if (!files.length) return;
+    setImportCandidates((current) => [...current, ...files]);
+    setImportOpen(true);
+  };
+
+  const handleDrop = async (event: React.DragEvent) => {
+    event.preventDefault();
+    if (!event.dataTransfer.files.length || !requirePremium("导入录音并自动处理")) return;
+    try {
+      const files = await api.imports.fromDropped(Array.from(event.dataTransfer.files));
+      setImportCandidates((current) => [...current, ...files]);
+      setImportOpen(true);
+    } catch (error) { setToast(error instanceof Error ? error.message : "无法读取拖入的文件。"); }
   };
 
   const handleMeetingChange = (next: Meeting) => {
@@ -186,13 +183,14 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
       <Sidebar
         meetings={meetings}
         selectedId={selectedId}
         onSelect={selectMeeting}
         onNew={() => setNewMeetingOpen(true)}
         onImport={handleImport}
+        importCount={importJobs.filter((job) => !["complete", "cancelled", "failed"].includes(job.status)).length}
         onTemplates={() => setNewMeetingOpen(true)}
         onTrash={() => setTrashOpen(true)}
         onSettings={() => setSettingsOpen(true)}
@@ -282,6 +280,8 @@ export function App() {
               </div>
             </header>
 
+            <MeetingPlayer meetingId={meeting.id} durationSeconds={meeting.durationSeconds} seekToMs={seekToMs} onTimeChange={setPlaybackMs} />
+
             <DocumentWorkspace
               meeting={meeting}
               onChange={handleMeetingChange}
@@ -324,6 +324,8 @@ export function App() {
           meeting={meeting}
           onChange={handleMeetingChange}
           onClose={() => setRightPanelOpen(false)}
+          playbackMs={playbackMs}
+          onSeek={(ms) => { setSeekToMs(null); requestAnimationFrame(() => setSeekToMs(ms)); }}
         />
       )}
 
@@ -363,6 +365,26 @@ export function App() {
         status={licenseStatus}
         onStatusChange={setLicenseStatus}
         onClose={() => setPaywallOpen(false)}
+      />
+      <ImportDrawer
+        open={importOpen}
+        candidates={importCandidates}
+        jobs={importJobs}
+        profiles={profiles}
+        onClose={() => setImportOpen(false)}
+        onPick={handleImport}
+        onChange={setImportCandidates}
+        onEnqueue={async (items, options) => {
+          const jobs = await api.imports.enqueue(items, options);
+          setImportJobs((current) => [...jobs, ...current.filter((item) => !jobs.some((job) => job.id === item.id))]);
+          setImportCandidates([]);
+          await refreshMeetings();
+          setToast(`${jobs.length} 个录音已归档并加入后台队列。`);
+        }}
+        onRetry={(id) => void api.imports.retry(id)}
+        onCancel={(id) => void api.imports.cancel(id)}
+        onOpenMeeting={(id) => { selectMeeting(id); setImportOpen(false); }}
+        onConfigure={() => { setImportOpen(false); setSettingsOpen(true); }}
       />
 
       {(error || toast) && (

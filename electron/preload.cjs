@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
 
@@ -16,7 +16,8 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     append: (payload) => invoke("recordings:append", payload),
     stop: (payload) => invoke("recordings:stop", payload),
     abort: (payload) => invoke("recordings:abort", payload),
-    open: (meetingId) => invoke("recordings:open", meetingId)
+    open: (meetingId) => invoke("recordings:open", meetingId),
+    assets: (meetingId) => invoke("recordings:assets", meetingId)
   },
   transcription: {
     processChunk: (payload) => invoke("transcription:chunk", payload)
@@ -44,7 +45,16 @@ contextBridge.exposeInMainWorld("meetingAPI", {
   },
   imports: {
     choose: () => invoke("imports:choose"),
-    process: (payload) => invoke("imports:process", payload)
+    fromDropped: (files) => invoke("imports:describe-dropped", Array.from(files, (file) => webUtils.getPathForFile(file))),
+    enqueue: (items, options) => invoke("imports:enqueue", items, options),
+    list: () => invoke("imports:list"),
+    retry: (id) => invoke("imports:retry", id),
+    cancel: (id) => invoke("imports:cancel", id),
+    onJobUpdated: (callback) => {
+      const listener = (_event, job) => callback(job);
+      ipcRenderer.on("imports:job-updated", listener);
+      return () => ipcRenderer.removeListener("imports:job-updated", listener);
+    }
   },
   exports: {
     save: (meeting, format) => invoke("exports:save", meeting, format)
