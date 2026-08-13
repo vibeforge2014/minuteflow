@@ -9,7 +9,13 @@ export function MeetingPlayer({ meetingId, durationSeconds, seekToMs, onTimeChan
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(durationSeconds);
 
-  useEffect(() => { setUrl(""); api.recordings.assets(meetingId).then((assets) => setUrl(assets[0]?.url || "")).catch(() => {}); }, [meetingId]);
+  useEffect(() => {
+    setUrl("");
+    if (!meetingId) return;
+    let cancelled = false;
+    api.recordings.assets(meetingId).then((assets) => { if (!cancelled) setUrl(assets[0]?.url || ""); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [meetingId]);
   useEffect(() => { if (seekToMs !== null && audioRef.current) { audioRef.current.currentTime = seekToMs / 1000; void audioRef.current.play(); } }, [seekToMs]);
   if (!url) return null;
 
