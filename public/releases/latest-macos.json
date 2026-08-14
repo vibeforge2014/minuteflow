@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.9",
+  "version": "0.1.10",
   "platform": "darwin",
   "architectures": [
     "arm64"
   ],
-  "publishedAt": "2026-08-14T01:08:01Z",
+  "publishedAt": "2026-08-14T01:55:51Z",
   "minimumSystemVersion": "14.2",
-  "notes": "本地转录兼容性扩展：新增 faster-whisper（CTranslate2）与 mlx-whisper（Apple Silicon 原生）两种运行时，支持模型目录或 Hugging Face 仓库 ID；自动发现 CT2/MLX 模型目录，不再误判 .bin。本地 Whisper 现支持 4 种运行时，均经真实中文音频验证。macOS 仍为签名+公证版本。",
+  "notes": "修复激活码在带扩展坞/VPN/Docker 的机器上误报“已绑定其他设备”并被锁死的问题：机器指纹改用稳定硬件 UUID，不再随网络变化；再次激活可重新绑定本机。升级后若提示已绑定其他设备，重新输入一次激活码即可。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.9",
-  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.9/MinuteFlow-0.1.9-macOS-arm64.dmg",
-  "sha256": "04d19fa59de9d0d72f83539139e7fe208e56867f74ca8f2f3871b6568fd4b9eb"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.10",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.10/MinuteFlow-0.1.10-macOS-arm64.dmg",
+  "sha256": "cbbd4d56264d05d9cb1d27b5d2c5d2fbaa41bf18f327b52c0a25eedeb993d48a"
 }
