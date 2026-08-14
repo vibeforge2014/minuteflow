@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.8",
+  "version": "0.1.9",
   "platform": "darwin",
   "architectures": [
     "arm64"
   ],
-  "publishedAt": "2026-08-13T16:01:05Z",
+  "publishedAt": "2026-08-14T01:08:01Z",
   "minimumSystemVersion": "14.2",
-  "notes": "中文转录默认输出简体中文（whisper.cpp 简体引导）；本地纪要按句子粒度抽取决定/行动/待解问题，单段多要点不再合并、段中问题不再漏掉。macOS 仍为签名+公证版本。",
+  "notes": "本地转录兼容性扩展：新增 faster-whisper（CTranslate2）与 mlx-whisper（Apple Silicon 原生）两种运行时，支持模型目录或 Hugging Face 仓库 ID；自动发现 CT2/MLX 模型目录，不再误判 .bin。本地 Whisper 现支持 4 种运行时，均经真实中文音频验证。macOS 仍为签名+公证版本。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.8",
-  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.8/MinuteFlow-0.1.8-macOS-arm64.dmg",
-  "sha256": "5a45b22fd1164367a77145d3f31dd62179e529d5caf5adaa6afcb87d9db626fd"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.9",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.9/MinuteFlow-0.1.9-macOS-arm64.dmg",
+  "sha256": "04d19fa59de9d0d72f83539139e7fe208e56867f74ca8f2f3871b6568fd4b9eb"
 }
