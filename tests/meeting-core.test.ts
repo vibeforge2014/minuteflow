@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { markdown, subtitle } from "../electron/services/formatters.mjs";
 import {
   resolveProviderEndpoint,
+  summarizeWithOpenAICompatible,
   summarizeLocally,
   transcribeRemote,
   validateSummary
@@ -145,6 +146,18 @@ describe("structured meeting summary", () => {
 });
 
 describe("model provider compatibility", () => {
+  const summaryInput = {
+    title: meeting.title,
+    goals: meeting.goals,
+    notes: meeting.notes,
+    transcript: meeting.transcript,
+    previousSummary: meeting.summary
+  };
+  const validSummaryPayload = JSON.stringify({
+    topics: [], keyPoints: [], decisions: [], actionItems: [],
+    openQuestions: [], risks: [], nextSteps: []
+  });
+
   it("normalizes New API base URLs with or without /v1", () => {
     const base = { baseUrl: "https://new-api.example", options: {} };
     expect(resolveProviderEndpoint(base, "chat/completions"))
@@ -170,6 +183,34 @@ describe("model provider compatibility", () => {
       "https://new-api.example/v1/audio/openai/create-transcription"
     ]);
     expect(result.text).toBe("测试转录");
+  });
+
+  it("uses Anthropic's native Messages API for Claude presets", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      content: [{ type: "text", text: validSummaryPayload }]
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    await summarizeWithOpenAICompatible({
+      baseUrl: "https://api.anthropic.com",
+      model: "claude-sonnet-4-6",
+      options: { apiFlavor: "anthropic" }
+    }, "anthropic-secret", summaryInput);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("https://api.anthropic.com/v1/messages");
+    expect(new Headers(init?.headers).get("x-api-key")).toBe("anthropic-secret");
+  });
+
+  it("uses Gemini's native generateContent API for Gemini presets", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: validSummaryPayload }] } }]
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    await summarizeWithOpenAICompatible({
+      baseUrl: "https://generativelanguage.googleapis.com",
+      model: "gemini-3.6-flash",
+      options: { apiFlavor: "gemini" }
+    }, "gemini-secret", summaryInput);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent");
+    expect(new Headers(init?.headers).get("x-goog-api-key")).toBe("gemini-secret");
   });
 
   it("routes PT checkpoints to Python and GGML/GGUF to whisper.cpp", () => {

@@ -3,6 +3,8 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import { loadWhisperModule } from "@fugood/whisper.node";
 
 const supportedExtensions = new Map([
   [".pt", { format: "PyTorch PT", engine: "whisper-python" }],
@@ -38,36 +40,68 @@ const catalog = [
     digest: "55356645c2b361a969dfd0ef2c5a50d530afd8d5",
     source: "ggerganov/whisper.cpp",
     license: "MIT"
-  },
-  {
-    id: "pt-base",
-    name: "Whisper Base（PyTorch）",
-    description: "OpenAI 原始 .pt 权重，需要 Python 与 openai-whisper。",
-    engine: "whisper-python",
-    format: "PyTorch PT",
-    sizeBytes: 145_000_000,
-    fileName: "base.pt",
-    url: "https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.pt",
-    digestAlgorithm: "sha256",
-    digest: "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e",
-    source: "openai/whisper",
-    license: "MIT"
-  },
-  {
-    id: "pt-small",
-    name: "Whisper Small（PyTorch）",
-    description: "OpenAI 原始 .pt 权重，适合已有 Python Whisper 环境。",
-    engine: "whisper-python",
-    format: "PyTorch PT",
-    sizeBytes: 461_000_000,
-    fileName: "small.pt",
-    url: "https://openaipublic.azureedge.net/main/whisper/models/9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794/small.pt",
-    digestAlgorithm: "sha256",
-    digest: "9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794",
-    source: "openai/whisper",
-    license: "MIT"
   }
 ];
+
+function unpackedExecutablePath(filePath) {
+  if (!filePath?.includes("app.asar")) return filePath;
+  return filePath.replace(/app\.asar([/\\])/, "app.asar.unpacked$1");
+}
+
+export async function managedFfmpegPath() {
+  const candidate = unpackedExecutablePath(ffmpegInstaller.path);
+  try {
+    await access(candidate, constants.X_OK);
+    return candidate;
+  } catch {
+    return undefined;
+  }
+}
+
+async function managedWhisperReady() {
+  try {
+    const runtime = await loadWhisperModule();
+    return Boolean(runtime?.WhisperContext);
+  } catch {
+    return false;
+  }
+}
+
+async function discoverLocalEnvironment() {
+  const python = await findExecutable(process.platform === "win32" ? ["python", "python3"] : ["python3", "python"]);
+  const [managedWhisper, bundledFfmpeg, whisperCpp] = await Promise.all([
+    managedWhisperReady(),
+    managedFfmpegPath(),
+    findExecutable(["whisper-cli", "whisper-cpp"])
+  ]);
+  const systemFfmpeg = bundledFfmpeg ? undefined : await findExecutable(["ffmpeg"]);
+  return {
+    paths: {
+      whisperCpp,
+      python,
+      ffmpeg: bundledFfmpeg || systemFfmpeg
+    },
+    runtimes: {
+      managedWhisper,
+      whisperCpp: Boolean(whisperCpp),
+      python: Boolean(python),
+      ffmpeg: Boolean(bundledFfmpeg || systemFfmpeg),
+      fasterWhisper: await probePythonPackage(python, "faster_whisper"),
+      mlxWhisper: process.platform === "darwin" ? await probePythonPackage(python, "mlx_whisper") : false
+    }
+  };
+}
+
+export async function ensureManagedLocalRuntime() {
+  const environment = await discoverLocalEnvironment();
+  const missing = [];
+  if (!environment.runtimes.managedWhisper) missing.push("本地转写组件");
+  if (!environment.runtimes.ffmpeg) missing.push("音频处理组件");
+  if (missing.length) {
+    throw new Error(`${missing.join("和")}未能加载，请重新安装应用或稍后重试。`);
+  }
+  return environment;
+}
 
 async function exists(filePath) {
   try {
@@ -208,23 +242,62 @@ async function findExecutable(names) {
   return undefined;
 }
 
-export async function discoverLocalModels({ roots, modelDirectory }) {
+async function scanLocalModels({ roots, modelDirectory }) {
   const models = [];
   const state = { visited: 0 };
   for (const root of Array.from(new Set([...roots, modelDirectory]))) {
     await scanDirectory(root, models, state);
   }
-  const uniqueModels = Array.from(new Map(models.map((item) => [item.path, item])).values())
+  return Array.from(new Map(models.map((item) => [item.path, item])).values())
     .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
-  const python = await findExecutable(process.platform === "win32" ? ["python", "python3"] : ["python3", "python"]);
+}
+
+export async function discoverLocalModels({ roots, modelDirectory }) {
+  const [models, environment] = await Promise.all([
+    scanLocalModels({ roots, modelDirectory }),
+    discoverLocalEnvironment()
+  ]);
   return {
-    models: uniqueModels,
-    runtimes: {
-      whisperCpp: await findExecutable(["whisper-cli", "whisper-cpp"]),
-      python,
-      ffmpeg: await findExecutable(["ffmpeg"]),
-      fasterWhisper: await probePythonPackage(python, "faster_whisper"),
-      mlxWhisper: process.platform === "darwin" ? await probePythonPackage(python, "mlx_whisper") : false
+    models,
+    runtimes: environment.runtimes
+  };
+}
+
+export async function resolveLocalModelProfile(profile, { roots, modelDirectory }) {
+  const [models, environment] = await Promise.all([
+    scanLocalModels({ roots, modelDirectory }),
+    discoverLocalEnvironment()
+  ]);
+  const discovery = { models, runtimes: environment.runtimes };
+  const matchingModel = discovery.models.find((model) => model.engine === profile.transport);
+  const isPythonBased = ["whisper-python", "faster-whisper", "mlx-whisper"].includes(profile.transport);
+  const options = {
+    ...profile.options,
+    ...(!profile.options?.modelPath && matchingModel ? { modelPath: matchingModel.path } : {}),
+    ...(profile.transport === "whisper-cpp" && !environment.runtimes.managedWhisper && !profile.options?.executablePath && environment.paths.whisperCpp
+      ? { executablePath: environment.paths.whisperCpp } : {}),
+    ...(isPythonBased && !profile.options?.pythonExecutablePath && environment.paths.python
+      ? { pythonExecutablePath: environment.paths.python } : {}),
+    ...(!profile.options?.ffmpegPath && environment.paths.ffmpeg ? { ffmpegPath: environment.paths.ffmpeg } : {})
+  };
+  const resolvedProfile = { ...profile, options };
+  const modelStat = options.modelPath ? await stat(options.modelPath).catch(() => null) : null;
+  const modelReady = Boolean(modelStat && (modelStat.isDirectory() || modelStat.size > 0));
+  const runtimeReady = profile.transport === "whisper-cpp"
+    ? Boolean(environment.runtimes.managedWhisper || options.executablePath)
+    : Boolean(options.pythonExecutablePath || options.executablePath);
+  const missing = [
+    !modelReady && "模型文件",
+    !runtimeReady && "本地转写组件",
+    !options.ffmpegPath && "音频处理组件"
+  ].filter(Boolean);
+  return {
+    profile: resolvedProfile,
+    discovery,
+    readiness: {
+      status: missing.length ? (options.modelPath && !modelReady ? "invalid_model" : "missing_components") : "ready",
+      missing,
+      message: missing.length ? `${missing.join("、")}尚未就绪。` : "本地转写已就绪。"
     }
   };
 }
@@ -259,6 +332,8 @@ export async function downloadModel(modelId, modelDirectory, onProgress = () => 
 async function doDownloadModel(modelId, modelDirectory, onProgress = () => {}) {
   const item = catalog.find((candidate) => candidate.id === modelId);
   if (!item) throw new Error("未找到可下载的模型。");
+  onProgress({ modelId, downloadedBytes: 0, totalBytes: item.sizeBytes, status: "preparing", message: "正在准备本地转写组件…" });
+  await ensureManagedLocalRuntime();
   await mkdir(modelDirectory, { recursive: true });
   const target = path.join(modelDirectory, item.fileName);
   const temporary = `${target}.download`;
@@ -281,7 +356,7 @@ async function doDownloadModel(modelId, modelDirectory, onProgress = () => {}) {
       const now = Date.now();
       if (now - lastProgressAt >= 250 || downloadedBytes >= totalBytes) {
         lastProgressAt = now;
-        onProgress({ modelId, downloadedBytes, totalBytes, status: "downloading" });
+        onProgress({ modelId, downloadedBytes, totalBytes, status: "downloading", message: "正在下载模型…" });
       }
     }
   } catch (error) {
@@ -290,13 +365,14 @@ async function doDownloadModel(modelId, modelDirectory, onProgress = () => {}) {
     throw error;
   }
   await file.close();
+  onProgress({ modelId, downloadedBytes, totalBytes, status: "verifying", message: "正在校验模型完整性…" });
   const actualDigest = hash.digest("hex");
   if (actualDigest !== item.digest) {
     await unlink(temporary).catch(() => {});
     throw new Error("模型校验失败，下载文件已删除，请重试。");
   }
   await rename(temporary, target);
-  onProgress({ modelId, downloadedBytes, totalBytes, status: "complete" });
+  onProgress({ modelId, downloadedBytes, totalBytes, status: "ready", message: "模型与转写组件已就绪。" });
   return describeModel(target, downloadedBytes);
 }
 

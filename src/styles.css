@@ -2787,32 +2787,6 @@ button {
   margin-top: 9px;
 }
 
-.advanced-runtime-options {
-  margin-top: 12px;
-  padding: 11px 12px;
-  color: #77706c;
-  background: #faf8f6;
-  border: 1px solid #e8e3df;
-  border-radius: 9px;
-  font-size: 10px;
-}
-
-.advanced-runtime-options summary {
-  color: #665f5b;
-  cursor: pointer;
-  font-weight: 620;
-}
-
-.advanced-runtime-options > p {
-  margin-top: 6px;
-  color: #99918c;
-  font-size: 9px;
-}
-
-.advanced-runtime-options .field {
-  margin-top: 11px;
-}
-
 .connection-status {
   margin-top: 12px;
   padding: 9px 10px;

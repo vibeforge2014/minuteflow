@@ -8,7 +8,8 @@
 - React — MIT
 - TipTap — MIT
 - Phosphor Icons — MIT
-- whisper.cpp — MIT
+- whisper.cpp / @fugood/whisper.node — MIT
+- FFmpeg / @ffmpeg-installer — LGPL-2.1；具体构建信息随平台包分发
 - sherpa-onnx — Apache-2.0；模型许可证可能不同
 - OpenAI Whisper model weights — MIT
 

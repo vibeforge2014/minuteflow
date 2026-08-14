@@ -51,7 +51,8 @@ import {
   describeLocalModel,
   discoverLocalModels,
   downloadModel,
-  listDownloadableModels
+  listDownloadableModels,
+  resolveLocalModelProfile
 } from "./services/local-models.mjs";
 import {
   checkForMacUpdate,
@@ -132,17 +133,10 @@ function transcribeLocally(profile, audio, fileName, language, glossary) {
 }
 
 const LOCAL_TRANSCRIPTION_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"];
-const PYTHON_TRANSCRIPTION_TRANSPORTS = ["whisper-python", "faster-whisper", "mlx-whisper"];
 
 async function resolveLocalTranscriptionProfile(profile) {
   if (!LOCAL_TRANSCRIPTION_TRANSPORTS.includes(profile.transport)) return profile;
-  const needsRuntime = profile.transport === "whisper-cpp"
-    ? !profile.options?.executablePath
-    : !profile.options?.pythonExecutablePath && !profile.options?.executablePath;
-  const needsModel = !profile.options?.modelPath;
-  if (!needsRuntime && !needsModel) return profile;
-
-  const discovery = await discoverLocalModels({
+  const resolution = await resolveLocalModelProfile(profile, {
     modelDirectory: localModelDirectory(),
     roots: [
       app.getPath("downloads"),
@@ -150,19 +144,16 @@ async function resolveLocalTranscriptionProfile(profile) {
       path.join(homedir(), ".cache", "huggingface", "hub")
     ]
   });
-  const matchingModel = discovery.models.find((model) => model.engine === profile.transport);
-  const options = {
-    ...profile.options,
-    ...(profile.transport === "whisper-cpp" && !profile.options?.executablePath && discovery.runtimes.whisperCpp
-      ? { executablePath: discovery.runtimes.whisperCpp } : {}),
-    ...(PYTHON_TRANSCRIPTION_TRANSPORTS.includes(profile.transport) && !profile.options?.pythonExecutablePath && discovery.runtimes.python
-      ? { pythonExecutablePath: discovery.runtimes.python } : {}),
-    ...(!profile.options?.ffmpegPath && discovery.runtimes.ffmpeg ? { ffmpegPath: discovery.runtimes.ffmpeg } : {}),
-    ...(!profile.options?.modelPath && matchingModel ? { modelPath: matchingModel.path } : {})
-  };
-  const resolved = { ...profile, options };
-  if (JSON.stringify(options) !== JSON.stringify(profile.options ?? {})) saveModelProfile(resolved);
-  return resolved;
+  if (resolution.readiness.status !== "ready") {
+    throw new Error(`${resolution.readiness.message}请在转录设置中下载模型后重试。`);
+  }
+  if (!profile.options?.modelPath && resolution.profile.options?.modelPath) {
+    saveModelProfile({
+      ...profile,
+      options: { ...profile.options, modelPath: resolution.profile.options.modelPath }
+    });
+  }
+  return resolution.profile;
 }
 
 async function loadPreferences() {
@@ -535,8 +526,12 @@ function registerIpc() {
     wakeImportQueue();
     return saved;
   });
-  trustedHandle("models:test", (_event, profile, apiKey) =>
-    testModelProfile(profile, apiKey || readSecret(profile.secretId)));
+  trustedHandle("models:test", async (_event, profile, apiKey) => {
+    const resolved = LOCAL_TRANSCRIPTION_TRANSPORTS.includes(profile.transport)
+      ? await resolveLocalTranscriptionProfile(profile)
+      : profile;
+    return testModelProfile(resolved, apiKey || readSecret(profile.secretId));
+  });
   trustedHandle("models:delete-secret", (_event, secretId) => deleteSecret(secretId));
   trustedHandle("models:scan-local", async () => discoverLocalModels({
     modelDirectory: localModelDirectory(),

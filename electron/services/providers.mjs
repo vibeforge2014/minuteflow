@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { writeFile, unlink } from "node:fs/promises";
 import { z } from "zod";
+import { initWhisper, loadWhisperModule } from "@fugood/whisper.node";
 
 const summarySchema = z.object({
   topics: z.array(z.string()).default([]),
@@ -49,6 +50,66 @@ const authorizationHeaders = (profile, apiKey) => {
     : { Authorization: `Bearer ${apiKey}` };
 };
 
+function nativeProviderEndpoint(profile, pathname, override) {
+  if (override) {
+    if (/^https?:\/\//i.test(override)) return override;
+    return `${normalizeBaseUrl(profile.baseUrl)}/${override.replace(/^\/+/, "")}`;
+  }
+  return `${normalizeBaseUrl(profile.baseUrl)}/${pathname.replace(/^\/+/, "")}`;
+}
+
+function requestSignal(signal, timeoutMs) {
+  return signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+    : AbortSignal.timeout(timeoutMs);
+}
+
+async function requestAnthropic(profile, apiKey, prompt, maxTokens = 8_192, signal) {
+  const response = await fetch(nativeProviderEndpoint(profile, "v1/messages", profile.options?.chatEndpoint), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      ...(profile.options?.headers ?? {})
+    },
+    body: JSON.stringify({
+      model: profile.model,
+      max_tokens: maxTokens,
+      temperature: 0.2,
+      system: "只输出可解析的 JSON。",
+      messages: [{ role: "user", content: prompt }]
+    }),
+    signal: requestSignal(signal, profile.options?.timeoutMs ?? 60_000)
+  });
+  if (!response.ok) throw new Error(`总结模型请求失败：${response.status} ${await response.text()}`);
+  return response.json();
+}
+
+async function requestGemini(profile, apiKey, prompt, maxTokens = 8_192, signal) {
+  const model = encodeURIComponent(profile.model);
+  const response = await fetch(nativeProviderEndpoint(profile, `v1beta/models/${model}:generateContent`, profile.options?.chatEndpoint), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": apiKey,
+      ...(profile.options?.headers ?? {})
+    },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: "只输出可解析的 JSON。" }] },
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: maxTokens,
+        responseMimeType: "application/json"
+      }
+    }),
+    signal: requestSignal(signal, profile.options?.timeoutMs ?? 60_000)
+  });
+  if (!response.ok) throw new Error(`总结模型请求失败：${response.status} ${await response.text()}`);
+  return response.json();
+}
+
 export function validateSummary(value) {
   return summarySchema.parse(value);
 }
@@ -74,6 +135,15 @@ export function buildSummaryPrompt(input, final = false) {
 }
 
 export async function summarizeWithOpenAICompatible(profile, apiKey, input, final = false, signal) {
+  const prompt = buildSummaryPrompt(input, final);
+  if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
+    const payload = profile.options.apiFlavor === "anthropic"
+      ? await requestAnthropic(profile, apiKey, prompt, 8_192, signal)
+      : await requestGemini(profile, apiKey, prompt, 8_192, signal);
+    const content = extractMessageContent(payload);
+    if (!content) throw new Error("总结模型没有返回内容。");
+    return validateSummary(JSON.parse(extractJson(content)));
+  }
   const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -83,7 +153,7 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
         temperature: 0.2,
         messages: [
           { role: "system", content: "只输出可解析的 JSON。" },
-          { role: "user", content: buildSummaryPrompt(input, final) }
+          { role: "user", content: prompt }
         ]
       };
       if (attempt === 0) body.response_format = { type: "json_object" };
@@ -395,8 +465,11 @@ export async function transcribeWithWhisperCpp(
   const whisperPath = profile.options?.executablePath;
   const modelPath = profile.options?.modelPath;
   const ffmpegPath = profile.options?.ffmpegPath;
-  if (!whisperPath || !modelPath) {
-    throw new Error("请先配置 whisper.cpp 可执行文件和模型路径。");
+  if (!modelPath) {
+    throw new Error("本地模型尚未就绪，请在转录设置中下载一个模型。");
+  }
+  if (!whisperPath) {
+    return transcribeWithManagedWhisper(profile, audioBuffer, fileName, language, glossary, signal);
   }
 
   const inputPath = path.join(tmpdir(), `${randomUUID()}-${fileName}`);
@@ -409,7 +482,7 @@ export async function transcribeWithWhisperCpp(
     } else if (path.extname(fileName).toLowerCase() === ".wav") {
       await writeFile(wavePath, await readFile(inputPath));
     } else {
-      throw new Error("转录 WebM/M4A 等格式时需要配置 FFmpeg 路径。");
+      throw new Error("音频处理组件尚未就绪，请重试或重新安装应用。");
     }
     const args = [
       "-m", modelPath,
@@ -447,19 +520,86 @@ export async function transcribeWithWhisperCpp(
   }
 }
 
+async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, language, glossary, signal) {
+  const modelPath = profile.options?.modelPath;
+  const ffmpegPath = profile.options?.ffmpegPath;
+  if (!modelPath) throw new Error("本地模型尚未就绪，请在转录设置中下载一个模型。");
+  await access(modelPath);
+
+  const inputPath = path.join(tmpdir(), `${randomUUID()}-${fileName}`);
+  const wavePath = `${inputPath}.wav`;
+  await writeFile(inputPath, audioBuffer);
+  let context;
+  let transcription;
+  let abort;
+  try {
+    if (ffmpegPath) {
+      await runProcess(ffmpegPath, ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavePath], { signal });
+    } else if (path.extname(fileName).toLowerCase() === ".wav") {
+      await writeFile(wavePath, await readFile(inputPath));
+    } else {
+      throw new Error("音频处理组件尚未就绪，请重试或重新安装应用。");
+    }
+
+    context = await initWhisper({
+      filePath: modelPath,
+      useGpu: process.platform === "darwin",
+      useFlashAttn: true
+    });
+    const promptSegments = [];
+    if (language === "zh") promptSegments.push("以下是简体中文的会议记录。");
+    if (glossary.length) promptSegments.push(glossary.slice(0, 200).join("，"));
+    transcription = context.transcribeFile(wavePath, {
+      language: language || undefined,
+      prompt: promptSegments.join("") || undefined,
+      temperature: 0
+    });
+    abort = () => { void transcription.stop(); };
+    signal?.addEventListener("abort", abort, { once: true });
+    const result = await transcription.promise;
+    if (signal?.aborted || result.isAborted) throw new Error("任务已取消。");
+    const segments = (result.segments ?? []).map((segment) => ({
+      // whisper.cpp timestamps are expressed in 10 ms units.
+      startMs: Math.round(Number(segment.t0 ?? 0) * 10),
+      endMs: Math.round(Number(segment.t1 ?? segment.t0 ?? 0) * 10),
+      text: String(segment.text ?? "").trim()
+    })).filter((segment) => segment.text);
+    return {
+      text: String(result.result ?? segments.map((segment) => segment.text).join(" ")).trim(),
+      language: language || undefined,
+      segments,
+      duration: segments.length ? Math.max(...segments.map((segment) => segment.endMs)) / 1000 : undefined
+    };
+  } finally {
+    if (abort) signal?.removeEventListener("abort", abort);
+    await context?.release().catch(() => {});
+    await Promise.allSettled([unlink(inputPath), unlink(wavePath)]);
+  }
+}
+
 export async function testModelProfile(profile, apiKey) {
   if (profile.transport === "whisper-cpp") {
-    if (!profile.options?.executablePath || !profile.options?.modelPath) {
-      throw new Error("请配置 whisper.cpp 可执行文件和模型路径。");
+    if (!profile.options?.modelPath) {
+      throw new Error("本地模型尚未就绪，请先下载一个模型。");
     }
-    // Actually invoke the executable so a missing/non-executable path or an
-    // incompatible build fails here, not silently mid-meeting.
+    await access(profile.options.modelPath);
+    if (!profile.options?.executablePath) {
+      try {
+        await loadWhisperModule();
+      } catch (error) {
+        throw new Error(`本地转写组件无法加载：${error instanceof Error ? error.message : "请重新安装应用。"}`);
+      }
+      if (!profile.options?.ffmpegPath) throw new Error("音频处理组件尚未就绪，请重试或重新安装应用。");
+      await access(profile.options.ffmpegPath);
+      return { ok: true, message: "本地模型与转写组件已就绪。" };
+    }
+    // Preserve compatibility with profiles created before the managed runtime.
     try {
       await runProcess(profile.options.executablePath, ["--help"], { timeoutMs: 8_000 });
     } catch (error) {
       throw new Error(`无法运行 whisper.cpp：${error instanceof Error ? error.message : "请检查可执行文件路径与权限。"}`);
     }
-    return { ok: true, message: "whisper.cpp 可执行文件可运行，模型路径已配置。" };
+    return { ok: true, message: "本地模型与兼容转写组件已就绪。" };
   }
   if (profile.transport === "whisper-python") {
     const pythonPath = profile.options?.pythonExecutablePath
@@ -502,6 +642,13 @@ export async function testModelProfile(profile, apiKey) {
     return { ok: true, message: "sherpa-onnx 可执行文件可运行，模型路径已配置。" };
   }
   if (profile.kind === "llm") {
+    if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
+      const payload = profile.options.apiFlavor === "anthropic"
+        ? await requestAnthropic(profile, apiKey, "只回复 OK", 16)
+        : await requestGemini(profile, apiKey, "只回复 OK", 16);
+      if (!extractMessageContent(payload)) throw new Error("连接成功，但模型没有返回消息内容。");
+      return { ok: true, message: "模型调用成功，原生接口可用。" };
+    }
     const response = await fetch(apiUrl(profile, "chat/completions", profile.options?.chatEndpoint), {
       method: "POST",
       headers: {
@@ -547,6 +694,14 @@ function extractMessageContent(payload, depth = 0) {
   if (Array.isArray(payload.output)) {
     return payload.output.flatMap((item) => item?.content ?? [])
       .map((item) => item?.text ?? "")
+      .join("");
+  }
+  if (Array.isArray(payload.content)) {
+    return payload.content.map((item) => item?.text ?? "").join("");
+  }
+  if (Array.isArray(payload.candidates)) {
+    return payload.candidates.flatMap((candidate) => candidate?.content?.parts ?? [])
+      .map((part) => part?.text ?? "")
       .join("");
   }
   return "";

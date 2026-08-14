@@ -25,7 +25,7 @@ import {
   transcribeWithMlxWhisper
 } from "./providers.mjs";
 import { applyDiarization, diarizeWithSherpa } from "./diarization.mjs";
-import { discoverLocalModels } from "./local-models.mjs";
+import { managedFfmpegPath, resolveLocalModelProfile } from "./local-models.mjs";
 
 const LOCAL_TRANSCRIPTION_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"];
 function transcribeLocal(profile, audio, fileName, language, signal) {
@@ -205,9 +205,10 @@ async function processJob(initial) {
       job = patchJob(job.id, { status: "preparing", stage: "preparing", progress: 0.24 });
       const profiles = listModelProfiles();
       const configuredFfmpeg = profiles.find((profile) => profile.kind === "stt" && profile.enabled)?.options?.ffmpegPath;
+      const automaticFfmpeg = await managedFfmpegPath();
       const playbackPath = path.join(path.dirname(job.archivedPath), `playback-${job.id}.m4a`);
       try {
-        await runFfmpeg(job.id, configuredFfmpeg || "ffmpeg", job.archivedPath, playbackPath, controller.signal);
+        await runFfmpeg(job.id, configuredFfmpeg || automaticFfmpeg || "ffmpeg", job.archivedPath, playbackPath, controller.signal);
       } catch (error) {
         if (error?.code === "ENOENT" || /ffmpeg/i.test(error?.message || "")) {
           patchJob(job.id, { status: "waiting_for_audio_tool", stage: "preparing", error: "需要 FFmpeg 才能为此格式生成播放副本。原文件已安全归档。" });
@@ -227,13 +228,10 @@ async function processJob(initial) {
       return;
     }
     if (LOCAL_TRANSCRIPTION_TRANSPORTS.includes(sttProfile.transport)) {
-      sttProfile = await resolveLocalProfile(sttProfile);
-      const missingModel = !sttProfile.options?.modelPath;
-      const missingRuntime = sttProfile.transport === "whisper-cpp"
-        ? !sttProfile.options?.executablePath
-        : !sttProfile.options?.pythonExecutablePath && !sttProfile.options?.executablePath;
-      if (missingModel || missingRuntime) {
-        patchJob(job.id, { status: "waiting_for_model", stage: "transcribing", progress: Math.max(job.progress, 0.28), error: "本地 Whisper 组件尚未就绪，请在转录设置中完成自动发现或下载。" });
+      const resolution = await resolveLocalProfile(sttProfile);
+      sttProfile = resolution.profile;
+      if (resolution.readiness.status !== "ready") {
+        patchJob(job.id, { status: "waiting_for_model", stage: "transcribing", progress: Math.max(job.progress, 0.28), error: `${resolution.readiness.message}请在转录设置中下载模型后重试。` });
         return;
       }
     }
@@ -330,22 +328,10 @@ async function processJob(initial) {
 }
 
 async function resolveLocalProfile(profile) {
-  const discovery = await discoverLocalModels({
+  return resolveLocalModelProfile(profile, {
     modelDirectory: path.join(app.getPath("userData"), "models", "whisper"),
     roots: [app.getPath("downloads"), path.join(homedir(), ".cache", "whisper"), path.join(homedir(), ".cache", "huggingface", "hub")]
   });
-  const model = discovery.models.find((candidate) => candidate.engine === profile.transport);
-  const isPythonBased = ["whisper-python", "faster-whisper", "mlx-whisper"].includes(profile.transport);
-  return {
-    ...profile,
-    options: {
-      ...profile.options,
-      ...(!profile.options?.modelPath && model ? { modelPath: model.path } : {}),
-      ...(profile.transport === "whisper-cpp" && !profile.options?.executablePath && discovery.runtimes.whisperCpp ? { executablePath: discovery.runtimes.whisperCpp } : {}),
-      ...(isPythonBased && !profile.options?.pythonExecutablePath && discovery.runtimes.python ? { pythonExecutablePath: discovery.runtimes.python } : {}),
-      ...(!profile.options?.ffmpegPath && discovery.runtimes.ffmpeg ? { ffmpegPath: discovery.runtimes.ffmpeg } : {})
-    }
-  };
 }
 
 function runFfmpeg(jobId, executable, input, output, signal) {

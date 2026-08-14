@@ -221,18 +221,6 @@ const browserApi: MeetingAPI = {
           source: "ggerganov/whisper.cpp",
           license: "MIT",
           installed: false
-        },
-        {
-          id: "pt-small",
-          name: "Whisper Small（PyTorch）",
-          description: "支持 OpenAI Whisper .pt 权重。",
-          engine: "whisper-python" as const,
-          format: "PyTorch PT",
-          sizeBytes: 461_000_000,
-          fileName: "small.pt",
-          source: "openai/whisper",
-          license: "MIT",
-          installed: false
         }
       ];
     },

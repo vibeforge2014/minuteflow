@@ -75,7 +75,7 @@ export interface ModelProfile {
     segmentationModelPath?: string;
     embeddingModelPath?: string;
     clusteringThreshold?: number;
-    apiFlavor?: "openai" | "new-api";
+    apiFlavor?: "openai" | "new-api" | "anthropic" | "gemini";
     responseFormat?: "json" | "verbose_json" | "text";
     chatEndpoint?: string;
     transcriptionEndpoint?: string;
@@ -224,9 +224,10 @@ export interface LocalModelFile {
 }
 
 export interface LocalRuntimeDiscovery {
-  whisperCpp?: string;
-  python?: string;
-  ffmpeg?: string;
+  whisperCpp?: boolean;
+  managedWhisper?: boolean;
+  python?: boolean;
+  ffmpeg?: boolean;
   fasterWhisper?: boolean;
   mlxWhisper?: boolean;
 }
@@ -254,7 +255,8 @@ export interface ModelDownloadProgress {
   modelId: string;
   downloadedBytes: number;
   totalBytes: number;
-  status: "downloading" | "complete";
+  status: "preparing" | "downloading" | "verifying" | "ready" | "error";
+  message?: string;
 }
 
 export interface ImportCandidate {

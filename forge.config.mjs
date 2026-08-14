@@ -17,7 +17,9 @@ const notarizeOptions = appleNotaryProfile
 export default {
   packagerConfig: {
     asar: {
-      unpack: "**/*.{node,dylib,so,dll}"
+      // Native Whisper bindings and the extensionless FFmpeg executable must
+      // live outside app.asar so Electron can load/execute them at runtime.
+      unpack: "{**/*.{node,dylib,so,dll,exe},**/node_modules/@ffmpeg-installer/**}"
     },
     ignore: [
       /^\/ios(?:\/|$)/

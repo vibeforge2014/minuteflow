@@ -14,7 +14,10 @@ const cacheTtlMs = 72 * 60 * 60 * 1_000;
 // Temporary bridge while the Paddle-backed verification service is being
 // completed. Keep only the digest in the shipped client, bind activation to
 // the first device, and stop honoring it after the fixed deadline.
-const temporaryLicenseHash = "b073dfd808f321b85324cbc40592a8f8eebfb1c756551c47226258e236a2b999";
+const temporaryLicenseHashes = [
+  "b073dfd808f321b85324cbc40592a8f8eebfb1c756551c47226258e236a2b999",
+  "6ba04be973fddb8b1b8a7084db786c01761773c77745045a4babff88992e6383"
+];
 const temporaryLicenseExpiresAt = "2026-10-01T00:00:00.000Z";
 // A wall-clock-vs-uptime skew beyond this many seconds signals the clock was
 // rolled back: if the wall claims less time elapsed than uptime advanced, or
@@ -205,8 +208,10 @@ function nowUptimeMs() {
 
 function isTemporaryLicenseKey(value) {
   const supplied = createHash("sha256").update(value).digest();
-  const expected = Buffer.from(temporaryLicenseHash, "hex");
-  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+  return temporaryLicenseHashes.some((hash) => {
+    const expected = Buffer.from(hash, "hex");
+    return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+  });
 }
 
 function temporaryLicenseIsValid(state) {

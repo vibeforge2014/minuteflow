@@ -35,10 +35,6 @@ import type {
 const LOCAL_WHISPER_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"] as const;
 const isLocalWhisperTransport = (transport: string | undefined) =>
   !!transport && (LOCAL_WHISPER_TRANSPORTS as readonly string[]).includes(transport);
-const PYTHON_WHISPER_TRANSPORTS = ["whisper-python", "faster-whisper", "mlx-whisper"] as const;
-const isPythonWhisperTransport = (transport: string | undefined) =>
-  !!transport && (PYTHON_WHISPER_TRANSPORTS as readonly string[]).includes(transport);
-
 const emptyProfile: ModelProfile = {
   name: "OpenAI 兼容模型",
   kind: "llm",
@@ -55,7 +51,23 @@ const providerPresets: Record<string, Partial<ModelProfile>> = {
     kind: "llm",
     transport: "openai-chat",
     baseUrl: "https://api.openai.com/v1",
-    model: "gpt-4.1-mini"
+    model: "gpt-5-mini"
+  },
+  anthropic: {
+    name: "Anthropic Claude",
+    kind: "llm",
+    transport: "openai-chat",
+    baseUrl: "https://api.anthropic.com",
+    model: "claude-sonnet-4-6",
+    options: { timeoutMs: 60_000, apiFlavor: "anthropic" }
+  },
+  gemini: {
+    name: "Google Gemini",
+    kind: "llm",
+    transport: "openai-chat",
+    baseUrl: "https://generativelanguage.googleapis.com",
+    model: "gemini-3.6-flash",
+    options: { timeoutMs: 60_000, apiFlavor: "gemini" }
   },
   azure: {
     name: "Azure OpenAI",
@@ -77,6 +89,49 @@ const providerPresets: Record<string, Partial<ModelProfile>> = {
     transport: "openai-chat",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     model: "qwen-plus"
+  },
+  doubao: {
+    name: "火山方舟 · 豆包",
+    kind: "llm",
+    transport: "openai-chat",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    model: "doubao-seed-2-0-lite-260215"
+  },
+  zhipu: {
+    name: "智谱 GLM",
+    kind: "llm",
+    transport: "openai-chat",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-5.2"
+  },
+  kimi: {
+    name: "Moonshot Kimi",
+    kind: "llm",
+    transport: "openai-chat",
+    baseUrl: "https://api.moonshot.cn/v1",
+    model: "kimi-k2.6"
+  },
+  minimax: {
+    name: "MiniMax",
+    kind: "llm",
+    transport: "openai-chat",
+    baseUrl: "https://api.minimaxi.com/v1",
+    model: "MiniMax-M2.7",
+    options: { timeoutMs: 60_000, chatEndpoint: "text/chatcompletion_v2" }
+  },
+  siliconflow: {
+    name: "SiliconFlow",
+    kind: "llm",
+    transport: "openai-chat",
+    baseUrl: "https://api.siliconflow.cn/v1",
+    model: "Pro/zai-org/GLM-4.7"
+  },
+  openrouter: {
+    name: "OpenRouter",
+    kind: "llm",
+    transport: "openai-chat",
+    baseUrl: "https://openrouter.ai/api/v1",
+    model: "~openai/gpt-latest"
   },
   ollama: {
     name: "Ollama",
@@ -135,6 +190,37 @@ const providerPresets: Record<string, Partial<ModelProfile>> = {
     model: "Pyannote + 3D-Speaker"
   }
 };
+
+const llmProviderGroups = [
+  {
+    label: "国内厂商",
+    providers: [
+      { key: "deepseek", name: "DeepSeek", icon: "DS", description: "推理与通用总结" },
+      { key: "dashscope", name: "通义千问", icon: "QW", description: "阿里云百炼" },
+      { key: "doubao", name: "豆包", icon: "DB", description: "火山方舟" },
+      { key: "zhipu", name: "智谱 GLM", icon: "GL", description: "智谱开放平台" },
+      { key: "kimi", name: "Kimi", icon: "KM", description: "Moonshot 开放平台" },
+      { key: "minimax", name: "MiniMax", icon: "MM", description: "MiniMax 开放平台" },
+      { key: "siliconflow", name: "SiliconFlow", icon: "SF", description: "多模型聚合平台" }
+    ]
+  },
+  {
+    label: "国际厂商",
+    providers: [
+      { key: "openai", name: "OpenAI", icon: "AI", description: "GPT 系列模型" },
+      { key: "anthropic", name: "Claude", icon: "CL", description: "Anthropic 原生接口" },
+      { key: "gemini", name: "Gemini", icon: "GM", description: "Google AI 原生接口" },
+      { key: "azure", name: "Azure OpenAI", icon: "AZ", description: "企业 Azure 部署" },
+      { key: "openrouter", name: "OpenRouter", icon: "OR", description: "全球模型聚合平台" }
+    ]
+  },
+  {
+    label: "兼容服务",
+    providers: [
+      { key: "newApiLlm", name: "New API", icon: "NA", description: "自建或聚合模型服务" }
+    ]
+  }
+] as const;
 
 export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): void }) {
   const profiles = useMeetingStore((state) => state.profiles);
@@ -313,16 +399,18 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
                       <button className={isLocalWhisperTransport(editing?.transport) ? "is-selected" : ""} onClick={() => startPreset("whisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>本地 Whisper</strong><small>自动适配 GGML/GGUF、.pt、CT2 与 MLX</small></span>{isLocalWhisperTransport(editing?.transport) && <CheckCircle size={16} weight="fill" />}</button>
                     )}
                   </div>
-                  <div className="model-catalog__section"><span>在线服务</span>
-                    {tab === "llm" ? (<>
-                      <button className={editing?.name === "OpenAI" ? "is-selected" : ""} onClick={() => startPreset("openai")}><span className="profile-icon">AI</span><span><strong>OpenAI</strong><small>开箱即用的会议总结</small></span>{editing?.name === "OpenAI" && <CheckCircle size={16} weight="fill" />}</button>
-                      <button className={editing?.name === "DeepSeek" ? "is-selected" : ""} onClick={() => startPreset("deepseek")}><span className="profile-icon">DS</span><span><strong>DeepSeek</strong><small>兼容 OpenAI 的在线模型</small></span>{editing?.name === "DeepSeek" && <CheckCircle size={16} weight="fill" />}</button>
-                      <button className={editing?.name === "New API 大模型" ? "is-selected" : ""} onClick={() => startPreset("newApiLlm")}><span className="profile-icon"><CloudArrowDown size={18} /></span><span><strong>New API</strong><small>连接自建或聚合模型服务</small></span>{editing?.name === "New API 大模型" && <CheckCircle size={16} weight="fill" />}</button>
-                    </>) : (<>
+                  {tab === "llm" ? llmProviderGroups.map((group) => (
+                    <div className="model-catalog__section" key={group.label}><span>{group.label}</span>
+                      {group.providers.map((provider) => {
+                        const preset = providerPresets[provider.key];
+                        const selected = editing?.name === preset.name && editing?.transport === preset.transport;
+                        return <button key={provider.key} className={selected ? "is-selected" : ""} onClick={() => startPreset(provider.key)}><span className="profile-icon">{provider.icon}</span><span><strong>{provider.name}</strong><small>{provider.description}</small></span>{selected && <CheckCircle size={16} weight="fill" />}</button>;
+                      })}
+                    </div>
+                  )) : <div className="model-catalog__section"><span>在线服务</span><>
                       <button className={editing?.name === "OpenAI Whisper" ? "is-selected" : ""} onClick={() => startPreset("openaiWhisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>OpenAI Whisper</strong><small>无需下载本地模型</small></span>{editing?.name === "OpenAI Whisper" && <CheckCircle size={16} weight="fill" />}</button>
                       <button className={editing?.name === "New API 语音转录" ? "is-selected" : ""} onClick={() => startPreset("newApiWhisper")}><span className="profile-icon"><CloudArrowDown size={18} /></span><span><strong>New API</strong><small>OpenAI 音频接口兼容</small></span>{editing?.name === "New API 语音转录" && <CheckCircle size={16} weight="fill" />}</button>
-                    </>)}
-                  </div>
+                    </></div>}
                   {!!profiles.length && <div className="model-catalog__section"><span>已保存</span>{profiles.filter((profile) => profile.kind === (tab === "llm" ? "llm" : "stt")).map((profile) => (
                     <button key={profile.id} className={editing?.id === profile.id ? "is-selected" : ""} onClick={() => { setEditing(profile); setApiKey(""); setStatus(null); }}><span className="profile-icon">{profile.kind === "stt" ? "STT" : profile.kind === "llm" ? "LLM" : "SPK"}</span><span><strong>{profile.name}</strong><small>{profile.model || "尚未选择模型"}</small></span>{profile.enabled && <CheckCircle size={16} weight="fill" />}</button>
                   ))}</div>}
@@ -343,17 +431,13 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
                           if (preset) setEditing({
                             ...editing,
                             ...preset,
-                            options: { ...editing.options, ...(preset.options ?? {}) }
+                            options: { ...emptyProfile.options, ...(preset.options ?? {}) }
                           });
                         }}>
                           <option value="">自定义配置</option>
                           {tab === "llm" ? (<>
-                            <option value="openai">OpenAI</option>
-                            <option value="azure">Azure OpenAI</option>
-                            <option value="deepseek">DeepSeek</option>
-                            <option value="dashscope">通义千问 / DashScope</option>
+                            {llmProviderGroups.map((group) => <optgroup label={group.label} key={group.label}>{group.providers.map((provider) => <option value={provider.key} key={provider.key}>{provider.name}</option>)}</optgroup>)}
                             <option value="ollama">Ollama（本地）</option>
-                            <option value="newApiLlm">New API</option>
                           </>) : (<>
                             <option value="whisper">本地 Whisper（自动适配）</option>
                             <option value="openaiWhisper">OpenAI Whisper</option>
@@ -364,23 +448,10 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
                       <label className="field"><span>名称</span><input value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></label>
                       <div className="field"><span>用于</span><div className="readonly-control">{tab === "llm" ? "会议总结与行动项" : "会议语音转文字"}</div></div>
                       <div className="field"><span>连接方式</span><div className="readonly-control">{isLocalWhisperTransport(editing.transport) ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
-                      <label className="field"><span>模型</span><input value={editing.model} onChange={(event) => setEditing({ ...editing, model: event.target.value })} placeholder={tab === "llm" ? "例如 gpt-4.1-mini" : "例如 whisper-1"} /></label>
+                      {!isLocalWhisperTransport(editing.transport) && <label className="field"><span>模型</span><input value={editing.model} onChange={(event) => setEditing({ ...editing, model: event.target.value })} placeholder={tab === "llm" ? "例如 gpt-4.1-mini" : "例如 whisper-1"} /></label>}
                     </div>
                     {isLocalWhisperTransport(editing.transport) ? (
-                      <>
-                        <LocalModelManager profile={editing} onChange={setEditing} />
-                        <details className="advanced-runtime-options">
-                          <summary>高级：手动指定运行环境</summary>
-                          <p>仅在自动发现失败或需要使用自定义运行环境时填写。</p>
-                          {editing.transport === "whisper-cpp" ? (
-                            <label className="field"><span>whisper.cpp 可执行文件</span><input value={editing.options.executablePath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, executablePath: event.target.value } })} placeholder="whisper-cli 路径" /></label>
-                          ) : (
-                            <label className="field"><span>Python 可执行文件</span><input value={editing.options.pythonExecutablePath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, pythonExecutablePath: event.target.value } })} placeholder="已安装 Whisper 包（openai-whisper / faster-whisper / mlx-whisper）的 Python 路径" /></label>
-                          )}
-                          <label className="field"><span>{editing.transport === "whisper-cpp" ? "GGML / GGUF 模型路径" : editing.transport === "whisper-python" ? "PyTorch .pt 模型路径" : "模型目录或 Hugging Face 仓库 ID"}</span><input value={editing.options.modelPath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, modelPath: event.target.value } })} /></label>
-                          <label className="field"><span>FFmpeg 路径</span><input value={editing.options.ffmpegPath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, ffmpegPath: event.target.value } })} /></label>
-                        </details>
-                      </>
+                      <LocalModelManager profile={editing} onChange={setEditing} />
                     ) : editing.transport === "sherpa-onnx" ? (
                       <>
                         <label className="field"><span>sherpa-onnx 分离程序</span><input value={editing.options.executablePath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, executablePath: event.target.value } })} /></label>
@@ -395,9 +466,11 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
                           <div className="field"><span>连接方式</span><div className="readonly-control">本机 Ollama 服务</div></div>
                         ) : (
                           <label className="field"><span>兼容协议</span>
-                            <select value={editing.options.apiFlavor || "openai"} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, apiFlavor: event.target.value as "openai" | "new-api" } })}>
+                            <select value={editing.options.apiFlavor || "openai"} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, apiFlavor: event.target.value as "openai" | "new-api" | "anthropic" | "gemini" } })}>
                               <option value="openai">OpenAI 兼容</option>
                               <option value="new-api">New API</option>
+                              <option value="anthropic">Anthropic 原生</option>
+                              <option value="gemini">Google Gemini 原生</option>
                             </select>
                           </label>
                         )}
@@ -556,24 +629,20 @@ function LocalModelManager({
       options: {
         ...profile.options,
         modelPath: model.path,
-        executablePath: model.engine === "whisper-cpp"
-          ? (profile.options.executablePath || runtimes?.whisperCpp)
-          : profile.options.executablePath,
-        pythonExecutablePath: (PYTHON_WHISPER_TRANSPORTS as readonly string[]).includes(model.engine)
-          ? (profile.options.pythonExecutablePath || runtimes?.python)
-          : profile.options.pythonExecutablePath,
-        ffmpegPath: profile.options.ffmpegPath || runtimes?.ffmpeg
+        // Runtime locations are resolved in the Electron main process. Keep
+        // legacy values intact for upgraded profiles, but never create new
+        // user-managed path settings from the renderer.
       }
       };
       const saved = await api.models.save(nextProfile);
       onChange(saved);
       await loadProfiles();
-      const runtimeMissing = model.engine === "whisper-cpp"
-        ? !saved.options.executablePath
-        : !saved.options.pythonExecutablePath;
-      setSuccess(runtimeMissing
-        ? `已启用 ${model.name}；模型路径已保存。还需要在下方补充${model.engine === "whisper-cpp" ? " whisper-cli" : "已安装对应 Whisper 包（faster-whisper / mlx-whisper / openai-whisper）的 Python"}路径。`
-        : `已启用 ${model.name}，后续会议将使用此模型转写。`);
+      const runtimeReady = model.engine === "whisper-cpp"
+        ? Boolean(runtimes?.managedWhisper || runtimes?.whisperCpp)
+        : Boolean(runtimes?.python);
+      setSuccess(runtimeReady
+        ? `已启用 ${model.name}，后续会议将使用此模型转写。`
+        : `已启用 ${model.name}；应用会在转写前自动检查所需组件。`);
     } catch (applyError) {
       setError(applyError instanceof Error ? applyError.message : "无法启用本地模型");
     } finally {
@@ -612,7 +681,7 @@ function LocalModelManager({
   const downloadModel = async (modelId: string) => {
     setBusy(true);
     setError(null);
-    setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "downloading" });
+    setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "preparing", message: "正在准备转写组件…" });
     try {
       const model = await api.models.download(modelId);
       const discovery = await api.models.scanLocal();
@@ -620,7 +689,9 @@ function LocalModelManager({
       await applyModel(model, discovery.runtimes);
       setCatalog(await api.models.catalog());
     } catch (downloadError) {
-      setError(downloadError instanceof Error ? downloadError.message : "模型下载失败");
+      const message = downloadError instanceof Error ? downloadError.message : "模型下载失败";
+      setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "error", message: "准备失败，可重试。" });
+      setError(message);
     } finally {
       setBusy(false);
     }
@@ -628,11 +699,12 @@ function LocalModelManager({
 
   const runtimeLabels: string[] = scan
     ? [
-        scan.runtimes.whisperCpp && "whisper.cpp 已就绪",
-        scan.runtimes.python && "Python 已找到",
+        scan.runtimes.managedWhisper && "本地转写组件已就绪",
+        !scan.runtimes.managedWhisper && scan.runtimes.whisperCpp && "兼容转写组件已就绪",
+        scan.runtimes.python && "兼容模型运行环境已就绪",
         scan.runtimes.fasterWhisper && "faster-whisper 已就绪",
         scan.runtimes.mlxWhisper && "mlx-whisper 已就绪",
-        scan.runtimes.ffmpeg && "FFmpeg 已找到"
+        scan.runtimes.ffmpeg && "音频处理组件已就绪"
       ].filter((label): label is string => typeof label === "string")
     : [];
 
@@ -673,9 +745,12 @@ function LocalModelManager({
                   await applyModel({ path: model.localPath!, name: model.fileName, format: model.format, engine: model.engine, sizeBytes: model.sizeBytes }, discovery.runtimes);
                 }}>{profile.options.modelPath === model.localPath ? "使用中" : "使用"}</button>
               ) : (
-                <button className="button button--small" disabled={busy} onClick={() => downloadModel(model.id)}><CloudArrowDown size={15} />{currentProgress ? `${percent}%` : "下载"}</button>
+                <button className="button button--small" disabled={busy} onClick={() => downloadModel(model.id)}><CloudArrowDown size={15} />{currentProgress ? (currentProgress.status === "downloading" ? `${percent}%` : currentProgress.status === "verifying" ? "校验中" : currentProgress.status === "ready" ? "已就绪" : currentProgress.status === "error" ? "重试" : "准备中") : "下载"}</button>
               )}
-              {currentProgress && <progress max="100" value={percent} aria-label={`${model.name} 下载进度`} />}
+              {currentProgress && <>
+                <progress max="100" value={currentProgress.status === "ready" ? 100 : percent} aria-label={`${model.name} 下载进度`} />
+                {currentProgress.message && <small>{currentProgress.message}</small>}
+              </>}
             </div>
           );
         })}

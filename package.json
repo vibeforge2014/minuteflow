@@ -1,7 +1,7 @@
 {
   "name": "minuteflow",
   "productName": "MinuteFlow",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": true,
   "type": "module",
   "main": "electron/main.mjs",
@@ -20,6 +20,8 @@
     "test:sites": "node --test tests/sites-worker.test.mjs"
   },
   "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@fugood/whisper.node": "^1.1.1",
     "@phosphor-icons/react": "^2.1.10",
     "@tiptap/extension-placeholder": "^3.0.7",
     "@tiptap/react": "^3.0.7",
