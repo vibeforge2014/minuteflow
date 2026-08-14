@@ -32,6 +32,13 @@ import type {
   AppUpdateCheckResult
 } from "../types";
 
+const LOCAL_WHISPER_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"] as const;
+const isLocalWhisperTransport = (transport: string | undefined) =>
+  !!transport && (LOCAL_WHISPER_TRANSPORTS as readonly string[]).includes(transport);
+const PYTHON_WHISPER_TRANSPORTS = ["whisper-python", "faster-whisper", "mlx-whisper"] as const;
+const isPythonWhisperTransport = (transport: string | undefined) =>
+  !!transport && (PYTHON_WHISPER_TRANSPORTS as readonly string[]).includes(transport);
+
 const emptyProfile: ModelProfile = {
   name: "OpenAI 兼容模型",
   kind: "llm",
@@ -303,7 +310,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
                     {tab === "llm" ? (
                       <button className={editing?.name === "Ollama" ? "is-selected" : ""} onClick={() => startPreset("ollama")}><span className="profile-icon">OL</span><span><strong>Ollama</strong><small>数据留在本机 · 需要已安装服务</small></span>{editing?.name === "Ollama" && <CheckCircle size={16} weight="fill" />}</button>
                     ) : (
-                      <button className={editing?.transport === "whisper-cpp" || editing?.transport === "whisper-python" ? "is-selected" : ""} onClick={() => startPreset("whisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>本地 Whisper</strong><small>自动适配 GGML、GGUF 与 .pt</small></span>{(editing?.transport === "whisper-cpp" || editing?.transport === "whisper-python") && <CheckCircle size={16} weight="fill" />}</button>
+                      <button className={isLocalWhisperTransport(editing?.transport) ? "is-selected" : ""} onClick={() => startPreset("whisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>本地 Whisper</strong><small>自动适配 GGML/GGUF、.pt、CT2 与 MLX</small></span>{isLocalWhisperTransport(editing?.transport) && <CheckCircle size={16} weight="fill" />}</button>
                     )}
                   </div>
                   <div className="model-catalog__section"><span>在线服务</span>
@@ -356,10 +363,10 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
                       </label>
                       <label className="field"><span>名称</span><input value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></label>
                       <div className="field"><span>用于</span><div className="readonly-control">{tab === "llm" ? "会议总结与行动项" : "会议语音转文字"}</div></div>
-                      <div className="field"><span>连接方式</span><div className="readonly-control">{editing.transport === "whisper-cpp" || editing.transport === "whisper-python" ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
+                      <div className="field"><span>连接方式</span><div className="readonly-control">{isLocalWhisperTransport(editing.transport) ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
                       <label className="field"><span>模型</span><input value={editing.model} onChange={(event) => setEditing({ ...editing, model: event.target.value })} placeholder={tab === "llm" ? "例如 gpt-4.1-mini" : "例如 whisper-1"} /></label>
                     </div>
-                    {editing.transport === "whisper-cpp" || editing.transport === "whisper-python" ? (
+                    {isLocalWhisperTransport(editing.transport) ? (
                       <>
                         <LocalModelManager profile={editing} onChange={setEditing} />
                         <details className="advanced-runtime-options">
@@ -368,9 +375,9 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
                           {editing.transport === "whisper-cpp" ? (
                             <label className="field"><span>whisper.cpp 可执行文件</span><input value={editing.options.executablePath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, executablePath: event.target.value } })} placeholder="whisper-cli 路径" /></label>
                           ) : (
-                            <label className="field"><span>Python 可执行文件</span><input value={editing.options.pythonExecutablePath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, pythonExecutablePath: event.target.value } })} placeholder="已安装 openai-whisper 的 Python 路径" /></label>
+                            <label className="field"><span>Python 可执行文件</span><input value={editing.options.pythonExecutablePath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, pythonExecutablePath: event.target.value } })} placeholder="已安装 Whisper 包（openai-whisper / faster-whisper / mlx-whisper）的 Python 路径" /></label>
                           )}
-                          <label className="field"><span>{editing.transport === "whisper-python" ? "PyTorch .pt 模型路径" : "GGML / GGUF 模型路径"}</span><input value={editing.options.modelPath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, modelPath: event.target.value } })} /></label>
+                          <label className="field"><span>{editing.transport === "whisper-cpp" ? "GGML / GGUF 模型路径" : editing.transport === "whisper-python" ? "PyTorch .pt 模型路径" : "模型目录或 Hugging Face 仓库 ID"}</span><input value={editing.options.modelPath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, modelPath: event.target.value } })} /></label>
                           <label className="field"><span>FFmpeg 路径</span><input value={editing.options.ffmpegPath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, ffmpegPath: event.target.value } })} /></label>
                         </details>
                       </>
@@ -552,7 +559,7 @@ function LocalModelManager({
         executablePath: model.engine === "whisper-cpp"
           ? (profile.options.executablePath || runtimes?.whisperCpp)
           : profile.options.executablePath,
-        pythonExecutablePath: model.engine === "whisper-python"
+        pythonExecutablePath: (PYTHON_WHISPER_TRANSPORTS as readonly string[]).includes(model.engine)
           ? (profile.options.pythonExecutablePath || runtimes?.python)
           : profile.options.pythonExecutablePath,
         ffmpegPath: profile.options.ffmpegPath || runtimes?.ffmpeg
@@ -565,7 +572,7 @@ function LocalModelManager({
         ? !saved.options.executablePath
         : !saved.options.pythonExecutablePath;
       setSuccess(runtimeMissing
-        ? `已启用 ${model.name}；模型路径已保存。还需要在下方补充${model.engine === "whisper-cpp" ? " whisper-cli" : "已安装 openai-whisper 的 Python"}路径。`
+        ? `已启用 ${model.name}；模型路径已保存。还需要在下方补充${model.engine === "whisper-cpp" ? " whisper-cli" : "已安装对应 Whisper 包（faster-whisper / mlx-whisper / openai-whisper）的 Python"}路径。`
         : `已启用 ${model.name}，后续会议将使用此模型转写。`);
     } catch (applyError) {
       setError(applyError instanceof Error ? applyError.message : "无法启用本地模型");
@@ -619,11 +626,15 @@ function LocalModelManager({
     }
   };
 
-  const runtimeLabels = scan ? [
-    scan.runtimes.whisperCpp && "whisper.cpp 已就绪",
-    scan.runtimes.python && "Python 已找到",
-    scan.runtimes.ffmpeg && "FFmpeg 已找到"
-  ].filter(Boolean) : [];
+  const runtimeLabels: string[] = scan
+    ? [
+        scan.runtimes.whisperCpp && "whisper.cpp 已就绪",
+        scan.runtimes.python && "Python 已找到",
+        scan.runtimes.fasterWhisper && "faster-whisper 已就绪",
+        scan.runtimes.mlxWhisper && "mlx-whisper 已就绪",
+        scan.runtimes.ffmpeg && "FFmpeg 已找到"
+      ].filter((label): label is string => typeof label === "string")
+    : [];
 
   return (
     <section className="local-model-manager">

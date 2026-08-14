@@ -42,7 +42,9 @@ import {
   testModelProfile,
   transcribeRemote,
   transcribeWithWhisperCpp,
-  transcribeWithPythonWhisper
+  transcribeWithPythonWhisper,
+  transcribeWithFasterWhisper,
+  transcribeWithMlxWhisper
 } from "./services/providers.mjs";
 import { chooseImportFiles, exportMeeting } from "./services/exports.mjs";
 import {
@@ -117,13 +119,23 @@ function localModelDirectory() {
 }
 
 function transcribeLocally(profile, audio, fileName, language, glossary) {
-  return profile.transport === "whisper-python"
-    ? transcribeWithPythonWhisper(profile, audio, fileName, language, glossary)
-    : transcribeWithWhisperCpp(profile, audio, fileName, language, glossary);
+  switch (profile.transport) {
+    case "whisper-python":
+      return transcribeWithPythonWhisper(profile, audio, fileName, language, glossary);
+    case "faster-whisper":
+      return transcribeWithFasterWhisper(profile, audio, fileName, language, glossary);
+    case "mlx-whisper":
+      return transcribeWithMlxWhisper(profile, audio, fileName, language, glossary);
+    default:
+      return transcribeWithWhisperCpp(profile, audio, fileName, language, glossary);
+  }
 }
 
+const LOCAL_TRANSCRIPTION_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"];
+const PYTHON_TRANSCRIPTION_TRANSPORTS = ["whisper-python", "faster-whisper", "mlx-whisper"];
+
 async function resolveLocalTranscriptionProfile(profile) {
-  if (profile.transport !== "whisper-cpp" && profile.transport !== "whisper-python") return profile;
+  if (!LOCAL_TRANSCRIPTION_TRANSPORTS.includes(profile.transport)) return profile;
   const needsRuntime = profile.transport === "whisper-cpp"
     ? !profile.options?.executablePath
     : !profile.options?.pythonExecutablePath && !profile.options?.executablePath;
@@ -143,7 +155,7 @@ async function resolveLocalTranscriptionProfile(profile) {
     ...profile.options,
     ...(profile.transport === "whisper-cpp" && !profile.options?.executablePath && discovery.runtimes.whisperCpp
       ? { executablePath: discovery.runtimes.whisperCpp } : {}),
-    ...(profile.transport === "whisper-python" && !profile.options?.pythonExecutablePath && discovery.runtimes.python
+    ...(PYTHON_TRANSCRIPTION_TRANSPORTS.includes(profile.transport) && !profile.options?.pythonExecutablePath && discovery.runtimes.python
       ? { pythonExecutablePath: discovery.runtimes.python } : {}),
     ...(!profile.options?.ffmpegPath && discovery.runtimes.ffmpeg ? { ffmpegPath: discovery.runtimes.ffmpeg } : {}),
     ...(!profile.options?.modelPath && matchingModel ? { modelPath: matchingModel.path } : {})
@@ -479,10 +491,11 @@ function registerIpc() {
     const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "stt");
     if (!profile) throw new Error("尚未配置转录模型。");
     const audio = Buffer.from(payload.data);
-    const localProfile = ["whisper-cpp", "whisper-python"].includes(profile.transport)
+    const isLocal = LOCAL_TRANSCRIPTION_TRANSPORTS.includes(profile.transport);
+    const localProfile = isLocal
       ? await resolveLocalTranscriptionProfile(profile)
       : profile;
-    const result = ["whisper-cpp", "whisper-python"].includes(profile.transport)
+    const result = isLocal
       ? await transcribeLocally(localProfile, audio, payload.fileName, payload.language, payload.glossary)
       : await transcribeRemote(
         profile,

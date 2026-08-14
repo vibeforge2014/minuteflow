@@ -20,10 +20,26 @@ import {
   summarizeWithOpenAICompatible,
   transcribeRemote,
   transcribeWithPythonWhisper,
-  transcribeWithWhisperCpp
+  transcribeWithWhisperCpp,
+  transcribeWithFasterWhisper,
+  transcribeWithMlxWhisper
 } from "./providers.mjs";
 import { applyDiarization, diarizeWithSherpa } from "./diarization.mjs";
 import { discoverLocalModels } from "./local-models.mjs";
+
+const LOCAL_TRANSCRIPTION_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"];
+function transcribeLocal(profile, audio, fileName, language, signal) {
+  switch (profile.transport) {
+    case "whisper-python":
+      return transcribeWithPythonWhisper(profile, audio, fileName, language, [], signal);
+    case "faster-whisper":
+      return transcribeWithFasterWhisper(profile, audio, fileName, language, [], signal);
+    case "mlx-whisper":
+      return transcribeWithMlxWhisper(profile, audio, fileName, language, [], signal);
+    default:
+      return transcribeWithWhisperCpp(profile, audio, fileName, language, [], signal);
+  }
+}
 
 const activeControllers = new Map();
 const activeProcesses = new Map();
@@ -210,7 +226,7 @@ async function processJob(initial) {
       patchJob(job.id, { status: "waiting_for_model", stage: "transcribing", progress: 0.2 });
       return;
     }
-    if (["whisper-cpp", "whisper-python"].includes(sttProfile.transport)) {
+    if (LOCAL_TRANSCRIPTION_TRANSPORTS.includes(sttProfile.transport)) {
       sttProfile = await resolveLocalProfile(sttProfile);
       const missingModel = !sttProfile.options?.modelPath;
       const missingRuntime = sttProfile.transport === "whisper-cpp"
@@ -227,11 +243,9 @@ async function processJob(initial) {
       job = patchJob(job.id, { status: "transcribing", stage: "transcribing", progress: 0.35, sttProfileId: sttProfile.id });
       const audio = await readFile(job.archivedPath);
       const language = job.language === "auto" ? "" : job.language;
-      const result = sttProfile.transport === "whisper-python"
-        ? await transcribeWithPythonWhisper(sttProfile, audio, job.sourceName, language, [], controller.signal)
-        : sttProfile.transport === "whisper-cpp"
-          ? await transcribeWithWhisperCpp(sttProfile, audio, job.sourceName, language, [], controller.signal)
-          : await transcribeRemote(sttProfile, readSecret(sttProfile.secretId), audio, job.sourceName, language, [], controller.signal);
+      const result = LOCAL_TRANSCRIPTION_TRANSPORTS.includes(sttProfile.transport)
+        ? await transcribeLocal(sttProfile, audio, job.sourceName, language, controller.signal)
+        : await transcribeRemote(sttProfile, readSecret(sttProfile.secretId), audio, job.sourceName, language, [], controller.signal);
       const durationSeconds = Math.max(0, Math.round(result.duration || 0));
       const transcript = result.segments?.length
         ? result.segments.map((segment) => ({
@@ -321,13 +335,14 @@ async function resolveLocalProfile(profile) {
     roots: [app.getPath("downloads"), path.join(homedir(), ".cache", "whisper"), path.join(homedir(), ".cache", "huggingface", "hub")]
   });
   const model = discovery.models.find((candidate) => candidate.engine === profile.transport);
+  const isPythonBased = ["whisper-python", "faster-whisper", "mlx-whisper"].includes(profile.transport);
   return {
     ...profile,
     options: {
       ...profile.options,
       ...(!profile.options?.modelPath && model ? { modelPath: model.path } : {}),
       ...(profile.transport === "whisper-cpp" && !profile.options?.executablePath && discovery.runtimes.whisperCpp ? { executablePath: discovery.runtimes.whisperCpp } : {}),
-      ...(profile.transport === "whisper-python" && !profile.options?.pythonExecutablePath && discovery.runtimes.python ? { pythonExecutablePath: discovery.runtimes.python } : {}),
+      ...(isPythonBased && !profile.options?.pythonExecutablePath && discovery.runtimes.python ? { pythonExecutablePath: discovery.runtimes.python } : {}),
       ...(!profile.options?.ffmpegPath && discovery.runtimes.ffmpeg ? { ffmpegPath: discovery.runtimes.ffmpeg } : {})
     }
   };

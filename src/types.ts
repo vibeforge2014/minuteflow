@@ -62,7 +62,7 @@ export interface ModelProfile {
   id?: string;
   name: string;
   kind: "llm" | "stt" | "diarization";
-  transport: "openai-chat" | "openai-audio" | "ollama" | "whisper-cpp" | "whisper-python" | "sherpa-onnx";
+  transport: "openai-chat" | "openai-audio" | "ollama" | "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper" | "sherpa-onnx";
   baseUrl: string;
   model: string;
   secretId?: string;
@@ -219,7 +219,7 @@ export interface LocalModelFile {
   path: string;
   name: string;
   format: string;
-  engine: "whisper-cpp" | "whisper-python";
+  engine: "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper";
   sizeBytes: number;
 }
 
@@ -227,6 +227,8 @@ export interface LocalRuntimeDiscovery {
   whisperCpp?: string;
   python?: string;
   ffmpeg?: string;
+  fasterWhisper?: boolean;
+  mlxWhisper?: boolean;
 }
 
 export interface LocalModelScanResult {
@@ -238,7 +240,7 @@ export interface DownloadableModel {
   id: string;
   name: string;
   description: string;
-  engine: "whisper-cpp" | "whisper-python";
+  engine: "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper";
   format: string;
   sizeBytes: number;
   fileName: string;

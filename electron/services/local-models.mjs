@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir, open, readdir, rename, stat, unlink } from "node:fs/promises";
+import { access, mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 const supportedExtensions = new Map([
@@ -89,6 +90,54 @@ function describeModel(filePath, sizeBytes = 0) {
   };
 }
 
+// Recognize directory-based Whisper models that are not single checkpoint files:
+//   - CTranslate2 (faster-whisper): model.bin + config.json
+//   - MLX (mlx-whisper): weights.npz + config.json
+// config.json is parsed and must look like a Whisper model so unrelated
+// config.json+weights directories (other HF models) are not misdetected.
+async function describeModelDirectory(dirPath) {
+  let entries;
+  try {
+    entries = await readdir(dirPath, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const names = new Set(entries.filter((entry) => entry.isFile()).map((entry) => entry.name));
+  if (!names.has("config.json")) return null;
+  let config;
+  try {
+    config = JSON.parse(await readFile(path.join(dirPath, "config.json"), "utf8"));
+  } catch {
+    return null;
+  }
+  const isWhisper = config?.model_type === "whisper"
+    || (Array.isArray(config?.architectures) && config.architectures.some((item) => /whisper/i.test(String(item))))
+    || /whisper/i.test(JSON.stringify(config));
+  if (!isWhisper) return null;
+  if (names.has("model.bin")) {
+    return { path: dirPath, name: path.basename(dirPath), format: "CTranslate2", engine: "faster-whisper", sizeBytes: 0 };
+  }
+  if (names.has("weights.npz")) {
+    return { path: dirPath, name: path.basename(dirPath), format: "MLX", engine: "mlx-whisper", sizeBytes: 0 };
+  }
+  return null;
+}
+
+function probePythonPackage(pythonPath, pkg, timeoutMs = 8_000) {
+  return new Promise((resolve) => {
+    if (!pythonPath) return resolve(false);
+    let done = false;
+    const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
+    const child = spawn(pythonPath, ["-c", `import importlib; importlib.import_module(${JSON.stringify(pkg)})`], {
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "ignore"]
+    });
+    const timer = setTimeout(() => { child.kill("SIGKILL"); finish(false); }, timeoutMs);
+    child.on("error", () => { clearTimeout(timer); finish(false); });
+    child.on("close", (code) => { clearTimeout(timer); finish(code === 0); });
+  });
+}
+
 export function looksLikeWhisperModel(filePath, sizeBytes) {
   if (sizeBytes < 30_000_000) return false;
   const extension = path.extname(filePath).toLowerCase();
@@ -112,6 +161,11 @@ async function scanDirectory(root, output, state, depth = 0) {
     state.visited += 1;
     const target = path.join(root, entry.name);
     if (entry.isDirectory()) {
+      const dirDescriptor = await describeModelDirectory(target);
+      if (dirDescriptor) {
+        output.push(dirDescriptor);
+        continue; // Present a model directory as a single model; do not scan inside.
+      }
       if (!entry.name.startsWith(".") || [".cache"].includes(entry.name)) {
         await scanDirectory(target, output, state, depth + 1);
       }
@@ -162,12 +216,15 @@ export async function discoverLocalModels({ roots, modelDirectory }) {
   }
   const uniqueModels = Array.from(new Map(models.map((item) => [item.path, item])).values())
     .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+  const python = await findExecutable(process.platform === "win32" ? ["python", "python3"] : ["python3", "python"]);
   return {
     models: uniqueModels,
     runtimes: {
       whisperCpp: await findExecutable(["whisper-cli", "whisper-cpp"]),
-      python: await findExecutable(process.platform === "win32" ? ["python", "python3"] : ["python3", "python"]),
-      ffmpeg: await findExecutable(["ffmpeg"])
+      python,
+      ffmpeg: await findExecutable(["ffmpeg"]),
+      fasterWhisper: await probePythonPackage(python, "faster_whisper"),
+      mlxWhisper: process.platform === "darwin" ? await probePythonPackage(python, "mlx_whisper") : false
     }
   };
 }

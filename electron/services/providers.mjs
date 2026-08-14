@@ -173,6 +173,74 @@ export function summarizeLocally(input) {
   });
 }
 
+// faster-whisper (CTranslate2) and mlx-whisper both run as Python packages and
+// accept either a local model directory or a Hugging Face repo id. They decode
+// audio themselves, but converting to 16k mono WAV via FFmpeg first avoids a
+// hard dependency on pyav/torchaudio being installed alongside the package.
+const FASTER_WHISPER_SCRIPT = [
+  "import json, sys",
+  "from faster_whisper import WhisperModel",
+  "model = WhisperModel(sys.argv[1], device='auto', compute_type='auto')",
+  "segments, info = model.transcribe(sys.argv[2], language=sys.argv[3] or None, initial_prompt=sys.argv[4] or None, vad_filter=True)",
+  "materialized = [{'start': float(s.start), 'end': float(s.end), 'text': (s.text or '').strip()} for s in segments]",
+  "print(json.dumps({'text': ' '.join(s['text'] for s in materialized), 'language': getattr(info, 'language', None), 'segments': materialized}, ensure_ascii=False))"
+].join("\n");
+
+const MLX_WHISPER_SCRIPT = [
+  "import json, sys",
+  "import mlx_whisper",
+  "result = mlx_whisper.transcribe(sys.argv[2], path_or_hf_repo=sys.argv[1], language=sys.argv[3] or None, initial_prompt=sys.argv[4] or None)",
+  "segments = [{'start': float(s.get('start', 0)), 'end': float(s.get('end', 0)), 'text': (s.get('text') or '').strip()} for s in result.get('segments', [])]",
+  "print(json.dumps({'text': (result.get('text') or '').strip(), 'language': result.get('language'), 'segments': segments}, ensure_ascii=False))"
+].join("\n");
+
+async function transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, script) {
+  const modelPath = profile.options?.modelPath;
+  const pythonPath = profile.options?.pythonExecutablePath
+    || profile.options?.executablePath
+    || (process.platform === "win32" ? "python" : "python3");
+  if (!modelPath) throw new Error("请先选择本地模型目录或填写 Hugging Face 仓库 ID。");
+  const promptSegments = [];
+  if (language === "zh") promptSegments.push("以下是简体中文的会议记录。");
+  if (glossary.length) promptSegments.push(glossary.slice(0, 200).join("，"));
+  const inputPath = path.join(tmpdir(), `${randomUUID()}-${fileName}`);
+  let wavePath = inputPath;
+  await writeFile(inputPath, audioBuffer);
+  const environment = { ...process.env };
+  if (profile.options?.ffmpegPath) {
+    environment.PATH = `${path.dirname(profile.options.ffmpegPath)}${path.delimiter}${environment.PATH ?? ""}`;
+    wavePath = `${inputPath}.wav`;
+    await runProcess(profile.options.ffmpegPath, ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavePath], { signal });
+  }
+  try {
+    const { stdout } = await runProcess(pythonPath, ["-c", script, modelPath, wavePath, language ?? "", promptSegments.join("")], { env: environment, signal });
+    const payload = JSON.parse(stdout.trim().split("\n").pop());
+    const segments = (payload.segments ?? [])
+      .map((segment) => ({
+        startMs: Math.round((Number(segment.start) || 0) * 1000),
+        endMs: Math.round((Number(segment.end) || 0) * 1000),
+        text: String(segment.text ?? "").trim()
+      }))
+      .filter((segment) => segment.text);
+    return {
+      text: (payload.text ?? segments.map((segment) => segment.text).join(" ")).trim(),
+      segments,
+      duration: segments.length ? Math.max(...segments.map((segment) => segment.endMs)) / 1000 : undefined
+    };
+  } finally {
+    await Promise.allSettled([unlink(inputPath), wavePath !== inputPath && unlink(wavePath)]);
+  }
+}
+
+export async function transcribeWithFasterWhisper(profile, audioBuffer, fileName, language = "zh", glossary = [], signal) {
+  return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, FASTER_WHISPER_SCRIPT);
+}
+
+export async function transcribeWithMlxWhisper(profile, audioBuffer, fileName, language = "zh", glossary = [], signal) {
+  if (process.platform !== "darwin") throw new Error("MLX-Whisper 仅在 Apple Silicon macOS 上可用。");
+  return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, MLX_WHISPER_SCRIPT);
+}
+
 export async function transcribeRemote(
   profile,
   apiKey,
@@ -401,6 +469,22 @@ export async function testModelProfile(profile, apiKey) {
     await access(profile.options.modelPath);
     const result = await runProcess(pythonPath, ["-c", "import whisper; print(whisper.__version__)"], { timeoutMs: 15_000 });
     return { ok: true, message: `Python Whisper 已就绪（${result.stdout.trim() || "版本未知"}）。` };
+  }
+  if (profile.transport === "faster-whisper" || profile.transport === "mlx-whisper") {
+    const label = profile.transport === "faster-whisper" ? "faster-whisper" : "mlx-whisper";
+    if (profile.transport === "mlx-whisper" && process.platform !== "darwin") {
+      throw new Error("MLX-Whisper 仅在 Apple Silicon macOS 上可用。");
+    }
+    if (!profile.options?.modelPath) throw new Error("请选择本地模型目录或填写 Hugging Face 仓库 ID。");
+    const pythonPath = profile.options?.pythonExecutablePath
+      || profile.options?.executablePath
+      || (process.platform === "win32" ? "python" : "python3");
+    try {
+      await runProcess(pythonPath, ["-c", `import ${label.replace("-", "_")}`], { timeoutMs: 20_000 });
+    } catch (error) {
+      throw new Error(`未检测到 ${label}，请先安装：pip install ${label}${error instanceof Error && error.message ? `（${error.message}）` : ""}`);
+    }
+    return { ok: true, message: `${label} 已就绪，模型路径已配置。` };
   }
   if (profile.transport === "sherpa-onnx") {
     if (
