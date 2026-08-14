@@ -1,7 +1,8 @@
 import { app } from "electron";
-import { existsSync, statSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { hostname, networkInterfaces, cpus, platform, arch } from "node:os";
+import { hostname, cpus, platform, arch } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { deleteSecret, readSecret, storeSecret } from "./secrets.mjs";
@@ -54,34 +55,44 @@ async function writeState(value) {
   await rename(temporary, target);
 }
 
-// Machine fingerprint built from stable, non-sensitive OS traits. Used to bind
-// an activation to a device so copying license.json to another Mac is rejected.
-function machineFingerprint() {
-  const interfaces = networkInterfaces();
-  const macs = Object.values(interfaces)
-    .flat()
-    .filter((item) => item && !item.internal && item.mac && item.mac !== "00:00:00:00:00:00")
-    .map((item) => item.mac)
-    .sort();
-  const cpuSignature = (cpus()[0]?.model || "") + (cpus().length || 0);
-  return createHash("sha256")
-    .update(`${platform()}|${arch()}|${hostname()}|${cpuSignature}|${macs.join(",")}`)
-    .digest("hex");
+// Stable, non-sensitive hardware identifier. Used instead of MAC addresses,
+// which change whenever a VPN, Docker bridge, dock, or Wi-Fi/Ethernet interface
+// appears or disappears — a drift that previously invalidated the fingerprint
+// and locked users out ("已绑定其他设备") on their own machine.
+let cachedHardwareId;
+function stableHardwareId() {
+  if (cachedHardwareId !== undefined) return cachedHardwareId;
+  let id = "";
+  try {
+    if (process.platform === "darwin") {
+      const output = execSync("ioreg -d2 -c IOPlatformExpertDevice", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const match = output.match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
+      id = match ? match[1] : "";
+    } else if (process.platform === "win32") {
+      const output = execSync('reg query "HKLM\\Software\\Microsoft\\Cryptography" /v MachineGuid', { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const match = output.match(/MachineGuid\s+REG_SZ\s+([0-9A-Fa-f-]+)/);
+      id = match ? match[1] : "";
+    } else {
+      try { id = readFileSync("/etc/machine-id", "utf8").trim(); } catch {}
+      if (!id) { try { id = readFileSync("/var/lib/dbus/machine-id", "utf8").trim(); } catch {} }
+    }
+  } catch {
+    // Fall back below to the legacy traits.
+  }
+  cachedHardwareId = id;
+  return id;
 }
 
-async function ensureDeviceId(state) {
-  const fingerprint = machineFingerprint();
-  if (state.deviceId) {
-    // Re-bind check: if the stored fingerprint no longer matches this machine,
-    // the state was copied from another device. Force a fresh activation.
-    if (state.machineFingerprint && state.machineFingerprint !== fingerprint) {
-      throw new Error("授权已绑定其他设备，请在本机重新激活。");
-    }
-    return { deviceId: state.deviceId, fingerprint };
-  }
-  const deviceId = randomUUID();
-  await writeState({ ...state, deviceId, machineFingerprint: fingerprint });
-  return { deviceId, fingerprint };
+// Machine fingerprint used to bind an activation to a device so copying
+// license.json to another machine is rejected. Prefer the stable hardware UUID;
+// fall back to hostname + CPU only if no stable ID is available.
+function machineFingerprint() {
+  const hardwareId = stableHardwareId();
+  const cpuSignature = (cpus()[0]?.model || "") + (cpus().length || 0);
+  const stable = hardwareId || `${hostname()}|${cpuSignature}`;
+  return createHash("sha256")
+    .update(`${platform()}|${arch()}|${stable}`)
+    .digest("hex");
 }
 
 function publicStatus(state, config, overrides = {}) {
@@ -261,7 +272,13 @@ export async function activateLicense(licenseKey) {
   const normalized = String(licenseKey || "").trim();
   if (normalized.length < 8 || normalized.length > 256) throw new Error("请输入有效的激活码。");
   const state = await readState();
-  const { deviceId, fingerprint } = await ensureDeviceId(state);
+  // Re-binding on activation is intentional: the fingerprint can drift when the
+  // OS hardware ID or a fallback trait changes, and a legitimate user entering a
+  // valid code on this machine must always be able to recover. Copy-protection
+  // is preserved because license.json alone (without re-activating) still fails
+  // the fingerprint check in getLicenseStatus on a different machine.
+  const fingerprint = machineFingerprint();
+  const deviceId = state.deviceId || randomUUID();
   if (isTemporaryLicenseKey(normalized)) {
     if (Date.now() >= Date.parse(temporaryLicenseExpiresAt)) {
       throw new Error("临时激活码已过期，请使用正式授权激活。");
@@ -282,6 +299,8 @@ export async function activateLicense(licenseKey) {
     await writeState(next);
     return publicStatus(next, config);
   }
+  // Remote (Paddle) licenses are verified server-side; the server is the real
+  // authority on device limits, so re-activation re-binds to this machine.
   const result = await verifyRemotely(normalized, deviceId, config);
   // storeSecret now degrades to plaintext instead of throwing when safeStorage
   // is unavailable, so an unsigned build no longer loses a verified license.
