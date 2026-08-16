@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.10",
+  "version": "0.1.11",
   "platform": "darwin",
   "architectures": [
     "arm64"
   ],
-  "publishedAt": "2026-08-14T01:55:51Z",
+  "publishedAt": "2026-08-16T08:11:25Z",
   "minimumSystemVersion": "14.2",
-  "notes": "修复激活码在带扩展坞/VPN/Docker 的机器上误报“已绑定其他设备”并被锁死的问题：机器指纹改用稳定硬件 UUID，不再随网络变化；再次激活可重新绑定本机。升级后若提示已绑定其他设备，重新输入一次激活码即可。",
+  "notes": "MinuteFlow 0.1.11 已发布。包含最新的功能改进、兼容性优化与问题修复。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.10",
-  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.10/MinuteFlow-0.1.10-macOS-arm64.dmg",
-  "sha256": "cbbd4d56264d05d9cb1d27b5d2c5d2fbaa41bf18f327b52c0a25eedeb993d48a"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.11",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.11/MinuteFlow-0.1.11-macOS-arm64.dmg",
+  "sha256": "ea1aecb9838db6f082f6522bf0e23289921b931f43b02979bb0131338a14c632"
 }
