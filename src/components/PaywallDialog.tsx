@@ -1,3 +1,9 @@
+/**
+ * 付费墙对话框（¥99 一次性购买）：解锁录音/转写/AI 纪要/导入/导出前弹出。
+ * 提供三个动作：跳转 Paddle 购买页、输入激活码（主进程经 HTTPS 验证服务校验并绑定设备）、
+ * 「恢复购买」（强制刷新授权状态，覆盖离线宽限期的过期缓存）。
+ * 验证/激活的实际逻辑在 electron/services/licensing.mjs；这里只做 UI 与状态回传。
+ */
 import { useEffect, useState } from "react";
 import { ArrowClockwise, Check, Key, LockKey, ShieldCheck, Sparkle, X } from "@phosphor-icons/react";
 import { api } from "../lib/api";
@@ -5,6 +11,7 @@ import type { LicenseStatus } from "../types";
 
 export function PaywallDialog({ open, reason, status, onStatusChange, onClose }: {
   open: boolean;
+  /** 触发付费墙的功能说明（如"导出前需解锁"）。 */
   reason?: string;
   status: LicenseStatus | null;
   onStatusChange(status: LicenseStatus): void;
@@ -15,9 +22,11 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 每次打开清掉上次的错误提示。
   useEffect(() => { if (open) setError(null); }, [open]);
   if (!open) return null;
 
+  /** 强制向验证服务刷新授权（刷新成功且已授权则自动关闭付费墙）。 */
   const refresh = async () => {
     setBusy(true); setError(null);
     try {
@@ -29,6 +38,7 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
     finally { setBusy(false); }
   };
 
+  /** 提交激活码：主进程校验成功后更新状态并关闭；失败展示服务端返回的原因。 */
   const activate = async () => {
     setBusy(true); setError(null);
     try {

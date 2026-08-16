@@ -1,9 +1,20 @@
+//
+//  WorkspaceViews.swift
+//  MeetingAssistant
+//
+//  自适应工作区视图：iPad 用 NavigationSplitView 组装三栏布局（会议库/文档/洞察面板），
+//  iPhone 用 TabView 组装三标签布局（会议/行动项/设置），并把会议详情组织为
+//  「文档/转录/AI 纪要」分段页。由 AppRootView 按 horizontalSizeClass 选择装配。
+//
+
 import SwiftUI
 
+/// iPad 三栏工作区：侧栏会议库 + 中栏会议文档 + 详情栏洞察面板，底部悬浮录音条。
 struct TabletWorkspaceView: View {
   @Environment(AppState.self) private var appState
   let meetings: [MeetingRecord]
   let onImport: () -> Void
+  /// 三栏可见性（用户可手动收起侧栏/中栏）。
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
   var body: some View {
@@ -23,6 +34,7 @@ struct TabletWorkspaceView: View {
       }
     }
     .navigationSplitViewStyle(.balanced)
+    // 录音条悬浮于三栏之上，只在选中会议时出现。
     .overlay(alignment: .bottom) {
       if let meeting = selectedMeeting {
         RecorderBar(meeting: meeting)
@@ -33,18 +45,21 @@ struct TabletWorkspaceView: View {
     }
   }
 
+  /// 从 AppState 的选中 id 解析当前会议对象。
   private var selectedMeeting: MeetingRecord? {
     guard let id = appState.selectedMeetingID else { return nil }
     return meetings.first { $0.id == id }
   }
 }
 
+/// iPhone 工作区：底部三标签（会议库 / 行动项总览 / 设置）。
 struct PhoneWorkspaceView: View {
   @Environment(AppState.self) private var appState
   let meetings: [MeetingRecord]
   let onImport: () -> Void
 
   var body: some View {
+    // AppState 是 @Observable，绑定 TabView selection 需先转 @Bindable。
     @Bindable var appState = appState
 
     TabView(selection: $appState.selectedPhoneTab) {
@@ -71,6 +86,7 @@ struct PhoneWorkspaceView: View {
   }
 }
 
+/// iPhone「会议」标签：可搜索的会议列表（收藏/最近两组），支持左滑收藏、右滑软删除。
 private struct PhoneMeetingsView: View {
   @Environment(AppState.self) private var appState
   let meetings: [MeetingRecord]
@@ -93,6 +109,7 @@ private struct PhoneMeetingsView: View {
       .navigationTitle("MinuteFlow")
       .toolbar {
         ToolbarItem(placement: .topBarLeading) {
+          // 导入外部音频（触发 AppRootView 的 fileImporter）。
           Button(action: onImport) {
             Label("导入", systemImage: "square.and.arrow.down")
           }
@@ -147,6 +164,7 @@ private struct PhoneMeetingsView: View {
     filteredMeetings.filter { !$0.isFavorite }
   }
 
+  /// 按标题、个人笔记、纪要与转录全文做大小写不敏感搜索。
   private var filteredMeetings: [MeetingRecord] {
     guard !searchText.isEmpty else { return meetings }
     return meetings.filter {
@@ -156,6 +174,7 @@ private struct PhoneMeetingsView: View {
   }
 }
 
+/// iPhone 会议详情页：顶部分段切换 文档 / 转录 / AI 纪要，底部常驻录音条。
 private struct PhoneMeetingDetailView: View {
   enum Section: String, CaseIterable, Identifiable {
     case document = "文档"
@@ -206,6 +225,7 @@ private struct PhoneMeetingDetailView: View {
   }
 }
 
+/// 行动项总览（iPhone 第二标签）：聚合所有会议里未完成的行动项，按会议分组展示。
 struct ActionItemsOverviewView: View {
   let meetings: [MeetingRecord]
 
@@ -230,6 +250,7 @@ struct ActionItemsOverviewView: View {
     }
   }
 
+  /** 展平所有会议中未完成的行动项为 (会议, 行动项) 对。 */
   private var activeItems: [(meeting: MeetingRecord, item: ActionItemRecord)] {
     meetings.flatMap { meeting in
       meeting.orderedActionItems
@@ -239,6 +260,7 @@ struct ActionItemsOverviewView: View {
   }
 }
 
+/// iPad 三栏未选中会议时的占位视图。
 private struct EmptyMeetingSelectionView: View {
   var body: some View {
     ContentUnavailableView(

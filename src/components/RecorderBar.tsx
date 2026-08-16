@@ -1,3 +1,8 @@
+/**
+ * 底部悬浮录音条：录音状态灯、计时、麦克风/系统双轨电平表、转录队列徽标，
+ * 以及开始/暂停/继续/停止/标记/取消操作。支持折叠为迷你模式（联动主进程迷你窗）。
+ * phase 状态机由 useMeetingRecorder 驱动：idle → starting → recording ⇄ paused → stopping。
+ */
 import { useState } from "react";
 import {
   ArrowsOutSimple,
@@ -14,13 +19,18 @@ import { formatDuration } from "../lib/format";
 
 interface RecorderBarProps {
   meeting: Meeting;
+  /** 录音状态机：空闲/启动中/录制中/已暂停/收尾中。 */
   phase: "idle" | "starting" | "recording" | "paused" | "stopping";
+  /** 已录制秒数（录制中实时更新）。 */
   elapsed: number;
+  /** 双轨实时电平（0-1）。 */
   levels: { microphone: number; system: number };
+  /** 在途转写任务数。 */
   queue: number;
   onStart(): Promise<void>;
   onPause(): Promise<void>;
   onStop(): Promise<void>;
+  /** 在当前播放位置打一个笔记标记。 */
   onMark(): void;
 }
 
@@ -36,8 +46,10 @@ export function RecorderBar({
   onMark
 }: RecorderBarProps) {
   const [mini, setMini] = useState(false);
+  // live=会话进行中（含启动/收尾过渡态）；active=已实际在录（显示暂停/停止）。
   const live = ["recording", "paused", "starting", "stopping"].includes(phase);
   const active = phase === "recording" || phase === "paused";
+  // 录制中显示实时计时，空闲时回退为该会议已保存的时长。
   const visualElapsed = live ? elapsed : meeting.durationSeconds;
 
   return (
@@ -87,6 +99,7 @@ export function RecorderBar({
           className="icon-button recorder-mini"
           aria-label="切换迷你录音窗口"
           onClick={async () => {
+            // 本地立即切换视图 + 通知主进程开/关系统级迷你窗（置顶小窗）。
             const next = !mini;
             setMini(next);
             await api.window.toggleMini(next);
@@ -99,6 +112,7 @@ export function RecorderBar({
   );
 }
 
+/** 单轨电平表：把 0-1 的 RMS 值点亮为 6 格中的若干格。 */
 function Level({ label, icon, value }: { label: string; icon: React.ReactNode; value: number }) {
   const active = Math.round(value * 6);
   return (

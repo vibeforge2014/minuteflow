@@ -1,3 +1,10 @@
+/**
+ * 右侧面板（工作区右栏）：「转录」与「AI 总结」两个标签页。
+ * 转录页：发言人色点与改名/合并管理、可编辑的转写段落（textarea 直接改写文本并标记纪要过期）、
+ * 时间戳点击跳转播放器、播放进度驱动的歌词式高亮（is-playing）、
+ * 长会议按 200 条增量加载 + 跟随尾部自动滚动。
+ * AI 总结页：主题/决策/未决问题/下一步的只读列表（编辑在中央文档区）。
+ */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowsMerge,
@@ -13,24 +20,30 @@ interface TranscriptPanelProps {
   meeting: Meeting;
   onChange(meeting: Meeting): void;
   onClose(): void;
+  /** 当前播放位置（毫秒），用于高亮同步段落。 */
   playbackMs?: number;
+  /** 点击时间戳时请求播放器跳转。 */
   onSeek?(ms: number): void;
 }
 
 export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, onSeek }: TranscriptPanelProps) {
   const [tab, setTab] = useState<"transcript" | "summary">("transcript");
+  /** 正在重命名的说话人 id（显示浮层输入框）。 */
   const [speakerEditor, setSpeakerEditor] = useState<string | null>(null);
   const [managerOpen, setManagerOpen] = useState(false);
   const [mergeSource, setMergeSource] = useState("");
   const [mergeTarget, setMergeTarget] = useState("");
+  /** 当前渲染的转写条数（从最新往前窗口化，长会议渐进加载）。 */
   const [visibleCount, setVisibleCount] = useState(200);
   const [autoScroll, setAutoScroll] = useState(true);
   const listRef = useRef<HTMLDivElement | null>(null);
+  // 从转写中提取去重后的说话人 (id → name) 列表。
   const speakers = useMemo(() => Array.from(new Map(
     meeting.transcript.map((segment) => [segment.speakerId, segment.speakerName])
   )), [meeting.transcript]);
   const visibleSegments = meeting.transcript.slice(-visibleCount);
 
+  // 切换会议时重置窗口化计数。
   useEffect(() => {
     setVisibleCount(200);
   }, [meeting.id]);
@@ -46,6 +59,7 @@ export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, on
     list.scrollTop = list.scrollHeight;
   }, [meeting.transcript.length, autoScroll, visibleCount]);
 
+  /** 重命名说话人：批量替换其全部段落的显示名，并把纪要标记为过期（stale）。 */
   const renameSpeaker = (speakerId: string, name: string) => {
     onChange({
       ...meeting,
@@ -56,6 +70,7 @@ export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, on
     setSpeakerEditor(null);
   };
 
+  /** 合并两个说话人标签（同一人被识别成两个 id 的场景），实际重映射在 lib/transcript.ts。 */
   const mergeSpeakers = () => {
     if (!mergeSource || !mergeTarget || mergeSource === mergeTarget) return;
     const targetName = speakers.find(([id]) => id === mergeTarget)?.[1] ?? "发言人";
@@ -150,6 +165,7 @@ export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, on
               </button>
             )}
             {meeting.transcript.length ? visibleSegments.map((segment) => (
+              // is-playing：当前播放位置落在该段落时间区间内时整行高亮（歌词式同步）。
               <article className={`transcript-item transcript-item--${segment.status} ${playbackMs >= segment.startMs && playbackMs < segment.endMs ? "is-playing" : ""}`} key={segment.id}>
                 <button className="transcript-time" onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
                 <div>
@@ -225,6 +241,7 @@ export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, on
   );
 }
 
+/** 转写时间戳 → HH:MM:SS / MM:SS（相对录音起点，与播放器时间轴对齐）。 */
 function formatTranscriptTime(ms: number) {
   // Relative to recording start (00:00:00), with seconds. startMs is measured
   // from when recording began, so this aligns with the audio timeline.
@@ -236,12 +253,14 @@ function formatTranscriptTime(ms: number) {
   return hours > 0 ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
 }
 
+/** 说话人配色：自己固定蓝色，其余按 id 哈希稳定分配橙/紫/绿（颜色即身份语义）。 */
 function speakerColor(id: string) {
   if (id === "me") return "blue";
   const colors = ["orange", "purple", "green"];
   return colors[Math.abs(hash(id)) % colors.length];
 }
 
+/** 简单字符串哈希（用于稳定选色）。 */
 function hash(value: string) {
   return Array.from(value).reduce((total, character) => total + character.charCodeAt(0), 0);
 }

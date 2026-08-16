@@ -1,3 +1,8 @@
+/**
+ * Sites Worker 行为测试（node:test，npm run test:sites）：
+ * 验证 worker/index.js 的 SPA 回退——静态资源原样服务、未知 HTML 路由回退 /index.html、
+ * 非浏览器请求（API/POST）不回退。注意：本文件与 worker/index.js 须保持功能不变。
+ */
 import assert from "node:assert/strict";
 import { access } from "node:fs/promises";
 import test from "node:test";

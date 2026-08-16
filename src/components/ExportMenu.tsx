@@ -1,3 +1,8 @@
+/**
+ * 导出格式菜单：列出八种导出目标（md/txt/pdf/docx/srt/vtt/json/zip），
+ * 点击后经 api.exports.save 走主进程系统保存框（浏览器端则触发下载）。
+ * 实际的文件生成逻辑在 electron/services/exports.mjs。
+ */
 import { BracketsCurly, FileDoc, FilePdf, FileText, Package, Subtitles } from "@phosphor-icons/react";
 import { api } from "../lib/api";
 import type { Meeting } from "../types";
@@ -11,6 +16,7 @@ export function ExportMenu({
   onClose(): void;
   onDone(message: string): void;
 }) {
+  /** 导出一种格式：用户取消保存框不提示成功。 */
   const exportFormat = async (format: string) => {
     const result = await api.exports.save(meeting, format);
     if (!result.canceled) onDone(`已导出 ${format.toUpperCase()} 文件。`);

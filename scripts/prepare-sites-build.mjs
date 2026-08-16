@@ -1,4 +1,11 @@
 #!/usr/bin/env node
+/**
+ * Sites 交付准备脚本（npm run build 的收尾步骤）：
+ * 校验并把 worker/index.js 与 .openai/hosting.json 复制进 dist，
+ * 使产物满足 Sites 托管要求——dist/client/index.html、dist/server/index.js、dist/.openai/hosting.json。
+ * 额外把 index.html 复制为 404.html，弥补 GitHub Pages 无 SPA 回退的问题。
+ * 注意：本脚本与 worker/index.js、tests/sites-worker.test.mjs 须保持功能不变。
+ */
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

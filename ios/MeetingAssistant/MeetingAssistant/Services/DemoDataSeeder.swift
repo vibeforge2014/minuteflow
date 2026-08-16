@@ -1,13 +1,30 @@
+//
+//  DemoDataSeeder.swift
+//  MeetingAssistant
+//
+//  演示数据种子：首次启动且数据库为空时，写入一场“进行中”的示例会议
+//  （含转录片段、行动项与纪要）和若干历史会议，便于直接体验完整界面。
+//  所属层：服务层（开发/演示用途，仅在库为空时执行一次）。
+//
+
 import Foundation
 import SwiftData
 
+// MARK: - 种子数据
+
+/// 首启演示数据播种工具（无状态枚举命名空间）。
 @MainActor
 enum DemoDataSeeder {
+  /// 数据库为空时播种演示数据；已有任何会议则直接返回。
+  ///
+  /// - Parameter modelContext: SwiftData 上下文。
+  /// - 副作用：插入示例 MeetingRecord/TranscriptSegmentRecord/ActionItemRecord 并保存。
   static func seedIfNeeded(modelContext: ModelContext) throws {
     var descriptor = FetchDescriptor<MeetingRecord>()
     descriptor.fetchLimit = 1
     guard try modelContext.fetch(descriptor).isEmpty else { return }
 
+    // 一场“进行中”的主示例会议：完整的目标/议程/笔记/纪要与元信息。
     let meeting = MeetingRecord(
       title: "产品团队周会",
       startedAt: .now.addingTimeInterval(-1_477),
@@ -36,6 +53,7 @@ enum DemoDataSeeder {
       nextStepsText: "• 完成可用性测试\n• 补齐埋点方案\n• 安排客服评审"
     )
 
+    // 示例转录片段：每段约 45 秒，最后一段标记为未定稿（模拟实时录音）。
     let segments: [(TimeInterval, String, String)] = [
       (0, "我", "大家好，我们开始今天的周会，先快速对齐议程和目标。"),
       (62, "刘婷", "我先汇报登录流程改版的进展。A 方案的可用性测试已经完成，整体反馈比 B 方案更好。"),
@@ -58,6 +76,7 @@ enum DemoDataSeeder {
       )
     }
 
+    // 示例行动项：不同负责人、截止日期与状态，覆盖排序分支。
     meeting.actionItems = [
       ActionItemRecord(
         title: "输出登录流程 AB 测试方案并评审",
@@ -82,6 +101,7 @@ enum DemoDataSeeder {
     ]
     modelContext.insert(meeting)
 
+    // 历史会议：仅标题/标签/占位纪要，用于填充会议库列表。
     let previousMeetings = [
       ("项目复盘：移动端体验优化", -2, 3_492.0, "复盘、移动端"),
       ("设计评审：登录流程改版", -3, 2_538.0, "设计、登录"),

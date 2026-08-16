@@ -1,3 +1,10 @@
+/**
+ * Electron Forge 打包配置（npm run package / make）：
+ * - asar unpack：whisper.cpp 原生 .node 绑定与 FFmpeg 可执行文件必须留在 asar 外才能加载/执行。
+ * - macOS：优先 Developer ID 签名 + 公证（环境变量注入 APPLE_IDENTITY / APPLE_NOTARY_PROFILE 或
+ *   APPLE_API_*）；无身份时退化为 ad-hoc 开发构建（关 hardened runtime，仅供本地调试）。
+ * - entitlements.mac.plist：hardened runtime 下加载原生模块与音频采集所必需。
+ */
 import { FusesPlugin } from "@electron-forge/plugin-fuses";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
 
@@ -8,6 +15,7 @@ const appleApiKey = process.env.APPLE_API_KEY;
 const appleApiKeyId = process.env.APPLE_API_KEY_ID;
 const appleApiIssuer = process.env.APPLE_API_ISSUER;
 
+// 公证凭据：优先 keychain profile，其次 App Store Connect API 密钥三元组。
 const notarizeOptions = appleNotaryProfile
   ? { keychainProfile: appleNotaryProfile }
   : appleApiKey && appleApiKeyId && appleApiIssuer

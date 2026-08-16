@@ -1,10 +1,17 @@
 #!/usr/bin/env node
+/**
+ * macOS 更新清单生成脚本（发版时本地运行，产物提交到 public/）：
+ * 读取 DMG 计算 sha256，按 schemaVersion 1 写出 public/releases/latest-macos.json。
+ * 桌面端启动时校验该清单（electron/services/updates.mjs），downloadUrl 指向官网稳定下载页。
+ * 用法：node scripts/write-release-manifest.mjs --version 0.2.0 --dmg out/MinuteFlow.dmg [--published-at ISO]
+ */
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// 解析 --key value 形式的命令行参数。
 const args = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {
   args.set(process.argv[index], process.argv[index + 1]);

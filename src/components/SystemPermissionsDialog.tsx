@@ -1,8 +1,15 @@
+/**
+ * 系统权限引导（首run第一道门）：版本化的首次授权流程，集中完成
+ * 麦克风与 macOS 屏幕录制（系统音频）授权。核心原则——正常录音/结束流程
+ * 永不触发系统弹窗或系统选择器；本对话框是唯一主动发起授权的地方。
+ * 每行显示权限状态并提供「打开设置」路由；「一次完成授权」逐项发起申请。
+ */
 import { useCallback, useEffect, useState } from "react";
 import { ArrowClockwise, Check, Microphone, Monitor, ShieldCheck, WarningCircle } from "@phosphor-icons/react";
 import { api } from "../lib/api";
 import type { SystemPermissionStatus, SystemPermissionValue } from "../types";
 
+/** 初始状态：macOS 上录制系统音频必须有屏幕录制权限（Chromium 的 CoreAudio Tap 依赖它）。 */
 const initialStatus: SystemPermissionStatus = {
   microphone: "unknown",
   screen: "unknown",
@@ -13,14 +20,17 @@ const initialStatus: SystemPermissionStatus = {
 export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; onComplete(): Promise<void> }) {
   const [status, setStatus] = useState(initialStatus);
   const [checking, setChecking] = useState(false);
+  // 非 macOS 无需一次性屏幕采集探测，直接视为就绪。
   const [capturePrepared, setCapturePrepared] = useState(api.system.platform !== "darwin");
   const [error, setError] = useState<string | null>(null);
 
+  /** 向主进程重新查询权限状态。 */
   const refresh = useCallback(async () => {
     setChecking(true);
     try { setStatus(await api.system.getPermissions()); } finally { setChecking(false); }
   }, []);
 
+  // 打开时刷新一次；窗口重新获得焦点时也刷新（用户可能刚去系统设置改完权限回来）。
   useEffect(() => {
     if (!open) return;
     refresh();
@@ -34,6 +44,7 @@ export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; o
   const screenReady = !status.systemAudioRequired || status.screen === "granted";
   const allReady = microphoneReady && screenReady && capturePrepared;
 
+  /** 「一次完成授权」：麦克风请求一次；macOS 再做一次最小屏幕采集探测，确认系统音频轨可用。 */
   const authorizeOnce = async () => {
     setChecking(true);
     setError(null);
@@ -107,6 +118,7 @@ export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; o
   </div>;
 }
 
+/** 单条权限行：图标、说明、状态标签（已允许/未允许/待确认/待检查）与「打开设置」按钮。 */
 function PermissionRow({ icon, title, description, value, primaryLabel, onPrimary, hideAction = false }: {
   icon: React.ReactNode;
   title: string;

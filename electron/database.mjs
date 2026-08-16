@@ -1,3 +1,14 @@
+/**
+ * 会议数据的本地持久化层（Electron 主进程 / 数据层）。
+ * 基于 node:sqlite（DatabaseSync）管理 userData/data/meetings.sqlite 中的会议、
+ * 转录段落、模型档案、录音块/音频资产、后台任务表以及 FTS5 全文索引。
+ * 主要导出：openDatabase、listMeetings、loadMeeting、saveMeeting、createMeeting、
+ * softDeleteMeeting、restoreMeeting、appendAudioChunk、finalizeAudioPath、
+ * listMeetingAudioPaths、listExpiredAudioPaths、deleteAudioPathRecord、saveAudioAsset、
+ * listMeetingAudioAssets、loadAudioAsset、saveJob、loadJob、listJobs、
+ * markRunningJobsInterrupted、listModelProfiles、saveModelProfile、markInterruptedRecordings。
+ * 被 main.mjs 注册的 IPC 处理器与 services/import-queue.mjs 导入流水线调用。
+ */
 import { app } from "electron";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
@@ -15,6 +26,7 @@ let transactionInProgress = false;
 
 const nowIso = () => new Date().toISOString();
 
+/** 容错地解析 JSON 字符串，失败时返回 fallback（损坏的库字段不至于让整条记录不可读）。 */
 const safeJson = (value, fallback) => {
   try {
     return JSON.parse(value);
@@ -23,6 +35,7 @@ const safeJson = (value, fallback) => {
   }
 };
 
+/** 首次启动（空库）时写入的示例会议数据，让新用户直接看到完整的产品形态。 */
 const seedMeetings = [
   {
     id: "product-weekly-2026-07-30",
@@ -126,6 +139,11 @@ const seedMeetings = [
   }
 ];
 
+/**
+ * 创建全部表结构与索引（幂等，IF NOT EXISTS）。
+ * WAL 日志模式保证崩溃安全；结尾对老库做轻量迁移（补 notes_markdown 列）。
+ * @param {import("node:sqlite").DatabaseSync} db 已打开的数据库连接
+ */
 function createSchema(db) {
   db.exec(`
     PRAGMA journal_mode = WAL;
@@ -225,11 +243,13 @@ function createSchema(db) {
     );
   `);
   const meetingColumns = db.prepare("PRAGMA table_info(meetings)").all();
+  // 老库迁移：早期版本没有 notes_markdown 列，检测缺失时补列（SQLite 不支持 IF NOT EXISTS 的 ADD COLUMN）。
   if (!meetingColumns.some((column) => column.name === "notes_markdown")) {
     db.exec("ALTER TABLE meetings ADD COLUMN notes_markdown TEXT NOT NULL DEFAULT ''");
   }
 }
 
+/** 把 meetings 行 + 关联转录段落转换为渲染层使用的驼峰字段会议对象。 */
 function rowToMeeting(db, row) {
   const transcript = db.prepare(`
     SELECT id, start_ms, end_ms, speaker_id, speaker_name, text, status, track, confidence
@@ -268,6 +288,7 @@ function rowToMeeting(db, row) {
   };
 }
 
+/** 全量重建某会议的 FTS5 索引（先删后插，保证与主表一致）。失败只影响搜索，不影响数据。 */
 function indexMeeting(db, meeting) {
   db.prepare("DELETE FROM meeting_search WHERE meeting_id = ?").run(meeting.id);
   db.prepare(`
@@ -282,6 +303,11 @@ function indexMeeting(db, meeting) {
   );
 }
 
+/**
+ * 把会议对象 UPSERT 进 meetings 表，并全量重写其转录段落（先删后插）。
+ * 由 saveMeeting 在事务内调用；写库副作用。
+ * @returns {object} 落库后重新读出的完整会议对象
+ */
 function persistMeeting(db, meeting) {
   const timestamp = nowIso();
   db.prepare(`
@@ -350,11 +376,17 @@ function persistMeeting(db, meeting) {
   return persisted;
 }
 
+/** 按主键读取单条会议（含转录），不存在返回 null。 */
 function getMeeting(db, id) {
   const row = db.prepare("SELECT * FROM meetings WHERE id = ?").get(id);
   return row ? rowToMeeting(db, row) : null;
 }
 
+/**
+ * 打开（或复用）单例数据库连接：建 schema、尽力重建 FTS 索引、空库时写入种子会议。
+ * 所有导出函数都先经过它拿连接，因此首次调用任意导出函数即可完成初始化。
+ * @returns {import("node:sqlite").DatabaseSync} 共享数据库连接
+ */
 export function openDatabase() {
   if (database) return database;
   const dataDirectory = path.join(app.getPath("userData"), "data");
@@ -372,6 +404,7 @@ export function openDatabase() {
 
   const count = database.prepare("SELECT COUNT(*) AS count FROM meetings").get().count;
   if (count === 0) {
+    // 空库才写种子数据，整体包在一个事务里，失败即回滚不留半截记录。
     database.exec("BEGIN");
     try {
       const seeded = [];
@@ -388,6 +421,12 @@ export function openDatabase() {
   return database;
 }
 
+/**
+ * 列出/搜索会议。带关键词时走 FTS5 MATCH（尾部加 * 做前缀匹配，引号转义防止语法注入），
+ * 否则全量按开始时间倒序；includeDeleted 控制是否包含回收站项。
+ * @param {string} query 搜索关键词，空串表示全部
+ * @returns {Array<object>} 会议对象数组
+ */
 export function listMeetings(query = "", includeDeleted = false) {
   const db = openDatabase();
   let rows;
@@ -409,10 +448,17 @@ export function listMeetings(query = "", includeDeleted = false) {
   return rows.map((row) => rowToMeeting(db, row));
 }
 
+/** 按会议 ID 读取完整会议数据（meetings:get / 导入流水线调用），不存在返回 null。 */
 export function loadMeeting(id) {
   return getMeeting(openDatabase(), id);
 }
 
+/**
+ * 保存整场会议（写库副作用）：会议行 + 转录段落整体落在一个事务里；
+ * FTS 索引更新放在事务之外且吞掉异常——索引损坏只降级搜索，绝不能回滚真实数据。
+ * @param {object} meeting 完整会议对象（字段缺失处用默认值兜底）
+ * @returns {object} 落库后的会议对象
+ */
 export function saveMeeting(meeting) {
   const db = openDatabase();
   if (transactionInProgress) {
@@ -444,6 +490,7 @@ export function saveMeeting(meeting) {
   return saved;
 }
 
+/** 新建一场草稿会议并落库（meetings:create / 导入入队时各建一场）。 */
 export function createMeeting(input) {
   const timestamp = nowIso();
   return saveMeeting({
@@ -475,6 +522,7 @@ export function createMeeting(input) {
   });
 }
 
+/** 软删除会议：只写 deleted_at 时间戳，数据仍在库中可恢复。 */
 export function softDeleteMeeting(id) {
   const db = openDatabase();
   db.prepare("UPDATE meetings SET deleted_at = ?, updated_at = ? WHERE id = ?")
@@ -482,6 +530,7 @@ export function softDeleteMeeting(id) {
   return true;
 }
 
+/** 从回收站恢复会议（清空 deleted_at）。 */
 export function restoreMeeting(id) {
   const db = openDatabase();
   db.prepare("UPDATE meetings SET deleted_at = NULL, updated_at = ? WHERE id = ?")
@@ -489,6 +538,10 @@ export function restoreMeeting(id) {
   return loadMeeting(id);
 }
 
+/**
+ * 记录一条音频块账目（recordings:append 写盘成功后调用），
+ * 用于审计"哪些字节写到了哪个文件"，stop 改名后由 finalizeAudioPath 统一更新路径。
+ */
 export function appendAudioChunk(record) {
   const db = openDatabase();
   db.prepare(`
@@ -507,6 +560,7 @@ export function appendAudioChunk(record) {
   );
 }
 
+/** 录音完成后把该会话该轨的块记录路径从 .partial 批量改写为最终文件路径。 */
 export function finalizeAudioPath(sessionId, track, targetPath) {
   openDatabase().prepare(`
     UPDATE audio_chunks SET path = ?
@@ -514,6 +568,7 @@ export function finalizeAudioPath(sessionId, track, targetPath) {
   `).run(targetPath, sessionId, track);
 }
 
+/** 汇总某会议全部音频文件路径（录音块 + 导入/播放资产，去重），导出 zip 与"打开所在位置"用。 */
 export function listMeetingAudioPaths(meetingId) {
   const db = openDatabase();
   const chunkPaths = db.prepare(`
@@ -527,6 +582,7 @@ export function listMeetingAudioPaths(meetingId) {
   return Array.from(new Set([...chunkPaths, ...assetPaths]));
 }
 
+/** 查询超过保留期、状态为 complete 的会议音频路径（含播放副本），供启动清理使用。 */
 export function listExpiredAudioPaths(retentionDays) {
   return openDatabase().prepare(`
     SELECT path FROM (
@@ -542,11 +598,17 @@ export function listExpiredAudioPaths(retentionDays) {
   `).all(retentionDays, retentionDays, retentionDays).map((row) => row.path);
 }
 
+/** 物理删除音频文件后，清理对应的块与资产记录，避免数据库指向不存在的文件。 */
 export function deleteAudioPathRecord(audioPath) {
   openDatabase().prepare("DELETE FROM audio_chunks WHERE path = ?").run(audioPath);
   openDatabase().prepare("DELETE FROM audio_assets WHERE path = ? OR playback_path = ?").run(audioPath, audioPath);
 }
 
+/**
+ * 新增或更新音频资产（录音轨或导入文件）。导入流水线分阶段多次调用：
+ * 先登记归档路径，之后补写播放副本路径、时长等字段。
+ * @returns {object} 带 id 的资产对象
+ */
 export function saveAudioAsset(asset) {
   const id = asset.id || randomUUID();
   openDatabase().prepare(`
@@ -566,6 +628,7 @@ export function saveAudioAsset(asset) {
   return { ...asset, id };
 }
 
+/** 列出某会议全部音频资产（recordings:assets 调用，供播放器生成 minuteflow-media:// 地址）。 */
 export function listMeetingAudioAssets(meetingId) {
   return openDatabase().prepare(`
     SELECT * FROM audio_assets WHERE meeting_id = ? ORDER BY created_at
@@ -584,6 +647,7 @@ export function listMeetingAudioAssets(meetingId) {
   }));
 }
 
+/** 按 UUID 读取单个音频资产（minuteflow-media 协议处理器调用），不存在返回 null。 */
 export function loadAudioAsset(id) {
   return listMeetingAudioAssetsByRows(openDatabase().prepare("SELECT * FROM audio_assets WHERE id = ?").all(id))[0] || null;
 }
@@ -597,6 +661,7 @@ function listMeetingAudioAssetsByRows(rows) {
   }));
 }
 
+/** jobs 行转任务对象：固定列之外的字段从 payload_json 还原展开。 */
 function rowToJob(row) {
   if (!row) return null;
   const payload = safeJson(row.payload_json, {});
@@ -613,10 +678,16 @@ function rowToJob(row) {
   };
 }
 
+/**
+ * 新增或更新后台任务（导入队列每推进一个阶段就写一次，写库副作用）。
+ * 白名单字段进独立列，其余（sourcePath、stage、各 *Complete 标记等）序列化进 payload_json。
+ * @returns {object} 落库后的任务对象
+ */
 export function saveJob(job) {
   const timestamp = nowIso();
   const id = job.id || randomUUID();
   const payload = { ...job };
+  // 这些字段有独立列，从 payload 中剔除避免重复存储。
   for (const key of ["id", "meetingId", "type", "status", "progress", "error", "createdAt", "updatedAt"]) delete payload[key];
   openDatabase().prepare(`
     INSERT INTO jobs(id, meeting_id, type, status, progress, payload_json, error, created_at, updated_at)
@@ -636,16 +707,19 @@ export function saveJob(job) {
   return loadJob(id);
 }
 
+/** 按任务 ID 读取任务对象，不存在返回 null。 */
 export function loadJob(id) {
   return rowToJob(openDatabase().prepare("SELECT * FROM jobs WHERE id = ?").get(id));
 }
 
+/** 按类型列出任务（默认 import），创建时间倒序，导入中心列表调用。 */
 export function listJobs(type = "import") {
   return openDatabase().prepare(`
     SELECT * FROM jobs WHERE type = ? ORDER BY created_at DESC
   `).all(type).map(rowToJob);
 }
 
+/** 应用启动时调用：把上次异常退出时仍"进行中"的导入任务复位为 queued，等待队列重新领取重试。 */
 export function markRunningJobsInterrupted() {
   openDatabase().prepare(`
     UPDATE jobs SET status = 'queued', error = NULL, updated_at = ?
@@ -653,6 +727,7 @@ export function markRunningJobsInterrupted() {
   `).run(nowIso());
 }
 
+/** 列出全部模型档案（stt/llm/diarization），按 kind 与名称排序；models:list 与导入流水线调用。 */
 export function listModelProfiles() {
   return openDatabase().prepare("SELECT * FROM model_profiles ORDER BY kind, name").all()
     .map((row) => ({
@@ -668,6 +743,7 @@ export function listModelProfiles() {
     }));
 }
 
+/** 新增或更新模型档案（models:save 调用；密钥本身存于 secrets.mjs，这里只存 secretId 引用）。 */
 export function saveModelProfile(profile) {
   const db = openDatabase();
   const timestamp = nowIso();
@@ -703,6 +779,7 @@ export function saveModelProfile(profile) {
   return { ...profile, id };
 }
 
+/** 应用启动时调用：把仍处于 recording 状态的会议标记为 interrupted（上次进程未正常结束录音的兜底）。 */
 export function markInterruptedRecordings() {
   const db = openDatabase();
   db.prepare(`

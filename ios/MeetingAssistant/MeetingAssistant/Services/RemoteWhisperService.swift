@@ -1,5 +1,17 @@
+//
+//  RemoteWhisperService.swift
+//  MeetingAssistant
+//
+//  远程 Whisper 转录服务：向 OpenAI 兼容的 /audio/transcriptions 接口上传
+//  multipart 音频并解析返回文本；API Key 从 Keychain 读取。
+//  所属层：服务层（网络调用）。
+//
+
 import Foundation
 
+// MARK: - 错误定义
+
+/// 远程 Whisper 调用失败的具体原因。
 enum RemoteWhisperError: LocalizedError {
   case missingAPIKey
   case invalidEndpoint
@@ -20,12 +32,26 @@ enum RemoteWhisperError: LocalizedError {
   }
 }
 
+// MARK: - 远程转录服务
+
+/// Whisper 转录客户端；由导入流程在用户选择“远程 Whisper”时调用。
 @MainActor
 struct RemoteWhisperService {
+  /// OpenAI 风格转录响应的最小解析模型（仅取 text 字段）。
   private struct TranscriptionResponse: Decodable {
     let text: String
   }
 
+  // MARK: - 公有方法
+
+  /// 上传音频文件并返回完整转录文本。
+  ///
+  /// - Parameters:
+  ///   - audioURL: 沙盒内的音频文件。
+  ///   - preferences: 提供 Base URL、模型名与语言。
+  /// - Returns: 识别出的完整文本。
+  /// - 副作用：读取 Keychain 中的 API Key；在临时目录生成 multipart 请求体文件
+  ///   （请求完成后删除）；发起 HTTPS 上传（超时 180 秒）。
   func transcribe(
     audioURL: URL,
     preferences: AppPreferences
@@ -42,6 +68,8 @@ struct RemoteWhisperService {
       throw RemoteWhisperError.invalidEndpoint
     }
 
+    // 先把 multipart 请求体落成临时文件，再以 upload(fromFile:) 流式上传，
+    // 避免大音频整体驻留内存。
     let boundary = "MeetingAssistant-\(UUID().uuidString)"
     let bodyURL = try makeMultipartBody(
       audioURL: audioURL,
@@ -82,6 +110,9 @@ struct RemoteWhisperService {
     return result.text
   }
 
+  // MARK: - 私有方法
+
+  /// 把 Base URL 归一化为 …/audio/transcriptions 端点（容忍末尾斜杠与已带路径）。
   private func endpoint(baseURL: String) -> URL? {
     guard
       var components = URLComponents(
@@ -101,6 +132,7 @@ struct RemoteWhisperService {
     return components.url
   }
 
+  /// 以流式方式把音频拼装成 multipart/form-data 临时文件（256KB 分块读写）。
   private func makeMultipartBody(
     audioURL: URL,
     model: String,
@@ -117,6 +149,7 @@ struct RemoteWhisperService {
       try output.write(contentsOf: Data(string.utf8))
     }
 
+    // 表单字段：model 与 language（语言取 BCP 47 前两位，如 zh-CN → zh）。
     try write("--\(boundary)\r\n")
     try write("Content-Disposition: form-data; name=\"model\"\r\n\r\n")
     try write("\(model)\r\n")
@@ -125,6 +158,7 @@ struct RemoteWhisperService {
     try write("Content-Disposition: form-data; name=\"language\"\r\n\r\n")
     try write("\(language.prefix(2))\r\n")
 
+    // 文件字段：以原始文件名与二进制流写入。
     let filename = audioURL.lastPathComponent
     try write("--\(boundary)\r\n")
     try write(

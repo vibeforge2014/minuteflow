@@ -1,3 +1,12 @@
+/**
+ * 一次性购买授权（¥99）的验证与状态管理（Electron 主进程 / 服务层）。
+ * 激活码经 HTTPS 验证服务校验后写入本地 license.json（原子写、0o600），
+ * 激活码本体存入 secrets.mjs 密钥库；按机器指纹绑定设备，提供 72 小时状态
+ * 缓存、30 天离线宽限与回拨时钟检测，另含过渡期临时授权码桥接。
+ * 主要导出：getLicenseStatus、activateLicense、deactivateLicense、requireLicense、checkoutUrl。
+ * 被 main.mjs 的 licensing:* 通道与各付费功能通道（作为 requireLicense 授权墙）调用。
+ * 副作用：网络请求（验证服务）、读写 license.json 与密钥库。
+ */
 import { app } from "electron";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -8,8 +17,11 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { deleteSecret, readSecret, storeSecret } from "./secrets.mjs";
 
 const productId = "minuteflow-desktop";
+/** 激活码在密钥库中的固定条目 ID。 */
 const licenseSecretId = "minuteflow-desktop-license";
+/** 离线宽限期：最近一次有效验证后 30 天内允许离线使用。 */
 const offlineGraceMs = 30 * 24 * 60 * 60 * 1_000;
+/** 状态缓存有效期：72 小时内不重复远程验证。 */
 const cacheTtlMs = 72 * 60 * 60 * 1_000;
 // Temporary bridge while the Paddle-backed verification service is being
 // completed. Keep only the digest in the shipped client, bind activation to
@@ -22,9 +34,14 @@ const temporaryLicenseExpiresAt = "2026-10-01T00:00:00.000Z";
 // A wall-clock-vs-uptime skew beyond this many seconds signals the clock was
 // rolled back: if the wall claims less time elapsed than uptime advanced, or
 // the stored lastVerifiedAt is in the future, treat as tampering.
+/** 时钟回拨判定容差：小于该偏差（毫秒）视作正常的 NTP 校时抖动。 */
 const clockSkewToleranceMs = 60_000;
 let cachedConfig;
 
+/**
+ * 读取授权相关配置（购买页与验证服务地址）：优先环境变量，其次打包产物内的
+ * licensing.json。结果缓存，Paddle 相关密钥永不随客户端分发。
+ */
 async function getConfig() {
   if (cachedConfig) return cachedConfig;
   let fileConfig = {};
@@ -38,10 +55,12 @@ async function getConfig() {
   return cachedConfig;
 }
 
+/** 本地授权状态文件路径（userData/config/license.json）。 */
 function statePath() {
   return path.join(app.getPath("userData"), "config", "license.json");
 }
 
+/** 读取授权状态 JSON；文件缺失/损坏返回空对象（视作未激活）。 */
 async function readState() {
   try {
     return JSON.parse(await readFile(statePath(), "utf8"));
@@ -50,6 +69,7 @@ async function readState() {
   }
 }
 
+/** 原子化写入授权状态（.tmp + rename，权限 0o600），避免崩溃留下半截状态。 */
 async function writeState(value) {
   const target = statePath();
   const temporary = `${target}.tmp`;
@@ -58,6 +78,8 @@ async function writeState(value) {
   await rename(temporary, target);
 }
 
+// 取稳定的硬件标识（缓存）：macOS 用 IOPlatformUUID，Windows 用 MachineGuid，
+// Linux 用 /etc/machine-id。
 // Stable, non-sensitive hardware identifier. Used instead of MAC addresses,
 // which change whenever a VPN, Docker bridge, dock, or Wi-Fi/Ethernet interface
 // appears or disappears — a drift that previously invalidated the fingerprint
@@ -89,6 +111,11 @@ function stableHardwareId() {
 // Machine fingerprint used to bind an activation to a device so copying
 // license.json to another machine is rejected. Prefer the stable hardware UUID;
 // fall back to hostname + CPU only if no stable ID is available.
+/**
+ * 计算设备指纹：优先稳定硬件 UUID，取不到时退回"主机名|CPU 型号+核心数"。
+ * 用于把激活绑定到首台设备——仅复制 license.json 到别的机器会被此校验拒绝。
+ * @returns {string} sha256 指纹十六进制串
+ */
 function machineFingerprint() {
   const hardwareId = stableHardwareId();
   const cpuSignature = (cpus()[0]?.model || "") + (cpus().length || 0);
@@ -98,6 +125,7 @@ function machineFingerprint() {
     .digest("hex");
 }
 
+/** 把内部状态整理为渲染层可见的授权状态对象（不含敏感字段，只保留展示所需信息）。 */
 function publicStatus(state, config, overrides = {}) {
   const licensed = state.status === "licensed";
   return {
@@ -116,6 +144,7 @@ function publicStatus(state, config, overrides = {}) {
 }
 
 // Cheap check (does not read the vault value) for surfacing a UI notice.
+/** 廉价检查（不触碰密钥值本身）：密钥库文件是否存在，用于 UI 显示"密钥未加密"提示。 */
 function readSecretSecureFlag() {
   try {
     return existsSync(path.join(app.getPath("userData"), "secrets.json"));
@@ -127,6 +156,12 @@ function readSecretSecureFlag() {
 // Detect clock rollback by comparing wall-clock elapsed since lastVerifiedAt
 // against both the file mtime and the monotonic process uptime baseline.
 // Returns true when the clock appears to have been moved backward.
+/**
+ * 检测系统时钟是否被回拨（防绕过离线宽限期的篡改手段）。
+ * 三重交叉验证：墙钟早于上次验证时间、license.json 的 mtime 与墙钟矛盾、
+ * 单调递增的进程 uptime 比 wall clock 走得更多。
+ * @returns {boolean} 判定回拨返回 true
+ */
 function detectClockRollback(state) {
   const lastVerified = Date.parse(state.lastVerifiedAt || "");
   if (!Number.isFinite(lastVerified)) return false;
@@ -152,6 +187,7 @@ function detectClockRollback(state) {
   return false;
 }
 
+/** 授权错误类型：kind 为 "invalid"（终态，立即失效）或 "transient"（可重试，可用离线宽限）。 */
 class LicenseError extends Error {
   constructor(message, kind) {
     super(message);
@@ -159,6 +195,12 @@ class LicenseError extends Error {
   }
 }
 
+/**
+ * 调用远程验证服务（副作用：网络请求）。提交激活码、设备 ID 与机器指纹，
+ * 由服务端裁决设备数量限制。HTTP 语义分级：401/403/410 为终态无效（绝不进入离线宽限），
+ * 网络失败与 429/5xx 为瞬态（可重试、可宽限）。
+ * @returns {Promise<{valid: boolean, customerEmail?: string, entitlementId?: string}>}
+ */
 async function verifyRemotely(licenseKey, deviceId, config) {
   const verificationUrl = config.verificationUrl;
   if (!verificationUrl) {
@@ -202,10 +244,12 @@ async function verifyRemotely(licenseKey, deviceId, config) {
   return result;
 }
 
+/** 当前进程 uptime（毫秒）：不受改系统时间影响，用作回拨检测的单调基准。 */
 function nowUptimeMs() {
   return process.uptime() * 1_000;
 }
 
+/** 用 timingSafeEqual 比对 SHA-256 摘要判断是否为过渡期临时授权码（客户端只存摘要不存明文）。 */
 function isTemporaryLicenseKey(value) {
   const supplied = createHash("sha256").update(value).digest();
   return temporaryLicenseHashes.some((hash) => {
@@ -214,12 +258,21 @@ function isTemporaryLicenseKey(value) {
   });
 }
 
+/** 临时授权状态是否仍有效：entitlementId 匹配、截止日期匹配且未过期。 */
 function temporaryLicenseIsValid(state) {
   return state.entitlementId === "temporary-paddle-bridge"
     && state.temporaryExpiresAt === temporaryLicenseExpiresAt
     && Date.now() < Date.parse(temporaryLicenseExpiresAt);
 }
 
+/**
+ * 查询授权状态（licensing:get-status 通道调用）。副作用：可能网络验证、写 license.json。
+ * 决策顺序：未激活直接返回；临时授权校验指纹与有效期；正式授权在 72 小时缓存内
+ * 直接返回缓存（时钟回拨除外，回拨强制远程复核）；否则远程验证，
+ * 瞬态失败且在 30 天宽限期内时降级为离线授权，终态失败立即失效。
+ * @param {{refresh?: boolean}} options refresh=true 跳过缓存强制远程验证
+ * @returns {Promise<object>} 渲染层可见的授权状态
+ */
 export async function getLicenseStatus({ refresh = false } = {}) {
   const config = await getConfig();
   const state = await readState();
@@ -272,6 +325,13 @@ export async function getLicenseStatus({ refresh = false } = {}) {
   }
 }
 
+/**
+ * 用激活码激活授权（licensing:activate 通道调用）。副作用：网络验证、写密钥库与 license.json。
+ * 支持两条路径：过渡期临时授权码（本地校验摘要与有效期、绑定首台设备）；
+ * 正式 Paddle 授权走远程验证（服务端是设备数量限制的最终裁决方）。
+ * 激活码长度先做 8-256 的基本校验。
+ * @returns {Promise<object>} 激活后的授权状态
+ */
 export async function activateLicense(licenseKey) {
   const config = await getConfig();
   const normalized = String(licenseKey || "").trim();
@@ -325,6 +385,7 @@ export async function activateLicense(licenseKey) {
   return publicStatus(next, config);
 }
 
+/** 停用本机授权（licensing:deactivate）：删除密钥并清空授权状态，但保留 deviceId/指纹以便再激活。 */
 export async function deactivateLicense() {
   const config = await getConfig();
   const state = await readState();
@@ -333,6 +394,12 @@ export async function deactivateLicense() {
   return publicStatus({ deviceId: state.deviceId, machineFingerprint: state.machineFingerprint }, config);
 }
 
+/**
+ * 付费功能统一授权墙（main.mjs 各付费通道入口处 await 调用）。
+ * 未授权时抛出带 [LICENSE_REQUIRED] 前缀的错误——自定义 error.code 属性
+ * 无法穿越 contextBridge，前缀是渲染层识别授权错误并弹购买墙的唯一依据。
+ * @returns {Promise<object>} 已授权时返回授权状态
+ */
 export async function requireLicense() {
   const status = await getLicenseStatus();
   if (status.state !== "licensed") {
@@ -346,6 +413,11 @@ export async function requireLicense() {
   return status;
 }
 
+/**
+ * 返回购买页地址（licensing:open-checkout）：优先配置值，缺省官网 pricing 页；
+ * 地址必须能解析为 URL 且为 HTTPS，否则报错（不允许把用户带去非加密页面）。
+ * @returns {Promise<string>} 购买页 URL
+ */
 export async function checkoutUrl() {
   const config = await getConfig();
   const candidate = config.checkoutUrl || "https://vibeforge2014.github.io/minuteflow/pricing/";

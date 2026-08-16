@@ -1,8 +1,22 @@
+//
+//  MeetingLibraryView.swift
+//  MeetingAssistant
+//
+//  会议库侧栏：品牌标题、新建按钮、搜索框、“收藏/最近会议”两组列表
+//  与底部设置/导入操作；行支持左滑收藏与右滑软删除。
+//  所属层：视图层。
+//
+
 import SwiftUI
 
+/// 会议库侧栏视图。
+/// 导航位置：iPad NavigationSplitView 第一栏（sidebar）；iPhone 由 PhoneMeetingsView 替代。
 struct MeetingLibraryView: View {
+  /// 全局 UI 状态（选中会议、搜索词、弹层）。
   @Environment(AppState.self) private var appState
+  /// 传入的会议列表（已按开始时间倒序）。
   let meetings: [MeetingRecord]
+  /// 导入按钮回调（由根视图唤起文件选择器）。
   let onImport: () -> Void
 
   var body: some View {
@@ -14,6 +28,7 @@ struct MeetingLibraryView: View {
         .padding(.horizontal, 14)
         .padding(.bottom, 10)
 
+      // List(selection:) 双向绑定选中会议，驱动中栏/右栏内容。
       List(selection: $appState.selectedMeetingID) {
         if !favoriteMeetings.isEmpty {
           Section("收藏") {
@@ -34,6 +49,9 @@ struct MeetingLibraryView: View {
     .navigationSplitViewColumnWidth(min: 230, ideal: 270, max: 330)
   }
 
+  // MARK: - 分区视图
+
+  /// 侧栏页眉：品牌标识 + “新建会议”主按钮。
   private var libraryHeader: some View {
     VStack(spacing: 12) {
       HStack(spacing: 10) {
@@ -57,6 +75,7 @@ struct MeetingLibraryView: View {
     .padding(14)
   }
 
+  /// 自定义搜索框（放大镜 + 输入框 + 清除按钮）。
   private func searchField(text: Binding<String>) -> some View {
     HStack(spacing: 8) {
       Image(systemName: "magnifyingglass")
@@ -83,6 +102,7 @@ struct MeetingLibraryView: View {
     }
   }
 
+  /// 渲染会议行：左滑收藏/取消收藏，右滑软删除（移到最近删除）。
   @ViewBuilder
   private func meetingRows(_ values: [MeetingRecord]) -> some View {
     ForEach(values) { meeting in
@@ -115,6 +135,7 @@ struct MeetingLibraryView: View {
     }
   }
 
+  /// 侧栏底栏：设置入口与导入入口。
   private var libraryFooter: some View {
     HStack {
       Button {
@@ -136,14 +157,19 @@ struct MeetingLibraryView: View {
     }
   }
 
+  // MARK: - 过滤辅助
+
+  /// 过滤后的收藏会议。
   private var favoriteMeetings: [MeetingRecord] {
     filteredMeetings.filter(\.isFavorite)
   }
 
+  /// 过滤后的非收藏（最近）会议。
   private var nonFavoriteMeetings: [MeetingRecord] {
     filteredMeetings.filter { !$0.isFavorite }
   }
 
+  /// 按搜索词过滤（匹配标题/标签/笔记/纪要/转录，大小写不敏感）。
   private var filteredMeetings: [MeetingRecord] {
     let query = appState.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !query.isEmpty else { return meetings }
@@ -160,12 +186,16 @@ struct MeetingLibraryView: View {
   }
 }
 
+/// 会议库行：标题（录音中带红点/星标）+ 日期、时长与状态摘要。
+/// iPad 侧栏与 iPhone 会议列表共用。
 struct MeetingLibraryRow: View {
+  /// 展示的会议。
   let meeting: MeetingRecord
 
   var body: some View {
     VStack(alignment: .leading, spacing: 7) {
       HStack(spacing: 7) {
+        // 录音中的会议显示红色呼吸圆点。
         if meeting.status == .recording {
           Circle()
             .fill(.red)

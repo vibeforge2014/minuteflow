@@ -1,3 +1,10 @@
+/**
+ * 设置工作台：左侧分类导航 + 中栏二级服务目录 + 右侧配置面板。
+ * 五个标签页：AI 总结（llm）、转录设置（stt）、通用设置、存储与隐私、软件更新（仅 macOS）。
+ * AI 总结/转录页共用「模型目录 + 档案编辑器」结构：本地（Ollama/本地 Whisper 零路径配置）与
+ * 在线服务预设（国内外厂商 + New API 兼容）一键预填端点/协议/推荐模型，通常只需填密钥。
+ * 实际的模型调用与本地运行时解析在 electron/services/providers.mjs 与 local-models.mjs。
+ */
 import { useEffect, useState } from "react";
 import {
   ArrowClockwise,
@@ -32,9 +39,11 @@ import type {
   AppUpdateCheckResult
 } from "../types";
 
+/** 四种本地 Whisper 运行时（whisper.cpp GGML/GGUF、Python .pt、CT2、MLX）统一呈现为一个「本地 Whisper」。 */
 const LOCAL_WHISPER_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"] as const;
 const isLocalWhisperTransport = (transport: string | undefined) =>
   !!transport && (LOCAL_WHISPER_TRANSPORTS as readonly string[]).includes(transport);
+/** 新建档案的空白模板（自定义服务从这里开始）。 */
 const emptyProfile: ModelProfile = {
   name: "OpenAI 兼容模型",
   kind: "llm",
@@ -45,6 +54,10 @@ const emptyProfile: ModelProfile = {
   enabled: true
 };
 
+/**
+ * 服务商预设表：预填官方端点、协议（apiFlavor）与推荐模型，用户通常只需输入密钥。
+ * Anthropic/Gemini 走原生协议；MiniMax 等特殊端点通过 chatEndpoint 适配；New API 为一等公民。
+ */
 const providerPresets: Record<string, Partial<ModelProfile>> = {
   openai: {
     name: "OpenAI",
@@ -191,6 +204,7 @@ const providerPresets: Record<string, Partial<ModelProfile>> = {
   }
 };
 
+/** LLM 目录的分组展示顺序：国内厂商 → 国际厂商 → 兼容服务。 */
 const llmProviderGroups = [
   {
     label: "国内厂商",
@@ -227,18 +241,25 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
   const preferences = useMeetingStore((state) => state.preferences);
   const loadProfiles = useMeetingStore((state) => state.loadProfiles);
   const updatePreferences = useMeetingStore((state) => state.updatePreferences);
+  /** 当前设置页。 */
   const [tab, setTab] = useState<"llm" | "transcription" | "general" | "storage" | "updates">("transcription");
+  /** 正在编辑的模型档案（目录选中项或新建草稿）。 */
   const [editing, setEditing] = useState<ModelProfile | null>(null);
+  /** 密钥输入框的明文值（保存后只留 secretId 引用，不回显）。 */
   const [apiKey, setApiKey] = useState("");
+  /** 测试/保存的结果反馈。 */
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [updateState, setUpdateState] = useState<AppUpdateCheckResult | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
 
+  // 打开设置时刷新档案列表。
   useEffect(() => {
     if (open) loadProfiles();
   }, [loadProfiles, open]);
 
+  // 切到 AI 总结/转录页时，为编辑器选一个初始档案：
+  // 优先取该用途已保存的第一个档案，否则落回默认预设（OpenAI / 本地 Whisper）。
   useEffect(() => {
     if (!open || (tab !== "llm" && tab !== "transcription")) return;
     const targetKind: ModelProfile["kind"] = tab === "llm" ? "llm" : "stt";
@@ -256,6 +277,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
     });
   }, [editing, open, profiles, tab]);
 
+  // 进入「软件更新」页时读取主进程缓存的更新状态（启动时已静默检查过一次）。
   useEffect(() => {
     if (!open || tab !== "updates") return;
     api.updates.getState().then(setUpdateState).catch((error) => {
@@ -269,6 +291,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
   }, [open, tab]);
   if (!open) return null;
 
+  /** 从预设开始编辑：套用预设字段并清空密钥/状态。 */
   const startPreset = (key: keyof typeof providerPresets) => {
     const preset = providerPresets[key];
     setEditing({
@@ -280,6 +303,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
     setStatus(null);
   };
 
+  /** 新建自定义服务档案（OpenAI 兼容协议，按当前页决定 stt/llm）。 */
   const startCustomProfile = () => {
     const isTranscription = tab === "transcription";
     setEditing({
@@ -293,6 +317,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
     setStatus(null);
   };
 
+  /** 保存档案：密钥随请求送到主进程安全存储，渲染层不再持有明文。 */
   const saveProfile = async () => {
     if (!editing) return;
     setBusy(true);
@@ -310,6 +335,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
     }
   };
 
+  /** 测试连接：主进程对所选端点发一次最小请求（见 providers.mjs 的 testModelProfile）。 */
   const testProfile = async () => {
     if (!editing) return;
     setBusy(true);
@@ -324,6 +350,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
     }
   };
 
+  /** 手动检查更新：主进程拉取并校验官网 JSON 清单（updates.mjs）。 */
   const checkUpdate = async () => {
     setCheckingUpdate(true);
     try {
@@ -340,6 +367,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
     }
   };
 
+  /** 打开官网下载页（未签名阶段不自动安装，只引导到稳定 DMG 地址）。 */
   const openUpdateDownload = async () => {
     try {
       await api.updates.openDownload();
@@ -353,6 +381,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
     }
   };
 
+  // 用名称+transport 反查当前档案命中的预设（驱动下拉框回显）；pythonWhisper 归并为统一的 whisper 预设。
   const matchedPresetKey = editing
     ? Object.entries(providerPresets).find(([, preset]) => preset.name === editing.name && preset.transport === editing.transport)?.[0] ?? ""
     : "";
@@ -590,6 +619,11 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
   );
 }
 
+/**
+ * 本地 Whisper 模型管理器（零路径配置）：搜索本机 / 选择文件 / 应用内下载三条路径。
+ * 全程不暴露可执行文件、模型或 FFmpeg 路径——运行时组件由主进程托管解析；
+ * 下载走「校验过的目录 + SHA 摘要」，就绪后自动写入档案并启用。
+ */
 function LocalModelManager({
   profile,
   onChange
@@ -597,14 +631,18 @@ function LocalModelManager({
   profile: ModelProfile;
   onChange(profile: ModelProfile): void;
 }) {
+  /** 可下载模型目录（主进程 catalog 通道）。 */
   const [catalog, setCatalog] = useState<DownloadableModel[]>([]);
+  /** 本机扫描结果（发现的模型 + 可用运行时）。 */
   const [scan, setScan] = useState<LocalModelScanResult | null>(null);
+  /** 订阅到的下载进度事件。 */
   const [progress, setProgress] = useState<ModelDownloadProgress | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const loadProfiles = useMeetingStore((state) => state.loadProfiles);
 
+  // 挂载时拉取目录并订阅主进程的下载进度推送。
   useEffect(() => {
     let active = true;
     api.models.catalog().then((items) => active && setCatalog(items)).catch(() => {});
@@ -615,6 +653,7 @@ function LocalModelManager({
     };
   }, []);
 
+  /** 把一个本地模型文件启用为 stt 档案：按文件类型自动切换 transport（whisper-cpp/python 等）。 */
   const applyModel = async (model: LocalModelFile, runtimes = scan?.runtimes) => {
     setBusy(true);
     setError(null);
@@ -650,6 +689,7 @@ function LocalModelManager({
     }
   };
 
+  /** 搜索本机常见目录；恰好只发现一个模型时直接启用，省去一次点击。 */
   const scanModels = async () => {
     setBusy(true);
     setError(null);
@@ -664,6 +704,7 @@ function LocalModelManager({
     }
   };
 
+  /** 手动选择模型文件（高级兜底，仍是文件选择器而非手填路径）。 */
   const chooseModel = async () => {
     setError(null);
     try {
@@ -678,6 +719,7 @@ function LocalModelManager({
     }
   };
 
+  /** 应用内下载模型：完成后重新扫描并自动启用。 */
   const downloadModel = async (modelId: string) => {
     setBusy(true);
     setError(null);
@@ -697,6 +739,7 @@ function LocalModelManager({
     }
   };
 
+  // 运行时就绪徽标文案（托管 whisper / 兼容 whisper.cpp / Python / CT2 / MLX / FFmpeg）。
   const runtimeLabels: string[] = scan
     ? [
         scan.runtimes.managedWhisper && "本地转写组件已就绪",
@@ -761,6 +804,7 @@ function LocalModelManager({
   );
 }
 
+/** 模型体积可读化（GB/MB）。 */
 function formatBytes(bytes: number) {
   if (!bytes) return "未知大小";
   if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;

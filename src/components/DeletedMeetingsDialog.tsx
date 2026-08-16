@@ -1,3 +1,7 @@
+/**
+ * 最近删除对话框：列出软删除的会议（deletedAt 非空），支持一键恢复回会议库。
+ * 软删除保证录音文件与转写不丢失；数据清理策略由主进程按保留天数偏好执行。
+ */
 import { ArrowCounterClockwise, Trash, X } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
@@ -10,11 +14,14 @@ export function DeletedMeetingsDialog({
 }: {
   open: boolean;
   onClose(): void;
+  /** 恢复成功后刷新会议库列表。 */
   onRestored(): Promise<void>;
 }) {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
+  /** 正在恢复中的会议 id（按钮防重）。 */
   const [busyId, setBusyId] = useState<string | null>(null);
 
+  // 每次打开时拉取含已删除标记的会议，过滤出软删除项。
   useEffect(() => {
     if (!open) return;
     api.meetings.list("", true).then((items) => {

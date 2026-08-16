@@ -1,3 +1,8 @@
+/**
+ * 会议库侧栏（工作区左栏）：品牌、新建入口、搜索框、按时间分组的会议列表，
+ * 以及底部辅助功能（导入录音/会议模板/最近删除/设置）。
+ * 列表数据来自 Zustand store 的 meetings，搜索词也存于 store 以便 ⌘K 全局聚焦。
+ */
 import { useMemo } from "react";
 import {
   CalendarBlank,
@@ -18,6 +23,7 @@ interface SidebarProps {
   onSelect(id: string): void;
   onNew(): void;
   onImport(): void;
+  /** 进行中的导入任务数（导入按钮角标）。 */
   importCount?: number;
   onTemplates(): void;
   onTrash(): void;
@@ -27,6 +33,7 @@ interface SidebarProps {
 export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, importCount = 0, onTemplates, onTrash, onSettings }: SidebarProps) {
   const search = useMeetingStore((state) => state.search);
   const setSearch = useMeetingStore((state) => state.setSearch);
+  // 按开会时间距今天数分组（今天/本周/更早），meetings 变化时才重算。
   const groups = useMemo(() => groupMeetings(meetings), [meetings]);
 
   return (
@@ -89,6 +96,7 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, impor
   );
 }
 
+/** 按距今天数把会议分到 今天（<1天）/ 本周（<7天）/ 更早 三组，空组不显示。 */
 function groupMeetings(meetings: Meeting[]) {
   const groups = [
     { label: "今天", meetings: [] as Meeting[] },
@@ -105,6 +113,7 @@ function groupMeetings(meetings: Meeting[]) {
   return groups.filter((group) => group.meetings.length);
 }
 
+/** 侧栏行内日期显示：MM-DD HH:mm。 */
 function formatDate(value: string) {
   const date = new Date(value);
   return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;

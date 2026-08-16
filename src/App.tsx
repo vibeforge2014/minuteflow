@@ -1,3 +1,10 @@
+/**
+ * 桌面工作台根组件：组装左侧会议库、中央会议文档/播放器、右侧转录面板与底部录音条，
+ * 并统一管理各类对话框（新建、设置、导入、付费墙、系统权限、新手引导）与全局 Toast。
+ *
+ * 所属层：渲染层 UI 编排（组合 store、录音 hook 与 api 事件）。
+ * 主要导出：App。
+ */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowClockwise,
@@ -50,6 +57,7 @@ export function App() {
     updatePreferences,
     clearError
   } = useMeetingStore();
+  // —— 本地 UI 状态：各类弹层开关、导入队列、播放进度等，不进入 Zustand 全局 store ——
   const [newMeetingOpen, setNewMeetingOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
@@ -67,8 +75,10 @@ export function App() {
   const [importJobs, setImportJobs] = useState<ImportJob[]>([]);
   const [playbackMs, setPlaybackMs] = useState(0);
   const [seekToMs, setSeekToMs] = useState<number | null>(null);
+  // 已提示过“导入完成”的任务 id 集合：防止事件订阅重放历史任务时重复弹 Toast。
   const completedImports = useRef(new Set<string>());
 
+  // 启动时加载会议/模型/偏好，并拉取一次授权状态（付费墙开关）。
   useEffect(() => {
     initialize();
     api.licensing.getStatus().then(setLicenseStatus).catch(() => setLicenseStatus(null));
@@ -80,6 +90,7 @@ export function App() {
     }
   }), []);
 
+  // 导入队列：先回填历史任务，再订阅主进程推送的任务更新；任务完成时提示一次并刷新会议列表。
   useEffect(() => {
     api.imports.list().then((jobs) => {
       setImportJobs(jobs);
@@ -95,6 +106,7 @@ export function App() {
     });
   }, [refreshMeetings]);
 
+  // 首次运行引导分两道门：先系统权限（版本化流程，v2 会重新弹出），完成后再新手引导。
   useEffect(() => {
     if (!loading && (!preferences.systemPermissionsCompleted || preferences.permissionsVersion < 2)) setPermissionsOpen(true);
   }, [loading, preferences.permissionsVersion, preferences.systemPermissionsCompleted]);
@@ -103,6 +115,7 @@ export function App() {
     if (!loading && preferences.systemPermissionsCompleted && !preferences.onboardingCompleted) setOnboardingOpen(true);
   }, [loading, preferences.onboardingCompleted, preferences.systemPermissionsCompleted]);
 
+  // 付费功能守卫：已授权直接放行；未授权则记住触发原因并弹出门槛（¥99 一次性购买）对话框。
   const requirePremium = (reason: string) => {
     if (licenseStatus?.state === "licensed") return true;
     setPaywallReason(reason);
@@ -114,6 +127,7 @@ export function App() {
     () => meetings.find((item) => item.id === selectedId),
     [meetings, selectedId]
   );
+  // 录音生命周期 hook：传入当前会议，返回 phase/elapsed/levels/queue 等驱动 RecorderBar 的状态。
   const recorder = useMeetingRecorder(meeting);
 
   useEffect(() => {
@@ -121,6 +135,8 @@ export function App() {
       // Surface license-required errors from the main process as the paywall
       // rather than a generic toast. The code is prefixed in the message
       // because custom Error properties do not survive the contextBridge.
+      // 中文补充：主进程的“需要授权”错误以 [LICENSE_REQUIRED] 前缀编码在 message 中，
+      // 因为自定义 Error 属性过不了 contextBridge；这里解码后转成付费墙而非普通 Toast。
       if (recorder.warning.startsWith("[LICENSE_REQUIRED]")) {
         setPaywallReason(recorder.warning.replace(/^\[LICENSE_REQUIRED\]\s*/, ""));
         setPaywallOpen(true);
@@ -132,6 +148,7 @@ export function App() {
 
   // Flush the recorder when the window closes so the last audio chunk is not
   // lost; the main-process before-quit handler is the backstop.
+  // 中文补充：窗口关闭前冲刷录音器，确保最后一个音频块落盘；主进程的 before-quit 是兜底。
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       if (recorder.phase === "recording" || recorder.phase === "paused") {
@@ -151,6 +168,7 @@ export function App() {
     return created;
   };
 
+  // 导入入口（文件选择器 / 拖拽）：先过付费墙，再把候选文件交给右侧确认抽屉，确认后才入队归档。
   const handleImport = async () => {
     if (!requirePremium("导入录音并自动处理")) return;
     const files = await api.imports.choose();
@@ -159,6 +177,7 @@ export function App() {
     setImportOpen(true);
   };
 
+  // 拖拽导入走 IPC 把 File 转成主进程可读的候选描述（浏览器兜底实现则直接读 File 元信息）。
   const handleDrop = async (event: React.DragEvent) => {
     event.preventDefault();
     if (!event.dataTransfer.files.length || !requirePremium("导入录音并自动处理")) return;
@@ -169,10 +188,12 @@ export function App() {
     } catch (error) { setToast(error instanceof Error ? error.message : "无法读取拖入的文件。"); }
   };
 
+  // 会议文档统一变更入口：整份替换，由 store 负责乐观更新 + 持久化。
   const handleMeetingChange = (next: Meeting) => {
     updateMeeting(next.id, () => next);
   };
 
+  // 首次加载且尚无可选会议时展示全屏 loading，避免闪烁空状态。
   if (loading && !meeting) {
     return (
       <div className="app-loading">

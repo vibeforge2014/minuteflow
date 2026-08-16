@@ -1,5 +1,14 @@
+/**
+ * 演示数据：浏览器/官网模式下首次打开时写入 localStorage 的示例会议。
+ * 覆盖主要状态（录音中/已完成/收藏/线上线下），让官网访客无需录音即可预览
+ * 会议库、文档、纪要与转写面板的完整 UI。
+ *
+ * 所属层：渲染层数据（仅演示，Electron 桌面端不使用）。
+ * 主要导出：demoMeetings。
+ */
 import type { Meeting, MeetingSummary } from "../types";
 
+/** 共享的示例纪要底稿：各会议在此基础上覆盖差异字段。 */
 const baseSummary: MeetingSummary = {
   topics: ["登录流程改版", "AB 测试流量", "客服高频问题"],
   keyPoints: [
@@ -26,6 +35,7 @@ const baseSummary: MeetingSummary = {
   stale: false
 };
 
+/** 示例会议列表：第一条为含完整转写的「录音中」周会，其余覆盖不同标签/形式/收藏态。 */
 export const demoMeetings: Meeting[] = [
   {
     id: "product-weekly-2026-07-30",

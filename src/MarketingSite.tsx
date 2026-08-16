@@ -1,3 +1,11 @@
+/**
+ * 产品官网（Apple 风格克制视觉，暖橙 #E76F51 点缀）：纯浏览器环境渲染的静态站点。
+ * 路由：#hash + pathname 混合——首页（#/)、规格页（#/specs/<section>）、
+ * 定价/条款/隐私/退款为独立路径页（/pricing/ 等，由托管层直接服务 HTML）。
+ * 使用原生文档滚动（与 Electron 固定视口工作台隔离），不提供浏览器版会议演示。
+ * 关键区块：Hero、特性信号条、工作区解剖（三栏）、三阶段演示、隐私图解、
+ * 平台对比、结尾 CTA、规格页（七节）、政策页四件套、页脚。
+ */
 import { useEffect, useLayoutEffect, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import {
@@ -31,11 +39,15 @@ import {
 import productWorkspace from "../implementation-1440x1024-final.png";
 import { BrandMark } from "./components/BrandMark";
 
+/** 站点路由：首页 / 规格 / 定价 / 条款 / 隐私 / 退款。 */
 type SiteRoute = "home" | "specs" | "pricing" | "terms" | "privacy" | "refund";
+/** 演示区块的三个阶段：会中记录 / 会中整理 / 会后行动。 */
 type DemoMode = "record" | "organize" | "act";
 
+/** 桌面版下载地址（GitHub Releases 最新版）。 */
 const desktopReleaseUrl = "https://github.com/vibeforge2014/minuteflow/releases/latest";
 
+/** 三阶段演示的文案数据（LandingPage 的记录/整理/行动切换器使用）。 */
 const featureDemo: Record<DemoMode, {
   eyebrow: string;
   title: string;
@@ -62,6 +74,7 @@ const featureDemo: Record<DemoMode, {
   }
 };
 
+/** 规格页目录（左侧锚点导航，id 与各 SpecSection 一一对应）。 */
 const specSections = [
   { id: "overview", label: "产品概览" },
   { id: "desktop", label: "桌面端" },
@@ -72,11 +85,14 @@ const specSections = [
   { id: "requirements", label: "系统要求" }
 ];
 
+/** 官网根组件：按路由切换 首页 / 规格页 / 政策页，装配页头页脚与回顶按钮。 */
 export function MarketingSite() {
   const [route, setRoute] = useState<SiteRoute>(() => getRoute());
   const [menuOpen, setMenuOpen] = useState(false);
+  // 滚动超过 24px 后导航栏收缩为毛玻璃、回顶按钮出现。
   const [isScrolled, setIsScrolled] = useState(() => window.scrollY > 24);
 
+  // 官网使用原生文档滚动：加 marketing-mode 类以解除桌面工作台的固定视口布局。
   useLayoutEffect(() => {
     document.documentElement.classList.add("marketing-mode");
     document.body.classList.add("marketing-mode");
@@ -93,6 +109,7 @@ export function MarketingSite() {
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
+  // hash 路由变化（前进/后退/深链）时切换页面并回到顶部；同时收起移动端菜单。
   useEffect(() => {
     let currentRoute = getRoute();
     const handleRoute = () => {
@@ -138,6 +155,7 @@ export function MarketingSite() {
   );
 }
 
+/** 顶部导航：品牌、主导航（含首页锚点滚动）、外链（下载/GitHub）、移动端汉堡菜单。 */
 function SiteHeader({
   route,
   menuOpen,
@@ -213,12 +231,15 @@ function SiteHeader({
   );
 }
 
+/** 首页：Hero（含产品截图舞台与浮动徽标）→ 特性信号条 → 工作区解剖 → 三阶段演示 → 隐私 → 平台 → 结尾 CTA。 */
 function LandingPage() {
+  // 演示区块当前阶段（记录/整理/行动），驱动文案与右侧示意图切换。
   const [demoMode, setDemoMode] = useState<DemoMode>("record");
   const demo = featureDemo[demoMode];
 
   return (
     <main id="main-content" tabIndex={-1}>
+      {/* —— Hero：主张、下载按钮、平台徽标、产品截图与两枚浮动特性卡 —— */}
       <section className="hero">
         <div className="hero__ambient hero__ambient--one" />
         <div className="hero__ambient hero__ambient--two" />
@@ -265,6 +286,7 @@ function LandingPage() {
         </div>
       </section>
 
+      {/* —— 特性信号条：实时转写 / 滚动纪要 / 本地优先 / 开放导出 —— */}
       <section className="signal-strip" aria-label="核心特性">
         <div><Waveform size={21} /><span><strong>实时转写</strong> 中文与中英混合</span></div>
         <div><Sparkle size={21} /><span><strong>滚动纪要</strong> 两分钟持续更新</span></div>
@@ -272,6 +294,7 @@ function LandingPage() {
         <div><Export size={21} /><span><strong>开放导出</strong> 文档、字幕与备份</span></div>
       </section>
 
+      {/* —— 工作区解剖：会议库 / 会议文档 / 实时侧栏 三张结构卡 —— */}
       <section className="site-section intro-section" id="features">
         <div className="section-heading section-heading--center">
           <span className="section-kicker">一个持续生长的会议文档</span>
@@ -311,6 +334,7 @@ function LandingPage() {
         </div>
       </section>
 
+      {/* —— 三阶段演示：记录/整理/行动 分段切换器 + 左文右图 —— */}
       <section className="site-section demo-section">
         <div className="demo-shell">
           <div className="demo-copy">
@@ -344,6 +368,7 @@ function LandingPage() {
         </div>
       </section>
 
+      {/* —— 隐私区块：本地优先数据流图（本机资料库 → 仅有配置后才发送） —— */}
       <section className="site-section privacy-section" id="privacy">
         <div className="privacy-card">
           <div className="privacy-card__copy">
@@ -376,6 +401,7 @@ function LandingPage() {
         </div>
       </section>
 
+      {/* —— 平台对比：桌面三栏工作区 vs iPhone/iPad 原生 SwiftUI —— */}
       <section className="site-section platform-section">
         <div className="section-heading">
           <span className="section-kicker">桌面深度工作，移动随身捕捉</span>
@@ -407,6 +433,7 @@ function LandingPage() {
         </div>
       </section>
 
+      {/* —— 结尾 CTA —— */}
       <section className="closing-cta">
         <div className="closing-cta__orb" />
         <span className="section-kicker">少一点整理，多一点推进</span>
@@ -422,6 +449,7 @@ function LandingPage() {
   );
 }
 
+/** 演示区右侧的静态示意图：按阶段渲染 文档+波形 / 时间线纪要 / 行动项表格 + 底部录音条。 */
 function DemoVisual({ mode }: { mode: DemoMode }) {
   return (
     <div className={`demo-visual demo-visual--${mode}`} aria-hidden="true">
@@ -480,9 +508,14 @@ function DemoVisual({ mode }: { mode: DemoMode }) {
   );
 }
 
+/**
+ * 规格页：左侧锚点目录 + 七个章节（概览/桌面端/iOS/转写与AI/数据与隐私/导入导出/系统要求）。
+ * 支持 #/specs/<section> 深链直滚；滚动时目录联动高亮当前章节。
+ */
 function SpecsPage() {
   const [activeSection, setActiveSection] = useState("overview");
 
+  // 进入页面时处理深链（#/specs/<id>），等一帧让布局完成再滚动定位。
   useEffect(() => {
     const requestedSection = window.location.hash.split("/")[2];
     if (!specSections.some(({ id }) => id === requestedSection)) return;
@@ -491,6 +524,7 @@ function SpecsPage() {
     });
   }, []);
 
+  // 滚动监听：把「顶部已滚过 150px 的最后一个章节」视为当前章节，驱动目录高亮。
   useEffect(() => {
     const onScroll = () => {
       const candidates = specSections
@@ -707,6 +741,7 @@ function SpecsPage() {
   );
 }
 
+/** 规格页章节骨架：编号 + kicker + 标题 + 引言 + 内容体（id 供锚点定位）。 */
 function SpecSection({
   id,
   index,
@@ -737,6 +772,7 @@ function SpecSection({
   );
 }
 
+/** 规格页指标卡（图标 + 标签 + 值）。 */
 function SpecMetric({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
   return (
     <div className="spec-metric">
@@ -747,6 +783,7 @@ function SpecMetric({ icon, label, value }: { icon: React.ReactNode; label: stri
   );
 }
 
+/** 规格页键值表格（label → value 两列行）。 */
 function SpecTable({ rows }: { rows: string[][] }) {
   return (
     <div className="spec-table">
@@ -760,6 +797,7 @@ function SpecTable({ rows }: { rows: string[][] }) {
   );
 }
 
+/** 特性行列表（图标 + 标题 + 描述 + 角标）。 */
 function FeatureRows({
   rows
 }: {
@@ -780,6 +818,7 @@ function FeatureRows({
 
 type PolicyRoute = Exclude<SiteRoute, "home" | "specs">;
 
+/** 政策四页（定价/条款/隐私/退款）的头部元信息。 */
 const policyMeta: Record<PolicyRoute, { eyebrow: string; title: string; summary: string }> = {
   pricing: { eyebrow: "清晰定价", title: "一次购买，长期使用。", summary: "没有隐藏套餐，也没有自动续费。以人民币一次性购买 MinuteFlow 桌面版授权。" },
   terms: { eyebrow: "服务条款", title: "使用 MinuteFlow 前，请了解这些约定。", summary: "本条款说明软件许可、可接受的使用方式、交易关系和双方责任。" },
@@ -787,6 +826,7 @@ const policyMeta: Record<PolicyRoute, { eyebrow: string; title: string; summary:
   refund: { eyebrow: "退款政策", title: "购买后 7 天内，可申请退款。", summary: "如果 MinuteFlow 不适合你，可在符合以下条件时通过 Paddle 申请退款。" }
 };
 
+/** 政策页骨架：头部元信息 + 左侧政策导航 + 对应内容组件。 */
 function PolicyPage({ route }: { route: PolicyRoute }) {
   const meta = policyMeta[route];
   return (
@@ -810,6 +850,7 @@ function PolicyPage({ route }: { route: PolicyRoute }) {
   );
 }
 
+/** 定价页内容：¥99 一次性购买价格卡 + 付款/授权/购买前说明。 */
 function PricingContent() {
   return <article className="policy-document pricing-document">
     <section className="price-card">
@@ -823,6 +864,7 @@ function PricingContent() {
   </article>;
 }
 
+/** 服务条款内容：销售主体、Paddle、许可、责任等八节。 */
 function TermsContent() {
   return <article className="policy-document">
     <section><h2>1. 适用范围与销售主体</h2><p>本条款适用于 MinuteFlow 软件及官网。MinuteFlow 由位于中国的个人开发者运营。联系邮箱：<a href="mailto:xhdp123@126.com">xhdp123@126.com</a>；联系电话：<a href="tel:+8618705850056">+86 187 0585 0056</a>。</p></section>
@@ -836,6 +878,7 @@ function TermsContent() {
   </article>;
 }
 
+/** 隐私政策内容：本地数据、第三方服务、付款信息等八节。 */
 function PrivacyContent() {
   return <article className="policy-document">
     <section><h2>1. 谁负责处理信息</h2><p>MinuteFlow 由位于中国的个人开发者运营。隐私问题或权利请求请发送至 <a href="mailto:xhdp123@126.com">xhdp123@126.com</a>，或致电 <a href="tel:+8618705850056">+86 187 0585 0056</a>。</p></section>
@@ -849,6 +892,7 @@ function PrivacyContent() {
   </article>;
 }
 
+/** 退款政策内容：7 天保证、申请方式、条件与例外。 */
 function RefundContent() {
   return <article className="policy-document">
     <section className="refund-highlight"><h2>7 天退款保证</h2><p>自首次购买完成之日起 7 个自然日内，你可以申请退回 MinuteFlow 的一次性购买款项。</p></section>
@@ -859,6 +903,7 @@ function RefundContent() {
   </article>;
 }
 
+/** 全站页脚：品牌、全量链接与版权行。 */
 function SiteFooter() {
   return (
     <footer className="site-footer">
@@ -883,6 +928,7 @@ function SiteFooter() {
   );
 }
 
+/** 从 pathname + hash 解析当前路由：政策页看路径尾部，specs 看 hash，其余为首页。 */
 function getRoute(): SiteRoute {
   const path = window.location.pathname.replace(/\/+$/, "");
   if (path.endsWith("/pricing")) return "pricing";
@@ -902,6 +948,7 @@ function siteHref(path: string) {
   return `${base}${path}`;
 }
 
+/** 首页锚点滚动：改写地址栏 hash 并平滑滚到目标区块（尊重 prefers-reduced-motion）。 */
 function scrollToSection(event: ReactMouseEvent<HTMLAnchorElement>, id: string) {
   event.preventDefault();
   window.history.replaceState(null, "", `#${id}`);

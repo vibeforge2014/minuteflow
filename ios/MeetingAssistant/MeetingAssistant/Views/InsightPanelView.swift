@@ -1,8 +1,22 @@
+//
+//  InsightPanelView.swift
+//  MeetingAssistant
+//
+//  会议洞察面板：顶部“转录 / AI 纪要”分段切换，下方分别承载实时转录列表
+//  与结构化纪要卡片；iPad 作为三栏布局的第三栏，iPhone 由详情页分段复用
+//  TranscriptPanelView / SummaryPanelView。
+//  所属层：视图层。
+//
+
 import SwiftData
 import SwiftUI
 
+/// 洞察面板容器：分段选择器 + 转录/纪要面板。
+/// 导航位置：iPad NavigationSplitView 第三栏（detail）；iPhone 不整体使用。
 struct InsightPanelView: View {
+  /// 全局 UI 状态（读写检查面板标签）。
   @Environment(AppState.self) private var appState
+  /// 目标会议。
   let meeting: MeetingRecord
 
   var body: some View {
@@ -22,6 +36,7 @@ struct InsightPanelView: View {
       .background(MeetingTheme.surface)
       Divider()
 
+      // 按标签切换：转录面板 / AI 纪要面板。
       switch appState.inspectorTab {
       case .transcript:
         TranscriptPanelView(meeting: meeting)
@@ -34,8 +49,12 @@ struct InsightPanelView: View {
   }
 }
 
+/// 实时转录面板：定稿片段列表 + 录音中的临时转写行，自动滚动跟随最新内容。
+/// 导航位置：iPad 为 InsightPanelView 的“转录”标签；iPhone 为详情页“转录”分段。
 struct TranscriptPanelView: View {
+  /// 录音协调器（临时转写与录音状态）。
   @Environment(RecordingCoordinator.self) private var recorder
+  /// 目标会议。
   let meeting: MeetingRecord
 
   var body: some View {
@@ -61,6 +80,7 @@ struct TranscriptPanelView: View {
               .padding(.leading, 54)
           }
 
+          // 录音中的临时转写行（未定稿，软底色区分）。
           if recorder.activeMeetingID == meeting.id,
             !recorder.liveTranscript.isEmpty
           {
@@ -71,6 +91,7 @@ struct TranscriptPanelView: View {
             .id("live-transcript")
           }
 
+          // 空状态：既无定稿片段也无实时文本。
           if meeting.orderedSegments.isEmpty && recorder.liveTranscript.isEmpty {
             ContentUnavailableView(
               "等待转录",
@@ -82,6 +103,7 @@ struct TranscriptPanelView: View {
         }
       }
       .scrollDismissesKeyboard(.interactively)
+      // 实时文本更新时平滑滚动到最新的临时转写行。
       .onChange(of: recorder.liveTranscript) { _, _ in
         withAnimation(.easeOut(duration: 0.2)) {
           proxy.scrollTo("live-transcript", anchor: .bottom)
@@ -91,7 +113,9 @@ struct TranscriptPanelView: View {
   }
 }
 
+/// 单条转录行：时间戳、可改名的说话人菜单、可编辑文本与定稿状态图标。
 private struct TranscriptSegmentRow: View {
+  /// 双向绑定的转录片段（就地编辑文本与说话人）。
   @Bindable var segment: TranscriptSegmentRecord
 
   var body: some View {
@@ -102,6 +126,7 @@ private struct TranscriptSegmentRow: View {
         .frame(width: 40, alignment: .leading)
 
       VStack(alignment: .leading, spacing: 6) {
+        // 说话人菜单：点按改名（预设名单 + 快速选项）。
         Menu {
           ForEach(["我", "Speaker 1", "Speaker 2", "刘婷", "周哲"], id: \.self) { name in
             Button(name) { segment.speaker = name }
@@ -124,6 +149,7 @@ private struct TranscriptSegmentRow: View {
           .textFieldStyle(.plain)
       }
 
+      // 定稿状态图标：定稿为对勾，未定稿为主题色省略号。
       Image(systemName: segment.isFinal ? "checkmark.circle" : "ellipsis.circle")
         .font(.caption)
         .foregroundStyle(
@@ -136,6 +162,7 @@ private struct TranscriptSegmentRow: View {
     .padding(.vertical, 12)
   }
 
+  /// 按说话人分配固定颜色（“我”为主色，示例说话人有专属色）。
   private var speakerColor: Color {
     switch segment.speaker {
     case "我": MeetingTheme.primary
@@ -146,8 +173,11 @@ private struct TranscriptSegmentRow: View {
   }
 }
 
+/// 录音中的临时转写行（软底色 + 进度指示，区别于定稿片段）。
 private struct LiveTranscriptRow: View {
+  /// 当前录音秒数（展示用时间戳）。
   let timestamp: TimeInterval
+  /// 实时识别文本。
   let text: String
 
   var body: some View {
@@ -178,12 +208,20 @@ private struct LiveTranscriptRow: View {
   }
 }
 
+/// AI 纪要面板：手动“更新”按钮 + 决策/未决/风险/下一步四张可编辑卡片。
+/// 导航位置：iPad 为 InsightPanelView 的“AI 纪要”标签；iPhone 为详情页同名分段。
 struct SummaryPanelView: View {
+  /// SwiftData 上下文（保存纪要结果）。
   @Environment(\.modelContext) private var modelContext
+  /// 录音协调器（拼接实时转录）。
   @Environment(RecordingCoordinator.self) private var recorder
+  /// 用户偏好（纪要 Provider 参数）。
   @Environment(AppPreferences.self) private var preferences
+  /// 双向绑定的会议（纪要字段可编辑）。
   @Bindable var meeting: MeetingRecord
+  /// 是否正在请求纪要。
   @State private var isSummarizing = false
+  /// 纪要失败文案（alert 展示）。
   @State private var errorMessage: String?
 
   var body: some View {
@@ -233,6 +271,7 @@ struct SummaryPanelView: View {
           text: $meeting.nextStepsText
         )
 
+        // 无纪要时的空状态提示。
         if meeting.summaryText.isEmpty {
           ContentUnavailableView(
             "尚未生成纪要",
@@ -245,6 +284,7 @@ struct SummaryPanelView: View {
       .padding(16)
       .padding(.bottom, 90)
     }
+    // 纪要更新失败提示。
     .alert(
       "纪要更新失败",
       isPresented: Binding(
@@ -258,6 +298,10 @@ struct SummaryPanelView: View {
     }
   }
 
+  // MARK: - 私有方法
+
+  /// 拼接定稿转录（含录音中的实时文本）与笔记生成纪要并保存。
+  /// - 副作用：写回 meeting 字段、保存 SwiftData；远程模式下发起网络调用。
   private func summarize() async {
     isSummarizing = true
     defer { isSummarizing = false }
@@ -278,9 +322,13 @@ struct SummaryPanelView: View {
   }
 }
 
+/// 纪要分区卡片：图标标题 + 可编辑多行文本（TextEditor 绑定模型字段）。
 private struct SummarySectionCard: View {
+  /// 卡片标题。
   let title: String
+  /// 标题图标（SF Symbol 名）。
   let systemImage: String
+  /// 绑定的纪要字段文本。
   @Binding var text: String
 
   var body: some View {

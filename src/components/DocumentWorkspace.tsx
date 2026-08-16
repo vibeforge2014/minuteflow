@@ -1,3 +1,10 @@
+/**
+ * 中央会议文档（工作区中栏）：自上而下依次是日期/参与者行、标题、
+ * 会议目标、个人笔记（Tiptap 富文本 + Markdown 源码/预览三态 + .md 导入）、
+ * 实时纪要（滚动要点，stale 提示与手动总结）、行动项表格、决策/问题/风险/下一步网格。
+ * 笔记以 Markdown 为真源（notesMarkdown 优先），编辑器与纯文本 notes 双向同步；
+ * 手动编辑过的纪要字段经 lockSummaryField 打锁，AI 重新生成时不会覆盖。
+ */
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowClockwise,
@@ -27,6 +34,7 @@ import { useMeetingStore } from "../store/meetingStore";
 interface DocumentWorkspaceProps {
   meeting: Meeting;
   onChange(meeting: Meeting): void;
+  /** 手动触发 AI 总结（final=false 滚动更新）。 */
   onGenerateSummary(): void;
   summaryBusy: boolean;
 }
@@ -38,12 +46,17 @@ export function DocumentWorkspace({
   summaryBusy
 }: DocumentWorkspaceProps) {
   const summaryIntervalSeconds = useMeetingStore((state) => state.preferences.summaryIntervalSeconds);
+  /** 笔记显示模式：富文本编辑 / Markdown 源码 / 只读预览。 */
   const [noteMode, setNoteMode] = useState<"rich" | "markdown" | "preview">("rich");
+  /** 最近导入的 .md 文件名（显示导入成功提示）。 */
   const [importedFile, setImportedFile] = useState<string | null>(null);
+  // onUpdate 回调里要访问「最新」的 meeting/onChange，用 ref 避免编辑器重建。
   const meetingRef = useRef(meeting);
   const onChangeRef = useRef(onChange);
   meetingRef.current = meeting;
   onChangeRef.current = onChange;
+  // Tiptap 富文本编辑器：内容从 Markdown 渲染而来；每次编辑即时转回 Markdown 持久化，
+  // 同时抽取纯文本行更新 notes（供搜索与 AI 总结使用）。
   const editor = useEditor({
     extensions: [
       StarterKit,
@@ -62,12 +75,15 @@ export function DocumentWorkspace({
     }
   });
 
+  // 外部数据变化（切换会议、转写更新回写、Markdown 源码模式编辑）同步进编辑器；
+  // 但用户正在编辑（聚焦）时不覆盖，避免光标跳动。
   useEffect(() => {
     if (!editor || editor.isFocused) return;
     const next = markdownToHtml(meetingMarkdown(meeting));
     if (editor.getHTML() !== next) editor.commands.setContent(next, { emitUpdate: false });
   }, [editor, meeting.id, meeting.notes, meeting.notesMarkdown]);
 
+  /** 导入 .md 文件：规范化换行/BOM 后写入编辑器与 notesMarkdown，并切到预览态。 */
   const importMarkdown = async () => {
     const imported = await api.notes.importMarkdown();
     if (!imported) return;
@@ -82,9 +98,14 @@ export function DocumentWorkspace({
     setNoteMode("preview");
   };
 
+  /** 修改会议目标列表。 */
   const setStringList = (key: "goals", values: string[]) =>
     onChange({ ...meeting, [key]: values });
 
+  /**
+   * 修改纪要的一个列表字段（要点/决策/未决问题/风险/下一步）。
+   * 手动改动会把被编辑的那条加入 manualLocks（lockSummaryField），AI 下次生成不覆盖它。
+   */
   const setSummaryList = (
     key: "keyPoints" | "decisions" | "openQuestions" | "risks" | "nextSteps",
     values: string[],
@@ -97,6 +118,7 @@ export function DocumentWorkspace({
     )
   });
 
+  /** 更新单个行动项字段；手动改动即锁定该行动项（`action:<id>`），防止 AI 重算时丢失。 */
   const updateAction = (id: string, patch: Partial<Meeting["summary"]["actionItems"][number]>) =>
     onChange({
       ...meeting,
@@ -220,6 +242,7 @@ export function DocumentWorkspace({
           )}
           <div className="summary-timeline">
             {meeting.summary.keyPoints.length ? meeting.summary.keyPoints.map((item, index) => (
+              // 最近 3 条标为「新增」，帮助用户快速看到滚动纪要的新内容。
               <div key={`kp-${index}`} className={index >= meeting.summary.keyPoints.length - 3 ? "is-new" : ""}>
                 <time>{index + 1}</time>
                 <textarea
@@ -321,6 +344,7 @@ export function DocumentWorkspace({
   );
 }
 
+/** 纪要四宫格里的一格：可编辑字符串列表（决策/未决问题/风险/下一步），编辑即锁定该条。 */
 function EditableSummaryList({
   title,
   values,
@@ -355,6 +379,7 @@ function EditableSummaryList({
   );
 }
 
+/** 文档区块骨架：图标 + 标题 + 徽标 + 右侧动作按钮 + 内容。 */
 function DocumentSection({
   icon,
   title,
@@ -379,6 +404,10 @@ function DocumentSection({
   );
 }
 
+/**
+ * 逐行编辑的字符串列表（会议目标用）：
+ * 行内回车在下方插入空行、空行退格删除该行，底部输入框回车/失焦追加新项。
+ */
 function EditableList({
   values,
   placeholder,
@@ -434,17 +463,20 @@ function EditableList({
   );
 }
 
+// HTML → Markdown 转换器（编辑器内容持久化为 Markdown 源）。
 const turndown = new TurndownService({
   bulletListMarker: "-",
   codeBlockStyle: "fenced",
   headingStyle: "atx"
 });
 
+/** 取笔记的 Markdown 真源：优先 notesMarkdown；旧数据（无源码）由 notes 行拼装。 */
 function meetingMarkdown(meeting: Meeting) {
   if (typeof meeting.notesMarkdown === "string") return meeting.notesMarkdown;
   return meeting.notes.map((item) => `- ${item}`).join("\n");
 }
 
+/** Markdown → 安全 HTML：marked 渲染后必须过 DOMPurify（禁 style/iframe 等），再进 dangerouslySetInnerHTML/编辑器。 */
 function markdownToHtml(markdown: string) {
   const rendered = marked.parse(markdown || "", { async: false, gfm: true });
   return DOMPurify.sanitize(String(rendered), {
@@ -453,10 +485,12 @@ function markdownToHtml(markdown: string) {
   }) || "<p></p>";
 }
 
+/** HTML → Markdown（编辑器内容落盘）。 */
 function htmlToMarkdown(html: string) {
   return turndown.turndown(html).trim();
 }
 
+/** Markdown → 纯文本行数组（写入 meeting.notes，供搜索与 AI 输入）。 */
 function markdownToPlainText(markdown: string) {
   const container = document.createElement("div");
   container.innerHTML = markdownToHtml(markdown);
@@ -466,6 +500,7 @@ function markdownToPlainText(markdown: string) {
     .filter(Boolean);
 }
 
+/** 文档头部日期显示：YYYY年M月D日 HH:mm。 */
 function formatMeetingDate(value: string) {
   const date = new Date(value);
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;

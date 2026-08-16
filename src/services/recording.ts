@@ -1,29 +1,49 @@
+/**
+ * 录音引擎（渲染层）：封装一次会议录音的完整生命周期——
+ * 权限预检、双轨采集（麦克风 + 系统/屏幕音频）、MediaRecorder 分块归档、
+ * 独立 8 秒转写块轮询、实时电平表，以及「停止前等待所有音频块落盘」的安全收尾。
+ * 供 hooks/useMeetingRecorder.ts 装配使用，通过 api 桥接主进程会话。
+ *
+ * 所属层：渲染层服务（音视频采集与转写调度）。
+ * 主要导出：MeetingRecorder。
+ */
 import { api } from "../lib/api";
 import type { AudioTrackKind, Meeting, ModelProfile, TranscriptSegment } from "../types";
 
+/** 可直接采集的轨道类型（"mixed" 仅用于已落盘的合成产物，不能采集）。 */
 type CaptureTrack = Exclude<AudioTrackKind, "mixed">;
 
+/** 录音过程中向上层（UI/hook）回调的事件集合。 */
 interface RecordingCallbacks {
+  /** 每帧输入电平（0-1，麦克风/系统各一路），驱动录音条波形动画。 */
   onLevel(levels: { microphone: number; system: number }): void;
+  /** 收到一段定稿转录（仅非空文本才回调）。 */
   onTranscript(segment: TranscriptSegment): void;
+  /** 在途转写任务数量变化（用于 UI 显示积压指示）。 */
   onTranscriptionQueue(size: number): void;
+  /** 非致命告警（如系统音频不可用、写盘失败），UI 以 Toast 呈现但不中断录音。 */
   onWarning(message: string): void;
 }
 
+/** 一条已绑定的采集轨道：流、归档录制器、块序号与在途落盘任务集合。 */
 interface RecorderBinding {
   track: CaptureTrack;
   stream: MediaStream;
   archive: MediaRecorder;
+  /** 归档块序号：主进程按 (track, sequence) 排序拼接，乱序会破坏音频。 */
   sequence: number;
+  /** 在途的 recordings.append 任务集合；stop() 必须等它们全部落盘后才能收尾。 */
   pendingWrites: Set<Promise<void>>;
 }
 
+/** 按优先级挑一个当前浏览器支持的编码（Chromium 优先 Opus/WebM），保证归档可被 FFmpeg 解码。 */
 const supportedMimeType = () => [
   "audio/webm;codecs=opus",
   "audio/webm",
   "audio/mp4"
 ].find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
 
+/** 用统一编码与码率创建录制器（归档 96kbps / 转写块 64kbps 由调用方指定）。 */
 function createAudioRecorder(stream: MediaStream, audioBitsPerSecond: number) {
   const mimeType = supportedMimeType();
   return new MediaRecorder(stream, {
@@ -32,21 +52,36 @@ function createAudioRecorder(stream: MediaStream, audioBitsPerSecond: number) {
   });
 }
 
+/**
+ * 单场会议的录音会话对象。
+ * 关键设计：
+ * - 归档与转写解耦：归档用长时 MediaRecorder 每 15s 落一块保证文件完整；
+ *   转写用独立的短时录制器每 8s 产一个自包含块，避免切割长 WebM 导致的解码错位。
+ * - 停止语义：stop() 先停录制器，再等全部在途 append 落盘，最后才调 recordings.stop 收尾，
+ *   确保不会丢最后一块或留下无法保存的录音。
+ */
 export class MeetingRecorder {
   private meeting: Meeting;
+  /** 已启用的 stt 模型档案；未配置时只归档不转写。 */
   private sttProfile: ModelProfile | undefined;
   private glossary: string[];
   private callbacks: RecordingCallbacks;
+  /** 主进程录音会话 id，append/stop 都要带上。 */
   private sessionId = "";
+  /** 会话开始时间戳（主进程返回），用于把块时间换算为相对会议的 startMs/endMs。 */
   private startedAt = 0;
   private bindings: RecorderBinding[] = [];
+  /** 每条轨道的转写循环 Promise；stop 时等待它们退出。 */
   private transcriptionLoops: Array<Promise<void>> = [];
   private stopTranscription = false;
   private paused = false;
   private audioContext: AudioContext | null = null;
+  /** 电平表 rAF 句柄，stop 时取消。 */
   private analyserFrame = 0;
   private transcriptionQueue = 0;
+  /** 用户在启动过程中取消（start 会被 reject）。 */
   private startCancelled = false;
+  /** 挂起的 getUserMedia/getDisplayMedia 的取消句柄。 */
   private rejectStart: ((error: Error) => void) | null = null;
 
   constructor(
@@ -61,6 +96,11 @@ export class MeetingRecorder {
     this.callbacks = callbacks;
   }
 
+  /**
+   * 启动录音：权限预检 → 建主进程会话 → 采集麦克风（线上会议再叠加系统音频轨）→ 启动电平表。
+   * 任何一步失败都会停止已开的轨道/录制器并 abort 会话，不留半启动状态。
+   * 注意：这里从不触发系统权限弹窗——权限必须由首run引导提前授予，未授权直接报错并引导去系统设置。
+   */
   async start() {
     const permissions = await api.system.getPermissions();
     if (permissions.microphone !== "granted") {
@@ -75,6 +115,7 @@ export class MeetingRecorder {
     try {
       const microphone = await this.requestMedia({
         audio: {
+          // 线上会议开启回声消除，避免扬声器里的远端声音被麦克风重复录到。
           echoCancellation: this.meeting.mode === "online",
           noiseSuppression: true,
           autoGainControl: true,
@@ -85,6 +126,7 @@ export class MeetingRecorder {
 
       if (this.meeting.mode === "online") {
         try {
+          // 屏幕采集只为了拿到系统音频轨：请求最小规格视频（部分平台强制要求视频轨）后立即禁用。
           const display = await this.requestDisplayMedia({
             video: { width: { ideal: 2 }, height: { ideal: 2 }, frameRate: { ideal: 1, max: 1 } },
             audio: true
@@ -122,6 +164,7 @@ export class MeetingRecorder {
     }
   }
 
+  /** 用户主动取消启动：标记取消、reject 挂起的授权请求，并停掉已开的轨道。 */
   cancelStart() {
     this.startCancelled = true;
     this.rejectStart?.(new Error("录音启动已取消。"));
@@ -147,6 +190,10 @@ export class MeetingRecorder {
     );
   }
 
+  /**
+   * 给授权请求加「用户取消 + 超时」双保险：Promise.race 原始请求/取消/超时三者。
+   * 输掉的那路拿到的流必须立刻 stop，防止轨道泄漏（常见于用户先取消后授权弹窗才返回）。
+   */
   private withStartDeadline(request: Promise<MediaStream>, timeoutMs: number, timeoutMessage: string) {
     let settled = false;
     const cancellation = new Promise<MediaStream>((_resolve, reject) => {
@@ -175,6 +222,10 @@ export class MeetingRecorder {
     });
   }
 
+  /**
+   * 绑定一条采集轨道：创建 15s 分块的归档录制器，dataavailable 时把块经 IPC 追加到主进程；
+   * 若配置了 stt 档案，同时为该轨道启动独立的转写循环。
+   */
   private async bindStream(track: CaptureTrack, stream: MediaStream) {
     const archive = createAudioRecorder(stream, 96_000);
     const binding: RecorderBinding = {
@@ -186,6 +237,7 @@ export class MeetingRecorder {
     };
     archive.addEventListener("dataavailable", (event) => {
       if (!event.data.size) return;
+      // 归档块写入：登记到 pendingWrites，让 stop() 能等它真正落盘后再收尾。
       const write = (async () => {
         try {
           const data = await event.data.arrayBuffer();
@@ -205,8 +257,10 @@ export class MeetingRecorder {
         }
       })();
       binding.pendingWrites.add(write);
+      // 写完（无论成败）即从集合移除；错误已在上面回调过 onWarning。
       void write.catch(() => {}).finally(() => binding.pendingWrites.delete(write));
     });
+    // 15 秒一块：兼顾落盘及时性与块数量（IPC 传输次数）。
     archive.start(15_000);
     this.bindings.push(binding);
 
@@ -215,6 +269,10 @@ export class MeetingRecorder {
     }
   }
 
+  /**
+   * 转写循环：每轮独立录一个 8 秒的自包含块，立刻送主进程转写（不落盘、用完即弃）。
+   * 暂停期间只休眠不采集；块时间戳换算为相对会议起点，供转写段落排序与播放器同步。
+   */
   private async runTranscriptionLoop(track: CaptureTrack, stream: MediaStream) {
     while (!this.stopTranscription && stream.active) {
       if (this.paused) {
@@ -226,6 +284,7 @@ export class MeetingRecorder {
       if (!blob?.size || this.stopTranscription || !this.sttProfile?.id) continue;
       const startMs = Math.max(0, chunkStarted - this.startedAt);
       const endMs = Math.max(startMs, Date.now() - this.startedAt);
+      // 入队在途计数 +1，UI 可显示「转写中 N」。
       this.transcriptionQueue += 1;
       this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
       api.transcription.processChunk({
@@ -248,6 +307,7 @@ export class MeetingRecorder {
     }
   }
 
+  /** 单独录一个固定时长的自包含块（起止各产生一次事件），避免切割长录制流导致的时间戳错位。 */
   private captureStandaloneChunk(stream: MediaStream, duration: number) {
     return new Promise<Blob | null>((resolve) => {
       if (this.stopTranscription || !stream.active) return resolve(null);
@@ -268,6 +328,7 @@ export class MeetingRecorder {
     });
   }
 
+  /** 启动 rAF 电平表：每条轨接一个 AnalyserNode，按 RMS 计算输入电平（×4.5 增益后截断到 1）。 */
   private startLevelMeter() {
     this.audioContext = new AudioContext();
     const analysers = new Map<CaptureTrack, AnalyserNode>();
@@ -294,6 +355,7 @@ export class MeetingRecorder {
     sample();
   }
 
+  /** 暂停：归档录制器 pause，转写循环进入休眠（轨道保持打开，快速恢复不断流）。 */
   pause() {
     this.paused = true;
     for (const binding of this.bindings) {
@@ -301,6 +363,7 @@ export class MeetingRecorder {
     }
   }
 
+  /** 恢复：归档录制器 resume，转写循环恢复采集。 */
   resume() {
     this.paused = false;
     for (const binding of this.bindings) {
@@ -308,6 +371,12 @@ export class MeetingRecorder {
     }
   }
 
+  /**
+   * 停止录音并安全收尾。顺序是关键：
+   * 停转写 → 停归档录制器 → 等全部在途 append 落盘（Promise.allSettled）→ 关轨道与 AudioContext
+   * → 等转写循环退出 → 最后 recordings.stop 让主进程合并/重命名产物文件。
+   * 任何提前返回都可能丢最后一块音频或留下未完成的录音。
+   */
   async stop(durationSeconds: number) {
     this.stopTranscription = true;
     cancelAnimationFrame(this.analyserFrame);

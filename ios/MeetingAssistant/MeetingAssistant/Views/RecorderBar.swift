@@ -1,17 +1,40 @@
+//
+//  RecorderBar.swift
+//  MeetingAssistant
+//
+//  底部悬浮录音工具条：展示录音状态红点与计时、麦克风音量条、
+//  标记/暂停/停止（或开始录音）按钮；停止时固化音频与转录并生成最终纪要。
+//  所属层：视图层。
+//
+
 import SwiftData
 import SwiftUI
 
+/// 录音工具条。
+/// 导航位置：iPad 以 overlay 悬浮于三栏工作区底部；iPhone 以 safeAreaInset
+/// 固定在会议详情页底部。
 struct RecorderBar: View {
+  // MARK: - 环境与状态
+
+  /// SwiftData 上下文（开始/停止时保存会议）。
   @Environment(\.modelContext) private var modelContext
+  /// 录音协调器。
   @Environment(RecordingCoordinator.self) private var recorder
+  /// 读取语言与自动纪要间隔。
   @Environment(AppPreferences.self) private var preferences
+  /// 绑定的会议。
   let meeting: MeetingRecord
 
+  /// 录音错误文案（alert 展示）。
   @State private var errorMessage: String?
+  /// 是否正在停止并生成最终纪要（防重复点击）。
   @State private var isFinishing = false
+
+  // MARK: - 视图内容
 
   var body: some View {
     HStack(spacing: 14) {
+      // 当前会话：红点 + 计时；否则显示“准备录音”待机态。
       if isCurrentSession {
         Circle()
           .fill(.red)
@@ -35,6 +58,7 @@ struct RecorderBar: View {
 
       Spacer(minLength: 0)
 
+      // 录音中：标记/暂停/停止；待机：开始录音。
       if isCurrentSession {
         Button {
           addMarker()
@@ -86,6 +110,7 @@ struct RecorderBar: View {
         .stroke(MeetingTheme.divider)
     }
     .shadow(color: .black.opacity(0.1), radius: 14, y: 5)
+    // 录音错误提示。
     .alert(
       "录音错误",
       isPresented: Binding(
@@ -99,10 +124,14 @@ struct RecorderBar: View {
     }
   }
 
+  // MARK: - 私有属性
+
+  /// 本工具条对应的会议是否正处于当前录音会话。
   private var isCurrentSession: Bool {
     recorder.isRecording && recorder.activeMeetingID == meeting.id
   }
 
+  /// 四格麦克风音量条（按 inputLevel 逐格点亮）。
   private var inputMeter: some View {
     HStack(spacing: 7) {
       Image(systemName: "mic")
@@ -125,6 +154,10 @@ struct RecorderBar: View {
     .accessibilityLabel("麦克风音量 \(Int(recorder.inputLevel * 100))%")
   }
 
+  // MARK: - 私有方法
+
+  /// 开始录音并更新会议状态为进行中。
+  /// - 副作用：启动 AVAudioEngine/Speech 会话；修改 meeting 字段并保存 SwiftData。
   private func startRecording() async {
     do {
       try await recorder.start(
@@ -141,6 +174,7 @@ struct RecorderBar: View {
     }
   }
 
+  /// 在暂停/恢复之间切换。
   private func togglePause() {
     if recorder.isPaused {
       do {
@@ -153,6 +187,8 @@ struct RecorderBar: View {
     }
   }
 
+  /// 在“我的记录”末尾追加带时间戳的书签标记（🔖 [mm:ss] ）。
+  /// - 副作用：修改 personalNotes/updatedAt 并保存 SwiftData。
   private func addMarker() {
     let timestamp = MeetingFormatters.timestamp(recorder.addMarker())
     let prefix = meeting.personalNotes.isEmpty ? "" : "\n"
@@ -161,13 +197,20 @@ struct RecorderBar: View {
     try? modelContext.save()
   }
 
+  /// 停止录音：固化音频文件名与整段实时转录、保存会议，再生成最终纪要。
+  ///
+  /// - 副作用：结束音频/识别会话；追加 TranscriptSegmentRecord；调用纪要服务
+  ///   （远程模式发起网络调用）；多次保存 SwiftData。纪要失败时录音仍安全保存，
+  ///   会议停留在“整理中”待手动重试。
   private func stopAndFinalize() async {
     isFinishing = true
+    // 先快照会话数据，再停止协调器（停止后临时状态会被清理）。
     let elapsed = recorder.elapsedSeconds
     let transcript = recorder.liveTranscript
     let audioName = recorder.audioURL?.lastPathComponent
     recorder.stop()
 
+    // 有实时转录时固化为一个完整片段，接续在最后一段之后。
     if !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       let start = meeting.orderedSegments.last?.endTime ?? 0
       meeting.transcriptSegments.append(
@@ -180,6 +223,7 @@ struct RecorderBar: View {
         )
       )
     }
+    // 先本地落盘（时长/音频名/状态），再做最终纪要。
     meeting.duration = TimeInterval(elapsed)
     meeting.audioFilename = audioName
     meeting.status = .processing

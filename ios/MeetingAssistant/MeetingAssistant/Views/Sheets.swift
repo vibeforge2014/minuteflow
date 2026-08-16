@@ -1,17 +1,39 @@
+//
+//  Sheets.swift
+//  MeetingAssistant
+//
+//  弹层与辅助界面集合：新建会议表单、设置页、最近删除、首次引导、
+//  导入帮助说明与系统分享面板（UIKit 桥接）。
+//  所属层：视图层。
+//
+
 import SwiftData
 import SwiftUI
 import UIKit
 
+// MARK: - 新建会议
+
+/// 新建会议表单：标题、开始时间、类型、参与者、会议目标与议程。
+/// 导航位置：全局 sheet（AppState.presentedSheet = .newMeeting）。
 struct NewMeetingView: View {
+  /// 关闭弹层。
   @Environment(\.dismiss) private var dismiss
+  /// SwiftData 上下文（插入新会议）。
   @Environment(\.modelContext) private var modelContext
+  /// 全局 UI 状态（创建后选中并关闭）。
   @Environment(AppState.self) private var appState
 
+  /// 会议标题输入。
   @State private var title = ""
+  /// 开始时间选择。
   @State private var startedAt = Date()
+  /// 会议类型（线上/线下/访谈）。
   @State private var mode = "线上会议"
+  /// 参与者输入（逗号分隔）。
   @State private var participants = ""
+  /// 议程输入。
   @State private var agenda = ""
+  /// 会议目标输入。
   @State private var goal = ""
 
   var body: some View {
@@ -54,6 +76,7 @@ struct NewMeetingView: View {
           .lineLimit(3...8)
         }
 
+        // 本地优先提示：内容默认仅保存在本机。
         Section {
           Label(
             "录音和会议内容默认只保存在本机",
@@ -79,6 +102,10 @@ struct NewMeetingView: View {
     .presentationDetents([.large])
   }
 
+  // MARK: - 私有方法
+
+  /// 创建并保存会议，选中后关闭表单。
+  /// - 副作用：插入 SwiftData 并保存；更新 appState.selectedMeetingID。
   private func createMeeting() {
     let meeting = MeetingRecord(
       title: title.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -95,14 +122,26 @@ struct NewMeetingView: View {
   }
 }
 
+// MARK: - 设置
+
+/// 设置页：AI 纪要、语音转录、自动纪要、说话人说明与隐私存储分区。
+/// 导航位置：iPhone 为 TabView“设置”标签（无完成按钮）；iPad 经全局 sheet
+/// 弹出（带“完成”按钮）。
 struct SettingsView: View {
+  /// 关闭弹层（仅 iPad sheet 场景使用）。
   @Environment(\.dismiss) private var dismiss
+  /// 用户偏好（表单直接绑定）。
   @Environment(AppPreferences.self) private var preferences
 
+  /// 是否显示工具栏“完成”按钮（sheet 场景）。
   let showsDoneButton: Bool
+  /// 纪要 API Key 输入（仅点击保存时写入 Keychain）。
   @State private var summaryAPIKey = ""
+  /// 转录（Whisper）API Key 输入。
   @State private var transcriptionAPIKey = ""
+  /// 保存/测试结果文案（alert 展示）。
   @State private var statusMessage: String?
+  /// 是否正在测试连接。
   @State private var isTestingConnection = false
 
   var body: some View {
@@ -116,6 +155,7 @@ struct SettingsView: View {
           }
         }
 
+        // 仅远程模式显示 Base URL / 模型名 / API Key 与测试连接。
         if preferences.summaryProvider == .openAICompatible {
           TextField("Base URL", text: $preferences.summaryBaseURL)
             .textInputAutocapitalization(.never)
@@ -163,6 +203,7 @@ struct SettingsView: View {
           Text("日本語").tag("ja-JP")
         }
 
+        // 仅远程 Whisper 模式显示接口配置。
         if preferences.transcriptionProvider == .remoteWhisper {
           TextField("Base URL", text: $preferences.transcriptionBaseURL)
             .textInputAutocapitalization(.never)
@@ -194,6 +235,7 @@ struct SettingsView: View {
           .disabled(true)
       }
 
+      // 说话人策略说明：仅手动改名，不做声纹/身份识别。
       Section("说话人") {
         LabeledContent("实时录音", value: "标记为“我”")
         LabeledContent("导入录音", value: "临时 Speaker 1")
@@ -221,6 +263,7 @@ struct SettingsView: View {
         }
       }
     }
+    // 保存/测试结果提示。
     .alert(
       "模型设置",
       isPresented: Binding(
@@ -232,6 +275,7 @@ struct SettingsView: View {
     } message: {
       Text(statusMessage ?? "")
     }
+    // 进入页面时预填已保存的密钥（仅展示，不回写）。
     .task {
       summaryAPIKey =
         (try? KeychainService().load(
@@ -244,6 +288,10 @@ struct SettingsView: View {
     }
   }
 
+  // MARK: - 私有方法
+
+  /// 保存或清空 API Key（空值删除对应条目）。
+  /// - 副作用：Keychain 写/删操作；结果写入 statusMessage。
   private func saveKey(_ key: String, account: String) {
     do {
       if key.isEmpty {
@@ -257,6 +305,8 @@ struct SettingsView: View {
     }
   }
 
+  /// 先保存 Key，再用一次最小纪要请求验证连通性。
+  /// - 副作用：Keychain 写入 + 网络调用（远程模式）；结果写入 statusMessage。
   private func testSummaryConnection() async {
     saveKey(
       summaryAPIKey,
@@ -273,7 +323,10 @@ struct SettingsView: View {
   }
 }
 
+/// 最近删除页：列出软删除的会议并支持恢复。
+/// 导航位置：设置页内 NavigationLink push 进入。
 private struct RecentlyDeletedView: View {
+  /// 全部会议（按更新时间倒序）。
   @Query(sort: \MeetingRecord.updatedAt, order: .reverse)
   private var meetings: [MeetingRecord]
 
@@ -307,15 +360,24 @@ private struct RecentlyDeletedView: View {
     .navigationTitle("最近删除")
   }
 
+  /// 仅保留软删除标记的会议。
   private var deletedMeetings: [MeetingRecord] {
     meetings.filter(\.isDeleted)
   }
 }
 
+// MARK: - 首次引导
+
+/// 三页式首次引导：产品介绍 → 本地优先说明 → 权限申请。
+/// 导航位置：首启 fullScreenCover（完成前不可下拉关闭）。
 struct OnboardingView: View {
+  /// 录音协调器（最后一页请求权限）。
   @Environment(RecordingCoordinator.self) private var recorder
+  /// 用户偏好（写入引导完成标记）。
   @Environment(AppPreferences.self) private var preferences
+  /// 当前引导页索引（0~2）。
   @State private var page = 0
+  /// 权限被拒提示文案。
   @State private var permissionMessage: String?
 
   var body: some View {
@@ -345,6 +407,7 @@ struct OnboardingView: View {
       .tabViewStyle(.page(indexDisplayMode: .always))
 
       VStack(spacing: 12) {
+        // 前两页显示“继续”；最后一页请求权限完成引导，或稍后在设置中开启。
         if page < 2 {
           Button("继续") {
             withAnimation { page += 1 }
@@ -378,6 +441,7 @@ struct OnboardingView: View {
     }
     .background(MeetingTheme.canvas)
     .interactiveDismissDisabled()
+    // 权限未开启提示：可继续体验或取消。
     .alert(
       "权限未开启",
       isPresented: Binding(
@@ -395,6 +459,7 @@ struct OnboardingView: View {
     }
   }
 
+  /// 单页引导内容：大图标 + 标题 + 说明。
   private func onboardingPage(
     systemImage: String,
     title: String,
@@ -420,8 +485,14 @@ struct OnboardingView: View {
   }
 }
 
+// MARK: - 导入帮助
+
+/// 导入说明弹层：解释导入行为并提供“选择文件”入口。
+/// 导航位置：全局 sheet（.importAudio）；确认后关闭并唤起系统文件选择器。
 struct ImportHelpView: View {
+  /// 关闭弹层。
   @Environment(\.dismiss) private var dismiss
+  /// “选择文件”回调（由根视图打开 fileImporter）。
   let onChooseFile: () -> Void
 
   var body: some View {
@@ -453,13 +524,19 @@ struct ImportHelpView: View {
   }
 }
 
+// MARK: - 系统分享桥接
+
+/// UIActivityViewController 的 SwiftUI 桥接（会议导出分享用）。
 struct ShareSheet: UIViewControllerRepresentable {
+  /// 待分享的内容（导出文件 URL 等）。
   let items: [Any]
 
+  /// 创建系统分享视图控制器。
   func makeUIViewController(context: Context) -> UIActivityViewController {
     UIActivityViewController(activityItems: items, applicationActivities: nil)
   }
 
+  /// SwiftUI 占位更新（无需处理）。
   func updateUIViewController(
     _ uiViewController: UIActivityViewController,
     context: Context

@@ -1,3 +1,7 @@
+/**
+ * 空状态引导：没有任何会议时中央工作区的落地页。
+ * 提供两个入口——新建会议（打开 NewMeetingDialog）与导入录音（打开 ImportDrawer）。
+ */
 import { FileArrowUp, FilePlus } from "@phosphor-icons/react";
 
 export function EmptyState({ onNew, onImport }: { onNew(): void; onImport(): void }) {

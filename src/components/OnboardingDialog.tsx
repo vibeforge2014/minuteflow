@@ -1,3 +1,8 @@
+/**
+ * 新手引导对话框：首run第二道门（在系统权限引导之后弹出）。
+ * 三条核心承诺——权限已集中授权、本地优先隐私、模型可后配置；
+ * 用户可直达模型配置或直接「开始使用」完成引导。
+ */
 import { Brain, Microphone, ShieldCheck } from "@phosphor-icons/react";
 
 export function OnboardingDialog({

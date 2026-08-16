@@ -1,3 +1,11 @@
+/**
+ * 录音编排 hook：把 MeetingRecorder 服务（采集/分块/落盘）接入 React 与 Zustand store。
+ * 职责包括：录音生命周期状态机（idle→starting→recording⇄paused→stopping）、每秒计时、
+ * 滚动 AI 纪要定时器、转写段落入账（appendTranscript）、系统睡眠/唤醒的暂停与自动恢复。
+ *
+ * 所属层：渲染层 hooks（连接 services/recording 与 store 的适配层）。
+ * 主要导出：useMeetingRecorder。
+ */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { MeetingRecorder } from "../services/recording";
@@ -12,15 +20,19 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   const updateMeeting = useMeetingStore((state) => state.updateMeeting);
   const appendTranscript = useMeetingStore((state) => state.appendTranscript);
   const updateSummary = useMeetingStore((state) => state.updateSummary);
+  // 录音状态机：idle 空闲 / starting 授权与取流中 / recording 录制中 / paused 暂停 / stopping 收尾落盘中。
   const [phase, setPhase] = useState<"idle" | "starting" | "recording" | "paused" | "stopping">("idle");
   const [elapsed, setElapsed] = useState(meeting?.durationSeconds ?? 0);
+  // 实时电平（0-1），由 MeetingRecorder 的 AnalyserNode 回调驱动底部工具条的波形动画。
   const [levels, setLevels] = useState({ microphone: 0, system: 0 });
+  // 待完成转写任务数，展示“转录队列”积压。
   const [queue, setQueue] = useState(0);
   const [warning, setWarning] = useState<string | null>(null);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const recorderRef = useRef<MeetingRecorder | null>(null);
   const timerRef = useRef<number | null>(null);
   const summaryTimerRef = useRef<number | null>(null);
+  // ref 镜像：让定时器与事件回调读到最新的会议/时长/偏好，而不必重建定时器。
   const meetingRef = useRef(meeting);
   const elapsedRef = useRef(elapsed);
   const preferencesSummaryIntervalRef = useRef(preferences.summaryIntervalSeconds);
@@ -38,6 +50,8 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   }, [preferences.summaryIntervalSeconds]);
 
   useEffect(() => {
+    // 切换会议（或首次挂载）且当前没有活跃录音器时，恢复该会议的展示态：
+    // 从已有时长继续计时（针对“录音中刷新页面/重启后重开”的场景），否则回到 idle。
     if (recorderRef.current) return;
     if (timerRef.current) {
       window.clearInterval(timerRef.current);
@@ -60,6 +74,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     };
   }, [meeting?.id]);
 
+  // 从已启用的档案中选出第一个 stt（转写）与 llm（总结）配置，作为本次会话使用的模型。
   const sttProfile = useMemo(
     () => profiles.find((profile) => profile.kind === "stt" && profile.enabled),
     [profiles]
@@ -69,6 +84,11 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     [profiles]
   );
 
+  /**
+   * 生成 AI 纪要：final=false 为录音中的滚动增量，true 为会后最终总结。
+   * 乐观并发保护：请求前记下会议的 updatedAt（baseVersion），返回后若已变化，
+   * 只把纪要标记为 stale 而不覆盖文档，避免用旧转写冲掉用户刚写入的内容。
+   */
   const generateSummary = useCallback(async (final = false) => {
     const current = meetingRef.current;
     if (!current || summaryBusy) return;
@@ -87,6 +107,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
         }
       });
       const latest = meetingRef.current;
+      // 会议已切换或内容在请求期间被修改：不套用结果，转而提示用户重新总结。
       if (!latest || latest.id !== current.id) return;
       if (!final && latest.updatedAt !== baseVersion) {
         await updateMeeting(current.id, (value) => ({

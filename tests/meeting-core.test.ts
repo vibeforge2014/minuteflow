@@ -1,3 +1,10 @@
+/**
+ * 核心单元测试（vitest，npm test）：覆盖主进程纯函数与渲染层纯逻辑——
+ * formatters（Markdown/字幕）、providers（端点解析/总结/转写/校验）、local-models
+ * （模型识别与描述）、diarization（轮次回填）、updates（版本比较与清单校验）、
+ * lib/transcript（段落合并/说话人合并）、lib/summary（纪要锁与修订合并）。
+ * 网络与子进程调用均以 vi.fn()/vi.stubGlobal() 模拟，不产生真实请求。
+ */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { markdown, subtitle } from "../electron/services/formatters.mjs";
 import {
@@ -19,6 +26,7 @@ import { mergeSpeakerLabels, mergeTranscriptSegments } from "../src/lib/transcri
 import { lockSummaryField, mergeSummaryRevision } from "../src/lib/summary";
 import type { Meeting, TranscriptSegment } from "../src/types";
 
+/** 构造一条定稿转写段的测试工厂（默认 speaker-1/刘婷/system 轨）。 */
 const segment = (
   id: string,
   startMs: number,

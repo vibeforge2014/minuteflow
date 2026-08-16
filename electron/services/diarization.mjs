@@ -1,3 +1,11 @@
+/**
+ * 说话人分离（Electron 主进程 / 服务层）。
+ * 基于 sherpa-onnx-node（Pyannote segmentation + 3D-Speaker embedding + 聚类）
+ * 对整段音频做离线分离，并把轮次标签套回转录段落。
+ * 主要导出：diarizeWithSherpa、applyDiarization。
+ * 被 services/import-queue.mjs 的导入流水线（diarizing 阶段）调用。
+ * 副作用：拉起 ffmpeg 子进程、写临时 WAV。
+ */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -5,8 +13,10 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
 
+// ESM 环境下加载 CJS 原生模块（sherpa-onnx-node）需要 createRequire。
 const require = createRequire(import.meta.url);
 
+/** 拉起子进程并等待退出（windowsHide 防止 Windows 上闪控制台窗口），失败抛出 stderr。 */
 function runProcess(command, args) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { windowsHide: true });
@@ -20,6 +30,10 @@ function runProcess(command, args) {
   });
 }
 
+/**
+ * 确保输入是 16k 单声道 WAV（分离模型的采样率要求）：
+ * 已是 .wav 直接复用；否则用 FFmpeg 转出临时文件（temporary 标记临时文件需清理）。
+ */
 async function ensureWave(filePath, ffmpegPath) {
   if (path.extname(filePath).toLowerCase() === ".wav") {
     return { filePath, temporary: false };
@@ -34,6 +48,13 @@ async function ensureWave(filePath, ffmpegPath) {
   return { filePath: target, temporary: true };
 }
 
+/**
+ * 用 sherpa-onnx 做离线说话人分离。副作用：ffmpeg 子进程、临时 WAV、
+ * 进程内跑分离模型（CPU 密集）。
+ * @param {object} profile diarization 模型档案（segmentation/embedding 模型路径等）
+ * @param {object} options expectedSpeakers 已知人数（-1 自动聚类），threshold 聚类阈值
+ * @returns {Promise<Array<{startMs, endMs, speakerId}>>} 说话人轮次列表
+ */
 export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
   const segmentationModel = profile.options?.segmentationModelPath;
   const embeddingModel = profile.options?.embeddingModelPath;
@@ -61,6 +82,7 @@ export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
       minDurationOff: 0.5
     });
     const wave = sherpaOnnx.readWave(waveAsset.filePath);
+    // 模型只接受其固有采样率（16k），不匹配直接报错而不是静默产出错误结果。
     if (diarizer.sampleRate !== wave.sampleRate) {
       throw new Error(`说话人模型需要 ${diarizer.sampleRate}Hz 音频，实际为 ${wave.sampleRate}Hz。`);
     }
@@ -74,6 +96,13 @@ export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
   }
 }
 
+/**
+ * 把分离轮次套回转录段：取每段的时间中点落在哪个轮次内即标记为该说话人，
+ * 命不中任何轮次的段保持原说话人不变（保持幂等、不破坏原文）。
+ * @param {Array} transcript 转录段落
+ * @param {Array<{startMs,endMs,speakerId}>} turns diarizeWithSherpa 的轮次
+ * @returns {Array} 更新说话人标签后的转录段
+ */
 export function applyDiarization(transcript, turns) {
   if (!turns.length) return transcript;
   return transcript.map((segment) => {

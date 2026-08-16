@@ -1,8 +1,14 @@
+/**
+ * 新建会议对话框：模板选择、标题、线上/线下模式、参与者与会议目标。
+ * 模式决定录音采集策略（线上=麦克风+系统音频，线下=仅麦克风）；
+ * 目标会作为 AI 总结的提示输入。创建后由 App 立即选中并可直接开始录音。
+ */
 import { useEffect, useState } from "react";
 import { CalendarBlank, Microphone, Users, X } from "@phosphor-icons/react";
 import type { CreateMeetingInput, MeetingMode } from "../types";
 import { useMeetingStore } from "../store/meetingStore";
 
+/** 内置会议模板：选择后预填标题与目标。 */
 const templates = {
   blank: { title: "", goal: "" },
   weekly: { title: "团队周会", goal: "对齐本周进展、风险、决策和行动项" },
@@ -26,6 +32,7 @@ export function NewMeetingDialog({
   const [goal, setGoal] = useState("");
   const [busy, setBusy] = useState(false);
   const preferences = useMeetingStore((state) => state.preferences);
+  // 每次打开时把默认模式同步为用户偏好（可再手动切换）。
   useEffect(() => {
     if (open) setMode(preferences.defaultMode);
   }, [open, preferences.defaultMode]);
@@ -110,6 +117,7 @@ export function NewMeetingDialog({
   );
 }
 
+/** 偏好里的滚动纪要间隔（秒）→ 可读文案。 */
 function formatInterval(seconds: number) {
   return seconds % 60 === 0 ? `${seconds / 60} 分钟` : `${seconds} 秒`;
 }
