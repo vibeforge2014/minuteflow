@@ -8,6 +8,7 @@
  * 主要导出：MeetingRecorder。
  */
 import { api } from "../lib/api";
+import { isMicrophonePermissionError, MICROPHONE_PERMISSION_REQUIRED, shouldRequestMicrophone } from "../lib/permissions";
 import type { AudioTrackKind, Meeting, ModelProfile, TranscriptSegment } from "../types";
 
 /** 可直接采集的轨道类型（"mixed" 仅用于已落盘的合成产物，不能采集）。 */
@@ -17,8 +18,12 @@ type CaptureTrack = Exclude<AudioTrackKind, "mixed">;
 interface RecordingCallbacks {
   /** 每帧输入电平（0-1，麦克风/系统各一路），驱动录音条波形动画。 */
   onLevel(levels: { microphone: number; system: number }): void;
-  /** 收到一段定稿转录（仅非空文本才回调）。 */
+  /** 收到一段定稿转录（仅非空文本才回调），会取代对应的临时段。 */
   onTranscript(segment: TranscriptSegment): void;
+  /** 某个音频块已送出转写，先显示一条临时（provisional）占位段。 */
+  onProvisional(segment: TranscriptSegment): void;
+  /** 临时占位段应当移除（该块转写失败或返回空文本），segmentId 为空时清空全部。 */
+  onProvisionalSettled(segmentId: string): void;
   /** 在途转写任务数量变化（用于 UI 显示积压指示）。 */
   onTranscriptionQueue(size: number): void;
   /** 非致命告警（如系统音频不可用、写盘失败），UI 以 Toast 呈现但不中断录音。 */
@@ -99,12 +104,15 @@ export class MeetingRecorder {
   /**
    * 启动录音：权限预检 → 建主进程会话 → 采集麦克风（线上会议再叠加系统音频轨）→ 启动电平表。
    * 任何一步失败都会停止已开的轨道/录制器并 abort 会话，不留半启动状态。
-   * 注意：这里从不触发系统权限弹窗——权限必须由首run引导提前授予，未授权直接报错并引导去系统设置。
+   * 麦克风状态可能滞后：未显示 granted 时先请求一次，但最终以真实 getUserMedia 结果为准。
+   * macOS 系统音频仍只在首run流程准备，正常录音不主动重开系统权限选择器。
    */
   async start() {
     const permissions = await api.system.getPermissions();
-    if (permissions.microphone !== "granted") {
-      throw new Error("麦克风权限未就绪。请在系统设置中重新授权；MinuteFlow 不会在录音时弹出权限申请。");
+    if (shouldRequestMicrophone(permissions.microphone)) {
+      // macOS 由主进程触发系统请求；Windows/未知状态仍会继续走 getUserMedia，
+      // 让 Chromium 用实际采集结果纠正可能过期的 systemPreferences 状态。
+      await api.system.requestMicrophone().catch(() => undefined);
     }
     if (this.meeting.mode === "online" && permissions.systemAudioRequired && permissions.screen !== "granted") {
       throw new Error("系统音频权限未就绪。请在系统设置中重新授权；MinuteFlow 不会在录音时弹出权限申请。");
@@ -113,15 +121,23 @@ export class MeetingRecorder {
     this.sessionId = session.sessionId;
     this.startedAt = session.startedAt;
     try {
-      const microphone = await this.requestMedia({
-        audio: {
-          // 线上会议开启回声消除，避免扬声器里的远端声音被麦克风重复录到。
-          echoCancellation: this.meeting.mode === "online",
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1
+      let microphone: MediaStream;
+      try {
+        microphone = await this.requestMedia({
+          audio: {
+            // 线上会议开启回声消除，避免扬声器里的远端声音被麦克风重复录到。
+            echoCancellation: this.meeting.mode === "online",
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1
+          }
+        }, 30_000, "等待麦克风授权超时，请在系统设置中允许录音后重试。");
+      } catch (error) {
+        if (isMicrophonePermissionError(error)) {
+          throw new Error(`${MICROPHONE_PERMISSION_REQUIRED} 麦克风权限未允许，请授权后重试。`);
         }
-      }, 30_000, "等待麦克风授权超时，请在系统设置中允许录音后重试。");
+        throw error;
+      }
       await this.bindStream("microphone", microphone);
 
       if (this.meeting.mode === "online") {
@@ -271,6 +287,8 @@ export class MeetingRecorder {
 
   /**
    * 转写循环：每轮独立录一个 8 秒的自包含块，立刻送主进程转写（不落盘、用完即弃）。
+   * 块送出时先经 onProvisional 显示“转写中”占位段，定稿结果到达后被合并逻辑取代；
+   * 瞬时失败自动重试一次，仍失败才告警并移除占位段。
    * 暂停期间只休眠不采集；块时间戳换算为相对会议起点，供转写段落排序与播放器同步。
    */
   private async runTranscriptionLoop(track: CaptureTrack, stream: MediaStream) {
@@ -284,10 +302,19 @@ export class MeetingRecorder {
       if (!blob?.size || this.stopTranscription || !this.sttProfile?.id) continue;
       const startMs = Math.max(0, chunkStarted - this.startedAt);
       const endMs = Math.max(startMs, Date.now() - this.startedAt);
-      // 入队在途计数 +1，UI 可显示「转写中 N」。
-      this.transcriptionQueue += 1;
-      this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
-      api.transcription.processChunk({
+      // 占位临时段：与最终段落共享时间区间与轨道，mergeTranscriptSegments 会用定稿结果替换它。
+      const provisional: TranscriptSegment = {
+        id: `provisional-${track}-${startMs}`,
+        startMs,
+        endMs,
+        speakerId: track === "microphone" ? "me" : "remote",
+        speakerName: track === "microphone" ? "我" : "远端发言人",
+        text: "……",
+        status: "provisional",
+        track
+      };
+      this.callbacks.onProvisional(provisional);
+      const payload = {
         profileId: this.sttProfile.id,
         data: await blob.arrayBuffer(),
         fileName: `${track}-${startMs}.${blob.type.includes("mp4") ? "m4a" : "webm"}`,
@@ -296,10 +323,29 @@ export class MeetingRecorder {
         endMs,
         track,
         glossary: this.glossary
-      }).then((segment) => {
+      };
+      // 入队在途计数 +1，UI 可显示「转写中 N」。
+      this.transcriptionQueue += 1;
+      this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
+      const request = () => api.transcription.processChunk(payload);
+      request().then((segment) => {
         if (segment.text.trim()) this.callbacks.onTranscript(segment);
-      }).catch((error) => {
-        this.callbacks.onWarning(error instanceof Error ? error.message : "转录任务失败");
+        else this.callbacks.onProvisionalSettled(provisional.id);
+      }).catch(async (firstError) => {
+        if (this.stopTranscription) {
+          this.callbacks.onProvisionalSettled(provisional.id);
+          return;
+        }
+        // 瞬时故障（网络抖动/本地进程偶发失败）等 1.5 秒重试一次，仍失败才告警。
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        try {
+          const segment = await request();
+          if (segment.text.trim()) this.callbacks.onTranscript(segment);
+          else this.callbacks.onProvisionalSettled(provisional.id);
+        } catch {
+          this.callbacks.onWarning(firstError instanceof Error ? firstError.message : "转录任务失败");
+          this.callbacks.onProvisionalSettled(provisional.id);
+        }
       }).finally(() => {
         this.transcriptionQueue = Math.max(0, this.transcriptionQueue - 1);
         this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
@@ -369,6 +415,30 @@ export class MeetingRecorder {
     for (const binding of this.bindings) {
       if (binding.archive.state === "paused") binding.archive.resume();
     }
+  }
+
+  /**
+   * 放弃录音并回收资源（不产出文件）：停转写循环与电平表、等归档录制器停止、
+   * 关轨道与 AudioContext，最后 recordings.abort 让主进程删除 .partial 并把会议退回草稿。
+   * 供启动过程中用户取消（stop 晚于最后一次取消检查的窄竞态）时兜底使用。
+   */
+  async abort() {
+    this.stopTranscription = true;
+    cancelAnimationFrame(this.analyserFrame);
+    const stops = this.bindings.map((binding) => new Promise<void>((resolve) => {
+      if (binding.archive.state === "inactive") return resolve();
+      binding.archive.addEventListener("stop", () => resolve(), { once: true });
+      binding.archive.stop();
+    }));
+    await Promise.all(stops);
+    for (const binding of this.bindings) {
+      for (const track of binding.stream.getTracks()) track.stop();
+    }
+    await this.audioContext?.close().catch(() => {});
+    return api.recordings.abort({
+      meetingId: this.meeting.id,
+      sessionId: this.sessionId
+    });
   }
 
   /**

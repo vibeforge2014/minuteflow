@@ -14,6 +14,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
+import { buildBasicKeyPoints, simplifyChinese, simplifyMeetingAiText, simplifySummary } from "./services/chinese.mjs";
 
 let database;
 // node:sqlite's DatabaseSync is a single shared connection and all its
@@ -42,7 +43,7 @@ const seedMeetings = [
     title: "产品团队周会",
     scheduledAt: "2026-07-30T10:00:00+08:00",
     durationSeconds: 1477,
-    status: "recording",
+    status: "complete",
     mode: "online",
     favorite: false,
     participants: ["我", "刘婷", "周哲", "王敏"],
@@ -260,7 +261,7 @@ function rowToMeeting(db, row) {
     endMs: segment.end_ms,
     speakerId: segment.speaker_id,
     speakerName: segment.speaker_name,
-    text: segment.text,
+    text: simplifyChinese(segment.text),
     status: segment.status,
     track: segment.track,
     confidence: segment.confidence ?? undefined
@@ -280,7 +281,7 @@ function rowToMeeting(db, row) {
     goals: safeJson(row.goals_json, []),
     notes,
     notesMarkdown: row.notes_markdown || notes.map((item) => `- ${item}`).join("\n"),
-    summary: safeJson(row.summary_json, {}),
+    summary: simplifySummary(safeJson(row.summary_json, {})),
     transcript,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -350,15 +351,44 @@ function persistMeeting(db, meeting) {
     meeting.deletedAt ?? null
   );
 
-  db.prepare("DELETE FROM transcript_segments WHERE meeting_id = ?").run(meeting.id);
-  const insertSegment = db.prepare(`
+  persistTranscriptSegments(db, meeting, timestamp);
+  const persisted = getMeeting(db, meeting.id);
+  return persisted;
+}
+
+/**
+ * 差量更新某会议的转录段落：删除已消失的 id、插入新 id、原地更新已有 id。
+ * 相比旧的“先删全表再重插”，长会议滚动保存（每 8 秒一条新段落）不再重写全部行，
+ * 也保住了未变化段落的 created_at；FTS 是每会议一行的重建，代价与段数无关。
+ */
+function persistTranscriptSegments(db, meeting, timestamp) {
+  const incoming = meeting.transcript ?? [];
+  const existingIds = new Set(
+    db.prepare("SELECT id FROM transcript_segments WHERE meeting_id = ?").all(meeting.id)
+      .map((row) => row.id)
+  );
+  const incomingIds = new Set(incoming.map((segment) => segment.id).filter(Boolean));
+  const removeSegment = db.prepare("DELETE FROM transcript_segments WHERE meeting_id = ? AND id = ?");
+  for (const id of existingIds) {
+    if (!incomingIds.has(id)) removeSegment.run(meeting.id, id);
+  }
+  const upsertSegment = db.prepare(`
     INSERT INTO transcript_segments(
       id, meeting_id, start_ms, end_ms, speaker_id, speaker_name, text,
       status, track, confidence, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      start_ms = excluded.start_ms,
+      end_ms = excluded.end_ms,
+      speaker_id = excluded.speaker_id,
+      speaker_name = excluded.speaker_name,
+      text = excluded.text,
+      status = excluded.status,
+      track = excluded.track,
+      confidence = excluded.confidence
   `);
-  for (const segment of meeting.transcript ?? []) {
-    insertSegment.run(
+  for (const segment of incoming) {
+    upsertSegment.run(
       segment.id ?? randomUUID(),
       meeting.id,
       segment.startMs,
@@ -372,8 +402,6 @@ function persistMeeting(db, meeting) {
       timestamp
     );
   }
-  const persisted = getMeeting(db, meeting.id);
-  return persisted;
 }
 
 /** 按主键读取单条会议（含转录），不存在返回 null。 */
@@ -418,7 +446,49 @@ export function openDatabase() {
       throw error;
     }
   }
+  migrateAiTextToSimplified(database);
   return database;
+}
+
+/**
+ * 一次性把旧库中的 AI 转录与纪要改为简体。只触碰 transcript_segments.text 和
+ * summary_json，绝不修改标题、个人笔记、术语表或说话人姓名。
+ */
+function migrateAiTextToSimplified(db) {
+  const version = Number(db.prepare("PRAGMA user_version").get()?.user_version ?? 0);
+  if (version >= 3) return;
+  db.exec("BEGIN");
+  try {
+    const updateSegment = db.prepare("UPDATE transcript_segments SET text = ? WHERE id = ?");
+    for (const row of db.prepare("SELECT id, text FROM transcript_segments").all()) {
+      const text = simplifyChinese(row.text);
+      if (text !== row.text) updateSegment.run(text, row.id);
+    }
+    const updateSummary = db.prepare("UPDATE meetings SET summary_json = ? WHERE id = ?");
+    for (const row of db.prepare("SELECT id, summary_json FROM meetings").all()) {
+      const current = safeJson(row.summary_json, {});
+      const summary = simplifySummary(current);
+      if (!(summary.manualLocks ?? []).some((key) => key.startsWith("keyPoints"))) {
+        const transcript = db.prepare("SELECT text, status FROM transcript_segments WHERE meeting_id = ? ORDER BY start_ms").all(row.id);
+        const transcriptTexts = new Set(transcript.map((segment) => simplifyChinese(segment.text).trim()));
+        const legacyCopied = summary.keyPoints.some((point) => point.length > 120 || transcriptTexts.has(point.trim()));
+        if (legacyCopied) {
+          summary.keyPoints = buildBasicKeyPoints(transcript);
+          summary.generationMode = "local";
+          summary.sourceThroughMs = db.prepare("SELECT MAX(end_ms) AS value FROM transcript_segments WHERE meeting_id = ?").get(row.id)?.value ?? 0;
+          summary.stale = false;
+          summary.updatedAt = nowIso();
+        }
+      }
+      if (JSON.stringify(summary) !== JSON.stringify(current)) updateSummary.run(JSON.stringify(summary), row.id);
+    }
+    db.exec("PRAGMA user_version = 3");
+    db.exec("COMMIT");
+    try { db.exec("INSERT INTO meeting_search(meeting_search) VALUES('rebuild')"); } catch {}
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 /**
@@ -460,6 +530,7 @@ export function loadMeeting(id) {
  * @returns {object} 落库后的会议对象
  */
 export function saveMeeting(meeting) {
+  meeting = simplifyMeetingAiText(meeting);
   const db = openDatabase();
   if (transactionInProgress) {
     // A re-entrant save would throw "cannot start a transaction within a

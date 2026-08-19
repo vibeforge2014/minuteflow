@@ -5,7 +5,7 @@
  * 主要导出：无（副作用模块）；内部渲染 Root 组件，按需 lazy 加载 App（桌面端）或 MarketingSite（官网）。
  */
 import { lazy, StrictMode, Suspense, useEffect } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root as ReactRoot } from "react-dom/client";
 import { api, isElectronRuntime } from "./lib/api";
 import { MarketingSite } from "./MarketingSite";
 import "./styles.css";
@@ -32,7 +32,12 @@ function Root() {
   return <MarketingSite />;
 }
 
-createRoot(document.getElementById("root")!).render(
+// Vite 热更新可能重新执行入口模块；复用既有 root，避免重复 createRoot 的 React 错误。
+const rootWindow = window as typeof window & { __MINUTEFLOW_REACT_ROOT__?: ReactRoot };
+const reactRoot = rootWindow.__MINUTEFLOW_REACT_ROOT__
+  ?? (rootWindow.__MINUTEFLOW_REACT_ROOT__ = createRoot(document.getElementById("root")!));
+
+reactRoot.render(
   <StrictMode>
     <Suspense fallback={<div className="site-loading">正在打开MinuteFlow…</div>}>
       <Root />

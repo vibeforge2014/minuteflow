@@ -4,7 +4,7 @@
  * 目标会作为 AI 总结的提示输入。创建后由 App 立即选中并可直接开始录音。
  */
 import { useEffect, useState } from "react";
-import { CalendarBlank, Microphone, Users, X } from "@phosphor-icons/react";
+import { CalendarBlank, Microphone, Users, WarningCircle, X } from "@phosphor-icons/react";
 import type { CreateMeetingInput, MeetingMode } from "../types";
 import { useMeetingStore } from "../store/meetingStore";
 
@@ -31,11 +31,22 @@ export function NewMeetingDialog({
   const [participants, setParticipants] = useState("我");
   const [goal, setGoal] = useState("");
   const [busy, setBusy] = useState(false);
+  // 创建失败的行内错误：保留弹窗与用户已填内容，方便直接重试。
+  const [error, setError] = useState<string | null>(null);
   const preferences = useMeetingStore((state) => state.preferences);
   // 每次打开时把默认模式同步为用户偏好（可再手动切换）。
   useEffect(() => {
     if (open) setMode(preferences.defaultMode);
   }, [open, preferences.defaultMode]);
+  // Esc 关闭弹窗（创建请求进行中时不关，避免与提交竞态）。
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, busy, onClose]);
   if (!open) return null;
 
   return (
@@ -44,17 +55,25 @@ export function NewMeetingDialog({
         className="dialog new-meeting-dialog"
         onSubmit={async (event) => {
           event.preventDefault();
+          if (busy) return;
           setBusy(true);
-          await onCreate({
-            title: title.trim() || "未命名会议",
-            mode,
-            participants: participants.split(/[、,]/).map((item) => item.trim()).filter(Boolean),
-            goals: goal.trim() ? [goal.trim()] : [],
-            tags: []
-          });
-          setTitle("");
-          setGoal("");
-          setBusy(false);
+          setError(null);
+          try {
+            await onCreate({
+              title: title.trim() || "未命名会议",
+              mode,
+              participants: participants.split(/[、,]/).map((item) => item.trim()).filter(Boolean),
+              goals: goal.trim() ? [goal.trim()] : [],
+              tags: []
+            });
+            setTitle("");
+            setGoal("");
+          } catch (submitError) {
+            // 失败时保持弹窗打开并就地展示原因；busy 必须复位，否则按钮会永久卡在“正在创建…”。
+            setError(submitError instanceof Error ? submitError.message : "创建会议失败，请重试。");
+          } finally {
+            setBusy(false);
+          }
         }}
       >
         <header>
@@ -105,6 +124,7 @@ export function NewMeetingDialog({
           <span>会议目标</span>
           <textarea value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="这次会议希望达成什么结果？" rows={3} />
         </label>
+        {error && <p className="dialog-error" role="alert"><WarningCircle size={14} weight="fill" />{error}</p>}
         <footer>
           <span><CalendarBlank size={16} />默认每 {formatInterval(preferences.summaryIntervalSeconds)} 更新纪要</span>
           <div>

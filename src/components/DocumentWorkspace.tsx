@@ -14,10 +14,13 @@ import {
   FileText,
   LinkSimple,
   ListBullets,
+  Lock,
+  LockOpen,
   NotePencil,
   PencilSimple,
   Plus,
-  Target
+  Target,
+  XCircle
 } from "@phosphor-icons/react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
@@ -27,15 +30,17 @@ import { marked } from "marked";
 import TurndownService from "turndown";
 import type { Meeting } from "../types";
 import { api } from "../lib/api";
-import { lockSummaryField } from "../lib/summary";
+import { lockSummaryField, toggleSummaryLock } from "../lib/summary";
 import { formatDuration, formatInterval } from "../lib/format";
 import { useMeetingStore } from "../store/meetingStore";
 
 interface DocumentWorkspaceProps {
   meeting: Meeting;
   onChange(meeting: Meeting): void;
-  /** 手动触发 AI 总结（final=false 滚动更新）。 */
+  /** 手动触发 AI 总结（录音中为滚动增量，会后为终稿）。 */
   onGenerateSummary(): void;
+  /** 取消进行中的总结请求（生成按钮在 busy 态变为“取消”）。 */
+  onCancelSummary(): void;
   summaryBusy: boolean;
 }
 
@@ -43,6 +48,7 @@ export function DocumentWorkspace({
   meeting,
   onChange,
   onGenerateSummary,
+  onCancelSummary,
   summaryBusy
 }: DocumentWorkspaceProps) {
   const summaryIntervalSeconds = useMeetingStore((state) => state.preferences.summaryIntervalSeconds);
@@ -218,21 +224,27 @@ export function DocumentWorkspace({
 
         <DocumentSection
           icon={<FileText size={20} weight="duotone" />}
-          title="实时纪要"
+          title="AI 会议纪要"
           badge={
             <span className="summary-cadence">
-              <i /> 每 {formatInterval(summaryIntervalSeconds)} 更新
+              <i /> {meeting.summary.generationMode === "local" ? "本机基础归纳" : "AI 自动整理"} · 约每 {formatInterval(summaryIntervalSeconds)}
             </span>
           }
           action={
-            <button
-              className="text-button"
-              onClick={onGenerateSummary}
-              disabled={summaryBusy}
-            >
-              <ArrowClockwise size={15} className={summaryBusy ? "spin" : ""} />
-              {meeting.summary.stale ? "更新纪要" : "立即总结"}
-            </button>
+            summaryBusy ? (
+              <button className="text-button" onClick={onCancelSummary} title="中止这次总结请求">
+                <XCircle size={15} />取消生成
+              </button>
+            ) : (
+              <button className="text-button" onClick={onGenerateSummary}>
+                <ArrowClockwise size={15} />
+                {meeting.summary.stale
+                  ? "更新纪要"
+                  : meeting.status === "recording" || meeting.status === "paused"
+                    ? "立即总结"
+                    : "生成最终纪要"}
+              </button>
+            )
           }
         >
           {meeting.summary.stale && (
@@ -256,10 +268,23 @@ export function DocumentWorkspace({
                     index
                   )}
                 />
+                <button
+                  className={`icon-button summary-lock ${meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "is-locked" : ""}`}
+                  aria-label={meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "解除锁定，允许 AI 更新这条要点" : "锁定这条要点，AI 重新生成时不覆盖"}
+                  title={meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "已锁定：AI 不覆盖。点击解锁。" : "未锁定。点击锁定后 AI 不覆盖这条。"}
+                  onClick={() => onChange({
+                    ...meeting,
+                    summary: toggleSummaryLock(meeting.summary, `keyPoints:${index}`)
+                  })}
+                >
+                  {meeting.summary.manualLocks?.includes(`keyPoints:${index}`)
+                    ? <Lock size={13} weight="fill" />
+                    : <LockOpen size={13} />}
+                </button>
                 {index >= meeting.summary.keyPoints.length - 3 && <span>新增</span>}
               </div>
             )) : (
-              <div className="section-empty">开始录音后，AI 会在这里整理关键进展。</div>
+              <div className="section-empty">转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。</div>
             )}
           </div>
         </DocumentSection>
@@ -269,7 +294,9 @@ export function DocumentWorkspace({
             <div className="action-table__head">
               <span>任务</span><span>负责人</span><span>截止时间</span><span>状态</span>
             </div>
-            {meeting.summary.actionItems.length ? meeting.summary.actionItems.map((item) => (
+            {meeting.summary.actionItems.length ? meeting.summary.actionItems.map((item) => {
+              const actionLocked = meeting.summary.manualLocks?.includes(`action:${item.id}`) ?? false;
+              return (
               <div className="action-row" key={item.id}>
                 <label>
                   <input
@@ -302,8 +329,20 @@ export function DocumentWorkspace({
                   <option value="in_progress">进行中</option>
                   <option value="done">已完成</option>
                 </select>
+                <button
+                  className={`icon-button summary-lock ${actionLocked ? "is-locked" : ""}`}
+                  aria-label={actionLocked ? "解除锁定，允许 AI 更新这条行动项" : "锁定这条行动项，AI 重新生成时不覆盖"}
+                  title={actionLocked ? "已锁定：AI 不覆盖。点击解锁。" : "未锁定。点击锁定后 AI 不覆盖这条。"}
+                  onClick={() => onChange({
+                    ...meeting,
+                    summary: toggleSummaryLock(meeting.summary, `action:${item.id}`)
+                  })}
+                >
+                  {actionLocked ? <Lock size={13} weight="fill" /> : <LockOpen size={13} />}
+                </button>
               </div>
-            )) : (
+              );
+            }) : (
               <div className="section-empty">暂无行动项。</div>
             )}
             <button
@@ -333,10 +372,10 @@ export function DocumentWorkspace({
 
         <DocumentSection icon={<CheckSquare size={20} weight="duotone" />} title="决策、问题与下一步">
           <div className="summary-detail-grid">
-            <EditableSummaryList title="已确认决策" values={meeting.summary.decisions} onChange={(values, index) => setSummaryList("decisions", values, index)} />
-            <EditableSummaryList title="未决问题" values={meeting.summary.openQuestions} onChange={(values, index) => setSummaryList("openQuestions", values, index)} />
-            <EditableSummaryList title="风险" values={meeting.summary.risks} onChange={(values, index) => setSummaryList("risks", values, index)} />
-            <EditableSummaryList title="下一步" values={meeting.summary.nextSteps} onChange={(values, index) => setSummaryList("nextSteps", values, index)} />
+            <EditableSummaryList title="已确认决策" values={meeting.summary.decisions} locks={meeting.summary.manualLocks} lockKey="decisions" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("decisions", values, index)} />
+            <EditableSummaryList title="未决问题" values={meeting.summary.openQuestions} locks={meeting.summary.manualLocks} lockKey="openQuestions" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("openQuestions", values, index)} />
+            <EditableSummaryList title="风险" values={meeting.summary.risks} locks={meeting.summary.manualLocks} lockKey="risks" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("risks", values, index)} />
+            <EditableSummaryList title="下一步" values={meeting.summary.nextSteps} locks={meeting.summary.manualLocks} lockKey="nextSteps" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("nextSteps", values, index)} />
           </div>
         </DocumentSection>
       </article>
@@ -344,31 +383,52 @@ export function DocumentWorkspace({
   );
 }
 
-/** 纪要四宫格里的一格：可编辑字符串列表（决策/未决问题/风险/下一步），编辑即锁定该条。 */
+/**
+ * 纪要四宫格里的一格：可编辑字符串列表（决策/未决问题/风险/下一步），编辑即锁定该条；
+ * 行尾的锁标记显示锁定状态，点击可手动锁定/解锁（解锁后恢复由 AI 更新）。
+ */
 function EditableSummaryList({
   title,
   values,
+  locks,
+  lockKey,
+  onToggleLock,
   onChange
 }: {
   title: string;
   values: string[];
+  locks?: string[];
+  lockKey: "decisions" | "openQuestions" | "risks" | "nextSteps";
+  onToggleLock(key: string): void;
   onChange(values: string[], lockedIndex: number): void;
 }) {
   return (
     <div className="summary-detail">
       <h3>{title}</h3>
-      {values.length ? values.map((value, index) => (
-        <textarea
-          key={`${title}-${index}`}
-          aria-label={`编辑${title} ${index + 1}`}
-          rows={2}
-          value={value}
-          onChange={(event) => onChange(
-            values.map((item, itemIndex) => itemIndex === index ? event.target.value : item),
-            index
-          )}
-        />
-      )) : <span>暂无</span>}
+      {values.length ? values.map((value, index) => {
+        const locked = locks?.includes(`${lockKey}:${index}`) ?? false;
+        return (
+          <div className="summary-detail-row" key={`${title}-${index}`}>
+            <textarea
+              aria-label={`编辑${title} ${index + 1}`}
+              rows={2}
+              value={value}
+              onChange={(event) => onChange(
+                values.map((item, itemIndex) => itemIndex === index ? event.target.value : item),
+                index
+              )}
+            />
+            <button
+              className={`icon-button summary-lock ${locked ? "is-locked" : ""}`}
+              aria-label={locked ? `解除锁定这条${title}` : `锁定这条${title}`}
+              title={locked ? "已锁定：AI 不覆盖。点击解锁。" : "未锁定。点击锁定后 AI 不覆盖这条。"}
+              onClick={() => onToggleLock(`${lockKey}:${index}`)}
+            >
+              {locked ? <Lock size={13} weight="fill" /> : <LockOpen size={13} />}
+            </button>
+          </div>
+        );
+      }) : <span>暂无</span>}
       <button
         className="text-button summary-detail__add"
         onClick={() => onChange([...values, `新的${title}`], values.length)}

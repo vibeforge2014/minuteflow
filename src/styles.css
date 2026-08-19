@@ -182,6 +182,50 @@ button {
   font-size: 10px;
 }
 
+.search-clear {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: #9ca1a9;
+  background: #f0f1f3;
+  border: 0;
+  border-radius: 50%;
+}
+
+.search-clear:hover {
+  color: var(--ink);
+  background: #e6e8ec;
+}
+
+.sidebar-empty {
+  margin: 18px 12px;
+  padding: 18px 14px;
+  text-align: center;
+  background: #f8f9fb;
+  border: 1px dashed #e1e3e8;
+  border-radius: 9px;
+}
+
+.sidebar-empty p {
+  margin: 0 0 10px;
+  color: #7c828c;
+  font-size: 11px;
+}
+
+.sidebar-empty button {
+  padding: 0;
+  color: var(--blue);
+  background: transparent;
+  border: 0;
+  font-size: 11px;
+}
+
+.sidebar-empty button:hover {
+  text-decoration: underline;
+}
+
 .meeting-groups {
   flex: 1;
   overflow-y: auto;
@@ -274,10 +318,12 @@ button {
 
 .sidebar-task-count { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; display: grid; place-items: center; border-radius: 999px; background: #f6d9d0; color: #a74431; font-size: 11px; font-weight: 700; }
 
-.meeting-player { margin: 14px 28px 0; padding: 14px 18px 12px; border: 1px solid #eadfd7; border-radius: 16px; background: linear-gradient(120deg, #fff8f4, #fffdfb); box-shadow: 0 7px 24px rgba(101, 65, 47, .06); }
+.meeting-player { margin: 8px 28px 0; padding: 9px 14px 8px; border: 1px solid #eadfd7; border-radius: 10px; background: #fffaf6; box-shadow: 0 4px 14px rgba(101, 65, 47, .05); }
 .meeting-player__timeline { display: grid; grid-template-columns: 42px 1fr 42px; align-items: center; gap: 9px; color: #8f857d; font-size: 11px; }.meeting-player__timeline time:last-child { text-align: right; }
 .meeting-player__timeline input { width: 100%; accent-color: #d45f47; }
-.meeting-player__controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; margin-top: 5px; }.meeting-player__controls > span { display: flex; align-items: center; gap: 6px; color: #776d65; font-size: 11px; }.meeting-player__controls > div { display: flex; align-items: center; gap: 8px; }.meeting-player__controls button { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 50%; color: #39332f; background: transparent; }.meeting-player__controls .meeting-player__play { width: 38px; height: 38px; color: #fff; background: #d35f48; }.meeting-player__controls strong { justify-self: end; color: #5e554f; font-size: 11px; }
+.meeting-player__controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; margin-top: 2px; }.meeting-player__controls > span { display: flex; align-items: center; gap: 6px; color: #776d65; font-size: 11px; }.meeting-player__controls > div { display: flex; align-items: center; gap: 6px; }.meeting-player__controls button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 50%; color: #39332f; background: transparent; }.meeting-player__controls .meeting-player__play { width: 34px; height: 34px; color: #fff; background: #d35f48; }.meeting-player__controls .meeting-player__close { justify-self: end; color: #8f857d; }.meeting-player__controls button:hover { background: #f5e8e1; }.meeting-player__controls .meeting-player__play:hover { background: #bd4f3a; }
+.meeting-player__error { margin: 4px 0 0; color: #b24735; font-size: 11px; text-align: center; }
+.playback-trigger.is-active { color: #a74431; border-color: #e8b8aa; background: #fff1eb; }
 .transcript-time { align-self: start; padding: 2px 0; border: 0; background: none; color: #9b9188; font: inherit; font-size: 11px; cursor: pointer; }.transcript-time:hover { color: #c3523d; }.transcript-item.is-playing { background: #fff2ec; box-shadow: inset 3px 0 #dc6b52; }
 
 .import-drawer { position: fixed; z-index: 70; inset: 0 0 0 auto; width: min(440px, calc(100vw - 24px)); display: flex; flex-direction: column; background: #fffdf9; border-left: 1px solid #e9e4de; box-shadow: -24px 0 64px rgba(75, 54, 42, .12); animation: import-slide-in .24s cubic-bezier(.2,.8,.2,1); }
@@ -303,6 +349,15 @@ button {
 .import-model-hint span { display: grid; gap: 2px; font-size: 11px; }.import-model-hint strong { font-size: 12px; }
 .import-submit { width: 100%; justify-content: center; margin-top: 14px; }
 .import-duplicate-note { margin: 9px 4px 0; color: #999087; text-align: center; font-size: 10px; }
+.import-title-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin: 8px 4px 0;
+  color: var(--amber);
+  font-size: 10px;
+}
 .import-queue { padding: 17px 20px 24px; overflow: auto; flex: 1; }
 .import-empty { min-height: 150px; display: grid; place-items: center; align-content: center; gap: 7px; color: #aaa097; border: 1px dashed #e4ddd5; border-radius: 14px; }
 .import-empty p { margin: 0; font-size: 12px; }.import-empty button { border: 0; background: none; color: #b2533e; font-weight: 700; }
@@ -781,7 +836,7 @@ button {
 .summary-timeline > div {
   position: relative;
   display: grid;
-  grid-template-columns: 43px 1fr auto;
+  grid-template-columns: 43px 1fr auto auto;
   align-items: start;
   gap: 7px;
   min-height: 28px;
@@ -848,7 +903,7 @@ button {
 .action-table__head,
 .action-row {
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) 105px 90px 64px;
+  grid-template-columns: minmax(280px, 1fr) 105px 90px 64px 22px;
   align-items: center;
   min-height: 28px;
   gap: 8px;
@@ -971,6 +1026,39 @@ button {
 .summary-detail textarea:hover,
 .summary-detail textarea:focus {
   border-color: #dfe3e9;
+}
+
+/* 纪要条目的锁定/解锁标记：锁定后 AI 重新生成不覆盖，图标点亮为主题色。 */
+.summary-lock {
+  flex: none;
+  color: #b6bac2;
+}
+
+.summary-lock:hover {
+  color: var(--accent, #e76f51);
+}
+
+.summary-lock.is-locked {
+  color: var(--accent, #e76f51);
+}
+
+/* 四宫格条目行：文本域 + 锁标记并排。 */
+.summary-detail-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.summary-detail-row textarea {
+  flex: 1;
+}
+
+.summary-detail-row .summary-lock {
+  margin-top: 8px;
+}
+
+.summary-timeline .summary-lock {
+  margin-top: 4px;
 }
 
 .summary-detail > span {
@@ -1116,6 +1204,12 @@ button {
 .speaker-merge {
   color: var(--blue) !important;
   background: var(--blue-soft) !important;
+}
+
+.speaker-more {
+  color: #6b7280 !important;
+  background: #e9ebef !important;
+  font-weight: 600;
 }
 
 .transcript-hint {
@@ -1404,6 +1498,18 @@ button {
   font-size: 9px;
 }
 
+.recorder-warning {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  color: var(--red);
+  background: #fdeced;
+  border-radius: 5px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
 .recorder-actions {
   display: flex;
   align-items: center;
@@ -1443,6 +1549,13 @@ button {
 
 .record-action--stop {
   color: var(--red);
+}
+
+/* 停止二次确认的武装态：第一次点击后变为醒目的实心红按钮，3 秒内再点才真正结束。 */
+.record-action--stop.is-armed {
+  color: white;
+  background: var(--red);
+  border-radius: 7px;
 }
 
 .recorder-mini {
@@ -1514,6 +1627,13 @@ button {
 .export-menu small {
   color: #9297a0;
   font-size: 9px;
+}
+
+/* 菜单打开时的透明遮罩：拦截外部点击（z-index 低于导出菜单 50 / 更多菜单 52）。 */
+.menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 49;
 }
 
 .more-menu {
@@ -1805,6 +1925,20 @@ button {
 
 .permission-wall > footer > div { display: flex; align-items: center; gap: 13px; }
 .permission-wall > footer > div > span { color: #838892; font-size: 9px; }
+
+/* 「暂不授权，先体验」：次级文字按钮，弱于主按钮但清晰可达。 */
+.permission-wall__skip {
+  padding: 0;
+  color: #7c828c;
+  background: transparent;
+  border: 0;
+  font-size: 10px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.permission-wall__skip:hover { color: var(--ink); }
+.permission-wall__skip:disabled { opacity: 0.5; }
 
 .paywall-dialog {
   position: relative;
@@ -2720,6 +2854,24 @@ button {
   margin-top: 10px;
 }
 
+.local-model-library-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.local-model-library-heading strong {
+  color: #343941;
+  font-size: 10px;
+}
+
+.local-model-library-heading small {
+  color: #9298a1;
+  font-size: 8px;
+}
+
 .local-model-list > button,
 .download-model-card {
   min-width: 0;
@@ -2992,6 +3144,37 @@ button {
   color: var(--green);
 }
 
+.toast--warning > svg {
+  color: var(--red);
+}
+
+/* 错误与成功提示的叠放容器：两条 Toast 垂直排列，互不覆盖。 */
+.toast-stack {
+  position: fixed;
+  z-index: 200;
+  left: 50%;
+  top: 18px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.toast-stack .toast {
+  position: static;
+  transform: none;
+}
+
+.dialog-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 2px 4px;
+  color: var(--red);
+  font-size: 11px;
+}
+
 .toast button {
   width: 24px;
   height: 24px;
@@ -3082,7 +3265,7 @@ button {
 
   .action-table__head,
   .action-row {
-    grid-template-columns: minmax(210px, 1fr) 84px 72px 54px;
+    grid-template-columns: minmax(210px, 1fr) 84px 72px 54px 22px;
   }
 
   .audio-level {

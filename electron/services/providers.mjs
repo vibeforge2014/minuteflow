@@ -1,6 +1,6 @@
 /**
  * 转录与纪要的模型调用层（Electron 主进程 / 服务层）。
- * 封装三类能力：远程 OpenAI 兼容接口的转录与纪要（含 New API 双端点兜底、
+ * 封装三类能力：远程 OpenAI 兼容接口的转录与纪要（含 New API 网关预设、
  * Anthropic / Gemini 原生协议）、本地 whisper.cpp / Python Whisper / faster-whisper /
  * mlx-whisper 转录，以及无 LLM 时的本地规则纪要与模型连通性测试。
  * 主要导出：resolveProviderEndpoint、validateSummary、buildSummaryPrompt、
@@ -12,6 +12,7 @@
  * 副作用：网络请求、拉起子进程（whisper.cpp / python / ffmpeg）、读写临时文件。
  */
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -19,6 +20,10 @@ import { randomUUID } from "node:crypto";
 import { writeFile, unlink } from "node:fs/promises";
 import { z } from "zod";
 import { initWhisper, loadWhisperModule } from "@fugood/whisper.node";
+import { buildBasicKeyPoints, simplifySummary } from "./chinese.mjs";
+
+// ESM 下按需加载 CJS 原生模块（sherpa-onnx-node）。
+const require = createRequire(import.meta.url);
 
 /** 会议纪要 JSON 的 zod 校验 schema：模型输出先经它归一化（缺省字段补默认值）再进库。 */
 const summarySchema = z.object({
@@ -140,9 +145,42 @@ async function requestGemini(profile, apiKey, prompt, maxTokens = 8_192, signal)
   return response.json();
 }
 
-/** 用 zod schema 校验并归一化纪要 JSON，字段缺失补默认值，格式不符抛错。 */
+/**
+ * 用 zod schema 校验并归一化纪要 JSON，字段缺失补默认值，格式不符抛出用户可读的错误
+ * （原始 ZodError 是结构化对象，直接透传会得到一坨无法阅读的 JSON）。
+ */
 export function validateSummary(value) {
-  return summarySchema.parse(value);
+  const result = summarySchema.safeParse(value);
+  if (!result.success) {
+    const issues = result.error.issues.slice(0, 3)
+      .map((issue) => `${issue.path.join(".") || "根对象"} ${issue.message}`)
+      .join("；");
+    throw new Error(`模型返回的纪要结构不合法（${issues}），请重试或换用兼容性更好的模型。`);
+  }
+  return simplifySummary(result.data);
+}
+
+/** 提示词中转录部分的最大字符量：更早的内容已并入上一版纪要，超长时只保留最近窗口。 */
+const MAX_TRANSCRIPT_PROMPT_CHARS = 30_000;
+
+/**
+ * 转录行窗口化：拼接后超长时从尾部往前保留最近的内容（滚动纪要场景下，
+ * 早期内容已体现在上一版纪要里），避免长会议把模型上下文和费用撑爆。
+ */
+function windowTranscriptLines(lines) {
+  if (!lines.length) return "";
+  let total = 0;
+  for (const line of lines) total += line.length + 1;
+  if (total <= MAX_TRANSCRIPT_PROMPT_CHARS) return lines.join("\n");
+  const kept = [];
+  let used = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const cost = lines[index].length + 1;
+    if (used + cost > MAX_TRANSCRIPT_PROMPT_CHARS && kept.length) break;
+    kept.unshift(lines[index]);
+    used += cost;
+  }
+  return `（转录过长，已省略更早的部分，其内容包含在上一版纪要中）\n${kept.join("\n")}`;
 }
 
 /**
@@ -152,11 +190,11 @@ export function validateSummary(value) {
  * @returns {string} 提示词文本
  */
 export function buildSummaryPrompt(input, final = false) {
-  const transcript = input.transcript
-    .map((segment) => `[${formatTime(segment.startMs)}] ${segment.speakerName}: ${segment.text}`)
-    .join("\n");
+  const transcript = windowTranscriptLines(input.transcript
+    .map((segment) => `[${formatTime(segment.startMs)}] ${segment.speakerName}: ${segment.text}`));
   return [
     "你是一名严谨的中文会议纪要助手。",
+    "所有内容必须使用简体中文。请归纳和压缩信息，合并重复观点，不要逐句复述转录。",
     final
       ? "请基于完整会议内容生成最终纪要。"
       : "请只根据新增内容更新滚动纪要，不要删除已经确认的人工内容。",
@@ -216,7 +254,12 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(profile.options?.timeoutMs ?? 60_000)]) : AbortSignal.timeout(profile.options?.timeoutMs ?? 60_000)
       });
       if (!response.ok) {
-        throw new Error(`总结模型请求失败：${response.status} ${await response.text()}`);
+        const error = new Error(`总结模型请求失败：${response.status} ${await response.text()}`);
+        // 只有“可能是 response_format 不被网关支持”的错误（400/404/422 或报文点名该字段）
+        // 才值得去掉 response_format 重试；鉴权/限流等不可恢复错误直接抛出，不做无谓重试。
+        error.retriableWithoutResponseFormat = [400, 404, 422].includes(response.status)
+          || /response_format/i.test(error.message);
+        throw error;
       }
       const payload = await response.json();
       const content = extractMessageContent(payload);
@@ -224,6 +267,7 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
       return validateSummary(JSON.parse(extractJson(content)));
     } catch (error) {
       if (signal?.aborted) throw error;
+      if (!error.retriableWithoutResponseFormat) throw error;
       lastError = error;
     }
   }
@@ -239,20 +283,18 @@ function splitSentences(text) {
 }
 
 /**
- * 本地规则纪要兜底（无 LLM 配置或用户关闭自动总结时使用，纯 CPU、无网络）。
- * 用关键词正则从最近几句转录里抽决策/行动项/未决问题，并与上一版纪要合并去重。
+ * 本地规则纪要兜底（无 LLM 配置、显式选择离线纪要或在线总结失败降级时使用，纯 CPU、无网络）。
+ * 用关键词正则从最近一段转录（最多 120 段，覆盖整场会议的绝大部分）里抽
+ * 决策/行动项/风险/未决问题，并与上一版纪要合并去重。
  * @param {object} input 会议上下文
  * @returns {object} 经 validateSummary 归一化后的纪要对象
  */
 export function summarizeLocally(input) {
-  const recent = input.transcript.filter((segment) => segment.status === "final").slice(-8);
-  const keyPoints = recent
-    .map((segment) => segment.text.trim())
-    .filter(Boolean)
-    .slice(-5);
+  const recent = input.transcript.filter((segment) => segment.status === "final").slice(-120);
   const decisionPattern = /(决定|決定|确认|確認|同意|采用|採用|确定|確定|结论|結論)/;
   const actionPattern = /(需要|负责|負責|完成|跟进|跟進|输出|輸出|整理|评估|評估|邀请|邀請)/;
   const questionPattern = /[？?]$/;
+  const riskPattern = /(风险|風險|延期|阻塞|合规|合規|隐患|隱患|来不及|來不及)/;
 
   // Match at sentence granularity (split on Chinese/English terminal punctuation)
   // so a single long segment containing several points yields individual
@@ -265,11 +307,13 @@ export function summarizeLocally(input) {
     }))
   );
 
+  const keyPoints = buildBasicKeyPoints(recent);
+
   return validateSummary({
     topics: input.previousSummary?.topics?.length
       ? input.previousSummary.topics
       : input.goals.slice(0, 3),
-    keyPoints: Array.from(new Set([...(input.previousSummary?.keyPoints ?? []), ...keyPoints])).slice(-8),
+    keyPoints: Array.from(new Set(keyPoints)).slice(-8),
     decisions: Array.from(new Set([
       ...(input.previousSummary?.decisions ?? []),
       ...sentences.filter((unit) => decisionPattern.test(unit.text)).map((unit) => unit.text)
@@ -293,7 +337,10 @@ export function summarizeLocally(input) {
       ...(input.previousSummary?.openQuestions ?? []),
       ...sentences.filter((unit) => questionPattern.test(unit.text)).map((unit) => unit.text)
     ])).slice(-5),
-    risks: input.previousSummary?.risks ?? [],
+    risks: Array.from(new Set([
+      ...(input.previousSummary?.risks ?? []),
+      ...sentences.filter((unit) => riskPattern.test(unit.text)).map((unit) => unit.text)
+    ])).slice(-5),
     nextSteps: input.previousSummary?.nextSteps ?? []
   });
 }
@@ -381,7 +428,7 @@ export async function transcribeWithMlxWhisper(profile, audioBuffer, fileName, l
 
 /**
  * 远程转录（OpenAI 兼容 /audio/transcriptions 接口）。副作用：网络请求。
- * New API 预设兼容：标准端点 404/405 时自动换用 /audio/openai/create-transcription 再试；
+ * New API 是服务网关预设，仍使用同一 OpenAI 兼容端点，不存在独立的 New API 协议。
  * 响应形状做了容错（data/result 包裹、text/transcript 字段、JSON 或纯文本体均可）。
  * @param {object} profile stt 模型档案
  * @param {string} apiKey 密钥（sherpa-onnx 等无密钥场景可为空）
@@ -396,40 +443,27 @@ export async function transcribeRemote(
   glossary = [],
   signal
 ) {
+  // 远程语音识别可能需要等待冷启动或处理较长导入音频。应用端保证至少
+  // 330 秒，比推荐的 DSM proxy_read_timeout=300s 多 30 秒缓冲；这也会覆盖旧档案中保存的 120s。
+  const transcriptionTimeoutMs = Math.max(profile.options?.timeoutMs ?? 0, 330_000);
   const defaultResponseFormat = profile.options?.responseFormat
     ?? (profile.options?.apiFlavor === "new-api" || profile.model !== "whisper-1" ? "json" : "verbose_json");
-  const endpoints = [
-    apiUrl(profile, "audio/transcriptions", profile.options?.transcriptionEndpoint)
-  ];
-  if (profile.options?.apiFlavor === "new-api" && !profile.options?.transcriptionEndpoint) {
-    endpoints.push(apiUrl(profile, "audio/openai/create-transcription"));
-  }
-  let response;
-  let errorBody = "";
-  for (const [index, endpoint] of endpoints.entries()) {
-    const form = new FormData();
-    form.append("file", new Blob([audioBuffer]), fileName);
-    form.append("model", profile.model);
-    if (language) form.append("language", language);
-    if (defaultResponseFormat !== "text") form.append("response_format", defaultResponseFormat);
-    if (glossary.length) form.append("prompt", glossary.slice(0, 200).join("，"));
-    response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        ...authorizationHeaders(profile, apiKey),
-        ...(profile.options?.headers ?? {})
-      },
-      body: form,
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(profile.options?.timeoutMs ?? 120_000)]) : AbortSignal.timeout(profile.options?.timeoutMs ?? 120_000)
-    });
-    if (response.ok) break;
-    // 仅在 404/405（端点不存在）且还有候选端点时切换；其他错误直接抛出。
-    errorBody = await response.text();
-    if (![404, 405].includes(response.status) || index === endpoints.length - 1) {
-      throw new Error(`转录模型请求失败：${response.status} ${errorBody}`);
-    }
-  }
-  if (!response?.ok) throw new Error(`转录模型请求失败：${errorBody || "未知错误"}`);
+  const form = new FormData();
+  form.append("file", new Blob([audioBuffer]), fileName);
+  form.append("model", profile.model);
+  if (language) form.append("language", language);
+  if (defaultResponseFormat !== "text") form.append("response_format", defaultResponseFormat);
+  if (glossary.length) form.append("prompt", glossary.slice(0, 200).join("，"));
+  const response = await fetch(apiUrl(profile, "audio/transcriptions", profile.options?.transcriptionEndpoint), {
+    method: "POST",
+    headers: {
+      ...authorizationHeaders(profile, apiKey),
+      ...(profile.options?.headers ?? {})
+    },
+    body: form,
+    signal: requestSignal(signal, transcriptionTimeoutMs)
+  });
+  if (!response.ok) throw new Error(`转录模型请求失败：${response.status} ${await response.text()}`);
   const contentType = response.headers.get("content-type") ?? "";
   const payload = contentType.includes("json") ? await response.json() : { text: await response.text() };
   const result = payload.data ?? payload.result ?? payload;
@@ -681,10 +715,13 @@ async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, lang
 /**
  * 测试模型档案是否可用（models:test 通道调用）。副作用：网络请求或子进程。
  * 各 transport 的就绪含义不同：本地运行时检查模型文件与组件可运行，
- * LLM 走一次最小请求确认连通，远程 stt 用 /models 列表探测。
+ * LLM 走一次最小请求确认连通，远程 stt 上传内置 WAV 确认真实转录端点。
  * @returns {Promise<{ok: true, message: string}>} 成功时带用户可读的提示
  */
 export async function testModelProfile(profile, apiKey) {
+  if (profile.transport === "local-summary") {
+    return { ok: true, message: "本机基础纪要已就绪，完全离线运行，无需联网或密钥。" };
+  }
   if (profile.transport === "whisper-cpp") {
     if (!profile.options?.modelPath) {
       throw new Error("本地模型尚未就绪，请先下载一个模型。");
@@ -734,19 +771,35 @@ export async function testModelProfile(profile, apiKey) {
     return { ok: true, message: `${label} 已就绪，模型路径已配置。` };
   }
   if (profile.transport === "sherpa-onnx") {
-    if (
-      !profile.options?.executablePath ||
-      !profile.options?.segmentationModelPath ||
-      !profile.options?.embeddingModelPath
-    ) {
-      throw new Error("请配置 sherpa-onnx 可执行文件、segmentation 和 embedding 模型路径。");
+    // 实际运行时是进程内 sherpa-onnx-node npm 包（diarization.mjs），不存在外部可执行文件：
+    // 测试 = npm 包可加载且两个模型文件真实存在，与运行路径完全一致。
+    if (!profile.options?.segmentationModelPath || !profile.options?.embeddingModelPath) {
+      throw new Error("请配置 Pyannote segmentation 与 3D-Speaker embedding 模型路径。");
     }
+    let sherpaOnnx;
     try {
-      await runProcess(profile.options.executablePath, ["--help"], { timeoutMs: 8_000 });
-    } catch (error) {
-      throw new Error(`无法运行 sherpa-onnx：${error instanceof Error ? error.message : "请检查可执行文件路径与权限。"}`);
+      sherpaOnnx = require("sherpa-onnx-node");
+    } catch {
+      throw new Error("未安装 sherpa-onnx 离线组件，请重新安装应用。");
     }
-    return { ok: true, message: "sherpa-onnx 可执行文件可运行，模型路径已配置。" };
+    if (!sherpaOnnx.OfflineSpeakerDiarization || !sherpaOnnx.readWave) {
+      throw new Error("sherpa-onnx 组件不完整，请重新安装应用。");
+    }
+    for (const [label, filePath] of [
+      ["segmentation 模型", profile.options.segmentationModelPath],
+      ["embedding 模型", profile.options.embeddingModelPath]
+    ]) {
+      try {
+        await access(filePath);
+      } catch {
+        throw new Error(`找不到${label}文件：${filePath}`);
+      }
+    }
+    return { ok: true, message: "说话人分离组件与模型文件已就绪。" };
+  }
+  if (profile.transport === "openai-audio") {
+    await transcribeRemote(profile, apiKey, createTranscriptionTestWave(), "minuteflow-connection-test.wav", "");
+    return { ok: true, message: "测试音频转录成功，接口可用。" };
   }
   if (profile.kind === "llm") {
     if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
@@ -787,6 +840,29 @@ export async function testModelProfile(profile, apiKey) {
   return { ok: true, message: "连接成功。" };
 }
 
+/** 生成 1 秒 16kHz/16-bit/单声道 WAV 测试音，避免测试连接依赖用户文件或录音权限。 */
+function createTranscriptionTestWave() {
+  const sampleRate = 16_000;
+  const sampleCount = sampleRate;
+  const output = Buffer.alloc(44 + sampleCount * 2);
+  output.write("RIFF", 0);
+  output.writeUInt32LE(output.length - 8, 4);
+  output.write("WAVEfmt ", 8);
+  output.writeUInt32LE(16, 16);
+  output.writeUInt16LE(1, 20);
+  output.writeUInt16LE(1, 22);
+  output.writeUInt32LE(sampleRate, 24);
+  output.writeUInt32LE(sampleRate * 2, 28);
+  output.writeUInt16LE(2, 32);
+  output.writeUInt16LE(16, 34);
+  output.write("data", 36);
+  output.writeUInt32LE(sampleCount * 2, 40);
+  for (let index = 0; index < sampleCount; index += 1) {
+    output.writeInt16LE(Math.round(Math.sin(2 * Math.PI * 440 * index / sampleRate) * 1_200), 44 + index * 2);
+  }
+  return output;
+}
+
 /**
  * 从各种常见响应形状中提取模型回复文本（兼容性兜底）：
  * choices[].message.content / output_text / output[].content / content[] / candidates[]，
@@ -819,16 +895,31 @@ function extractMessageContent(payload, depth = 0) {
   return "";
 }
 
-/** 剥掉 Markdown 代码围栏并截取最外层 {...}，把模型回复规整成可 JSON.parse 的字符串。 */
-function extractJson(content) {
+/**
+ * 剥掉 Markdown 代码围栏并截取最外层 {...}，把模型回复规整成可 JSON.parse 的字符串。
+ * 兼容多种脏输出：围栏、前后解释文字、尾部多出来的 JSON 块——从首个 { 起按 } 自尾向前
+ * 逐个截取候选串，返回第一个能成功 parse 的。
+ */
+export function extractJson(content) {
   const trimmed = String(content).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  return start >= 0 && end > start ? trimmed.slice(start, end + 1) : trimmed;
+  const lastEnd = trimmed.lastIndexOf("}");
+  if (start < 0 || lastEnd <= start) return trimmed;
+  let end = lastEnd;
+  while (end > start) {
+    const candidate = trimmed.slice(start, end + 1);
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      end = trimmed.lastIndexOf("}", end - 1);
+    }
+  }
+  return trimmed.slice(start, lastEnd + 1);
 }
 
-/** 毫秒数格式化为 mm:ss（纪要提示词中的时间戳用）。 */
+/** 毫秒数格式化为 mm:ss（纪要提示词中的时间戳用）；非法/缺失时间戳按 00:00 处理。 */
 function formatTime(ms) {
-  const total = Math.floor(ms / 1000);
+  const total = Math.floor((Number.isFinite(ms) ? Number(ms) : 0) / 1000);
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }

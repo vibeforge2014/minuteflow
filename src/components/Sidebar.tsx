@@ -5,12 +5,12 @@
  */
 import { useMemo } from "react";
 import {
-  CalendarBlank,
   FileArrowUp,
   GearSix,
   MagnifyingGlass,
   Plus,
-  Trash
+  Trash,
+  X
 } from "@phosphor-icons/react";
 import type { Meeting } from "../types";
 import { useMeetingStore } from "../store/meetingStore";
@@ -25,16 +25,16 @@ interface SidebarProps {
   onImport(): void;
   /** 进行中的导入任务数（导入按钮角标）。 */
   importCount?: number;
-  onTemplates(): void;
   onTrash(): void;
   onSettings(): void;
 }
 
-export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, importCount = 0, onTemplates, onTrash, onSettings }: SidebarProps) {
+export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, importCount = 0, onTrash, onSettings }: SidebarProps) {
   const search = useMeetingStore((state) => state.search);
   const setSearch = useMeetingStore((state) => state.setSearch);
   // 按开会时间距今天数分组（今天/本周/更早），meetings 变化时才重算。
   const groups = useMemo(() => groupMeetings(meetings), [meetings]);
+  const searching = search.trim().length > 0;
 
   return (
     <aside className="sidebar">
@@ -51,11 +51,23 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, impor
       <label className="search-box">
         <MagnifyingGlass size={17} />
         <input
+          id="meeting-search"
           value={search}
           placeholder="搜索会议或内容"
           onChange={(event) => setSearch(event.target.value)}
         />
-        <kbd>⌘ K</kbd>
+        {searching ? (
+          <button
+            type="button"
+            className="search-clear"
+            aria-label="清除搜索"
+            onClick={() => void setSearch("")}
+          >
+            <X size={13} weight="bold" />
+          </button>
+        ) : (
+          <kbd>⌘ K</kbd>
+        )}
       </label>
 
       <div className="meeting-groups">
@@ -84,11 +96,16 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, impor
             ))}
           </section>
         ))}
+        {searching && !groups.length && (
+          <div className="sidebar-empty">
+            <p>没有找到与「{search.trim()}」匹配的会议</p>
+            <button onClick={() => void setSearch("")}>清除搜索，查看全部会议</button>
+          </div>
+        )}
       </div>
 
       <nav className="sidebar-actions" aria-label="辅助功能">
         <button onClick={onImport}><FileArrowUp size={18} />导入录音{importCount > 0 && <span className="sidebar-task-count">{importCount}</span>}</button>
-        <button onClick={onTemplates}><CalendarBlank size={18} />会议模板</button>
         <button onClick={onTrash}><Trash size={18} />最近删除</button>
         <button onClick={onSettings}><GearSix size={18} />设置</button>
       </nav>

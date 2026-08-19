@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
+import { managedFfmpegPath } from "./local-models.mjs";
 
 // ESM 环境下加载 CJS 原生模块（sherpa-onnx-node）需要 createRequire。
 const require = createRequire(import.meta.url);
@@ -34,13 +35,12 @@ function runProcess(command, args) {
  * 确保输入是 16k 单声道 WAV（分离模型的采样率要求）：
  * 已是 .wav 直接复用；否则用 FFmpeg 转出临时文件（temporary 标记临时文件需清理）。
  */
-async function ensureWave(filePath, ffmpegPath) {
+async function ensureWave(filePath) {
   if (path.extname(filePath).toLowerCase() === ".wav") {
     return { filePath, temporary: false };
   }
-  if (!ffmpegPath) {
-    throw new Error("说话人分离非 WAV 文件时需要配置 FFmpeg 路径。");
-  }
+  const ffmpegPath = await managedFfmpegPath();
+  if (!ffmpegPath) throw new Error("应用内置音频组件无法加载，请重新安装 MinuteFlow。");
   const target = path.join(tmpdir(), `${randomUUID()}-diarization.wav`);
   await runProcess(ffmpegPath, [
     "-y", "-i", filePath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", target
@@ -69,7 +69,7 @@ export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
     throw new Error("未安装 sherpa-onnx-node 运行时，请重新安装应用或改用手动发言人标签。");
   }
 
-  const waveAsset = await ensureWave(audioFilePath, profile.options?.ffmpegPath);
+  const waveAsset = await ensureWave(audioFilePath);
   try {
     const diarizer = new sherpaOnnx.OfflineSpeakerDiarization({
       segmentation: { pyannote: { model: segmentationModel } },

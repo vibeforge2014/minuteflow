@@ -17,13 +17,19 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     stop: (payload) => invoke("recordings:stop", payload),
     abort: (payload) => invoke("recordings:abort", payload),
     open: (meetingId) => invoke("recordings:open", meetingId),
-    assets: (meetingId) => invoke("recordings:assets", meetingId)
+    assets: (meetingId) => invoke("recordings:assets", meetingId),
+    onWriteError: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("recordings:write-error", listener);
+      return () => ipcRenderer.removeListener("recordings:write-error", listener);
+    }
   },
   transcription: {
     processChunk: (payload) => invoke("transcription:chunk", payload)
   },
   summary: {
-    generate: (payload) => invoke("summary:generate", payload)
+    generate: (payload) => invoke("summary:generate", payload),
+    cancel: (meetingId) => invoke("summary:cancel", meetingId)
   },
   models: {
     list: () => invoke("models:list"),
@@ -54,6 +60,11 @@ contextBridge.exposeInMainWorld("meetingAPI", {
       const listener = (_event, job) => callback(job);
       ipcRenderer.on("imports:job-updated", listener);
       return () => ipcRenderer.removeListener("imports:job-updated", listener);
+    },
+    onMeetingUpdated: (callback) => {
+      const listener = (_event, meeting) => callback(meeting);
+      ipcRenderer.on("imports:meeting-updated", listener);
+      return () => ipcRenderer.removeListener("imports:meeting-updated", listener);
     }
   },
   exports: {

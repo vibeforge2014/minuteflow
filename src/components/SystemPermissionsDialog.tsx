@@ -17,7 +17,19 @@ const initialStatus: SystemPermissionStatus = {
   systemAudioPickerHint: false
 };
 
-export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; onComplete(): Promise<void> }) {
+export function SystemPermissionsDialog({
+  open,
+  onComplete,
+  onSkip,
+  returningUser = false
+}: {
+  open: boolean;
+  onComplete(): Promise<void>;
+  /** 「暂不授权，先体验」：跳过首run权限墙；真正开始录音时会再次引导授权。 */
+  onSkip(): Promise<void>;
+  /** 升级后因权限流程版本提升而重弹的老用户：解释“为什么又弹一次”。 */
+  returningUser?: boolean;
+}) {
   const [status, setStatus] = useState(initialStatus);
   const [checking, setChecking] = useState(false);
   // 非 macOS 无需一次性屏幕采集探测，直接视为就绪。
@@ -51,7 +63,12 @@ export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; o
     try {
       let microphone = status.microphone;
       if (microphone !== "granted") microphone = await api.system.requestMicrophone();
-      if (microphone !== "granted") throw new Error("麦克风权限未允许，请在系统设置中允许后重新检查。");
+      if (microphone !== "granted") {
+        // systemPreferences 在部分系统版本上刷新较慢；以真实采集成功作为最终依据。
+        const microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        for (const track of microphoneStream.getTracks()) track.stop();
+        microphone = "granted";
+      }
 
       if (status.systemAudioRequired) {
         const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -66,7 +83,8 @@ export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; o
         if (!audioReady) throw new Error("系统音频授权未完成，请检查系统设置后重试。");
         setCapturePrepared(true);
       }
-      setStatus(await api.system.getPermissions());
+      const refreshed = await api.system.getPermissions();
+      setStatus({ ...refreshed, microphone });
     } catch (authorizeError) {
       setError(authorizeError instanceof Error ? authorizeError.message : "权限授权未完成，请重试。");
       setStatus(await api.system.getPermissions().catch(() => status));
@@ -79,7 +97,11 @@ export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; o
     <section className="dialog permission-wall" role="dialog" aria-modal="true" aria-labelledby="permission-wall-title">
       <header className="permission-wall__header">
         <div className="permission-wall__symbol"><ShieldCheck size={27} weight="duotone" /></div>
-        <div><span>开始之前</span><h2 id="permission-wall-title">由你决定 MinuteFlow 可以访问什么</h2><p>权限只用于你主动开始的会议，本地内容不会因此上传。</p></div>
+        <div>
+          <span>开始之前</span>
+          <h2 id="permission-wall-title">{returningUser ? "本次更新需要再确认一次权限" : "由你决定 MinuteFlow 可以访问什么"}</h2>
+          <p>{returningUser ? "新版本调整了系统音频的采集方式，需要补充确认；已有权限不会被重置。" : "权限只用于你主动开始的会议，本地内容不会因此上传。"}</p>
+        </div>
       </header>
       <div className="permission-wall__list">
         <PermissionRow
@@ -87,8 +109,23 @@ export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; o
           title="麦克风"
           description="录制你的声音，并用于本地或你选择的转写服务。"
           value={status.microphone}
-          primaryLabel="打开设置"
-          onPrimary={() => api.system.openSettings("microphone")}
+          primaryLabel={status.microphone === "denied" || status.microphone === "restricted" ? "打开设置" : "请求权限"}
+          onPrimary={async () => {
+            if (status.microphone === "denied" || status.microphone === "restricted") {
+              await api.system.openSettings("microphone");
+              return;
+            }
+            setChecking(true);
+            setError(null);
+            try {
+              await api.system.requestMicrophone();
+              await refresh();
+            } catch (requestError) {
+              setError(requestError instanceof Error ? requestError.message : "无法请求麦克风权限。");
+            } finally {
+              setChecking(false);
+            }
+          }}
         />
         <PermissionRow
           icon={<Monitor size={21} />}
@@ -108,7 +145,10 @@ export function SystemPermissionsDialog({ open, onComplete }: { open: boolean; o
         <div>
           <span>{allReady ? "权限已就绪，之后不会再主动弹出授权" : "需要一次完成麦克风与系统音频授权"}</span>
           {!allReady ? (
-            <button className="button button--primary" onClick={authorizeOnce} disabled={checking}>{checking ? "正在授权…" : "一次完成授权"}</button>
+            <>
+              <button className="permission-wall__skip" onClick={onSkip} disabled={checking}>暂不授权，先体验</button>
+              <button className="button button--primary" onClick={authorizeOnce} disabled={checking}>{checking ? "正在授权…" : "一次完成授权"}</button>
+            </>
           ) : (
             <button className="button button--primary" onClick={onComplete}>开始使用</button>
           )}

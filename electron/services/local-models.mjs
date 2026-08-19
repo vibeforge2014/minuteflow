@@ -22,33 +22,107 @@ const supportedExtensions = new Map([
   [".gguf", { format: "GGUF", engine: "whisper-cpp" }]
 ]);
 
-/** 应用内可下载的模型目录（HuggingFace 官方源 + sha1 摘要，用于完整性校验）。 */
+/**
+ * 应用内可下载的模型目录（HuggingFace ggerganov/whisper.cpp 官方源）。
+ * 完整性校验用 sha256，摘要逐一取自 HuggingFace LFS 元数据（与仓库内文件一一对应），
+ * 防止下载损坏或被篡改的模型进入托管目录。
+ */
 const catalog = [
+  {
+    id: "ggml-tiny",
+    name: "Whisper Tiny（GGML）",
+    description: "最快、占用最低，适合快速草稿和低配置设备。",
+    engine: "whisper-cpp",
+    format: "GGML",
+    sizeBytes: 77_691_713,
+    fileName: "ggml-tiny.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin?download=true",
+    digestAlgorithm: "sha256",
+    digest: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+    source: "ggerganov/whisper.cpp",
+    license: "MIT"
+  },
   {
     id: "ggml-base",
     name: "Whisper Base（GGML）",
-    description: "速度优先，适合普通办公电脑。",
+    description: "轻量日常转写，速度和准确率优于 Tiny。",
     engine: "whisper-cpp",
     format: "GGML",
-    sizeBytes: 148_000_000,
+    sizeBytes: 147_951_465,
     fileName: "ggml-base.bin",
     url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true",
-    digestAlgorithm: "sha1",
-    digest: "465707469ff3a37a2b9b8d8f89f2f99de7299dac",
+    digestAlgorithm: "sha256",
+    digest: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
     source: "ggerganov/whisper.cpp",
     license: "MIT"
   },
   {
     id: "ggml-small",
     name: "Whisper Small（GGML）",
-    description: "中英混合准确率更好，推荐 16GB 内存设备。",
+    description: "中英混合表现均衡，推荐大多数会议使用。",
     engine: "whisper-cpp",
     format: "GGML",
-    sizeBytes: 488_000_000,
+    sizeBytes: 487_601_967,
     fileName: "ggml-small.bin",
     url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin?download=true",
-    digestAlgorithm: "sha1",
-    digest: "55356645c2b361a969dfd0ef2c5a50d530afd8d5",
+    digestAlgorithm: "sha256",
+    digest: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+    source: "ggerganov/whisper.cpp",
+    license: "MIT"
+  },
+  {
+    id: "ggml-medium",
+    name: "Whisper Medium（GGML）",
+    description: "更重视中文和复杂音频准确率，推荐 16GB 内存。",
+    engine: "whisper-cpp",
+    format: "GGML",
+    sizeBytes: 1_533_763_059,
+    fileName: "ggml-medium.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin?download=true",
+    digestAlgorithm: "sha256",
+    digest: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
+    source: "ggerganov/whisper.cpp",
+    license: "MIT"
+  },
+  {
+    id: "ggml-large-v3-turbo-q5_0",
+    name: "Whisper Large v3 Turbo Q5（GGML）",
+    description: "Turbo 的 5-bit 量化版，约 0.55GB，中低配设备的准确率优选。",
+    engine: "whisper-cpp",
+    format: "GGML",
+    sizeBytes: 574_041_195,
+    fileName: "ggml-large-v3-turbo-q5_0.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin?download=true",
+    digestAlgorithm: "sha256",
+    digest: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+    source: "ggerganov/whisper.cpp",
+    license: "MIT"
+  },
+  {
+    id: "ggml-large-v3-turbo",
+    name: "Whisper Large v3 Turbo（GGML）",
+    description: "高准确率与速度兼顾，适合性能较好的新款电脑。",
+    engine: "whisper-cpp",
+    format: "GGML",
+    sizeBytes: 1_624_555_275,
+    fileName: "ggml-large-v3-turbo.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin?download=true",
+    digestAlgorithm: "sha256",
+    digest: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+    source: "ggerganov/whisper.cpp",
+    license: "MIT"
+  },
+  {
+    id: "ggml-large-v3",
+    name: "Whisper Large v3（GGML）",
+    description: "最高准确率，下载和运行占用较高，推荐 24GB 以上内存。",
+    engine: "whisper-cpp",
+    format: "GGML",
+    sizeBytes: 3_095_033_483,
+    fileName: "ggml-large-v3.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin?download=true",
+    digestAlgorithm: "sha256",
+    digest: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
     source: "ggerganov/whisper.cpp",
     license: "MIT"
   }
@@ -61,8 +135,8 @@ function unpackedExecutablePath(filePath) {
 }
 
 /**
- * 应用内置 FFmpeg 的可用路径（unpacked 后），不可用时返回 undefined，
- * 调用方再退回系统 PATH 中的 ffmpeg。
+ * 应用内置 FFmpeg 的可用路径（unpacked 后）。不从系统 PATH 发现 FFmpeg：
+ * 音频工具是 MinuteFlow 的托管运行时，安装包缺失时应明确报错，不把配置责任转给用户。
  */
 export async function managedFfmpegPath() {
   const candidate = unpackedExecutablePath(ffmpegInstaller.path);
@@ -96,18 +170,17 @@ async function discoverLocalEnvironment() {
     managedFfmpegPath(),
     findExecutable(["whisper-cli", "whisper-cpp"])
   ]);
-  const systemFfmpeg = bundledFfmpeg ? undefined : await findExecutable(["ffmpeg"]);
   return {
     paths: {
       whisperCpp,
       python,
-      ffmpeg: bundledFfmpeg || systemFfmpeg
+      ffmpeg: bundledFfmpeg
     },
     runtimes: {
       managedWhisper,
       whisperCpp: Boolean(whisperCpp),
       python: Boolean(python),
-      ffmpeg: Boolean(bundledFfmpeg || systemFfmpeg),
+      ffmpeg: Boolean(bundledFfmpeg),
       fasterWhisper: await probePythonPackage(python, "faster_whisper"),
       mlxWhisper: process.platform === "darwin" ? await probePythonPackage(python, "mlx_whisper") : false
     }
@@ -313,7 +386,7 @@ export async function discoverLocalModels({ roots, modelDirectory }) {
 /**
  * 把用户保存的模型档案解析为可直接执行的形态（main.mjs 与导入队列转录前调用）。
  * 缺什么自动补什么：模型路径按引擎匹配首个扫描结果；whisper.cpp 优先托管运行时、
- * 托管不可用时才用 PATH 里的 whisper-cli；Python 系补解释器路径；FFmpeg 统一注入。
+ * 托管不可用时才用 PATH 里的 whisper-cli；Python 系补解释器路径；FFmpeg 始终注入应用内置路径。
  * @returns {Promise<{profile, discovery, readiness}>} readiness.status 为
  *   ready / invalid_model / missing_components，供 UI 给出针对性提示。
  */
@@ -332,7 +405,7 @@ export async function resolveLocalModelProfile(profile, { roots, modelDirectory 
       ? { executablePath: environment.paths.whisperCpp } : {}),
     ...(isPythonBased && !profile.options?.pythonExecutablePath && environment.paths.python
       ? { pythonExecutablePath: environment.paths.python } : {}),
-    ...(!profile.options?.ffmpegPath && environment.paths.ffmpeg ? { ffmpegPath: environment.paths.ffmpeg } : {})
+    ...(environment.paths.ffmpeg ? { ffmpegPath: environment.paths.ffmpeg } : {})
   };
   const resolvedProfile = { ...profile, options };
   const modelStat = options.modelPath ? await stat(options.modelPath).catch(() => null) : null;
@@ -358,7 +431,7 @@ export async function resolveLocalModelProfile(profile, { roots, modelDirectory 
 
 /** 列出可下载模型目录并标注每项是否已安装在本机（models:catalog 通道调用）。 */
 export async function listDownloadableModels(modelDirectory) {
-  return Promise.all(catalog.map(async ({ url: _url, digest: _digest, digestAlgorithm: _algorithm, ...item }) => {
+  return Promise.all(catalog.map(async ({ url: _url, digest: _digest, ...item }) => {
     const localPath = path.join(modelDirectory, item.fileName);
     const fileStat = await stat(localPath).catch(() => null);
     return {
@@ -392,7 +465,7 @@ export async function downloadModel(modelId, modelDirectory, onProgress = () => 
 
 /**
  * 实际下载流程：先确保托管运行时可用 → 流式写入 .download 临时文件并逐块更新摘要 →
- * 校验 sha1 摘要（不符即删除重来，防止半截文件被当成可用模型）→ 原子 rename 为正式文件名。
+ * 校验 sha256 摘要（不符即删除重来，防止半截文件被当成可用模型）→ 原子 rename 为正式文件名。
  */
 async function doDownloadModel(modelId, modelDirectory, onProgress = () => {}) {
   const item = catalog.find((candidate) => candidate.id === modelId);

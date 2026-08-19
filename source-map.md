@@ -54,12 +54,12 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 
 | 文件 | 职责 | 关键符号 |
 |---|---|---|
-| `main.mjs` | 主进程入口：窗口创建、特权媒体协议、session 权限收紧、全部 IPC 通道注册与付费墙前置 | `trustedHandle`、`createMainWindow`、`recordings:* / transcription:chunk / summary:generate / models:* / imports:* / licensing:* / updates:* / window:toggle-mini` |
-| `database.mjs` | node:sqlite 本地数据层：会议/转录段/模型档案/音频资产/任务表 + FTS5 全文索引 | `openDatabase`、`saveMeeting`、`listMeetings`、`saveJob`、`markInterruptedRecordings` |
-| `services/providers.mjs` | 转录与纪要的模型调用层：OpenAI 兼容远程（New API/Anthropic/Gemini 方言）+ 四种本地 Whisper 运行时 | `summarizeWithOpenAICompatible`、`transcribeRemote`、`transcribeWithWhisperCpp`、`resolveProviderEndpoint`、`testModelProfile` |
+| `main.mjs` | 主进程入口：窗口创建、特权媒体协议、session 权限收紧、全部 IPC 通道注册与付费墙前置 | `trustedHandle`、`recordings:* / transcription:chunk / summary:generate / summary:cancel / models:* / imports:* / licensing:* / updates:* / window:toggle-mini`；录音首块写盘失败经 `recordings:write-error` 即时推送；总结失败回退本地引擎并带 degraded 标记；`recordings:start` 清理同会议遗留会话 |
+| `database.mjs` | node:sqlite 本地数据层：会议/转录段/模型档案/音频资产/任务表 + FTS5 全文索引；转录段按 id 差量增删改（长会议滚动保存不再全表重写） | `openDatabase`、`saveMeeting`、`listMeetings`、`saveJob`、`markInterruptedRecordings` |
+| `services/providers.mjs` | 转录与纪要的模型调用层：OpenAI 兼容远程（含 New API 网关预设）、Anthropic/Gemini 原生协议、真实 WAV 转录连接测试 + 四种本地 Whisper 运行时 + 本地规则纪要（120 段窗口）+ robust JSON 提取 | `summarizeWithOpenAICompatible`、`summarizeLocally`、`extractJson`、`transcribeRemote`、`transcribeWithWhisperCpp`、`resolveProviderEndpoint`、`testModelProfile` |
 | `services/secrets.mjs` | 密钥保险库：safeStorage 加密、明文降级、串行原子写盘、内存缓存 | `storeSecret`、`readSecret`、`flushSecrets` |
 | `services/licensing.mjs` | ¥99 一次性授权：HTTPS 验证、机器指纹绑定、72h 缓存、30 天离线宽限、时钟回拨检测 | `requireLicense`、`activateLicense`、`getLicenseStatus`、`openCheckout` |
-| `services/local-models.mjs` | 本地 Whisper 零路径配置：模型发现/带校验下载/托管运行时解析 | `discoverLocalModels`、`downloadModel`、`ensureManagedLocalRuntime`、`looksLikeWhisperModel` |
+| `services/local-models.mjs` | 本地 Whisper 零路径配置：模型发现/sha256 校验下载（tiny→large-v3 共 7 个 GGML 模型）/托管运行时解析 | `discoverLocalModels`、`downloadModel`、`ensureManagedLocalRuntime`、`looksLikeWhisperModel` |
 | `services/import-queue.mjs` | 持久化单 worker 导入队列：归档→预处理→转写→分离→总结，缺组件可恢复暂停 | `enqueueImports`、`runQueue`、`processJob`、`cancelImport` |
 | `services/diarization.mjs` | sherpa-onnx 离线说话人分离与轮次标签回填 | `diarizeWithSherpa`、`applyDiarization` |
 | `services/exports.mjs` | 八种格式导出（md/txt/pdf/docx/srt/vtt/json/zip）与导入文件选择 | `exportMeeting`、`chooseImportFiles` |
@@ -75,7 +75,7 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 | `main.tsx` | 渲染入口：按环境分流桌面工作台（lazy chunk）或官网；`?preview=desktop` 本地预览 | `Root` |
 | `App.tsx` | 工作台根组件：三栏布局 + 底部录音条 + 全部弹窗调度 + 导入队列订阅 + 首run两道门 + 滚动纪要节拍 | `App` |
 | `types.ts` | 全部领域类型与 `MeetingAPI` IPC 契约（含每个通道的语义注释） | `Meeting`、`TranscriptSegment`、`MeetingSummary`、`ModelProfile`、`MeetingAPI` |
-| `store/meetingStore.ts` | Zustand 全局状态：会议 CRUD（乐观更新）、偏好、档案、搜索 | `useMeetingStore`、`updateMeeting`、`appendTranscript` |
+| `store/meetingStore.ts` | Zustand 全局状态：会议 CRUD（乐观更新）、偏好、档案、搜索；定稿转写节流落盘（10s flush）、provisional 段仅内存并随保存过滤 | `useMeetingStore`、`updateMeeting`、`appendTranscript`、`appendProvisionalTranscript`、`flushMeeting` |
 | `lib/api.ts` | 环境桥：Electron 用 preload 注入的 IPC 桥；浏览器用 localStorage 兜底实现 | `api`、`isElectronRuntime`、`browserApi` |
 | `lib/transcript.ts` | 转写段合并（provisional→final 覆盖）与说话人标签合并 | `mergeTranscriptSegments`、`mergeSpeakerLabels` |
 | `lib/summary.ts` | 纪要手动锁与 AI 修订版合并（保护用户编辑不被覆盖） | `lockSummaryField`、`mergeSummaryRevision` |
@@ -86,16 +86,16 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 
 | 文件 | 职责 |
 |---|---|
-| `hooks/useMeetingRecorder.ts` | 录音状态机（idle→starting→recording⇄paused→stopping）+ 电平/转写回调 + 滚动纪要定时器 |
+| `hooks/useMeetingRecorder.ts` | 录音状态机（idle→starting→recording⇄paused→stopping）+ 电平/转写回调 + 滚动纪要定时器（暂停即停、ref 取最新回调）+ final 自动推导 + 总结取消/降级提示 + 刷新后假录音态修复 |
 | `services/recording.ts` | `MeetingRecorder` 引擎：双轨采集、15s 归档块、独立 8s 转写块、停止时等全部落盘再收尾 |
-| `components/RecorderBar.tsx` | 底部悬浮录音条：状态灯/计时/双轨电平/队列徽标/操作按钮/迷你窗切换 |
+| `components/RecorderBar.tsx` | 底部悬浮录音条：状态灯/计时/双轨真实电平（持续静音告警）/队列徽标/停止二次确认/迷你窗切换 |
 | `components/MeetingPlayer.tsx` | 文档上方回放条：时间轴、±15s、与转写时间戳双向联动（歌词式高亮） |
 
 ### 工作区组件（`src/components/`）
 
 | 文件 | 位置/职责 |
 |---|---|
-| `Sidebar.tsx` | 左栏会议库：搜索、今天/本周/更早分组、导入/模板/最近删除/设置入口 |
+| `Sidebar.tsx` | 左栏会议库：搜索（⌘K 聚焦、一键清除、无结果提示）、今天/本周/更早分组、导入/最近删除/设置入口 |
 | `DocumentWorkspace.tsx` | 中栏会议文档：Tiptap 富文本（Markdown 真源、.md 导入、DOMPurify）、实时纪要、行动项表格、决策四宫格 |
 | `TranscriptPanel.tsx` | 右栏：转录（发言人改名/合并、窗口化加载、播放同步高亮）与 AI 总结两标签 |
 | `SettingsDialog.tsx` | 设置工作台：AI 总结/转录（服务目录 + 档案编辑 + `LocalModelManager` 零路径本地 Whisper）、通用、存储隐私、软件更新 |
@@ -106,7 +106,7 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 | `OnboardingDialog.tsx` | 首run第二道门：本地优先/权限/模型配置三条承诺 |
 | `DeletedMeetingsDialog.tsx` | 最近删除（软删除恢复） |
 | `ExportMenu.tsx` | 八种导出格式菜单 |
-| `Toast.tsx` / `EmptyState.tsx` / `BrandMark.tsx` | 轻量反馈/空状态/品牌标（多环境图片地址解析） |
+| `Toast.tsx` / `EmptyState.tsx` / `BrandMark.tsx` | 轻量反馈（成功/警告双通道叠放）/空状态（首run 引导与搜索无结果两变体）/品牌标（多环境图片地址解析） |
 | `MarketingSite.tsx` | 官网整站：首页（Hero/演示/隐私/平台）、规格页（七节锚点）、定价/条款/隐私/退款四政策页 |
 
 ## 4. iOS 端（`ios/MeetingAssistant/MeetingAssistant/`）
@@ -182,7 +182,7 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 |---|---|
 | `npm run dev:electron` | 同时起 Vite dev server + Electron 开发模式 |
 | `npm run dev` | 仅 Vite（浏览器预览官网；`?preview=desktop` 预览桌面 UI） |
-| `npm test` | vitest 核心单测（19 例） |
+| `npm test` | vitest 核心单测（32 例，含 DB 差量持久化） |
 | `npm run test:sites` | Sites Worker 测试（4 例） |
 | `npm run typecheck` | tsc --noEmit |
 | `npm run build` | Vite 构建 + Sites 交付物组装（须产出 dist/client/index.html、dist/server/index.js、dist/.openai/hosting.json） |

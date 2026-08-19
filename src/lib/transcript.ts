@@ -5,6 +5,50 @@
  * 主要导出：mergeTranscriptSegments、mergeSpeakerLabels。
  */
 import type { TranscriptSegment } from "../types";
+import { simplifyTranscriptSegment } from "./chinese";
+
+const normalizedText = (value: string) => value.toLocaleLowerCase().replace(/[\s，。！？、,.!?;；:：'"“”‘’]/g, "");
+
+/**
+ * 把相邻短片段整理成自然发言段落。段落以第一片的 id 为稳定 id；临时片段不参与合并，
+ * 因而最终结果仍能原位替换“转写中”占位。问句/感叹句、换人、长停顿或达到长度上限即断开。
+ */
+export function groupTranscriptSegments(segments: TranscriptSegment[]): TranscriptSegment[] {
+  return [...segments].sort((left, right) => left.startMs - right.startMs).reduce<TranscriptSegment[]>((grouped, raw) => {
+    const current = simplifyTranscriptSegment(raw);
+    const previous = grouped.at(-1);
+    if (!previous || previous.status !== "final" || current.status !== "final") {
+      grouped.push(current);
+      return grouped;
+    }
+    const gapMs = current.startMs - previous.endMs;
+    const combinedText = `${previous.text}${/[a-z\d]$/i.test(previous.text) && /^[a-z\d]/i.test(current.text) ? " " : ""}${current.text}`;
+    const sentenceCount = combinedText.match(/[。！？!?]/g)?.length ?? 0;
+    const canMerge = previous.speakerId === current.speakerId
+      && previous.track === current.track
+      && gapMs >= -500 && gapMs <= 1_500
+      && current.endMs - previous.startMs <= 18_000
+      && combinedText.length <= 80
+      && sentenceCount <= 4
+      && !/[！？!?]\s*$/.test(previous.text)
+      && !(/[。]\s*$/.test(previous.text) && (previous.text.match(/[。]/g)?.length ?? 0) >= 2);
+    if (!canMerge) {
+      grouped.push(current);
+      return grouped;
+    }
+    const previousKey = normalizedText(previous.text);
+    const currentKey = normalizedText(current.text);
+    grouped[grouped.length - 1] = {
+      ...previous,
+      endMs: Math.max(previous.endMs, current.endMs),
+      text: previousKey.includes(currentKey) ? previous.text : combinedText,
+      confidence: previous.confidence === undefined ? current.confidence
+        : current.confidence === undefined ? previous.confidence
+          : Math.min(previous.confidence, current.confidence)
+    };
+    return grouped;
+  }, []);
+}
 
 /** 计算两段落的时间重叠率（重叠时长 / 较短段落时长），用于判断“同一段话”。 */
 const overlapRatio = (left: TranscriptSegment, right: TranscriptSegment) => {
@@ -38,7 +82,7 @@ export function mergeTranscriptSegments(
     next[duplicateIndex] = incoming.status === "final" || current[duplicateIndex].status !== "final"
       ? incoming
       : current[duplicateIndex];
-    return next.sort((left, right) => left.startMs - right.startMs);
+    return groupTranscriptSegments(next);
   }
 
   // 定稿结果到达时清掉它对应的临时段落（重叠率阈值放宽到 0.55，容忍时间边界抖动）。
@@ -50,8 +94,7 @@ export function mergeTranscriptSegments(
         overlapRatio(segment, incoming) >= 0.55
       ))
     : current;
-  return [...withoutSupersededProvisional, incoming]
-    .sort((left, right) => left.startMs - right.startMs);
+  return groupTranscriptSegments([...withoutSupersededProvisional, incoming]);
 }
 
 /** 说话人合并：把 sourceId 的全部段落改指到 targetId/targetName（用户在转录面板上手动归并说话人时调用）。 */

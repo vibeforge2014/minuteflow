@@ -9,15 +9,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowsMerge,
   CheckCircle,
+  Lock,
+  LockOpen,
   MagicWand,
   PencilSimple,
   X
 } from "@phosphor-icons/react";
-import type { Meeting } from "../types";
+import type { ImportJob, Meeting } from "../types";
 import { mergeSpeakerLabels } from "../lib/transcript";
+import { toggleSummaryLock } from "../lib/summary";
 
 interface TranscriptPanelProps {
   meeting: Meeting;
+  importJob?: ImportJob;
+  tab: "transcript" | "summary";
+  onTabChange(tab: "transcript" | "summary"): void;
   onChange(meeting: Meeting): void;
   onClose(): void;
   /** 当前播放位置（毫秒），用于高亮同步段落。 */
@@ -26,8 +32,7 @@ interface TranscriptPanelProps {
   onSeek?(ms: number): void;
 }
 
-export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, onSeek }: TranscriptPanelProps) {
-  const [tab, setTab] = useState<"transcript" | "summary">("transcript");
+export function TranscriptPanel({ meeting, importJob, tab, onTabChange, onChange, onClose, playbackMs = 0, onSeek }: TranscriptPanelProps) {
   /** 正在重命名的说话人 id（显示浮层输入框）。 */
   const [speakerEditor, setSpeakerEditor] = useState<string | null>(null);
   const [managerOpen, setManagerOpen] = useState(false);
@@ -87,8 +92,8 @@ export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, on
     <aside className="transcript-panel">
       <header className="transcript-panel__header">
         <div className="panel-tabs">
-          <button className={tab === "transcript" ? "is-active" : ""} onClick={() => setTab("transcript")}>转录</button>
-          <button className={tab === "summary" ? "is-active" : ""} onClick={() => setTab("summary")}>
+          <button className={tab === "transcript" ? "is-active" : ""} onClick={() => onTabChange("transcript")}>转录</button>
+          <button className={tab === "summary" ? "is-active" : ""} onClick={() => onTabChange("summary")}>
             AI 总结 <small>Beta</small>
           </button>
         </div>
@@ -103,6 +108,12 @@ export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, on
                 <span className={`speaker-dot speaker-dot--${speakerColor(id)}`} />{name}
               </button>
             ))}
+            {speakers.length > 3 && (
+              // 超出前 3 个的说话人以 +N 收纳：点开管理面板即可查看/改名全部。
+              <button className="speaker-more" onClick={() => setManagerOpen(true)}>
+                +{speakers.length - 3}
+              </button>
+            )}
             <button className="speaker-merge" onClick={() => setManagerOpen((value) => !value)}>
               <ArrowsMerge size={14} />管理
             </button>
@@ -125,6 +136,14 @@ export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, on
                     <input
                       aria-label={`重命名 ${name}`}
                       defaultValue={name}
+                      // 与气泡改名保持一致：Enter 立即应用（另保留失焦提交通道）。
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter") return;
+                        event.preventDefault();
+                        const next = event.currentTarget.value.trim();
+                        if (next && next !== name) renameSpeaker(id, next);
+                        event.currentTarget.blur();
+                      }}
                       onBlur={(event) => {
                         const next = event.currentTarget.value.trim();
                         if (next && next !== name) renameSpeaker(id, next);
@@ -157,7 +176,9 @@ export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, on
               )}
             </section>
           )}
-          <p className="transcript-hint">AI 实时转写中，临时内容仅供参考</p>
+          {meeting.transcript.length > 0 && (
+            <p className="transcript-hint">{importTranscriptStatus(importJob, meeting.transcript.length)}</p>
+          )}
           <div className="transcript-list" ref={listRef}>
             {meeting.transcript.length > visibleCount && (
               <button className="load-earlier" onClick={() => setVisibleCount((value) => value + 200)}>
@@ -189,7 +210,7 @@ export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, on
             )) : (
               <div className="panel-empty">
                 <MagicWand size={24} weight="duotone" />
-                <p>开始录音后，转录会出现在这里。</p>
+                <p>{importJob ? importTranscriptStatus(importJob, 0) : "开始录音后，转录会出现在这里。"}</p>
               </div>
             )}
           </div>
@@ -205,7 +226,22 @@ export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, on
       ) : (
         <div className="ai-panel">
           <section>
-            <h3>当前议题</h3>
+            <h3>
+              当前议题
+              <button
+                className={`icon-button summary-lock ${meeting.summary.manualLocks?.includes("topics") ? "is-locked" : ""}`}
+                aria-label={meeting.summary.manualLocks?.includes("topics") ? "解除主题锁定" : "锁定主题，AI 不整体改写"}
+                title={meeting.summary.manualLocks?.includes("topics") ? "已锁定：AI 重新生成时保留当前主题。点击解锁。" : "未锁定。点击锁定后 AI 不改写主题列表。"}
+                onClick={() => onChange({
+                  ...meeting,
+                  summary: toggleSummaryLock(meeting.summary, "topics")
+                })}
+              >
+                {meeting.summary.manualLocks?.includes("topics")
+                  ? <Lock size={13} weight="fill" />
+                  : <LockOpen size={13} />}
+              </button>
+            </h3>
             <ul>{meeting.summary.topics.map((item) => <li key={item}>{item}</li>)}</ul>
           </section>
           <section>
@@ -239,6 +275,26 @@ export function TranscriptPanel({ meeting, onChange, onClose, playbackMs = 0, on
       )}
     </aside>
   );
+}
+
+/** 导入任务阶段 → 右栏即时状态；已有文本时仍保留状态行，不替换转录内容。 */
+function importTranscriptStatus(job: ImportJob | undefined, segmentCount: number) {
+  if (!job) return segmentCount ? "转录内容已按时间轴排列" : "AI 实时转写中，临时内容仅供参考";
+  if (job.status === "queued" && job.stage === "copying") return "等待归档录音…";
+  if (job.status === "copying" || job.stage === "copying") return "正在归档录音…";
+  if (job.status === "preparing" || job.stage === "preparing") return "正在准备音频…";
+  if (job.status === "waiting_for_model") return "等待配置转录模型，录音已安全归档。";
+  if (job.status === "waiting_for_audio_tool") return "音频组件需要恢复后才能继续转录。";
+  if (job.status === "failed") return `转录暂停：${job.error || "处理失败"}`;
+  if (job.status === "cancelled") return "导入处理已取消，已有转录仍会保留。";
+  if (job.status === "transcribing" || job.stage === "transcribing") {
+    return job.totalChunks
+      ? `正在转录第 ${Math.min((job.completedChunks || 0) + 1, job.totalChunks)}/${job.totalChunks} 段，约每 10 秒音频持续追加。`
+      : "正在分析音频，首段文本很快会出现在这里。";
+  }
+  if (job.status === "diarizing") return "转录完成，正在识别不同发言人…";
+  if (job.status === "summarizing") return "转录完成，正在整理会议纪要…";
+  return segmentCount ? "转录已完成，点击时间戳可定位播放。" : "录音中没有识别到可显示的语音。";
 }
 
 /** 转写时间戳 → HH:MM:SS / MM:SS（相对录音起点，与播放器时间轴对齐）。 */

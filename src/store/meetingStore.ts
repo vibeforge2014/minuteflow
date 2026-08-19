@@ -9,7 +9,15 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
 import { mergeTranscriptSegments } from "../lib/transcript";
+import { mergeSummaryRevision } from "../lib/summary";
 import type { CreateMeetingInput, Meeting, MeetingPreferences, MeetingSummary, ModelProfile, TranscriptSegment } from "../types";
+
+/**
+ * 转录增量落盘的节流间隔：录音中每 8 秒产生一条新段落，逐条全量保存会造成
+ * “会议级 UPSERT × 段落全量重写”的写放大；这里改为内存即时入账、至多每 10 秒
+ * 冲刷一次（停止录音时立即冲刷兜底）。
+ */
+const TRANSCRIPT_FLUSH_INTERVAL_MS = 10_000;
 
 interface MeetingState {
   meetings: Meeting[];
@@ -32,11 +40,19 @@ interface MeetingState {
   /** 更新搜索词并重新查询（侧栏搜索框输入）。 */
   setSearch(value: string): Promise<void>;
   selectMeeting(id: string): void;
+  /** 合并后台导入快照，只更新队列拥有的字段，保留用户正在编辑的标题与笔记。 */
+  mergeImportedMeeting(meeting: Meeting): void;
   createMeeting(input: CreateMeetingInput): Promise<Meeting>;
   /** 乐观更新：updater 产出新会议后先改内存，persist=true 时再走 api 保存并回填。 */
   updateMeeting(id: string, updater: (meeting: Meeting) => Meeting, persist?: boolean): Promise<void>;
-  /** 并入一条转写段落（含去重合并），并把纪要标记为 stale。 */
+  /** 并入一条定稿转写段落（去重合并 + 纪要置 stale），落盘走节流冲刷。 */
   appendTranscript(id: string, segment: TranscriptSegment): Promise<void>;
+  /** 并入一条临时（provisional）转写段落：只更新内存展示，不置 stale、不落盘。 */
+  appendProvisionalTranscript(id: string, segment: TranscriptSegment): void;
+  /** 移除一条临时段落（转写失败/空结果时），只影响内存展示。 */
+  dropProvisionalTranscript(id: string, segmentId?: string): void;
+  /** 立即把某会议当前的内存状态（过滤临时段后）持久化；清除其节流定时器。 */
+  flushMeeting(id: string): Promise<void>;
   /** 整体替换会议纪要（AI 结果合并锁定字段后调用）。 */
   updateSummary(id: string, summary: MeetingSummary): Promise<void>;
   /** 软删除会议（移入“最近删除”），并修正选中项。 */
@@ -49,6 +65,28 @@ interface MeetingState {
   clearError(): void;
 }
 
+// 各会议待冲刷的节流定时器（meetingId → timer），模块级保证 store 重建也不悬挂。
+const flushTimers = new Map<string, number>();
+
+/**
+ * 保存会议并在回填时保留仅存在于内存的临时（provisional）段落：
+ * 临时段不落库（数据库里只应有定稿内容），但也不能因保存回填把“转写中”指示闪没。
+ */
+async function persistMeetingToBackend(updated: Meeting): Promise<Meeting> {
+  const hasProvisional = updated.transcript.some((segment) => segment.status === "provisional");
+  const persisted = hasProvisional
+    ? { ...updated, transcript: updated.transcript.filter((segment) => segment.status !== "provisional") }
+    : updated;
+  const saved = await api.meetings.save(persisted);
+  if (!hasProvisional) return saved;
+  // 冲刷时未被定稿覆盖的临时段仍在途（被覆盖的已在合并时移除），拼回展示态。
+  const provisional = updated.transcript.filter((segment) => segment.status === "provisional");
+  return {
+    ...saved,
+    transcript: [...saved.transcript, ...provisional].sort((left, right) => left.startMs - right.startMs)
+  };
+}
+
 export const useMeetingStore = create<MeetingState>((set, get) => ({
   // —— 初始 state：空会议列表 + 默认偏好，loading=true 让首帧先渲染全屏加载态 ——
   meetings: [],
@@ -56,7 +94,8 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
   search: "",
   profiles: [],
   preferences: {
-    summaryIntervalSeconds: 120,
+    summaryIntervalSeconds: 60,
+    summaryCadenceVersion: 1,
     defaultMode: "online",
     glossary: [],
     retentionDays: null,
@@ -114,6 +153,37 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     set({ selectedId: id });
   },
 
+  mergeImportedMeeting(incoming) {
+    set((state) => {
+      const current = state.meetings.find((meeting) => meeting.id === incoming.id);
+      if (!current) return { meetings: [incoming, ...state.meetings] };
+      const currentSegments = new Map(current.transcript.map((segment) => [segment.id, segment]));
+      const merged: Meeting = {
+        ...current,
+        transcript: incoming.transcript.map((segment) => {
+          const existing = currentSegments.get(segment.id);
+          // 后台可以更新时间戳/说话人；已经显示过的文本以本地编辑值为准。
+          if (!existing) return segment;
+          // 后台自然段落可能沿用第一片的稳定 id 并向后扩展。它包含当前文本时应接受
+          // 追加结果；只有区间未增长或后台不含本地文字时才视为用户编辑并保留本地值。
+          const backgroundExtended = segment.endMs > existing.endMs && segment.text.includes(existing.text);
+          return backgroundExtended ? segment : { ...segment, text: existing.text };
+        }),
+        durationSeconds: incoming.durationSeconds,
+        status: incoming.status,
+        summary: {
+          ...mergeSummaryRevision(current.summary, incoming.summary),
+          stale: incoming.summary.stale
+        },
+        participants: incoming.participants,
+        updatedAt: incoming.updatedAt
+      };
+      return {
+        meetings: state.meetings.map((meeting) => meeting.id === incoming.id ? merged : meeting)
+      };
+    });
+  },
+
   /** 创建会议：api 成功后把新会议插到列表头部并选中；失败抛错由调用方处理。 */
   async createMeeting(input) {
     set({ saving: true, error: null });
@@ -147,7 +217,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     if (!persist) return;
     set({ saving: true });
     try {
-      const saved = await api.meetings.save(updated);
+      const saved = await persistMeetingToBackend(updated);
       set((state) => ({
         meetings: state.meetings.map((meeting) => meeting.id === id ? saved : meeting),
         saving: false
@@ -157,13 +227,72 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     }
   },
 
-  /** 转写段落入账：经 mergeTranscriptSegments 去重合并，同时把纪要置为 stale（提示需重新总结）。 */
+  /**
+   * 定稿转写段落入账：经 mergeTranscriptSegments 去重合并（临时段被定稿结果取代），
+   * 同时把纪要置为 stale（提示需重新总结）；落盘走 10 秒节流冲刷（见 flushMeeting），
+   * 避免长会议每个 8 秒块都触发一次会议级全量保存。
+   */
   async appendTranscript(id, segment) {
     await get().updateMeeting(id, (meeting) => ({
       ...meeting,
       transcript: mergeTranscriptSegments(meeting.transcript, segment),
       summary: { ...meeting.summary, stale: true }
+    }), false);
+    const existing = flushTimers.get(id);
+    if (existing === undefined) {
+      flushTimers.set(id, window.setTimeout(() => {
+        flushTimers.delete(id);
+        void get().flushMeeting(id);
+      }, TRANSCRIPT_FLUSH_INTERVAL_MS));
+    }
+  },
+
+  /** 临时转写段落入账：只更新内存（“转写中…”指示），不落盘、不影响纪要 stale。 */
+  appendProvisionalTranscript(id, segment) {
+    const current = get().meetings.find((meeting) => meeting.id === id);
+    if (!current) return;
+    set((state) => ({
+      meetings: state.meetings.map((meeting) => meeting.id === id
+        ? { ...meeting, transcript: mergeTranscriptSegments(meeting.transcript, segment) }
+        : meeting)
     }));
+  },
+
+  /** 移除临时段落：segmentId 省略时清空该会议全部临时段（停止录音时收尾用）。 */
+  dropProvisionalTranscript(id, segmentId) {
+    const current = get().meetings.find((meeting) => meeting.id === id);
+    if (!current?.transcript.some((segment) => segment.status === "provisional")) return;
+    set((state) => ({
+      meetings: state.meetings.map((meeting) => meeting.id === id
+        ? {
+            ...meeting,
+            transcript: meeting.transcript.filter((segment) => segmentId === undefined
+              ? segment.status !== "provisional"
+              : segment.id !== segmentId)
+          }
+        : meeting)
+    }));
+  },
+
+  /** 立即冲刷某会议的节流落盘：清除定时器后把当前内存态（过滤临时段）持久化并回填。 */
+  async flushMeeting(id) {
+    const timer = flushTimers.get(id);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      flushTimers.delete(id);
+    }
+    const current = get().meetings.find((meeting) => meeting.id === id);
+    if (!current) return;
+    set({ saving: true });
+    try {
+      const saved = await persistMeetingToBackend(current);
+      set((state) => ({
+        meetings: state.meetings.map((meeting) => meeting.id === id ? saved : meeting),
+        saving: false
+      }));
+    } catch (error) {
+      set({ saving: false, error: error instanceof Error ? error.message : "保存失败" });
+    }
   },
 
   /** 替换会议纪要（AI 结果已按 mergeSummaryRevision 合并锁定字段后写入）。 */

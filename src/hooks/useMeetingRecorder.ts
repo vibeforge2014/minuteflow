@@ -1,7 +1,9 @@
 /**
  * 录音编排 hook：把 MeetingRecorder 服务（采集/分块/落盘）接入 React 与 Zustand store。
  * 职责包括：录音生命周期状态机（idle→starting→recording⇄paused→stopping）、每秒计时、
- * 滚动 AI 纪要定时器、转写段落入账（appendTranscript）、系统睡眠/唤醒的暂停与自动恢复。
+ * 滚动 AI 纪要定时器（暂停即停）、转写段落入账（定稿走节流落盘，临时段仅内存展示）、
+ * 手动/自动总结（含取消与降级提示）、系统睡眠/唤醒的暂停与自动恢复，
+ * 以及“录音中刷新页面”的假录音态修复（无录音器时按已中断收场）。
  *
  * 所属层：渲染层 hooks（连接 services/recording 与 store 的适配层）。
  * 主要导出：useMeetingRecorder。
@@ -19,6 +21,9 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   const preferences = useMeetingStore((state) => state.preferences);
   const updateMeeting = useMeetingStore((state) => state.updateMeeting);
   const appendTranscript = useMeetingStore((state) => state.appendTranscript);
+  const appendProvisionalTranscript = useMeetingStore((state) => state.appendProvisionalTranscript);
+  const dropProvisionalTranscript = useMeetingStore((state) => state.dropProvisionalTranscript);
+  const flushMeeting = useMeetingStore((state) => state.flushMeeting);
   const updateSummary = useMeetingStore((state) => state.updateSummary);
   // 录音状态机：idle 空闲 / starting 授权与取流中 / recording 录制中 / paused 暂停 / stopping 收尾落盘中。
   const [phase, setPhase] = useState<"idle" | "starting" | "recording" | "paused" | "stopping">("idle");
@@ -36,6 +41,10 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   const meetingRef = useRef(meeting);
   const elapsedRef = useRef(elapsed);
   const preferencesSummaryIntervalRef = useRef(preferences.summaryIntervalSeconds);
+  // 忙碌锁用 ref 而非 state：定时器回调与快速连点在 state 尚未提交时也能正确互斥。
+  const summaryBusyRef = useRef(false);
+  // starting 阶段用户按了停止（最后一次取消检查之后的兜底路径）。
+  const stopRequestedDuringStartRef = useRef(false);
 
   useEffect(() => {
     meetingRef.current = meeting;
@@ -50,21 +59,20 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   }, [preferences.summaryIntervalSeconds]);
 
   useEffect(() => {
-    // 切换会议（或首次挂载）且当前没有活跃录音器时，恢复该会议的展示态：
-    // 从已有时长继续计时（针对“录音中刷新页面/重启后重开”的场景），否则回到 idle。
+    // 切换会议（或首次挂载）且当前没有活跃录音器时，回到 idle 展示态。
+    // 注意：录音器不可能跨渲染进程刷新存活，所以挂载时看到的 status=recording
+    // 一定是上次录音被刷新/崩溃打断的残留——按“已中断”收场并明确告知用户，
+    // 绝不能伪装成还在录音（那样停止时会把没有音频产物的会议标成已完成）。
     if (recorderRef.current) return;
     if (timerRef.current) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
     }
     setElapsed(meeting?.durationSeconds ?? 0);
-    if (meeting?.status === "recording") {
-      setPhase("recording");
-      timerRef.current = window.setInterval(() => {
-        setElapsed((value) => value + 1);
-      }, 1_000);
-    } else {
-      setPhase("idle");
+    setPhase("idle");
+    if (meeting?.status === "recording" || meeting?.status === "paused") {
+      void updateMeeting(meeting.id, (current) => ({ ...current, status: "interrupted" }));
+      setWarning("上次录音因窗口刷新或异常退出未能正常结束，这场会议已标记为“已中断”；录音文件（如已落盘）仍保留。");
     }
     return () => {
       if (!recorderRef.current && timerRef.current) {
@@ -72,7 +80,16 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
         timerRef.current = null;
       }
     };
-  }, [meeting?.id]);
+  }, [meeting?.id, updateMeeting]);
+
+  // 订阅主进程推送的录音写盘失败：录音过程中即时告警（磁盘满/IO 错误），
+  // 不必等停止收尾时才知道整个会话已损坏。
+  useEffect(() => {
+    const remove = api.recordings.onWriteError(({ message }) => {
+      setWarning(`录音写盘出现问题：${message}`);
+    });
+    return remove;
+  }, []);
 
   // 从已启用的档案中选出第一个 stt（转写）与 llm（总结）配置，作为本次会话使用的模型。
   const sttProfile = useMemo(
@@ -85,53 +102,85 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   );
 
   /**
-   * 生成 AI 纪要：final=false 为录音中的滚动增量，true 为会后最终总结。
+   * 生成 AI 纪要。final 省略时自动推导：会议不在录音/暂停中即为“会后终稿”，
+   * 手动按钮因此能在录音结束后产出终稿总结（终稿路径不再不可达）。
    * 乐观并发保护：请求前记下会议的 updatedAt（baseVersion），返回后若已变化，
    * 只把纪要标记为 stale 而不覆盖文档，避免用旧转写冲掉用户刚写入的内容。
+   * 主进程降级（未配置 LLM 或在线失败回退本地引擎）时返回 degraded 标记，
+   * 这里合入结果的同时用 warning 告知用户，不再静默。
    */
-  const generateSummary = useCallback(async (final = false) => {
+  const generateSummary = useCallback(async (final?: boolean, automatic = false) => {
     const current = meetingRef.current;
-    if (!current || summaryBusy) return;
-    const baseVersion = current.updatedAt;
+    if (!current || summaryBusyRef.current) return;
+    const isFinal = final ?? !["recording", "paused"].includes(current.status);
+    const finalTranscript = current.transcript.filter((segment) => segment.status === "final");
+    const sourceThroughMs = finalTranscript.reduce((maximum, segment) => Math.max(maximum, segment.endMs), 0);
+    if (automatic) {
+      const previousThroughMs = current.summary.sourceThroughMs ?? 0;
+      const newSegments = finalTranscript.filter((segment) => segment.endMs > previousThroughMs).length;
+      // 定时器只在真正积累出可归纳内容时调用模型，避免静音或零碎片段产生空请求。
+      if (sourceThroughMs - previousThroughMs < 30_000 && newSegments < 4) return;
+    }
+    const baseNotes = JSON.stringify(current.notes);
+    summaryBusyRef.current = true;
     setSummaryBusy(true);
     try {
-      const summary = await api.summary.generate({
+      const { degraded, degradedReason, ...summary } = await api.summary.generate({
+        meetingId: current.id,
         profileId: llmProfile?.id,
-        final,
+        final: isFinal,
         input: {
           title: current.title,
           goals: current.goals,
           notes: current.notes,
-          transcript: current.transcript.filter((segment) => segment.status === "final"),
+          transcript: finalTranscript,
           previousSummary: current.summary
         }
       });
       const latest = meetingRef.current;
-      // 会议已切换或内容在请求期间被修改：不套用结果，转而提示用户重新总结。
+      // 新转录在模型生成期间到达是正常情况：把结果合入最新快照，并将尚未覆盖部分标记
+      // 为 stale。人工锁定字段始终由 mergeSummaryRevision 保留，不再整次丢弃结果。
       if (!latest || latest.id !== current.id) return;
-      if (!final && latest.updatedAt !== baseVersion) {
-        await updateMeeting(current.id, (value) => ({
-          ...value,
-          summary: { ...value.summary, stale: true }
-        }));
-        setWarning("生成期间会议内容发生了变化，AI 结果未覆盖当前文档，请重新总结。");
-        return;
-      }
-      await updateSummary(current.id, mergeSummaryRevision(latest.summary, summary));
+      const latestThroughMs = latest.transcript
+        .filter((segment) => segment.status === "final")
+        .reduce((maximum, segment) => Math.max(maximum, segment.endMs), 0);
+      const merged = mergeSummaryRevision(latest.summary, summary);
+      merged.stale = latestThroughMs > (summary.sourceThroughMs ?? sourceThroughMs)
+        || JSON.stringify(latest.notes) !== baseNotes;
+      await updateSummary(current.id, merged);
+      if (degraded && degradedReason) setWarning(degradedReason);
     } catch (error) {
       setWarning(error instanceof Error ? error.message : "生成纪要失败");
     } finally {
+      summaryBusyRef.current = false;
       setSummaryBusy(false);
     }
-  }, [llmProfile?.id, summaryBusy, updateMeeting, updateSummary]);
+  }, [llmProfile?.id, updateMeeting, updateSummary]);
 
   const generateSummaryRef = useRef(generateSummary);
   useEffect(() => {
     generateSummaryRef.current = generateSummary;
   }, [generateSummary]);
 
+  /** 取消进行中的总结请求（主进程中止 AbortController），供“取消生成”按钮调用。 */
+  const cancelSummary = useCallback(async () => {
+    const current = meetingRef.current;
+    if (!current) return;
+    await api.summary.cancel(current.id).catch(() => {});
+  }, []);
+
+  /** 重启滚动纪要定时器：回调经 ref 取最新实例，间隔经 ref 取最新偏好。 */
+  const restartSummaryTimer = useCallback(() => {
+    if (summaryTimerRef.current) window.clearInterval(summaryTimerRef.current);
+    summaryTimerRef.current = window.setInterval(
+      () => generateSummaryRef.current(false, true),
+      preferencesSummaryIntervalRef.current * 1_000
+    );
+  }, []);
+
   const start = useCallback(async () => {
     if (!meeting || phase !== "idle") return;
+    stopRequestedDuringStartRef.current = false;
     setPhase("starting");
     setWarning(null);
     try {
@@ -139,18 +188,26 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
         onLevel: setLevels,
         onTranscriptionQueue: setQueue,
         onWarning: setWarning,
-        onTranscript: (segment) => appendTranscript(meeting.id, segment)
+        onTranscript: (segment) => appendTranscript(meeting.id, segment),
+        onProvisional: (segment) => appendProvisionalTranscript(meeting.id, segment),
+        onProvisionalSettled: (segmentId) => dropProvisionalTranscript(meeting.id, segmentId)
       });
       recorderRef.current = recorder;
       await recorder.start();
+      // 用户在授权/取流期间按了停止，而取消信号晚于录音器最后一次检查：直接中止会话，
+      // 会议退回草稿，状态机归位（否则会“看起来停了、实际在录”）。
+      if (stopRequestedDuringStartRef.current) {
+        stopRequestedDuringStartRef.current = false;
+        recorderRef.current = null;
+        setPhase("idle");
+        await recorder.abort().catch(() => {});
+        return;
+      }
       setElapsed(0);
       setPhase("recording");
       await updateMeeting(meeting.id, (current) => ({ ...current, status: "recording", durationSeconds: 0 }));
       timerRef.current = window.setInterval(() => setElapsed((value) => value + 1), 1_000);
-      summaryTimerRef.current = window.setInterval(
-        () => generateSummary(false),
-        preferences.summaryIntervalSeconds * 1_000
-      );
+      restartSummaryTimer();
     } catch (error) {
       recorderRef.current = null;
       // A failed/cancelled start must not leave a dangling summary timer that
@@ -164,7 +221,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
         setWarning(error instanceof Error ? error.message : "无法开始录音");
       }
     }
-  }, [appendTranscript, generateSummary, meeting, phase, preferences.glossary, preferences.summaryIntervalSeconds, sttProfile, updateMeeting]);
+  }, [appendProvisionalTranscript, appendTranscript, dropProvisionalTranscript, meeting, phase, preferences.glossary, restartSummaryTimer, sttProfile, updateMeeting]);
 
   const pause = useCallback(async () => {
     if (!meeting) return;
@@ -172,33 +229,48 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       recorderRef.current?.pause();
       setPhase("paused");
       if (timerRef.current) window.clearInterval(timerRef.current);
+      timerRef.current = null;
+      // 暂停期间转录不再增长，滚动总结定时器一并停下，不做无谓的远程调用。
+      if (summaryTimerRef.current) window.clearInterval(summaryTimerRef.current);
+      summaryTimerRef.current = null;
       await updateMeeting(meeting.id, (current) => ({ ...current, status: "paused", durationSeconds: elapsed }));
     } else if (phase === "paused") {
       recorderRef.current?.resume();
       setPhase("recording");
       timerRef.current = window.setInterval(() => setElapsed((value) => value + 1), 1_000);
+      restartSummaryTimer();
       await updateMeeting(meeting.id, (current) => ({ ...current, status: "recording" }));
     }
-  }, [elapsed, meeting, phase, updateMeeting]);
+  }, [elapsed, meeting, phase, restartSummaryTimer, updateMeeting]);
 
   const stop = useCallback(async () => {
     if (!meeting || !["starting", "recording", "paused"].includes(phase)) return;
     if (phase === "starting") {
+      // 记录停止意图：若取消信号来得及，start() 会以“已取消”异常收场；
+      // 来不及（竞态）则 start() 成功返回后走 abort 兜底路径。
+      stopRequestedDuringStartRef.current = true;
       setPhase("stopping");
       recorderRef.current?.cancelStart();
       return;
     }
+    const recorder = recorderRef.current;
     setPhase("stopping");
     if (timerRef.current) window.clearInterval(timerRef.current);
     timerRef.current = null;
     if (summaryTimerRef.current) window.clearInterval(summaryTimerRef.current);
+    summaryTimerRef.current = null;
     try {
-      if (recorderRef.current) await recorderRef.current.stop(elapsed);
+      if (recorder) await recorder.stop(elapsed);
+      // 收尾前清掉仍在途的临时（provisional）转写段，避免“转写中…”残留到会后文档。
+      dropProvisionalTranscript(meeting.id);
       await updateMeeting(meeting.id, (current) => ({
         ...current,
-        status: "complete",
+        // 没有活跃录音器却走到停止（防御路径，正常已被恢复逻辑拦下）：
+        // 宁可标记“已中断”也不能把无音频产物的会议标成“已完成”。
+        status: recorder ? "complete" : "interrupted",
         durationSeconds: elapsed
       }));
+      if (recorder) await flushMeeting(meeting.id);
     } catch (error) {
       setWarning(error instanceof Error ? error.message : "停止录音时发生错误");
     } finally {
@@ -206,7 +278,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       setPhase("idle");
       setLevels({ microphone: 0, system: 0 });
     }
-  }, [elapsed, meeting, phase, updateMeeting]);
+  }, [dropProvisionalTranscript, elapsed, flushMeeting, meeting, phase, updateMeeting]);
 
   useEffect(() => () => {
     if (timerRef.current) window.clearInterval(timerRef.current);
@@ -218,6 +290,8 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       if (!recorderRef.current) return;
       recorderRef.current.pause();
       if (timerRef.current) window.clearInterval(timerRef.current);
+      if (summaryTimerRef.current) window.clearInterval(summaryTimerRef.current);
+      summaryTimerRef.current = null;
       setPhase("paused");
       setWarning("系统已进入睡眠，录音已暂停并写入时间线。");
       const current = meetingRef.current;
@@ -240,19 +314,14 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       // a single sleep silently stops all automatic summaries for the session.
       try { recorderRef.current.resume(); } catch { /* recorder may already be stopped */ }
       setPhase("recording");
-      if (summaryTimerRef.current) window.clearInterval(summaryTimerRef.current);
-      const intervalSeconds = meetingRef.current ? preferencesSummaryIntervalRef.current : 120;
-      summaryTimerRef.current = window.setInterval(
-        () => generateSummaryRef.current(false),
-        intervalSeconds * 1_000
-      );
+      restartSummaryTimer();
       setWarning("系统已唤醒，已自动继续录音，请确认设备正常。");
     });
     return () => {
       removeSuspend();
       removeResume();
     };
-  }, [updateMeeting]);
+  }, [restartSummaryTimer, updateMeeting]);
 
   return {
     phase,
@@ -265,6 +334,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     start,
     pause,
     stop,
-    generateSummary
+    generateSummary,
+    cancelSummary
   };
 }

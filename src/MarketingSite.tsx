@@ -722,7 +722,7 @@ function SpecsPage() {
               ["Windows", "Windows 10 22H2 或更高版本"],
               ["iPhone / iPad", "iOS / iPadOS 18 或更高版本"],
               ["桌面运行时", "Electron"],
-              ["本地模型", "权重与 FFmpeg 按需配置，不静默打包"],
+              ["本地模型", "模型可自主选择，音频工具随应用内置"],
               ["远程服务", "需要用户自行提供兼容服务地址与凭据"]
             ]} />
             <div className="spec-endcap">

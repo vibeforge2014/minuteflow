@@ -5,7 +5,7 @@
  * 所属层：渲染层 UI 编排（组合 store、录音 hook 与 api 事件）。
  * 主要导出：App。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowClockwise,
   CloudCheck,
@@ -13,6 +13,7 @@ import {
   Export,
   GearSix,
   LockKey,
+  PlayCircle,
   FolderOpen,
   SidebarSimple,
   Star,
@@ -51,6 +52,7 @@ export function App() {
     initialize,
     refreshMeetings,
     selectMeeting,
+    mergeImportedMeeting,
     createMeeting,
     updateMeeting,
     deleteMeeting,
@@ -67,6 +69,7 @@ export function App() {
   const [paywallReason, setPaywallReason] = useState<string>();
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [rightPanelTab, setRightPanelTab] = useState<"transcript" | "summary">("transcript");
   const [exportOpen, setExportOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -75,6 +78,8 @@ export function App() {
   const [importJobs, setImportJobs] = useState<ImportJob[]>([]);
   const [playbackMs, setPlaybackMs] = useState(0);
   const [seekToMs, setSeekToMs] = useState<number | null>(null);
+  const [playerAvailable, setPlayerAvailable] = useState(false);
+  const [playerOpen, setPlayerOpen] = useState(false);
   // 已提示过“导入完成”的任务 id 集合：防止事件订阅重放历史任务时重复弹 Toast。
   const completedImports = useRef(new Set<string>());
 
@@ -100,11 +105,16 @@ export function App() {
       setImportJobs((current) => [job, ...current.filter((item) => item.id !== job.id)].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)));
       if (job.status === "complete" && !completedImports.current.has(job.id)) {
         completedImports.current.add(job.id);
-        setToast(`“${job.title}”已完成导入，点击任务可查看结果。`);
+        setToast(`“${job.title}”已完成导入，可从左侧「导入录音」打开它，或直接在会议库中查看。`);
         void refreshMeetings();
       }
     });
   }, [refreshMeetings]);
+
+  // 导入分段完成后主进程直接推送会议快照；只合并后台拥有的字段，避免覆盖用户正在写的笔记。
+  useEffect(() => api.imports.onMeetingUpdated((updatedMeeting) => {
+    mergeImportedMeeting(updatedMeeting);
+  }), [mergeImportedMeeting]);
 
   // 首次运行引导分两道门：先系统权限（版本化流程，v2 会重新弹出），完成后再新手引导。
   useEffect(() => {
@@ -127,6 +137,20 @@ export function App() {
     () => meetings.find((item) => item.id === selectedId),
     [meetings, selectedId]
   );
+  // 搜索词与清除入口：区分「没有任何会议」和「搜索无结果」两种空状态。
+  const search = useMeetingStore((state) => state.search);
+  const setSearch = useMeetingStore((state) => state.setSearch);
+  const searching = search.trim().length > 0;
+  const meetingImportJob = useMemo(
+    () => meeting ? importJobs.find((job) => job.meetingId === meeting.id) : undefined,
+    [importJobs, meeting]
+  );
+  useEffect(() => {
+    setPlayerOpen(false);
+    setPlayerAvailable(false);
+    setPlaybackMs(0);
+    setSeekToMs(null);
+  }, [meeting?.id]);
   // 录音生命周期 hook：传入当前会议，返回 phase/elapsed/levels/queue 等驱动 RecorderBar 的状态。
   const recorder = useMeetingRecorder(meeting);
 
@@ -138,11 +162,20 @@ export function App() {
       // 中文补充：主进程的“需要授权”错误以 [LICENSE_REQUIRED] 前缀编码在 message 中，
       // 因为自定义 Error 属性过不了 contextBridge；这里解码后转成付费墙而非普通 Toast。
       if (recorder.warning.startsWith("[LICENSE_REQUIRED]")) {
-        setPaywallReason(recorder.warning.replace(/^\[LICENSE_REQUIRED\]\s*/, ""));
+        setPaywallReason(recorder.warning.replace(/^\[LICENSE_REQUIRED]\s*/, ""));
         setPaywallOpen(true);
         return;
       }
-      setToast(recorder.warning);
+      if (recorder.warning.startsWith("[MICROPHONE_PERMISSION_REQUIRED]")) {
+        setPermissionsOpen(true);
+        recorder.setWarning(null);
+        return;
+      }
+      const message = recorder.warning;
+      // 立即消费 warning（而不是保留字符串）：否则连续两次内容相同的警告
+      // 不会重新触发本 effect，第二次提示会被静默吞掉。
+      recorder.setWarning(null);
+      setToast(message);
     }
   }, [recorder.warning]);
 
@@ -161,12 +194,41 @@ export function App() {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [recorder]);
 
+  // 稳定的 Toast 关闭回调：内联箭头函数会随 App 每次重渲染变化，导致 Toast 内部的
+  // 自动关闭计时器被反复重置（录音中电平更新让 App 高频重渲染，提示将永远不消失）。
+  const dismissToast = useCallback(() => setToast(null), []);
+
   const handleCreate = async (input: CreateMeetingInput) => {
     const created = await createMeeting(input);
     setNewMeetingOpen(false);
     setToast("会议已创建，可以开始录音。");
     return created;
   };
+
+  // 全局快捷键：⌘K/Ctrl+K 聚焦会议搜索（与搜索框 kbd 提示一致）、⌘N/Ctrl+N 新建会议；
+  // Esc 依次收起导出/更多菜单与导入抽屉。仅在无输入框抢占的场景下拦截（快捷键本身不冲突输入）。
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const meta = event.metaKey || event.ctrlKey;
+      if (meta && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        document.getElementById("meeting-search")?.focus();
+        return;
+      }
+      if (meta && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setNewMeetingOpen(true);
+        return;
+      }
+      if (event.key === "Escape") {
+        if (moreOpen) { setMoreOpen(false); return; }
+        if (exportOpen) { setExportOpen(false); return; }
+        if (importOpen) { setImportOpen(false); return; }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [exportOpen, importOpen, moreOpen]);
 
   // 导入入口（文件选择器 / 拖拽）：先过付费墙，再把候选文件交给右侧确认抽屉，确认后才入队归档。
   const handleImport = async () => {
@@ -212,7 +274,6 @@ export function App() {
         onNew={() => setNewMeetingOpen(true)}
         onImport={handleImport}
         importCount={importJobs.filter((job) => !["complete", "cancelled", "failed"].includes(job.status)).length}
-        onTemplates={() => setNewMeetingOpen(true)}
         onTrash={() => setTrashOpen(true)}
         onSettings={() => setSettingsOpen(true)}
       />
@@ -240,9 +301,20 @@ export function App() {
                   {saving ? <ArrowClockwise size={16} className="spin" /> : <CloudCheck size={17} />}
                   {saving ? "正在保存" : "已自动保存"}
                 </span>
+                {playerAvailable && (
+                  <button
+                    className={`button button--secondary button--small playback-trigger ${playerOpen ? "is-active" : ""}`}
+                    onClick={() => setPlayerOpen((value) => !value)}
+                  >
+                    <PlayCircle size={16} weight={playerOpen ? "fill" : "regular"} />回放
+                  </button>
+                )}
                 <div className="export-wrap">
                   <button className="button button--primary button--small" onClick={() => {
-                    if (requirePremium("导出会议文档与完整备份")) setExportOpen((value) => !value);
+                    if (requirePremium("导出会议文档与完整备份")) {
+                      setMoreOpen(false);
+                      setExportOpen((value) => !value);
+                    }
                   }}>
                     <Export size={16} /> 导出
                   </button>
@@ -258,7 +330,10 @@ export function App() {
                   <button
                     className="icon-button"
                     aria-label="更多选项"
-                    onClick={() => setMoreOpen((value) => !value)}
+                    onClick={() => {
+                      setExportOpen(false);
+                      setMoreOpen((value) => !value);
+                    }}
                   >
                     <DotsThree size={22} weight="bold" />
                   </button>
@@ -301,14 +376,26 @@ export function App() {
               </div>
             </header>
 
-            <MeetingPlayer meetingId={meeting.id} durationSeconds={meeting.durationSeconds} seekToMs={seekToMs} onTimeChange={setPlaybackMs} />
+            <MeetingPlayer
+              key={`${meeting.id}:${meetingImportJob?.audioAssetId || "pending"}`}
+              meetingId={meeting.id}
+              durationSeconds={meeting.durationSeconds}
+              seekToMs={seekToMs}
+              open={playerOpen}
+              onClose={() => setPlayerOpen(false)}
+              onAvailabilityChange={setPlayerAvailable}
+              onTimeChange={setPlaybackMs}
+              onError={setToast}
+            />
 
             <DocumentWorkspace
               meeting={meeting}
               onChange={handleMeetingChange}
               onGenerateSummary={() => {
-                if (requirePremium("生成 AI 会议纪要")) recorder.generateSummary(false);
+                // final 由 hook 按会议状态自动推导：录音/暂停中为滚动增量，会后为终稿总结。
+                if (requirePremium("生成 AI 会议纪要")) void recorder.generateSummary();
               }}
+              onCancelSummary={() => void recorder.cancelSummary()}
               summaryBusy={recorder.summaryBusy}
             />
 
@@ -335,18 +422,47 @@ export function App() {
               }}
             />
           </>
+        ) : searching ? (
+          <EmptyState
+            variant="search"
+            onClear={() => void setSearch("")}
+          />
         ) : (
           <EmptyState onNew={() => setNewMeetingOpen(true)} onImport={handleImport} />
         )}
       </main>
 
+      {/* 菜单遮罩：导出/更多菜单打开时拦截外部点击，点任意空白处即收起菜单。 */}
+      {(exportOpen || moreOpen) && (
+        <div
+          className="menu-scrim"
+          aria-hidden="true"
+          onClick={() => {
+            setExportOpen(false);
+            setMoreOpen(false);
+          }}
+        />
+      )}
+
       {meeting && rightPanelOpen && (
         <TranscriptPanel
           meeting={meeting}
+          importJob={meetingImportJob}
+          tab={rightPanelTab}
+          onTabChange={setRightPanelTab}
           onChange={handleMeetingChange}
           onClose={() => setRightPanelOpen(false)}
           playbackMs={playbackMs}
-          onSeek={(ms) => { setSeekToMs(null); requestAnimationFrame(() => setSeekToMs(ms)); }}
+          onSeek={(ms) => {
+            // 没有可用音频（未录制/文件缺失）时不打开播放器，避免出现一个必然报错的空播放器。
+            if (!playerAvailable) {
+              setToast("这场会议没有可回放的音频文件；转录时间戳仍可作为内容定位使用。");
+              return;
+            }
+            setPlayerOpen(true);
+            setSeekToMs(null);
+            requestAnimationFrame(() => setSeekToMs(ms));
+          }}
         />
       )}
 
@@ -375,9 +491,17 @@ export function App() {
       />
       <SystemPermissionsDialog
         open={permissionsOpen}
+        returningUser={preferences.systemPermissionsCompleted && preferences.permissionsVersion < 2}
         onComplete={async () => {
           await updatePreferences({ ...preferences, systemPermissionsCompleted: true, permissionsVersion: 2 });
           setPermissionsOpen(false);
+        }}
+        onSkip={async () => {
+          // 跳过首run权限墙：只记录“已走完该流程”，不动系统权限。
+          // 之后用户第一次点“开始录音”时会按需引导授权（含被拒绝时重新打开本对话框）。
+          await updatePreferences({ ...preferences, systemPermissionsCompleted: true, permissionsVersion: 2 });
+          setPermissionsOpen(false);
+          setToast("已跳过授权。首次开始录音时会再引导你完成麦克风授权。");
         }}
       />
       <PaywallDialog
@@ -400,6 +524,10 @@ export function App() {
           setImportJobs((current) => [...jobs, ...current.filter((item) => !jobs.some((job) => job.id === item.id))]);
           setImportCandidates([]);
           await refreshMeetings();
+          if (jobs[0]?.meetingId) selectMeeting(jobs[0].meetingId);
+          setImportOpen(false);
+          setRightPanelOpen(true);
+          setRightPanelTab("transcript");
           setToast(`${jobs.length} 个录音已归档并加入后台队列。`);
         }}
         onRetry={(id) => void api.imports.retry(id)}
@@ -408,15 +536,13 @@ export function App() {
         onConfigure={() => { setImportOpen(false); setSettingsOpen(true); }}
       />
 
+      {/* 错误与操作反馈分成两条独立 Toast 叠放：store 错误（警告样式）不再吞掉
+          导入/导出等成功提示，反之亦然。 */}
       {(error || toast) && (
-        <Toast
-          message={error || toast || ""}
-          onClose={() => {
-            clearError();
-            setToast(null);
-            recorder.setWarning(null);
-          }}
-        />
+        <div className="toast-stack">
+          {error && <Toast tone="warning" message={error} onClose={clearError} />}
+          {toast && <Toast message={toast} onClose={dismissToast} />}
+        </div>
       )}
 
       <button

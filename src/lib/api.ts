@@ -8,7 +8,8 @@
  * 主要导出：api（当前生效的 MeetingAPI 实例）、isElectronRuntime（是否 Electron 环境）。
  */
 import { demoMeetings } from "../data/demo";
-import type { CreateMeetingInput, ImportCandidate, ImportJob, Meeting, MeetingAPI, MeetingPreferences, MeetingSummary, ModelProfile } from "../types";
+import type { CreateMeetingInput, DownloadableModel, ImportCandidate, ImportJob, Meeting, MeetingAPI, MeetingPreferences, MeetingSummary, ModelProfile } from "../types";
+import { simplifyChinese, simplifySummary } from "./chinese";
 
 // —— 浏览器兜底实现的 localStorage 键位与内存事件总线 ——
 const storageKey = "meeting-assistant-demo-state-v3";
@@ -18,7 +19,8 @@ const importJobsKey = "meeting-assistant-demo-import-jobs-v1";
 // 浏览器端没有主进程推送，用内存监听器集合模拟 imports.onJobUpdated 事件流。
 const importListeners = new Set<(job: ImportJob) => void>();
 const defaultPreferences: MeetingPreferences = {
-  summaryIntervalSeconds: 120,
+  summaryIntervalSeconds: 60,
+  summaryCadenceVersion: 1,
   defaultMode: "online",
   glossary: [],
   retentionDays: null,
@@ -26,6 +28,28 @@ const defaultPreferences: MeetingPreferences = {
   systemPermissionsCompleted: false,
   permissionsVersion: 0
 };
+
+/** 浏览器预览与桌面端保持相同的模型目录；预览只展示，真实下载由 Electron 主进程执行。 */
+const browserModelCatalog: DownloadableModel[] = [
+  ["ggml-tiny", "Whisper Tiny（GGML）", "最快、占用最低，适合快速草稿和低配置设备。", 77_691_713, "ggml-tiny.bin"],
+  ["ggml-base", "Whisper Base（GGML）", "轻量日常转写，速度和准确率优于 Tiny。", 147_951_465, "ggml-base.bin"],
+  ["ggml-small", "Whisper Small（GGML）", "中英混合表现均衡，推荐大多数会议使用。", 487_601_967, "ggml-small.bin"],
+  ["ggml-medium", "Whisper Medium（GGML）", "更重视中文和复杂音频准确率，推荐 16GB 内存。", 1_533_763_059, "ggml-medium.bin"],
+  ["ggml-large-v3-turbo-q5_0", "Whisper Large v3 Turbo Q5（GGML）", "Turbo 的 5-bit 量化版，约 0.55GB，中低配设备的准确率优选。", 574_041_195, "ggml-large-v3-turbo-q5_0.bin"],
+  ["ggml-large-v3-turbo", "Whisper Large v3 Turbo（GGML）", "高准确率与速度兼顾，适合性能较好的新款电脑。", 1_624_555_275, "ggml-large-v3-turbo.bin"],
+  ["ggml-large-v3", "Whisper Large v3（GGML）", "最高准确率，下载和运行占用较高，推荐 24GB 以上内存。", 3_095_033_483, "ggml-large-v3.bin"]
+].map(([id, name, description, sizeBytes, fileName]) => ({
+  id: id as string,
+  name: name as string,
+  description: description as string,
+  engine: "whisper-cpp",
+  format: "GGML",
+  sizeBytes: sizeBytes as number,
+  fileName: fileName as string,
+  source: "ggerganov/whisper.cpp",
+  license: "MIT",
+  installed: false
+}));
 
 // 深拷贝：把演示数据克隆后再返回，避免调用方修改直接污染模块内的 demoMeetings 常量。
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -35,18 +59,26 @@ function loadBrowserMeetings(): Meeting[] {
   const stored = localStorage.getItem(storageKey);
   if (!stored) {
     localStorage.setItem(storageKey, JSON.stringify(demoMeetings));
-    return clone(demoMeetings);
+    return clone(demoMeetings).map(normalizeBrowserMeetingAiText);
   }
   try {
-    return JSON.parse(stored) as Meeting[];
+    return (JSON.parse(stored) as Meeting[]).map(normalizeBrowserMeetingAiText);
   } catch {
-    return clone(demoMeetings);
+    return clone(demoMeetings).map(normalizeBrowserMeetingAiText);
   }
+}
+
+function normalizeBrowserMeetingAiText(meeting: Meeting): Meeting {
+  return {
+    ...meeting,
+    transcript: meeting.transcript.map((segment) => ({ ...segment, text: simplifyChinese(segment.text) })),
+    summary: simplifySummary(meeting.summary)
+  };
 }
 
 /** 把会议列表整体写回 localStorage（浏览器端的“持久化”）。 */
 function saveBrowserMeetings(meetings: Meeting[]) {
-  localStorage.setItem(storageKey, JSON.stringify(meetings));
+  localStorage.setItem(storageKey, JSON.stringify(meetings.map(normalizeBrowserMeetingAiText)));
 }
 
 /** 把浏览器 File 转成导入候选描述（浏览器端无法读绝对路径，用文件名代替 sourcePath）。 */
@@ -74,24 +106,39 @@ function saveBrowserImportJob(job: ImportJob) {
   importListeners.forEach((listener) => listener(job));
 }
 
-/** 浏览器端的“伪 AI 总结”：取最近 6 条转写追加进要点（去重、截尾 8 条），仅用于演示 UI。 */
+/** 浏览器预览中的本机基础纪要：压缩高信息句，避免把右侧转录原样复制到文档。 */
 function localSummary(input: {
   goals: string[];
   notes: string[];
   transcript: Meeting["transcript"];
   previousSummary: MeetingSummary;
 }): MeetingSummary {
-  const recent = input.transcript.slice(-6);
-  return {
+  const candidates = input.transcript
+    .flatMap((segment) => segment.text.split(/(?<=[。！？!?])\s*/))
+    .map((text) => simplifyChinese(text).replace(/^(嗯+|啊+|呃+|然后|就是|那个)[，,。.!！\s]*/, "").trim())
+    .filter((text) => text.length >= 8 && !/[？?]$/.test(text))
+    .map((text) => ({
+      text,
+      score: (text.match(/(确认|决定|结论|完成|进展|方案|问题|结果|计划|建议|需要|风险|负责)/g)?.length ?? 0) * 3 + text.length / 30
+    }))
+    .sort((left, right) => right.score - left.score);
+  const keyPoints: string[] = [];
+  for (const candidate of candidates) {
+    const normalized = candidate.text.replace(/[\s，。！？、,.!?]/g, "");
+    if (keyPoints.some((item) => item.replace(/[\s，。！？、,.!?]/g, "").includes(normalized))) continue;
+    keyPoints.push(/^(已|将|需|本次|当前|会议)/.test(candidate.text) ? candidate.text : `会议明确：${candidate.text}`);
+    if (keyPoints.length >= 6) break;
+  }
+  const sourceThroughMs = input.transcript.reduce((maximum, segment) => Math.max(maximum, segment.endMs), 0);
+  return simplifySummary({
     ...input.previousSummary,
     topics: input.previousSummary.topics.length ? input.previousSummary.topics : input.goals.slice(0, 3),
-    keyPoints: Array.from(new Set([
-      ...input.previousSummary.keyPoints,
-      ...recent.map((item) => item.text)
-    ])).slice(-8),
+    keyPoints: Array.from(new Set(keyPoints)).slice(-8),
     updatedAt: new Date().toISOString(),
+    generationMode: "local",
+    sourceThroughMs,
     stale: false
-  };
+  });
 }
 
 /**
@@ -184,7 +231,8 @@ const browserApi: MeetingAPI = {
     async open() {
       throw new Error("浏览器预览无法打开本地录音。");
     },
-    async assets() { return []; }
+    async assets() { return []; },
+    onWriteError() { return () => {}; }
   },
   transcription: {
     // 模拟 700ms 转写延迟后返回占位段落：本地麦克风轨记为“我”，其余记为远端发言人。
@@ -207,6 +255,9 @@ const browserApi: MeetingAPI = {
     async generate(payload) {
       await new Promise((resolve) => setTimeout(resolve, 900));
       return localSummary(payload.input);
+    },
+    async cancel() {
+      return { ok: true };
     }
   },
   models: {
@@ -235,21 +286,7 @@ const browserApi: MeetingAPI = {
       return null;
     },
     async catalog() {
-      // 目录只展示一条 GGML 示例；真实下载必须回到 Electron 桌面端。
-      return [
-        {
-          id: "ggml-base",
-          name: "Whisper Base（GGML）",
-          description: "速度优先，适合普通办公电脑。",
-          engine: "whisper-cpp" as const,
-          format: "GGML",
-          sizeBytes: 148_000_000,
-          fileName: "ggml-base.bin",
-          source: "ggerganov/whisper.cpp",
-          license: "MIT",
-          installed: false
-        }
-      ];
+      return browserModelCatalog;
     },
     async download() {
       throw new Error("请在 Electron 桌面应用中下载本地模型。");
@@ -331,7 +368,8 @@ const browserApi: MeetingAPI = {
     onJobUpdated(callback) {
       importListeners.add(callback);
       return () => importListeners.delete(callback);
-    }
+    },
+    onMeetingUpdated() { return () => {}; }
   },
   exports: {
     // 无系统保存框，用 Blob + <a download> 触发浏览器下载。
@@ -351,11 +389,22 @@ const browserApi: MeetingAPI = {
   },
   preferences: {
     async get() {
-      return JSON.parse(localStorage.getItem(preferencesKey) || JSON.stringify(defaultPreferences));
-    },
-    async save(preferences) {
+      const stored = JSON.parse(localStorage.getItem(preferencesKey) || "{}");
+      const preferences = {
+        ...defaultPreferences,
+        ...stored,
+        summaryIntervalSeconds: Number(stored.summaryCadenceVersion) >= 1
+          ? Number(stored.summaryIntervalSeconds) || 60
+          : 60,
+        summaryCadenceVersion: 1
+      };
       localStorage.setItem(preferencesKey, JSON.stringify(preferences));
       return preferences;
+    },
+    async save(preferences) {
+      const validated = { ...preferences, summaryCadenceVersion: 1 };
+      localStorage.setItem(preferencesKey, JSON.stringify(validated));
+      return validated;
     }
   },
   licensing: {

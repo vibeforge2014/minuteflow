@@ -14,7 +14,6 @@ import {
   desktopCapturer,
   dialog,
   ipcMain,
-  net,
   powerMonitor,
   protocol,
   session,
@@ -22,9 +21,11 @@ import {
   systemPreferences
 } from "electron";
 import { mkdir, open, readFile, rename, stat, statfs, unlink, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { Readable } from "node:stream";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import {
   appendAudioChunk,
@@ -56,6 +57,8 @@ import {
   transcribeWithFasterWhisper,
   transcribeWithMlxWhisper
 } from "./services/providers.mjs";
+import { simplifyTranscriptResult } from "./services/chinese.mjs";
+import { audioContentType, parseByteRange } from "./services/media.mjs";
 import { chooseImportFiles, exportMeeting } from "./services/exports.mjs";
 import {
   describeLocalModel,
@@ -95,6 +98,8 @@ let latestUpdateCheck;
 // 录音会话的运行时状态（文件句柄 + 串行写队列 + 首个错误），键为 `${sessionId}:${track}`。
 // 仅存在于内存中；崩溃重启后由 database 的 markInterruptedRecordings 兜底为 interrupted 状态。
 const recordingFiles = new Map();
+// 进行中的总结请求（AbortController），键为 meetingId；summary:cancel 据此中止对应请求。
+const activeSummaryRequests = new Map();
 // 偏好设置写入串行队列：并发触发 preferences:save 时按提交顺序落盘，避免相互覆盖。
 let preferenceWriteQueue = Promise.resolve();
 // File paths the renderer obtained from a native dialog within this session.
@@ -125,7 +130,8 @@ function assertUuid(value, label) {
 }
 /** 偏好设置默认值；字段集合需与 persistPreferences 的校验白名单保持一致。 */
 const defaultPreferences = {
-  summaryIntervalSeconds: 120,
+  summaryIntervalSeconds: 60,
+  summaryCadenceVersion: 1,
   defaultMode: "online",
   glossary: [],
   retentionDays: null,
@@ -201,7 +207,18 @@ async function resolveLocalTranscriptionProfile(profile) {
  */
 async function loadPreferences() {
   try {
-    return { ...defaultPreferences, ...JSON.parse(await readFile(preferencesPath(), "utf8")) };
+    const stored = JSON.parse(await readFile(preferencesPath(), "utf8"));
+    const preferences = {
+      ...defaultPreferences,
+      ...stored,
+      // v1 将旧版默认的 2 分钟迁移为用户确认的智能约 1 分钟节奏。
+      summaryIntervalSeconds: Number(stored.summaryCadenceVersion) >= 1
+        ? Number(stored.summaryIntervalSeconds) || 60
+        : 60,
+      summaryCadenceVersion: 1
+    };
+    if (Number(stored.summaryCadenceVersion) < 1) await persistPreferences(preferences);
+    return preferences;
   } catch {
     return defaultPreferences;
   }
@@ -215,7 +232,8 @@ async function loadPreferences() {
  */
 async function persistPreferences(preferences) {
   const validated = {
-    summaryIntervalSeconds: Math.max(30, Number(preferences.summaryIntervalSeconds) || 120),
+    summaryIntervalSeconds: Math.max(30, Number(preferences.summaryIntervalSeconds) || 60),
+    summaryCadenceVersion: 1,
     defaultMode: preferences.defaultMode === "offline" ? "offline" : "online",
     glossary: Array.isArray(preferences.glossary)
       ? preferences.glossary.map((item) => String(item).trim()).filter(Boolean).slice(0, 500)
@@ -418,6 +436,16 @@ function registerIpc() {
     assertUuid(meetingId, "会议 ID");
     const meeting = loadMeeting(meetingId);
     if (!meeting) throw new Error("会议不存在。");
+    // 同一场会议同时只允许一个活跃录音会话：清理异常路径遗留的旧会话句柄
+    // （否则文件句柄与写队列会一直泄漏到应用退出）。
+    for (const [staleKey, staleRecord] of recordingFiles) {
+      if (staleRecord.meetingId !== meetingId) continue;
+      staleRecord.closing = true;
+      await staleRecord.writeQueue.catch(() => {});
+      await staleRecord.handle.close().catch(() => {});
+      await unlink(staleRecord.filePath).catch(() => {});
+      recordingFiles.delete(staleKey);
+    }
     const sessionId = randomUUID();
     const directory = path.join(app.getPath("userData"), "meetings", meetingId, "audio");
     await mkdir(directory, { recursive: true });
@@ -426,6 +454,7 @@ function registerIpc() {
     for (const track of ["microphone", "system"]) {
       const filePath = path.join(directory, `${sessionId}-${track}.partial`);
       recordingFiles.set(`${sessionId}:${track}`, {
+        meetingId,
         filePath,
         handle: await open(filePath, "a"),
         mimeType: "audio/webm",
@@ -439,8 +468,9 @@ function registerIpc() {
   });
 
   // recordings:append — 追加一段音频块（付费功能）：进入该轨的串行写队列，写前检查
-  // 磁盘剩余空间；瞬时错误只记录在会话上，stop 时统一上报，避免单个坏块毒化整个会话。
-  trustedHandle("recordings:append", async (_event, payload) => {
+  // 磁盘剩余空间；瞬时错误只记录在会话上（首个错误即时经 recordings:write-error 推送），
+  // stop 时统一上报，避免单个坏块毒化整个会话。
+  trustedHandle("recordings:append", async (event, payload) => {
     await requireLicense();
     assertUuid(payload.sessionId, "录音会话 ID");
     assertUuid(payload.meetingId, "会议 ID");
@@ -471,7 +501,16 @@ function registerIpc() {
       // recover instead of being permanently poisoned.
       record.lastError = null;
     }).catch((error) => {
+      const isFirstError = record.lastError === null;
       record.lastError ??= error instanceof Error ? error : new Error(String(error));
+      // 首次写盘失败立即推送给渲染层，让用户在录音过程中就看到磁盘告警
+      // （而不是等 stop 收尾时才知道）；写链恢复成功后上面会清掉 lastError。
+      if (isFirstError && !event.sender.isDestroyed()) {
+        event.sender.send("recordings:write-error", {
+          track: payload.track,
+          message: record.lastError.message
+        });
+      }
     });
     await record.writeQueue;
     // A successful write clears a transient error (e.g. disk freed up), so the
@@ -571,15 +610,21 @@ function registerIpc() {
     return { path: target };
   });
   // recordings:assets — 列出会议音频资产并生成 minuteflow-media:// 播放地址，会议播放器调用。
-  trustedHandle("recordings:assets", (_event, meetingId) => {
+  trustedHandle("recordings:assets", async (_event, meetingId) => {
     assertUuid(meetingId, "会议 ID");
-    return listMeetingAudioAssets(meetingId).map((asset) => ({
-      id: asset.id,
-      track: asset.track,
-      originalName: asset.originalName,
-      durationMs: asset.durationMs,
-      url: `minuteflow-media://audio/${asset.id}`
+    const assets = await Promise.all(listMeetingAudioAssets(meetingId).map(async (asset) => {
+      const playablePath = asset.playbackPath || asset.path;
+      const fileStat = await stat(playablePath).catch(() => null);
+      if (!fileStat?.isFile() || fileStat.size <= 0) return null;
+      return {
+        id: asset.id,
+        track: asset.track,
+        originalName: asset.originalName,
+        durationMs: asset.durationMs,
+        url: `minuteflow-media://audio/${asset.id}`
+      };
     }));
+    return assets.filter(Boolean);
   });
 
   // transcription:chunk — 对一小段音频执行转录（付费功能）：本地 transport 先做就绪
@@ -594,7 +639,7 @@ function registerIpc() {
     const localProfile = isLocal
       ? await resolveLocalTranscriptionProfile(profile)
       : profile;
-    const result = isLocal
+    const rawResult = isLocal
       ? await transcribeLocally(localProfile, audio, payload.fileName, payload.language, payload.glossary)
       : await transcribeRemote(
         profile,
@@ -604,6 +649,7 @@ function registerIpc() {
         payload.language,
         payload.glossary
       );
+    const result = simplifyTranscriptResult(rawResult);
     return {
       id: randomUUID(),
       startMs: payload.startMs,
@@ -616,16 +662,80 @@ function registerIpc() {
     };
   });
 
-  // summary:generate — 生成或滚动更新会议纪要（付费功能）：配置了 LLM 档案走在线
-  // 接口，否则退回本地规则纪要；由渲染层"生成纪要"操作显式触发（录音停止不会自动触发）。
+  // summary:generate — 生成或滚动更新会议纪要（付费功能）：显式选择离线纪要走本地规则引擎，
+  // 配置了在线 LLM 档案走在线接口（失败时回退本地引擎并在响应中带 degraded 标记告知用户，
+  // 不再静默降级），未配置档案同样返回带 degraded 标记的本地纪要；
+  // 由渲染层"生成纪要"操作显式触发（录音停止不会自动触发，避免停止时才弹 Keychain）。
   trustedHandle("summary:generate", async (_event, payload) => {
     await requireLicense();
+    // 入参防御：转写段必须是数组且逐条至少有文本，避免把任意结构喂给模型或规则引擎。
+    const input = payload?.input;
+    if (!input || !Array.isArray(input.transcript)) {
+      throw new Error("总结请求缺少会议上下文。");
+    }
+    const sanitized = {
+      title: String(input.title ?? ""),
+      goals: Array.isArray(input.goals) ? input.goals.map((item) => String(item)) : [],
+      notes: Array.isArray(input.notes) ? input.notes.map((item) => String(item)) : [],
+      transcript: input.transcript.filter((segment) => segment && typeof segment.text === "string"),
+      previousSummary: input.previousSummary ?? {}
+    };
+    const sourceThroughMs = sanitized.transcript.reduce(
+      (maximum, segment) => Math.max(maximum, Number(segment.endMs) || 0),
+      0
+    );
+    const finishedAt = () => new Date().toISOString();
     const profiles = listModelProfiles();
     const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "llm");
-    const summary = profile
-      ? await summarizeWithOpenAICompatible(profile, readSecret(profile.secretId), payload.input, payload.final)
-      : summarizeLocally(payload.input);
-    return { ...summary, updatedAt: new Date().toISOString(), stale: false };
+    if (profile?.transport === "local-summary") {
+      return { ...summarizeLocally(sanitized), updatedAt: finishedAt(), generationMode: "local", sourceThroughMs, stale: false };
+    }
+    if (!profile) {
+      return {
+        ...summarizeLocally(sanitized),
+        updatedAt: finishedAt(),
+        generationMode: "local",
+        sourceThroughMs,
+        stale: false,
+        degraded: true,
+        degradedReason: "尚未配置在线总结服务，本次已用本机基础纪要生成；可在设置中选择总结服务获得更好的效果。"
+      };
+    }
+    const meetingKey = typeof payload.meetingId === "string" ? payload.meetingId : "default";
+    const controller = new AbortController();
+    activeSummaryRequests.set(meetingKey, controller);
+    try {
+      const summary = await summarizeWithOpenAICompatible(
+        profile,
+        readSecret(profile.secretId),
+        sanitized,
+        Boolean(payload.final),
+        controller.signal
+      );
+      return { ...summary, updatedAt: finishedAt(), generationMode: "online", sourceThroughMs, stale: false };
+    } catch (error) {
+      // 用户主动取消不降级，原样抛出；其余失败（断网/超时/鉴权）回退本地纪要并明确告知。
+      if (controller.signal.aborted || error?.name === "AbortError") throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      return {
+        ...summarizeLocally(sanitized),
+        updatedAt: finishedAt(),
+        generationMode: "local",
+        sourceThroughMs,
+        stale: false,
+        degraded: true,
+        degradedReason: `在线总结失败（${reason}），已回退生成本机基础纪要。`
+      };
+    } finally {
+      if (activeSummaryRequests.get(meetingKey) === controller) activeSummaryRequests.delete(meetingKey);
+    }
+  });
+
+  // summary:cancel — 取消一场会议进行中的总结请求（中止 AbortController，无付费墙）。
+  trustedHandle("summary:cancel", (_event, meetingId) => {
+    const controller = typeof meetingId === "string" ? activeSummaryRequests.get(meetingId) : undefined;
+    controller?.abort();
+    return { ok: true };
   });
 
   // models:list — 列出已保存的模型档案（stt/llm/diarization），设置页服务目录调用。
@@ -844,13 +954,33 @@ app.whenReady().then(async () => {
   // Resolve any existing Keychain-backed credentials once at app startup so
   // recording and finalization never become the first surprise access point.
   warmSecretCache();
-  // 音频播放协议处理器：按资产 UUID 从数据库取路径，经 net.fetch 以流式响应返回本地文件。
-  protocol.handle("minuteflow-media", (request) => {
+  // 音频播放协议处理器：手动实现 Range 响应，保证 Chromium 可以渐进加载、拖动时间轴；
+  // 直接把 Range 转给 file:// 在部分 Electron 版本会得到不可播放的空响应。
+  protocol.handle("minuteflow-media", async (request) => {
     const id = new URL(request.url).pathname.split("/").filter(Boolean).pop();
     if (!id || !UUID_PATTERN.test(id)) return new Response("Not found", { status: 404 });
     const asset = loadAudioAsset(id);
     if (!asset) return new Response("Not found", { status: 404 });
-    return net.fetch(pathToFileURL(asset.playbackPath || asset.path).toString(), { headers: request.headers });
+    const filePath = asset.playbackPath || asset.path;
+    const fileStat = await stat(filePath).catch(() => null);
+    if (!fileStat?.isFile() || fileStat.size <= 0) return new Response("Not found", { status: 404 });
+    const rangeHeader = request.headers.get("range");
+    const range = parseByteRange(rangeHeader, fileStat.size);
+    if (rangeHeader && range === undefined) {
+      return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${fileStat.size}` } });
+    }
+    const start = range?.start ?? 0;
+    const end = range?.end ?? fileStat.size - 1;
+    const headers = {
+      "Accept-Ranges": "bytes",
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": audioContentType(filePath),
+      "Content-Length": String(end - start + 1),
+      ...(range ? { "Content-Range": `bytes ${start}-${end}/${fileStat.size}` } : {})
+    };
+    if (request.method === "HEAD") return new Response(null, { status: range ? 206 : 200, headers });
+    const stream = Readable.toWeb(createReadStream(filePath, { start, end }));
+    return new Response(stream, { status: range ? 206 : 200, headers });
   });
   configurePermissions();
   registerIpc();
@@ -862,6 +992,9 @@ app.whenReady().then(async () => {
   configureImportQueue({
     notify: (job) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("imports:job-updated", job);
+    },
+    notifyMeeting: (meeting) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("imports:meeting-updated", meeting);
     }
   });
   // 按保留策略清理过期音频；失败只记日志，不阻塞启动。

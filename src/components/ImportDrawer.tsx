@@ -4,7 +4,7 @@
  * 确认后文件立即归档并入队；下半部分是后台任务队列（单 worker 串行），
  * 支持重试、取消、等待配置（缺模型时任务可恢复暂停而非失败）。
  */
-import { ArrowClockwise, Check, FileAudio, GearSix, Pause, Trash, X } from "@phosphor-icons/react";
+import { ArrowClockwise, Check, FileAudio, GearSix, Pause, Trash, WarningCircle, X } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import type { ImportCandidate, ImportJob, ModelProfile } from "../types";
 
@@ -66,9 +66,14 @@ export function ImportDrawer(props: Props) {
               <div className="import-file" key={`${file.sourcePath}-${index}`}>
                 <div className="import-file__icon"><FileAudio size={20} /></div>
                 <div className="import-file__body">
-                  <input aria-label={`${file.name} 的会议标题`} value={file.title} onChange={(event) => {
-                    const next = [...props.candidates]; next[index] = { ...file, title: event.target.value }; props.onChange(next);
-                  }} />
+                  <input
+                    aria-label={`${file.name} 的会议标题`}
+                    placeholder="为这份录音填写会议标题"
+                    value={file.title}
+                    onChange={(event) => {
+                      const next = [...props.candidates]; next[index] = { ...file, title: event.target.value }; props.onChange(next);
+                    }}
+                  />
                   <p>{file.name}</p><span>{file.extension} · {formatBytes(file.sizeBytes)} · {file.durationMs ? formatTime(file.durationMs) : "时长将在归档后检测"}</span>
                 </div>
                 <button className="icon-button" aria-label={`移除 ${file.name}`} onClick={() => props.onChange(props.candidates.filter((_, itemIndex) => itemIndex !== index))}><Trash size={16} /></button>
@@ -86,6 +91,10 @@ export function ImportDrawer(props: Props) {
           <button className="button button--primary import-submit" disabled={busy || props.candidates.some((item) => !item.title.trim())} onClick={async () => {
             setBusy(true); try { await props.onEnqueue(props.candidates, { language, sttProfileId: sttProfileId || undefined, llmProfileId: llmProfileId || undefined, diarizationEnabled, autoSummarize: true }); } finally { setBusy(false); }
           }}>{busy ? "正在加入…" : `导入并后台处理 ${props.candidates.length} 个文件`}</button>
+          {props.candidates.some((item) => !item.title.trim()) && (
+            // 提交按钮因标题为空被禁用时，明确告诉用户缺什么，而不是只留一个灰按钮。
+            <p className="import-title-hint"><WarningCircle size={13} weight="fill" />还有文件未填写会议标题，填写后即可开始导入。</p>
+          )}
           <p className="import-duplicate-note">重复文件也会创建新的会议副本，原文件不会被移动或修改。</p>
         </section>
       )}

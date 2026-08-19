@@ -19,7 +19,7 @@
 - Markdown、PDF、DOCX、SRT、VTT、JSON 和 ZIP 备份导出
 - SQLite/FTS5 本地数据库与系统安全存储中的 API Key
 
-本地模型权重、FFmpeg、`whisper.cpp` 和 sherpa-onnx 权重不会静默打进安装包，需要由用户按需配置或下载。
+FFmpeg 和托管的 Whisper 运行时随桌面应用打包，无需用户安装或配置路径。Whisper 模型权重与说话人分离模型由用户在应用内按需下载或选择。
 
 ## 本地开发
 

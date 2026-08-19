@@ -74,6 +74,10 @@ export interface MeetingSummary {
   nextSteps: string[];
   /** 纪要最近一次生成/更新的时间。 */
   updatedAt?: string;
+  /** 当前纪要由在线模型或本机基础归纳生成。 */
+  generationMode?: "online" | "local";
+  /** 本次纪要已覆盖到的转录时间点。 */
+  sourceThroughMs?: number;
   /** 转写已更新但纪要未刷新时为 true，UI 据此提示重新总结。 */
   stale?: boolean;
   /** 手动锁定字段键集合（如 "keyPoints:0"、"action:<id>"），AI 重算时保留这些内容。 */
@@ -124,8 +128,8 @@ export interface ModelProfile {
   name: string;
   /** 用途：llm=纪要总结，stt=语音转写，diarization=说话人分离。 */
   kind: "llm" | "stt" | "diarization";
-  /** 调用通道：OpenAI 兼容 chat/audio、Ollama、whisper.cpp、Python Whisper、faster-whisper、MLX、sherpa-onnx。 */
-  transport: "openai-chat" | "openai-audio" | "ollama" | "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper" | "sherpa-onnx";
+  /** 调用通道：OpenAI 兼容 chat/audio、Ollama、离线基础纪要、whisper.cpp、Python Whisper、faster-whisper、MLX、sherpa-onnx。 */
+  transport: "openai-chat" | "openai-audio" | "ollama" | "local-summary" | "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper" | "sherpa-onnx";
   /** 服务基础地址。 */
   baseUrl: string;
   /** 模型名/本地模型文件名。 */
@@ -141,7 +145,7 @@ export interface ModelProfile {
     pythonExecutablePath?: string;
     /** 本地模型文件路径。 */
     modelPath?: string;
-    /** FFmpeg 路径（音频预处理）。 */
+    /** 主进程解析的应用内置 FFmpeg 路径；仅作运行时字段，不对用户暴露。 */
     ffmpegPath?: string;
     /** 说话人分割模型路径。 */
     segmentationModelPath?: string;
@@ -149,7 +153,7 @@ export interface ModelProfile {
     embeddingModelPath?: string;
     /** 说话人聚类阈值。 */
     clusteringThreshold?: number;
-    /** 接口方言：OpenAI 兼容 / New API / Anthropic 原生 / Gemini 原生。 */
+    /** 接口格式：OpenAI 兼容 / Anthropic 原生 / Gemini 原生；new-api 仅供旧档案迁移。 */
     apiFlavor?: "openai" | "new-api" | "anthropic" | "gemini";
     /** 转写响应格式偏好。 */
     responseFormat?: "json" | "verbose_json" | "text";
@@ -277,6 +281,8 @@ export interface CreateMeetingInput {
 export interface MeetingPreferences {
   /** 滚动 AI 纪要的生成间隔（秒）。 */
   summaryIntervalSeconds: number;
+  /** 智能滚动纪要节奏版本；升级时把旧默认值迁移为约 1 分钟。 */
+  summaryCadenceVersion?: number;
   /** 新建会议的默认形式（online/offline）。 */
   defaultMode: MeetingMode;
   /** 术语表：转写时传给模型，统一专有名词写法。 */
@@ -414,6 +420,8 @@ export interface DownloadableModel {
   license: string;
   installed: boolean;
   localPath?: string;
+  /** 下载完整性校验算法（当前为 sha256）。 */
+  digestAlgorithm?: "sha256" | "sha1";
 }
 
 /**
@@ -464,6 +472,21 @@ export interface ImportJob {
   stage: ImportStage;
   /** 0-1 进度。 */
   progress: number;
+  /** 分段转录总块数；旧任务没有该字段。 */
+  totalChunks?: number;
+  /** 已完成并落盘的分段数。 */
+  completedChunks?: number;
+  /** 当前正在处理的音频时间区间。 */
+  currentChunkStartMs?: number;
+  currentChunkEndMs?: number;
+  /** 分块方案版本与持久化参数；用于旧任务按原断点续跑。 */
+  chunkingVersion?: number;
+  chunkDurationMs?: number;
+  chunkOverlapMs?: number;
+  /** 最近一次滚动纪要已覆盖的音频位置与完成块数。 */
+  lastSummaryThroughMs?: number;
+  lastSummaryCompletedChunks?: number;
+  lastSummaryAt?: string;
   language: string;
   sttProfileId?: string;
   llmProfileId?: string;
@@ -511,7 +534,9 @@ export interface MeetingAPI {
     abort(payload: { meetingId: string; sessionId: string }): Promise<{ ok: true }>;
     open(meetingId: string): Promise<{ path: string }>;
     assets(meetingId: string): Promise<PlaybackAsset[]>;
-  };
+    /** 主进程推送的录音写盘失败告警（首次失败即时送达，不等停止收尾）。 */
+    onWriteError(callback: (payload: { track: AudioTrackKind; message: string }) => void): () => void;
+  }
   /** 转写：把一个音频块交给所选 stt 档案处理，返回单个转录段落。 */
   transcription: {
     processChunk(payload: {
@@ -525,9 +550,13 @@ export interface MeetingAPI {
       glossary?: string[];
     }): Promise<TranscriptSegment>;
   };
-  /** 纪要生成：final=false 为录音中滚动增量，true 为会后最终总结；由用户手动触发的最终总结不跟随录音停止自动执行。 */
+  /**
+   * 纪要生成：final=false 为录音中滚动增量，true 为会后最终总结；由用户手动触发的最终总结不跟随录音停止自动执行。
+   * degraded=true 表示结果来自本地规则引擎回退（未配置或在线失败），degradedReason 为给用户的说明。
+   */
   summary: {
     generate(payload: {
+      meetingId: string;
       profileId?: string;
       final: boolean;
       input: {
@@ -537,7 +566,9 @@ export interface MeetingAPI {
         transcript: TranscriptSegment[];
         previousSummary: MeetingSummary;
       };
-    }): Promise<MeetingSummary>;
+    }): Promise<MeetingSummary & { degraded?: boolean; degradedReason?: string }>;
+    /** 取消一场会议进行中的总结请求（中止主进程侧的 AbortController）。 */
+    cancel(meetingId: string): Promise<{ ok: true }>;
   };
   models: {
     list(): Promise<ModelProfile[]>;
@@ -568,6 +599,8 @@ export interface MeetingAPI {
     retry(id: string): Promise<ImportJob>;
     cancel(id: string): Promise<ImportJob>;
     onJobUpdated(callback: (job: ImportJob) => void): () => void;
+    /** 导入队列每完成一个音频分段后推送最新会议快照。 */
+    onMeetingUpdated(callback: (meeting: Meeting) => void): () => void;
   };
   /** 导出：把会议另存为指定格式（主进程弹出系统保存框）。 */
   exports: {
