@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths-ignore:
       - public/releases/latest-macos.json
+      - public/releases/latest-windows.json
       - public/downloads/**
   pull_request:
 
