@@ -335,24 +335,28 @@ export interface LicenseStatus {
 }
 
 /**
- * macOS 更新清单条目：从官网校验过的 JSON 更新 manifest 中读取的单条版本信息（含 sha256 与最低系统版本）。
+ * 桌面更新清单条目：从官网校验过的 JSON 更新 manifest 中读取的单条版本信息
+ * （macOS DMG / Windows 安装程序，含 sha256 与最低系统版本）。
  */
-export interface MacUpdateInfo {
+export interface AppUpdateInfo {
   schemaVersion: 1;
   version: string;
-  platform: "darwin";
+  platform: "darwin" | "win32";
   architectures: string[];
   publishedAt: string;
   notes: string;
-  /** 当前 DMG 的稳定下载地址。 */
+  /** 安装包的稳定下载地址（官网下载页）。 */
   downloadUrl: string;
   /** 版本发布页地址。 */
   releasePageUrl: string;
   assetUrl: string;
-  /** DMG 的 SHA-256 校验值。 */
+  /** 安装包的 SHA-256 校验值。 */
   sha256: string;
   minimumSystemVersion: string;
 }
+
+/** 历史别名：更新检测曾仅支持 macOS 时使用。 */
+export type MacUpdateInfo = AppUpdateInfo;
 
 /**
  * 应用更新检查结果：idle/available/up-to-date/unsupported/error 五种状态及当前版本信息。
@@ -363,7 +367,7 @@ export interface AppUpdateCheckResult {
   checkedAt: string;
   message: string;
   /** 有可用更新时携带的版本详情。 */
-  update?: MacUpdateInfo;
+  update?: AppUpdateInfo;
 }
 
 /**

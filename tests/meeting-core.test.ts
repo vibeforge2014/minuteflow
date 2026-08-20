@@ -21,10 +21,11 @@ import {
 import { describeLocalModel, listDownloadableModels, looksLikeWhisperModel } from "../electron/services/local-models.mjs";
 import { applyDiarization } from "../electron/services/diarization.mjs";
 import {
-  checkForMacUpdate,
+  checkForAppUpdate,
   compareVersions,
-  normalizeGitHubMacRelease,
-  validateMacUpdateManifest
+  normalizeGitHubRelease,
+  updateManifestUrls,
+  validateUpdateManifest
 } from "../electron/services/updates.mjs";
 import { groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments } from "../src/lib/transcript";
 import { simplifyChinese } from "../src/lib/chinese";
@@ -508,7 +509,7 @@ describe("model provider compatibility", () => {
   });
 });
 
-describe("macOS website updates", () => {
+describe("desktop online updates", () => {
   const updateManifest = {
     schemaVersion: 1,
     version: "0.2.0",
@@ -522,6 +523,14 @@ describe("macOS website updates", () => {
     sha256: "abc"
   };
 
+  const windowsManifest = {
+    ...updateManifest,
+    platform: "win32",
+    architectures: ["x64"],
+    downloadUrl: "../downloads/windows/latest/",
+    assetUrl: "https://github.com/vibeforge2014/minuteflow/releases/download/v0.2.0/MinuteFlow-Setup.exe"
+  };
+
   it("compares stable and prerelease semantic versions", () => {
     expect(compareVersions("0.2.0", "0.1.9")).toBe(1);
     expect(compareVersions("v0.2.0", "0.2.0")).toBe(0);
@@ -529,15 +538,27 @@ describe("macOS website updates", () => {
     expect(compareVersions("0.2.0", "0.2.0-beta.2")).toBe(1);
   });
 
+  it("selects per-platform manifest sources and rejects other platforms", () => {
+    expect(updateManifestUrls("darwin")[0]).toContain("latest-macos.json");
+    expect(updateManifestUrls("win32")[0]).toContain("latest-windows.json");
+    expect(updateManifestUrls("linux")).toEqual([]);
+    expect(() => validateUpdateManifest(updateManifest, { platform: "win32" }))
+      .toThrow("更新清单不是 Windows 版本。");
+  });
+
   it("rejects update manifests that point outside official HTTPS hosts", () => {
-    expect(() => validateMacUpdateManifest({
+    expect(() => validateUpdateManifest({
       ...updateManifest,
       downloadUrl: "https://example.com/app.dmg"
     })).toThrow("受信任");
+    expect(() => validateUpdateManifest({
+      ...windowsManifest,
+      assetUrl: "http://example.com/MinuteFlow-Setup.exe"
+    }, { platform: "win32" })).toThrow("受信任");
   });
 
   it("detects a newer compatible macOS release from the website manifest", async () => {
-    const result = await checkForMacUpdate({
+    const result = await checkForAppUpdate({
       currentVersion: "0.1.1",
       platform: "darwin",
       arch: "arm64",
@@ -549,7 +570,7 @@ describe("macOS website updates", () => {
     expect(result).toMatchObject({
       status: "available",
       currentVersion: "0.1.1",
-      update: { version: "0.2.0" }
+      update: { version: "0.2.0", platform: "darwin" }
     });
   });
 
@@ -565,7 +586,7 @@ describe("macOS website updates", () => {
         digest: "sha256:1234"
       }]
     };
-    expect(normalizeGitHubMacRelease(githubRelease, "arm64")).toMatchObject({
+    expect(normalizeGitHubRelease(githubRelease, { platform: "darwin", arch: "arm64" })).toMatchObject({
       version: "0.2.0",
       architectures: ["arm64"],
       sha256: "1234"
@@ -573,7 +594,7 @@ describe("macOS website updates", () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(new Response("missing", { status: 404 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(githubRelease), { status: 200 }));
-    const result = await checkForMacUpdate({
+    const result = await checkForAppUpdate({
       currentVersion: "0.1.1",
       platform: "darwin",
       arch: "arm64",
@@ -581,6 +602,76 @@ describe("macOS website updates", () => {
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ status: "available", update: { version: "0.2.0" } });
+  });
+
+  it("detects a newer Windows release from the website manifest", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify(windowsManifest), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    }));
+    const result = await checkForAppUpdate({
+      currentVersion: "0.1.1",
+      platform: "win32",
+      arch: "x64",
+      fetchImpl
+    });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://vibeforge2014.github.io/minuteflow/releases/latest-windows.json",
+      expect.anything()
+    );
+    expect(result).toMatchObject({
+      status: "available",
+      update: { version: "0.2.0", platform: "win32", architectures: ["x64"] }
+    });
+  });
+
+  it("picks the squirrel setup executable from a GitHub release for Windows", async () => {
+    const githubRelease = {
+      tag_name: "v0.2.0",
+      published_at: "2026-08-03T00:00:00Z",
+      html_url: "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.2.0",
+      body: "修复与改进",
+      assets: [
+        { name: "RELEASES", browser_download_url: "https://github.com/vibeforge2014/minuteflow/releases/download/v0.2.0/RELEASES" },
+        { name: "minuteflow-0.2.0-full.nupkg", browser_download_url: "https://github.com/vibeforge2014/minuteflow/releases/download/v0.2.0/minuteflow-0.2.0-full.nupkg" },
+        {
+          name: "MinuteFlow-Setup.exe",
+          browser_download_url: "https://github.com/vibeforge2014/minuteflow/releases/download/v0.2.0/MinuteFlow-Setup.exe",
+          digest: "sha256:abcd"
+        }
+      ]
+    };
+    expect(normalizeGitHubRelease(githubRelease, { platform: "win32", arch: "x64" })).toMatchObject({
+      version: "0.2.0",
+      platform: "win32",
+      architectures: ["x64"],
+      assetUrl: "https://github.com/vibeforge2014/minuteflow/releases/download/v0.2.0/MinuteFlow-Setup.exe"
+    });
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(new Response("missing", { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(githubRelease), { status: 200 }));
+    const result = await checkForAppUpdate({
+      currentVersion: "0.1.1",
+      platform: "win32",
+      arch: "x64",
+      fetchImpl
+    });
+    expect(result).toMatchObject({
+      status: "available",
+      update: { assetUrl: "https://github.com/vibeforge2014/minuteflow/releases/download/v0.2.0/MinuteFlow-Setup.exe" }
+    });
+  });
+
+  it("reports unsupported platforms without any network request", async () => {
+    const fetchImpl = vi.fn();
+    const result = await checkForAppUpdate({
+      currentVersion: "0.1.1",
+      platform: "linux",
+      arch: "x64",
+      fetchImpl
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: "unsupported" });
   });
 });
 

@@ -380,7 +380,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
     }
   };
 
-  /** 打开官网下载页（未签名阶段不自动安装，只引导到稳定 DMG 地址）。 */
+  /** 打开官网下载页（未签名阶段不自动安装，只引导到稳定下载地址）。 */
   const openUpdateDownload = async () => {
     try {
       await api.updates.openDownload();
@@ -393,6 +393,13 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
       }));
     }
   };
+
+  /** 安装提示按平台区分：macOS 拖入应用程序，Windows 直接运行安装程序。 */
+  const updateInstallHint = api.system.platform === "win32"
+    ? "应用只接受 HTTPS 官网清单和官方发布地址。下载 MinuteFlow-Setup.exe 后直接运行，安装程序会自动完成升级。"
+    : api.system.platform === "darwin"
+      ? "应用只接受 HTTPS 官网清单和官方发布地址。下载完成后，请打开 DMG 并将新版本拖入“应用程序”。"
+      : "应用只接受 HTTPS 官网清单和官方发布地址。";
 
   // 用名称+transport 反查当前档案命中的预设（驱动下拉框回显）；pythonWhisper 归并为统一的 whisper 预设。
   const matchedPresetKey = editing
@@ -626,7 +633,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
                 </div>
                 <div className="update-security-note">
                   <CheckCircle size={17} weight="fill" />
-                  <p>应用只接受 HTTPS 官网清单和官方发布地址。下载完成后，请打开 DMG 并将新版本拖入“应用程序”。</p>
+                  <p>{updateInstallHint}</p>
                 </div>
               </div>
             )}

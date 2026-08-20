@@ -63,7 +63,7 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 | `services/import-queue.mjs` | 持久化单 worker 导入队列：归档→预处理→转写→分离→总结，缺组件可恢复暂停 | `enqueueImports`、`runQueue`、`processJob`、`cancelImport` |
 | `services/diarization.mjs` | sherpa-onnx 离线说话人分离与轮次标签回填 | `diarizeWithSherpa`、`applyDiarization` |
 | `services/exports.mjs` | 八种格式导出（md/txt/pdf/docx/srt/vtt/json/zip）与导入文件选择 | `exportMeeting`、`chooseImportFiles` |
-| `services/updates.mjs` | macOS 更新：官网 JSON 清单 + GitHub 兜底、版本比较、allow-list HTTPS 校验 | `checkForMacUpdate`、`compareVersions`、`validateMacUpdateManifest` |
+| `services/updates.mjs` | macOS + Windows 更新：分平台官网 JSON 清单 + GitHub 兜底、版本比较、allow-list HTTPS 校验 | `checkForAppUpdate`、`compareVersions`、`validateUpdateManifest` |
 | `services/formatters.mjs` | 纯函数格式化：Markdown 纪要、SRT/VTT、时间戳 | `markdown`、`subtitle`、`formatTime` |
 
 ## 3. 桌面端渲染层（`src/`）
@@ -167,7 +167,7 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 | 导入队列（暂停/恢复/重试） | `electron/services/import-queue.mjs` + `src/components/ImportDrawer.tsx` |
 | 付费墙/激活/离线宽限 | `electron/services/licensing.mjs` + `src/components/PaywallDialog.tsx` |
 | 首run权限引导流程版本 | `src/App.tsx`（permissionsVersion 判断）+ `src/components/SystemPermissionsDialog.tsx` |
-| 应用更新（清单校验/跳转） | `electron/services/updates.mjs` + `src/components/SettingsDialog.tsx`（updates 页）+ `public/downloads/macos/latest/redirect.js` |
+| 应用更新（清单校验/跳转） | `electron/services/updates.mjs` + `src/components/SettingsDialog.tsx`（updates 页）+ `public/downloads/{macos,windows}/latest/redirect.js` |
 | 官网首页文案/区块 | `src/MarketingSite.tsx`（LandingPage） |
 | 官网政策页（定价/条款/隐私/退款） | `src/MarketingSite.tsx`（PolicyPage + 四个 *Content） |
 | 数据库表结构/搜索索引 | `electron/database.mjs` |
@@ -187,4 +187,4 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 | `npm run typecheck` | tsc --noEmit |
 | `npm run build` | Vite 构建 + Sites 交付物组装（须产出 dist/client/index.html、dist/server/index.js、dist/.openai/hosting.json） |
 | `npm run make` | Electron Forge 打包（DMG/Squirrel/ZIP） |
-| `node scripts/write-release-manifest.mjs --version X.Y.Z --dmg <path>` | 发版更新官网清单 |
+| `node scripts/write-release-manifest.mjs --version X.Y.Z --dmg <path>` / `--setup <path>` | 发版更新官网清单（macOS DMG / Windows 安装程序） |

@@ -68,7 +68,7 @@ import {
   resolveLocalModelProfile
 } from "./services/local-models.mjs";
 import {
-  checkForMacUpdate,
+  checkForAppUpdate,
   isOfficialHttpsUrl
 } from "./services/updates.mjs";
 import {
@@ -368,27 +368,29 @@ function trustedHandle(channel, handler) {
   });
 }
 
-/** 更新检查的初始状态：仅 macOS 支持官网更新检测，其余平台直接标记 unsupported。 */
+/** 提供官网更新检测的桌面平台（macOS DMG / Windows squirrel 安装器）。 */
+const UPDATE_PLATFORMS = new Set(["darwin", "win32"]);
+
+/** 更新检查的初始状态：macOS 与 Windows 支持官网更新检测，其余平台直接标记 unsupported。 */
 function idleUpdateState() {
+  const supported = UPDATE_PLATFORMS.has(process.platform);
   return {
-    status: process.platform === "darwin" ? "idle" : "unsupported",
+    status: supported ? "idle" : "unsupported",
     currentVersion: app.getVersion(),
     checkedAt: "",
-    message: process.platform === "darwin"
-      ? "尚未检查更新。"
-      : "当前仅为 macOS 提供官网更新检测。"
+    message: supported ? "尚未检查更新。" : "当前平台暂不支持在线更新检测。"
   };
 }
 
 /**
- * 执行一次 macOS 更新检查并把结果缓存到 latestUpdateCheck（供 updates:get-state 读取）。
+ * 执行一次桌面端更新检查并把结果缓存到 latestUpdateCheck（供 updates:get-state 读取）。
  * @param {{notify?: boolean}} options notify=true 且发现新版本时向渲染层推送 updates:available 事件
  * @returns {Promise<object>} 检查结果（status: available / up-to-date / unsupported / error）
  * 副作用：网络请求（updates.mjs）；检查失败降级为 error 状态而不是抛出。
  */
-async function runMacUpdateCheck({ notify = false } = {}) {
+async function runUpdateCheck({ notify = false } = {}) {
   try {
-    latestUpdateCheck = await checkForMacUpdate({
+    latestUpdateCheck = await checkForAppUpdate({
       currentVersion: app.getVersion(),
       platform: process.platform,
       arch: process.arch
@@ -868,7 +870,7 @@ function registerIpc() {
   // updates:get-state — 读取最近一次更新检查结果（未检查时返回初始状态），更新卡片调用。
   trustedHandle("updates:get-state", () => latestUpdateCheck ?? idleUpdateState());
   // updates:check — 手动触发一次更新检查，设置页"检查更新"按钮调用。
-  trustedHandle("updates:check", () => runMacUpdateCheck());
+  trustedHandle("updates:check", () => runUpdateCheck());
   // updates:open-download — 打开官网下载页；下载地址必须再次通过 allow-list HTTPS 校验，
   // 更新从不静默安装，只跳转官方稳定链接。
   trustedHandle("updates:open-download", async () => {
@@ -1005,9 +1007,9 @@ app.whenReady().then(async () => {
   // 主窗口就绪后立即唤醒导入队列（含因缺模型/组件而暂停等待的任务）。
   wakeImportQueue();
 
-  // 打包后的 macOS 版本在启动 5 秒后静默检查一次更新；仅提醒，从不自动安装。
-  if (process.platform === "darwin" && app.isPackaged) {
-    setTimeout(() => runMacUpdateCheck({ notify: true }), 5_000);
+  // 打包后的 macOS / Windows 版本在启动 5 秒后静默检查一次更新；仅提醒，从不自动安装。
+  if (UPDATE_PLATFORMS.has(process.platform) && app.isPackaged) {
+    setTimeout(() => runUpdateCheck({ notify: true }), 5_000);
   }
 
   // 系统休眠/唤醒事件转发给渲染层，便于暂停录音与恢复界面状态。
