@@ -28,6 +28,7 @@ import {
   validateUpdateManifest
 } from "../electron/services/updates.mjs";
 import { groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments } from "../src/lib/transcript";
+import { groupLibraryMeetings, splitHighlight } from "../src/lib/library";
 import { simplifyChinese } from "../src/lib/chinese";
 import { isMicrophonePermissionError, shouldRequestMicrophone } from "../src/lib/permissions";
 import { lockSummaryField, mergeSummaryRevision, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
@@ -110,6 +111,65 @@ describe("microphone permission routing", () => {
     denied.name = "NotAllowedError";
     expect(isMicrophonePermissionError(denied)).toBe(true);
     expect(isMicrophonePermissionError(new Error("device missing"))).toBe(false);
+  });
+});
+
+describe("meeting library grouping", () => {
+  const now = Date.now();
+  const libraryMeeting = (id: string, hoursAgo: number, favorite = false) => ({
+    id,
+    favorite,
+    scheduledAt: new Date(now - hoursAgo * 3_600_000).toISOString()
+  });
+
+  it("pins favorites above the time groups and excludes them from time buckets", () => {
+    const groups = groupLibraryMeetings([
+      libraryMeeting("today", 2),
+      libraryMeeting("fav-week", 30, true),
+      libraryMeeting("week", 50),
+      libraryMeeting("fav-today", 3, true),
+      libraryMeeting("earlier", 24 * 10)
+    ], false);
+    expect(groups.map((group) => group.key)).toEqual(["favorites", "today", "week", "earlier"]);
+    expect(groups[0].meetings.map((item) => item.id)).toEqual(["fav-week", "fav-today"]);
+    expect(groups[1].meetings.map((item) => item.id)).toEqual(["today"]);
+    expect(groups[3].meetings.map((item) => item.id)).toEqual(["earlier"]);
+  });
+
+  it("falls back to plain time groups while searching so results stay ordered", () => {
+    const groups = groupLibraryMeetings([
+      libraryMeeting("fav-today", 3, true),
+      libraryMeeting("today", 2)
+    ], true);
+    expect(groups.map((group) => group.key)).toEqual(["today"]);
+    expect(groups[0].meetings.map((item) => item.id)).toEqual(["fav-today", "today"]);
+  });
+
+  it("emits no favorites header when nothing is starred", () => {
+    expect(groupLibraryMeetings([libraryMeeting("today", 1)], false).map((group) => group.key)).toEqual(["today"]);
+  });
+});
+
+describe("meeting library search highlight", () => {
+  it("splits case-insensitive matches into highlighted parts", () => {
+    expect(splitHighlight("产品团队周会 Kickoff", "kick")).toEqual([
+      { text: "产品团队周会 ", match: false },
+      { text: "Kick", match: true },
+      { text: "off", match: false }
+    ]);
+  });
+
+  it("highlights repeated hits and keeps CJK substring matching", () => {
+    expect(splitHighlight("周会与复盘周会", "周会")).toEqual([
+      { text: "周会", match: true },
+      { text: "与复盘", match: false },
+      { text: "周会", match: true }
+    ]);
+  });
+
+  it("returns a single plain part for empty queries or no match", () => {
+    expect(splitHighlight("团队周会", "   ")).toEqual([{ text: "团队周会", match: false }]);
+    expect(splitHighlight("团队周会", "访谈").every((part) => !part.match)).toBe(true);
   });
 });
 

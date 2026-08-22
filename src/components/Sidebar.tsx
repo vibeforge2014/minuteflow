@@ -1,7 +1,8 @@
 /**
- * 会议库侧栏（工作区左栏）：品牌、新建入口、搜索框、按时间分组的会议列表，
+ * 会议库侧栏（工作区左栏）：品牌、新建入口、搜索框、收藏置顶 + 按时间分组的会议列表，
  * 以及底部辅助功能（导入录音/会议模板/最近删除/设置）。
- * 列表数据来自 Zustand store 的 meetings，搜索词也存于 store 以便 ⌘K 全局聚焦。
+ * 列表数据来自 Zustand store 的 meetings，搜索词也存于 store 以便 ⌘K 全局聚焦；
+ * 搜索时标题会高亮命中片段，行内星标可直接收藏/取消收藏（收藏项固定在顶部「收藏」组）。
  */
 import { useMemo } from "react";
 import {
@@ -9,12 +10,14 @@ import {
   GearSix,
   MagnifyingGlass,
   Plus,
+  Star,
   Trash,
   X
 } from "@phosphor-icons/react";
 import type { Meeting } from "../types";
 import { useMeetingStore } from "../store/meetingStore";
 import { formatDuration } from "../lib/format";
+import { groupLibraryMeetings, splitHighlight } from "../lib/library";
 import { BrandMark } from "./BrandMark";
 
 interface SidebarProps {
@@ -25,15 +28,17 @@ interface SidebarProps {
   onImport(): void;
   /** 进行中的导入任务数（导入按钮角标）。 */
   importCount?: number;
+  /** 行内星标：收藏/取消收藏某个会议。 */
+  onToggleFavorite(id: string): void;
   onTrash(): void;
   onSettings(): void;
 }
 
-export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, importCount = 0, onTrash, onSettings }: SidebarProps) {
+export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, importCount = 0, onToggleFavorite, onTrash, onSettings }: SidebarProps) {
   const search = useMeetingStore((state) => state.search);
   const setSearch = useMeetingStore((state) => state.setSearch);
-  // 按开会时间距今天数分组（今天/本周/更早），meetings 变化时才重算。
-  const groups = useMemo(() => groupMeetings(meetings), [meetings]);
+  // 收藏置顶 + 时间分组（搜索时退回纯时间分组），meetings/搜索状态变化时才重算。
+  const groups = useMemo(() => groupLibraryMeetings(meetings, search.trim().length > 0), [meetings, search]);
   const searching = search.trim().length > 0;
 
   return (
@@ -72,27 +77,42 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, impor
 
       <div className="meeting-groups">
         {groups.map((group) => (
-          <section key={group.label} className="meeting-group">
-            <h2>{group.label}</h2>
+          <section key={group.key} className={`meeting-group ${group.key === "favorites" ? "meeting-group--favorites" : ""}`}>
+            <h2>
+              {group.key === "favorites" && <Star size={11} weight="fill" />}
+              {group.label}
+            </h2>
             {group.meetings.map((meeting) => (
-              <button
-                key={meeting.id}
-                className={`meeting-row ${selectedId === meeting.id ? "is-selected" : ""}`}
-                onClick={() => onSelect(meeting.id)}
-              >
-                <span className="meeting-row__title">
-                  {meeting.status === "recording" && <i />}
-                  {meeting.title}
-                </span>
-                <span className="meeting-row__meta">
-                  {formatDate(meeting.scheduledAt)}
-                  {meeting.status === "recording" ? (
-                    <strong>进行中</strong>
-                  ) : (
-                    <span>{formatDuration(meeting.durationSeconds)}</span>
-                  )}
-                </span>
-              </button>
+              <div key={meeting.id} className="meeting-row-wrap">
+                <button
+                  className={`meeting-row ${selectedId === meeting.id ? "is-selected" : ""}`}
+                  onClick={() => onSelect(meeting.id)}
+                >
+                  <span className="meeting-row__title">
+                    {meeting.status === "recording" && <i />}
+                    {searching
+                      ? splitHighlight(meeting.title, search).map((part, index) =>
+                          part.match ? <mark key={`hl-${index}`}>{part.text}</mark> : <span key={`hl-${index}`}>{part.text}</span>)
+                      : meeting.title}
+                  </span>
+                  <span className="meeting-row__meta">
+                    {formatDate(meeting.scheduledAt)}
+                    {meeting.status === "recording" ? (
+                      <strong>进行中</strong>
+                    ) : (
+                      <span>{formatDuration(meeting.durationSeconds)}</span>
+                    )}
+                  </span>
+                </button>
+                <button
+                  className={`meeting-row-fav ${meeting.favorite ? "is-favorited" : ""}`}
+                  aria-label={meeting.favorite ? `取消收藏 ${meeting.title}` : `收藏 ${meeting.title}`}
+                  title={meeting.favorite ? "取消收藏" : "收藏，固定在列表顶部"}
+                  onClick={() => onToggleFavorite(meeting.id)}
+                >
+                  <Star size={14} weight={meeting.favorite ? "fill" : "regular"} />
+                </button>
+              </div>
             ))}
           </section>
         ))}
@@ -111,23 +131,6 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, impor
       </nav>
     </aside>
   );
-}
-
-/** 按距今天数把会议分到 今天（<1天）/ 本周（<7天）/ 更早 三组，空组不显示。 */
-function groupMeetings(meetings: Meeting[]) {
-  const groups = [
-    { label: "今天", meetings: [] as Meeting[] },
-    { label: "本周", meetings: [] as Meeting[] },
-    { label: "更早", meetings: [] as Meeting[] }
-  ];
-  const anchor = Date.now();
-  for (const meeting of meetings) {
-    const difference = (anchor - new Date(meeting.scheduledAt).getTime()) / 86_400_000;
-    if (difference < 1) groups[0].meetings.push(meeting);
-    else if (difference < 7) groups[1].meetings.push(meeting);
-    else groups[2].meetings.push(meeting);
-  }
-  return groups.filter((group) => group.meetings.length);
 }
 
 /** 侧栏行内日期显示：MM-DD HH:mm。 */

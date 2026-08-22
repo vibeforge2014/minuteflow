@@ -80,6 +80,7 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 | `lib/transcript.ts` | 转写段合并（provisional→final 覆盖）与说话人标签合并 | `mergeTranscriptSegments`、`mergeSpeakerLabels` |
 | `lib/summary.ts` | 纪要手动锁与 AI 修订版合并（保护用户编辑不被覆盖） | `lockSummaryField`、`mergeSummaryRevision` |
 | `lib/format.ts` | 时长/间隔格式化 | `formatDuration`、`formatInterval` |
+| `lib/library.ts` | 会议库分组（收藏置顶/时间分组）与搜索高亮切分 | `groupLibraryMeetings`、`splitHighlight` |
 | `data/demo.ts` | 官网/浏览器模式演示会议数据 | `demoMeetings` |
 
 ### 录音链路

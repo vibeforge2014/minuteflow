@@ -24,7 +24,7 @@ import { DocumentWorkspace } from "./components/DocumentWorkspace";
 import { TranscriptPanel } from "./components/TranscriptPanel";
 import { RecorderBar } from "./components/RecorderBar";
 import { NewMeetingDialog } from "./components/NewMeetingDialog";
-import { SettingsDialog } from "./components/SettingsDialog";
+import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
 import { ExportMenu } from "./components/ExportMenu";
 import { Toast } from "./components/Toast";
 import { EmptyState } from "./components/EmptyState";
@@ -62,6 +62,8 @@ export function App() {
   // —— 本地 UI 状态：各类弹层开关、导入队列、播放进度等，不进入 Zustand 全局 store ——
   const [newMeetingOpen, setNewMeetingOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 打开设置时的初始页（如更新提示直达「软件更新」）；undefined 表示沿用上次页。 */
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>();
   const [trashOpen, setTrashOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [permissionsOpen, setPermissionsOpen] = useState(false);
@@ -72,7 +74,8 @@ export function App() {
   const [rightPanelTab, setRightPanelTab] = useState<"transcript" | "summary">("transcript");
   const [exportOpen, setExportOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  /** 成功提示：可附带一个直达动作（更新提示 → 打开软件更新）。 */
+  const [toast, setToast] = useState<{ message: string; action?: { label: string; run: () => void } } | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importCandidates, setImportCandidates] = useState<ImportCandidate[]>([]);
   const [importJobs, setImportJobs] = useState<ImportJob[]>([]);
@@ -83,17 +86,29 @@ export function App() {
   // 已提示过“导入完成”的任务 id 集合：防止事件订阅重放历史任务时重复弹 Toast。
   const completedImports = useRef(new Set<string>());
 
+  /** 统一的提示入口：可附带直达动作（如更新提示一键打开软件更新）。 */
+  const notify = useCallback((message: string, action?: { label: string; run: () => void }) => {
+    setToast(action ? { message, action } : { message });
+  }, []);
+
+  /** 打开设置，可选直达某个标签页。 */
+  const openSettings = useCallback((tab?: SettingsTab) => {
+    setSettingsTab(tab);
+    setSettingsOpen(true);
+  }, []);
+
   // 启动时加载会议/模型/偏好，并拉取一次授权状态（付费墙开关）。
   useEffect(() => {
     initialize();
     api.licensing.getStatus().then(setLicenseStatus).catch(() => setLicenseStatus(null));
   }, [initialize]);
 
+  // 发现新版本：提示附带「打开软件更新」直达按钮，不再要求用户手动找设置入口。
   useEffect(() => api.updates.onAvailable((result) => {
     if (result.update) {
-      setToast(`发现新版本 ${result.update.version}，可前往“设置 → 软件更新”下载。`);
+      notify(`发现新版本 ${result.update.version}。`, { label: "打开软件更新", run: () => openSettings("updates") });
     }
-  }), []);
+  }), [notify, openSettings]);
 
   // 导入队列：先回填历史任务，再订阅主进程推送的任务更新；任务完成时提示一次并刷新会议列表。
   useEffect(() => {
@@ -105,7 +120,7 @@ export function App() {
       setImportJobs((current) => [job, ...current.filter((item) => item.id !== job.id)].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)));
       if (job.status === "complete" && !completedImports.current.has(job.id)) {
         completedImports.current.add(job.id);
-        setToast(`“${job.title}”已完成导入，可从左侧「导入录音」打开它，或直接在会议库中查看。`);
+        notify(`“${job.title}”已完成导入，可从左侧「导入录音」打开它，或直接在会议库中查看。`);
         void refreshMeetings();
       }
     });
@@ -175,7 +190,7 @@ export function App() {
       // 立即消费 warning（而不是保留字符串）：否则连续两次内容相同的警告
       // 不会重新触发本 effect，第二次提示会被静默吞掉。
       recorder.setWarning(null);
-      setToast(message);
+      notify(message);
     }
   }, [recorder.warning]);
 
@@ -198,10 +213,15 @@ export function App() {
   // 自动关闭计时器被反复重置（录音中电平更新让 App 高频重渲染，提示将永远不消失）。
   const dismissToast = useCallback(() => setToast(null), []);
 
-  const handleCreate = async (input: CreateMeetingInput) => {
+  const handleCreate = async (input: CreateMeetingInput, options?: { startRecording?: boolean }) => {
     const created = await createMeeting(input);
     setNewMeetingOpen(false);
-    setToast("会议已创建，可以开始录音。");
+    // 一键开会：对刚创建的会议立即启动录音（先过付费墙；启动仍会做真实麦克风校验）。
+    if (options?.startRecording) {
+      if (requirePremium("录音、实时转写与自动纪要")) void recorder.start(created);
+    } else {
+      notify("会议已创建，可以开始录音。");
+    }
     return created;
   };
 
@@ -247,13 +267,18 @@ export function App() {
       const files = await api.imports.fromDropped(Array.from(event.dataTransfer.files));
       setImportCandidates((current) => [...current, ...files]);
       setImportOpen(true);
-    } catch (error) { setToast(error instanceof Error ? error.message : "无法读取拖入的文件。"); }
+    } catch (error) { notify(error instanceof Error ? error.message : "无法读取拖入的文件。"); }
   };
 
   // 会议文档统一变更入口：整份替换，由 store 负责乐观更新 + 持久化。
   const handleMeetingChange = (next: Meeting) => {
     updateMeeting(next.id, () => next);
   };
+
+  // 侧栏行内星标：切换收藏（收藏项固定在会议库顶部）。
+  const handleToggleFavorite = useCallback((id: string) => {
+    void updateMeeting(id, (current) => ({ ...current, favorite: !current.favorite }));
+  }, [updateMeeting]);
 
   // 首次加载且尚无可选会议时展示全屏 loading，避免闪烁空状态。
   if (loading && !meeting) {
@@ -274,8 +299,9 @@ export function App() {
         onNew={() => setNewMeetingOpen(true)}
         onImport={handleImport}
         importCount={importJobs.filter((job) => !["complete", "cancelled", "failed"].includes(job.status)).length}
+        onToggleFavorite={handleToggleFavorite}
         onTrash={() => setTrashOpen(true)}
-        onSettings={() => setSettingsOpen(true)}
+        onSettings={() => openSettings()}
       />
 
       <main className="main-pane">
@@ -322,7 +348,7 @@ export function App() {
                     <ExportMenu
                       meeting={meeting}
                       onClose={() => setExportOpen(false)}
-                      onDone={(message) => setToast(message)}
+                      onDone={(message) => notify(message)}
                     />
                   )}
                 </div>
@@ -343,7 +369,7 @@ export function App() {
                         try {
                           await api.recordings.open(meeting.id);
                         } catch (error) {
-                          setToast(error instanceof Error ? error.message : "无法打开录音位置。");
+                          notify(error instanceof Error ? error.message : "无法打开录音位置。");
                         }
                         setMoreOpen(false);
                       }}>
@@ -359,7 +385,7 @@ export function App() {
                       <button className="is-danger" onClick={async () => {
                         await deleteMeeting(meeting.id);
                         setMoreOpen(false);
-                        setToast("会议已移到最近删除，可在会议库中恢复。");
+                        notify("会议已移到最近删除，可在会议库中恢复。");
                       }}>
                         <Trash size={16} />移到最近删除
                       </button>
@@ -385,7 +411,7 @@ export function App() {
               onClose={() => setPlayerOpen(false)}
               onAvailabilityChange={setPlayerAvailable}
               onTimeChange={setPlaybackMs}
-              onError={setToast}
+              onError={notify}
             />
 
             <DocumentWorkspace
@@ -418,7 +444,7 @@ export function App() {
                   notes: [...meeting.notes, marker],
                   notesMarkdown: [meeting.notesMarkdown || meeting.notes.join("\n\n"), marker].filter(Boolean).join("\n\n")
                 });
-                setToast(`已在 ${time} 添加重点标记。`);
+                notify(`已在 ${time} 添加重点标记。`);
               }}
             />
           </>
@@ -456,7 +482,7 @@ export function App() {
           onSeek={(ms) => {
             // 没有可用音频（未录制/文件缺失）时不打开播放器，避免出现一个必然报错的空播放器。
             if (!playerAvailable) {
-              setToast("这场会议没有可回放的音频文件；转录时间戳仍可作为内容定位使用。");
+              notify("这场会议没有可回放的音频文件；转录时间戳仍可作为内容定位使用。");
               return;
             }
             setPlayerOpen(true);
@@ -471,7 +497,7 @@ export function App() {
         onClose={() => setNewMeetingOpen(false)}
         onCreate={handleCreate}
       />
-      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsDialog open={settingsOpen} initialTab={settingsTab} onClose={() => setSettingsOpen(false)} />
       <DeletedMeetingsDialog
         open={trashOpen}
         onClose={() => setTrashOpen(false)}
@@ -486,7 +512,7 @@ export function App() {
         onConfigureModels={async () => {
           await updatePreferences({ ...preferences, onboardingCompleted: true });
           setOnboardingOpen(false);
-          setSettingsOpen(true);
+          openSettings();
         }}
       />
       <SystemPermissionsDialog
@@ -501,7 +527,7 @@ export function App() {
           // 之后用户第一次点“开始录音”时会按需引导授权（含被拒绝时重新打开本对话框）。
           await updatePreferences({ ...preferences, systemPermissionsCompleted: true, permissionsVersion: 2 });
           setPermissionsOpen(false);
-          setToast("已跳过授权。首次开始录音时会再引导你完成麦克风授权。");
+          notify("已跳过授权。首次开始录音时会再引导你完成麦克风授权。");
         }}
       />
       <PaywallDialog
@@ -528,12 +554,12 @@ export function App() {
           setImportOpen(false);
           setRightPanelOpen(true);
           setRightPanelTab("transcript");
-          setToast(`${jobs.length} 个录音已归档并加入后台队列。`);
+          notify(`${jobs.length} 个录音已归档并加入后台队列。`);
         }}
         onRetry={(id) => void api.imports.retry(id)}
         onCancel={(id) => void api.imports.cancel(id)}
         onOpenMeeting={(id) => { selectMeeting(id); setImportOpen(false); }}
-        onConfigure={() => { setImportOpen(false); setSettingsOpen(true); }}
+        onConfigure={() => { setImportOpen(false); openSettings(); }}
       />
 
       {/* 错误与操作反馈分成两条独立 Toast 叠放：store 错误（警告样式）不再吞掉
@@ -541,14 +567,14 @@ export function App() {
       {(error || toast) && (
         <div className="toast-stack">
           {error && <Toast tone="warning" message={error} onClose={clearError} />}
-          {toast && <Toast message={toast} onClose={dismissToast} />}
+          {toast && <Toast message={toast.message} action={toast.action ? { label: toast.action.label, run: toast.action.run } : undefined} onClose={dismissToast} />}
         </div>
       )}
 
       <button
         className="floating-settings"
         aria-label="打开设置"
-        onClick={() => setSettingsOpen(true)}
+        onClick={() => openSettings()}
       >
         <GearSix size={19} />
       </button>

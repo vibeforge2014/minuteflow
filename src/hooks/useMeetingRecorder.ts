@@ -178,19 +178,25 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     );
   }, []);
 
-  const start = useCallback(async () => {
-    if (!meeting || phase !== "idle") return;
+  /**
+   * 开始录音。可传入 meeting 覆盖参数：一键「创建并开始录音」时，闭包里的 meeting
+   * prop 还是旧选中项（store 更新尚未重渲染），需要直接对刚创建的会议启动；
+   * 覆盖参数与 prop 指向同一会议时行为不变。启动仍走完整的麦克风校验与授权流程。
+   */
+  const start = useCallback(async (override?: Meeting) => {
+    const target = override ?? meeting;
+    if (!target || phase !== "idle") return;
     stopRequestedDuringStartRef.current = false;
     setPhase("starting");
     setWarning(null);
     try {
-      const recorder = new MeetingRecorder(meeting, sttProfile, preferences.glossary, {
+      const recorder = new MeetingRecorder(target, sttProfile, preferences.glossary, {
         onLevel: setLevels,
         onTranscriptionQueue: setQueue,
         onWarning: setWarning,
-        onTranscript: (segment) => appendTranscript(meeting.id, segment),
-        onProvisional: (segment) => appendProvisionalTranscript(meeting.id, segment),
-        onProvisionalSettled: (segmentId) => dropProvisionalTranscript(meeting.id, segmentId)
+        onTranscript: (segment) => appendTranscript(target.id, segment),
+        onProvisional: (segment) => appendProvisionalTranscript(target.id, segment),
+        onProvisionalSettled: (segmentId) => dropProvisionalTranscript(target.id, segmentId)
       });
       recorderRef.current = recorder;
       await recorder.start();
@@ -205,7 +211,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       }
       setElapsed(0);
       setPhase("recording");
-      await updateMeeting(meeting.id, (current) => ({ ...current, status: "recording", durationSeconds: 0 }));
+      await updateMeeting(target.id, (current) => ({ ...current, status: "recording", durationSeconds: 0 }));
       timerRef.current = window.setInterval(() => setElapsed((value) => value + 1), 1_000);
       restartSummaryTimer();
     } catch (error) {

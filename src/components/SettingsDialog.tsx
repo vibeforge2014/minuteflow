@@ -249,13 +249,16 @@ const normalizeLegacyProviderProfile = (profile: ModelProfile): ModelProfile => 
   ? { ...profile, options: { ...profile.options, apiFlavor: "openai" } }
   : profile;
 
-export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): void }) {
+/** 设置页标签：五个标签页（软件更新仅桌面端展示）。 */
+export type SettingsTab = "llm" | "transcription" | "general" | "storage" | "updates";
+
+export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; initialTab?: SettingsTab; onClose(): void }) {
   const profiles = useMeetingStore((state) => state.profiles);
   const preferences = useMeetingStore((state) => state.preferences);
   const loadProfiles = useMeetingStore((state) => state.loadProfiles);
   const updatePreferences = useMeetingStore((state) => state.updatePreferences);
   /** 当前设置页。 */
-  const [tab, setTab] = useState<"llm" | "transcription" | "general" | "storage" | "updates">("transcription");
+  const [tab, setTab] = useState<SettingsTab>("transcription");
   /** 正在编辑的模型档案（目录选中项或新建草稿）。 */
   const [editing, setEditing] = useState<ModelProfile | null>(null);
   /** 密钥输入框的明文值（保存后只留 secretId 引用，不回显）。 */
@@ -270,6 +273,11 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose(): vo
   useEffect(() => {
     if (open) loadProfiles();
   }, [loadProfiles, open]);
+
+  // 指定初始页时（如更新提示 Toast 直达「软件更新」），打开瞬间切到该页。
+  useEffect(() => {
+    if (open && initialTab) setTab(initialTab);
+  }, [open, initialTab]);
 
   // 切到 AI 总结/转录页时，为编辑器选一个初始档案：
   // 优先取该用途已保存的第一个档案，否则落回默认预设（OpenAI / 本地 Whisper）。

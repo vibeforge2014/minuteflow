@@ -3,7 +3,7 @@
  * 模式决定录音采集策略（线上=麦克风+系统音频，线下=仅麦克风）；
  * 目标会作为 AI 总结的提示输入。创建后由 App 立即选中并可直接开始录音。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CalendarBlank, Microphone, Users, WarningCircle, X } from "@phosphor-icons/react";
 import type { CreateMeetingInput, MeetingMode } from "../types";
 import { useMeetingStore } from "../store/meetingStore";
@@ -24,7 +24,8 @@ export function NewMeetingDialog({
 }: {
   open: boolean;
   onClose(): void;
-  onCreate(input: CreateMeetingInput): Promise<unknown>;
+  /** options.startRecording=true 时创建后立即开始录音（一键开会）。 */
+  onCreate(input: CreateMeetingInput, options?: { startRecording?: boolean }): Promise<unknown>;
 }) {
   const [title, setTitle] = useState("");
   const [mode, setMode] = useState<MeetingMode>("online");
@@ -33,6 +34,8 @@ export function NewMeetingDialog({
   const [busy, setBusy] = useState(false);
   // 创建失败的行内错误：保留弹窗与用户已填内容，方便直接重试。
   const [error, setError] = useState<string | null>(null);
+  // 「创建并开始录音」按钮在提交前置位；表单隐式提交（输入框回车）走默认的「仅创建」。
+  const startRecordingRef = useRef(false);
   const preferences = useMeetingStore((state) => state.preferences);
   // 每次打开时把默认模式同步为用户偏好（可再手动切换）。
   useEffect(() => {
@@ -56,6 +59,8 @@ export function NewMeetingDialog({
         onSubmit={async (event) => {
           event.preventDefault();
           if (busy) return;
+          const startRecording = startRecordingRef.current;
+          startRecordingRef.current = false;
           setBusy(true);
           setError(null);
           try {
@@ -65,7 +70,7 @@ export function NewMeetingDialog({
               participants: participants.split(/[、,]/).map((item) => item.trim()).filter(Boolean),
               goals: goal.trim() ? [goal.trim()] : [],
               tags: []
-            });
+            }, { startRecording });
             setTitle("");
             setGoal("");
           } catch (submitError) {
@@ -129,7 +134,16 @@ export function NewMeetingDialog({
           <span><CalendarBlank size={16} />默认每 {formatInterval(preferences.summaryIntervalSeconds)} 更新纪要</span>
           <div>
             <button type="button" className="button" onClick={onClose}>取消</button>
-            <button className="button button--primary" disabled={busy}>{busy ? "正在创建…" : "创建会议"}</button>
+            <button type="submit" className="button" disabled={busy}>仅创建</button>
+            <button
+              type="submit"
+              className="button button--primary"
+              disabled={busy}
+              onClick={() => { startRecordingRef.current = true; }}
+              title="创建会议并立即申请麦克风权限开始录音"
+            >
+              {busy ? "正在创建…" : "创建并开始录音"}
+            </button>
           </div>
         </footer>
       </form>
