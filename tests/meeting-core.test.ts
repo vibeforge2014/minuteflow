@@ -7,6 +7,9 @@
  * 网络与子进程调用均以 vi.fn()/vi.stubGlobal() 模拟，不产生真实请求。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { markdown, subtitle } from "../electron/services/formatters.mjs";
 import {
   buildSummaryPrompt,
@@ -18,7 +21,14 @@ import {
   transcribeRemote,
   validateSummary
 } from "../electron/services/providers.mjs";
-import { describeLocalModel, listDownloadableModels, looksLikeWhisperModel } from "../electron/services/local-models.mjs";
+import {
+  buildModelDownloadUrl,
+  describeLocalModel,
+  downloadFromUrl,
+  downloadModel,
+  listDownloadableModels,
+  looksLikeWhisperModel
+} from "../electron/services/local-models.mjs";
 import { applyDiarization } from "../electron/services/diarization.mjs";
 import {
   checkForAppUpdate,
@@ -40,6 +50,15 @@ import type { Meeting, TranscriptSegment } from "../src/types";
 // 使差量持久化测试可以真实跑 node:sqlite（不依赖 Electron 运行时）。
 vi.mock("electron", () => ({
   app: { getPath: () => `/tmp/minuteflow-db-test-${process.pid}` }
+}));
+// 模型下载测试需要"托管运行时就绪"：把 whisper.node 与内置 FFmpeg 替换为
+// 进程内可加载的替身（process.execPath 一定是可执行文件），避免探测真实二进制。
+vi.mock("@fugood/whisper.node", () => ({
+  loadWhisperModule: async () => ({ WhisperContext: class WhisperContext {} }),
+  initWhisper: async () => ({})
+}));
+vi.mock("@ffmpeg-installer/ffmpeg", () => ({
+  default: { path: process.execPath }
 }));
 import { listMeetings, loadMeeting, saveMeeting } from "../electron/database.mjs";
 
@@ -550,7 +569,7 @@ describe("model provider compatibility", () => {
     expect(looksLikeWhisperModel("/Downloads/small.pt", 461_000_000)).toBe(true);
   });
 
-  it("offers the common multilingual Whisper model range with sha256 digests", async () => {
+  it("offers the grouped Whisper catalog with sha256 digests", async () => {
     const catalog = await listDownloadableModels("/nonexistent/minuteflow-model-catalog");
     expect(catalog.map((model) => model.id)).toEqual([
       "ggml-tiny",
@@ -559,13 +578,103 @@ describe("model provider compatibility", () => {
       "ggml-medium",
       "ggml-large-v3-turbo-q5_0",
       "ggml-large-v3-turbo",
-      "ggml-large-v3"
+      "ggml-large-v3",
+      "ggml-medium-q5_0",
+      "ggml-medium-q8_0",
+      "ggml-large-v3-q5_0",
+      "ggml-large-v3-turbo-q8_0",
+      "ggml-tiny.en",
+      "ggml-base.en",
+      "ggml-small.en",
+      "ggml-medium.en"
     ]);
     expect(catalog.every((model) => model.engine === "whisper-cpp" && model.installed === false)).toBe(true);
     // 摘要算法必须是 sha256（体积与 HuggingFace 官方仓库逐一核对）。
     expect(catalog.every((model) => model.digestAlgorithm === "sha256")).toBe(true);
+    // 三组展示：多语言推荐 7 款 + 轻量量化 4 款 + 英文专用 4 款。
+    expect(catalog.filter((model) => model.group === "multilingual")).toHaveLength(7);
+    expect(catalog.filter((model) => model.group === "quantized")).toHaveLength(4);
+    expect(catalog.filter((model) => model.group === "english")).toHaveLength(4);
     expect(catalog.find((model) => model.id === "ggml-base")?.sizeBytes).toBe(147_951_465);
     expect(catalog.find((model) => model.id === "ggml-large-v3")?.sizeBytes).toBe(3_095_033_483);
+    expect(catalog.find((model) => model.id === "ggml-medium-q5_0")?.sizeBytes).toBe(539_212_467);
+    expect(catalog.find((model) => model.id === "ggml-medium.en")?.sizeBytes).toBe(1_533_774_781);
+  });
+
+  it("builds download URLs from mirror hosts and {fileName} templates", () => {
+    const item = { fileName: "ggml-base.bin", repo: "ggerganov/whisper.cpp" };
+    // HF 兼容站点根地址：换域名即可用，路径与官方一致。
+    expect(buildModelDownloadUrl(item, "https://hf-mirror.com")).toBe(
+      "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true"
+    );
+    expect(buildModelDownloadUrl(item, "https://huggingface.co/")).toBe(
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true"
+    );
+    // 含 {fileName} 占位符的链接模板按字面替换。
+    expect(buildModelDownloadUrl(item, "https://cdn.example.com/models/{fileName}")).toBe(
+      "https://cdn.example.com/models/ggml-base.bin"
+    );
+    // 缺省 repo 回落到官方仓库名；空源返回 null。
+    expect(buildModelDownloadUrl({ fileName: "ggml-tiny.bin" }, "https://hf.example.com")).toContain(
+      "https://hf.example.com/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
+    );
+    expect(buildModelDownloadUrl(item, "   ")).toBeNull();
+  });
+
+  // 以下下载用例会触发真实的环境探测（spawn python 探包），放宽 vitest 默认 5 秒超时。
+  it("falls back to the mirror source when the official source is unreachable", { timeout: 30_000 }, async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("fetch failed"));
+    const directory = await mkdtemp(path.join(tmpdir(), "minuteflow-model-source-"));
+    await expect(downloadModel("ggml-base", directory)).rejects.toThrow("模型下载失败");
+    const urls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(urls).toEqual([
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true",
+      "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true"
+    ]);
+    await expect(readdir(directory)).resolves.toEqual([]);
+  });
+
+  it("tries the selected custom source first, then the built-in presets", { timeout: 30_000 }, async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("fetch failed"));
+    const directory = await mkdtemp(path.join(tmpdir(), "minuteflow-model-custom-"));
+    await expect(downloadModel("ggml-tiny", directory, () => {}, {
+      sourceKind: "custom",
+      customBase: "https://mirror.internal/whisper/{fileName}"
+    })).rejects.toThrow("模型下载失败");
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://mirror.internal/whisper/ggml-tiny.bin",
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin?download=true",
+      "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin?download=true"
+    ]);
+  });
+
+  it("rejects mismatched digests and cleans up temporary files across sources", { timeout: 30_000 }, async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(new Uint8Array([1, 2, 3])));
+    const directory = await mkdtemp(path.join(tmpdir(), "minuteflow-model-digest-"));
+    await expect(downloadModel("ggml-base", directory)).rejects.toThrow("模型下载失败");
+    // 两个预设源各尝试一次（摘要不符也视作该源失败并换源），且不留下 .download 半截文件。
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    await expect(readdir(directory)).resolves.toEqual([]);
+  });
+
+  it("downloads a model from a custom direct link without digest verification", { timeout: 30_000 }, async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(bytes));
+    const directory = await mkdtemp(path.join(tmpdir(), "minuteflow-model-url-"));
+    const events: Array<{ status: string; modelId: string }> = [];
+    const model = await downloadFromUrl("https://example.com/models/my-whisper.bin", directory, (progress) => events.push(progress));
+    expect(model.engine).toBe("whisper-cpp");
+    expect(model.name).toBe("my-whisper.bin");
+    await expect(readFile(path.join(directory, "my-whisper.bin"))).resolves.toEqual(Buffer.from(bytes));
+    expect(events.some((event) => event.status === "ready")).toBe(true);
+    expect(events.every((event) => event.modelId === "custom:my-whisper.bin")).toBe(true);
+  });
+
+  it("rejects custom links that do not point at a model file", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "minuteflow-model-url-invalid-"));
+    await expect(downloadFromUrl("https://example.com/models/notes.txt", directory)).rejects.toThrow(".pt、.bin 或 .gguf");
+    await expect(downloadFromUrl("ftp://example.com/models/ggml-base.bin", directory)).rejects.toThrow("http(s)");
+    await expect(downloadFromUrl("not-a-url", directory)).rejects.toThrow("下载链接无效");
   });
 });
 

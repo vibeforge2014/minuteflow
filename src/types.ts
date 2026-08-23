@@ -295,6 +295,10 @@ export interface MeetingPreferences {
   systemPermissionsCompleted: boolean;
   /** 权限引导流程版本号，递增以便老用户重新走新版流程。 */
   permissionsVersion: number;
+  /** 本地模型下载源：官方 / 国内镜像 / 自定义；失败时自动回退其余预设源。 */
+  modelDownloadSourceKind: "official" | "mirror" | "custom";
+  /** 自定义下载源：HF 兼容站点根地址，或含 {fileName} 占位符的链接模板。 */
+  modelDownloadCustomBase: string;
 }
 
 /** 系统权限取值：已授权 / 拒绝 / 受限 / 未询问 / 未知。 */
@@ -410,7 +414,7 @@ export interface LocalModelScanResult {
 }
 
 /**
- * 可下载模型条目：应用内模型目录中的一项（含来源、许可证、体积与是否已安装）。
+ * 可下载模型条目：应用内模型目录中的一项（含分组、来源、许可证、体积与是否已安装）。
  */
 export interface DownloadableModel {
   id: string;
@@ -418,6 +422,8 @@ export interface DownloadableModel {
   description: string;
   engine: "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper";
   format: string;
+  /** 展示分组：多语言推荐 / 轻量量化 / 英文专用。 */
+  group: "multilingual" | "quantized" | "english";
   sizeBytes: number;
   fileName: string;
   source: string;
@@ -583,6 +589,8 @@ export interface MeetingAPI {
     chooseLocal(): Promise<LocalModelFile | null>;
     catalog(): Promise<DownloadableModel[]>;
     download(modelId: string): Promise<LocalModelFile>;
+    /** 从自定义直链下载模型（.pt/.bin/.gguf；无官方摘要，跳过完整性校验）。 */
+    downloadFromUrl(url: string): Promise<LocalModelFile>;
     onDownloadProgress(callback: (progress: ModelDownloadProgress) => void): () => void;
   };
   /** 笔记导入：打开文件选择器读取 Markdown 源文本（渲染层保持 Markdown 可编辑）。 */

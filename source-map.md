@@ -59,7 +59,7 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 | `services/providers.mjs` | 转录与纪要的模型调用层：OpenAI 兼容远程（含 New API 网关预设）、Anthropic/Gemini 原生协议、真实 WAV 转录连接测试 + 四种本地 Whisper 运行时 + 本地规则纪要（120 段窗口）+ robust JSON 提取 | `summarizeWithOpenAICompatible`、`summarizeLocally`、`extractJson`、`transcribeRemote`、`transcribeWithWhisperCpp`、`resolveProviderEndpoint`、`testModelProfile` |
 | `services/secrets.mjs` | 密钥保险库：safeStorage 加密、明文降级、串行原子写盘、内存缓存 | `storeSecret`、`readSecret`、`flushSecrets` |
 | `services/licensing.mjs` | ¥99 一次性授权：HTTPS 验证、机器指纹绑定、72h 缓存、30 天离线宽限、时钟回拨检测 | `requireLicense`、`activateLicense`、`getLicenseStatus`、`openCheckout` |
-| `services/local-models.mjs` | 本地 Whisper 零路径配置：模型发现/sha256 校验下载（tiny→large-v3 共 7 个 GGML 模型）/托管运行时解析 | `discoverLocalModels`、`downloadModel`、`ensureManagedLocalRuntime`、`looksLikeWhisperModel` |
+| `services/local-models.mjs` | 本地 Whisper 零路径配置：模型发现/sha256 校验下载（15 款 GGML 模型分多语言/量化/英文三组）/可配置下载源（官方+hf-mirror+自定义，失败自动回退）/自定义直链下载/托管运行时解析 | `discoverLocalModels`、`downloadModel`、`downloadFromUrl`、`buildModelDownloadUrl`、`MODEL_DOWNLOAD_SOURCES`、`ensureManagedLocalRuntime`、`looksLikeWhisperModel` |
 | `services/import-queue.mjs` | 持久化单 worker 导入队列：归档→预处理→转写→分离→总结，缺组件可恢复暂停 | `enqueueImports`、`runQueue`、`processJob`、`cancelImport` |
 | `services/diarization.mjs` | sherpa-onnx 离线说话人分离与轮次标签回填 | `diarizeWithSherpa`、`applyDiarization` |
 | `services/exports.mjs` | 八种格式导出（md/txt/pdf/docx/srt/vtt/json/zip）与导入文件选择 | `exportMeeting`、`chooseImportFiles` |
@@ -99,7 +99,7 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 | `Sidebar.tsx` | 左栏会议库：搜索（⌘K 聚焦、一键清除、无结果提示）、今天/本周/更早分组、导入/最近删除/设置入口 |
 | `DocumentWorkspace.tsx` | 中栏会议文档：Tiptap 富文本（Markdown 真源、.md 导入、DOMPurify）、实时纪要、行动项表格、决策四宫格 |
 | `TranscriptPanel.tsx` | 右栏：转录（发言人改名/合并、窗口化加载、播放同步高亮）与 AI 总结两标签 |
-| `SettingsDialog.tsx` | 设置工作台：AI 总结/转录（服务目录 + 档案编辑 + `LocalModelManager` 零路径本地 Whisper）、通用、存储隐私、软件更新 |
+| `SettingsDialog.tsx` | 设置工作台：AI 总结/转录（服务目录 + 档案编辑 + `LocalModelManager` 零路径本地 Whisper：分组目录/下载源选择/直链下载）、通用、存储隐私、软件更新 |
 | `ImportDrawer.tsx` | 右侧导入抽屉：待确认文件（改标题/选模型）+ 后台任务队列（重试/取消/等待配置） |
 | `NewMeetingDialog.tsx` | 新建会议：模板/标题/线上线下模式/参与者/目标 |
 | `PaywallDialog.tsx` | ¥99 付费墙：购买跳转、激活码输入、恢复购买 |
@@ -158,7 +158,7 @@ MeetingAssistantApp.swift（入口，装配 SwiftData 容器与环境对象）
 | 新增/修改一个 IPC 通道 | `electron/main.mjs`（注册）+ `src/types.ts`（MeetingAPI 契约）+ `electron/preload.cjs`（暴露） |
 | 调整 AI 总结提示词/响应解析 | `electron/services/providers.mjs`（`summarizeWithOpenAICompatible`） |
 | 新增一个服务提供商预设 | `src/components/SettingsDialog.tsx`（`providerPresets` + `llmProviderGroups`） |
-| 本地 Whisper 下载目录/运行时探测 | `electron/services/local-models.mjs` |
+| 本地 Whisper 下载目录/下载源/运行时探测 | `electron/services/local-models.mjs`（源偏好持久化在 `main.mjs` persistPreferences 白名单） |
 | 录音分块时长/停止收尾逻辑 | `src/services/recording.ts`（15s 归档块 / 8s 转写块 / `stop()`） |
 | 音频块落盘与产物合并 | `electron/main.mjs`（recordings:append/stop 处理器） |
 | 说话人分离/合并标签 | `electron/services/diarization.mjs` + `src/lib/transcript.ts` + `src/components/TranscriptPanel.tsx` |

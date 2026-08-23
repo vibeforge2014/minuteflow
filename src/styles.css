@@ -2981,6 +2981,105 @@ button {
   accent-color: var(--blue);
 }
 
+.download-source-row {
+  display: grid;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid #e6e8ec;
+  border-radius: 7px;
+  background: #fafbfc;
+}
+
+.download-source-row label {
+  display: grid;
+  gap: 5px;
+}
+
+.download-source-row span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.download-source-row strong {
+  color: #343941;
+  font-size: 10px;
+}
+
+.download-source-row small {
+  color: #8a9099;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.download-source-row select,
+.download-source-row input,
+.download-url-row input {
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid #e6e8ec;
+  border-radius: 6px;
+  background: #fff;
+  color: #343941;
+  font-size: 10px;
+}
+
+.download-model-group {
+  display: grid;
+  gap: 6px;
+}
+
+.download-model-group__label {
+  margin-top: 4px;
+  color: #9298a1;
+  font-size: 8px;
+  letter-spacing: 0.04em;
+}
+
+.download-url-row {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 9px 10px;
+  border: 1px dashed #e0d5cd;
+  border-radius: 7px;
+  background: #fffdfb;
+}
+
+.download-url-row__heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.download-url-row__heading strong {
+  color: #343941;
+  font-size: 10px;
+}
+
+.download-url-row__heading small,
+.download-url-row > small {
+  color: #8a9099;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.download-url-row__controls {
+  display: flex;
+  gap: 6px;
+}
+
+.download-url-row__controls input {
+  flex: 1;
+}
+
+.download-url-row progress {
+  width: 100%;
+  height: 2px;
+  accent-color: var(--blue);
+}
+
 .advanced-provider-options {
   margin-top: 12px;
   color: #737984;

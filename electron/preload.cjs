@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     chooseLocal: () => invoke("models:choose-local"),
     catalog: () => invoke("models:catalog"),
     download: (modelId) => invoke("models:download", modelId),
+    downloadFromUrl: (url) => invoke("models:download-url", url),
     onDownloadProgress: (callback) => {
       const listener = (_event, progress) => callback(progress);
       ipcRenderer.on("models:download-progress", listener);

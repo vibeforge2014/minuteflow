@@ -63,6 +63,7 @@ import { chooseImportFiles, exportMeeting } from "./services/exports.mjs";
 import {
   describeLocalModel,
   discoverLocalModels,
+  downloadFromUrl,
   downloadModel,
   listDownloadableModels,
   resolveLocalModelProfile
@@ -137,7 +138,9 @@ const defaultPreferences = {
   retentionDays: null,
   onboardingCompleted: false,
   systemPermissionsCompleted: false,
-  permissionsVersion: 0
+  permissionsVersion: 0,
+  modelDownloadSourceKind: "official",
+  modelDownloadCustomBase: ""
 };
 
 /** 偏好设置 JSON 文件路径（userData/config/preferences.json）。 */
@@ -243,7 +246,14 @@ async function persistPreferences(preferences) {
       : Math.max(0, Number(preferences.retentionDays) || 0),
     onboardingCompleted: Boolean(preferences.onboardingCompleted),
     systemPermissionsCompleted: Boolean(preferences.systemPermissionsCompleted),
-    permissionsVersion: Math.max(0, Number(preferences.permissionsVersion) || 0)
+    permissionsVersion: Math.max(0, Number(preferences.permissionsVersion) || 0),
+    modelDownloadSourceKind: ["official", "mirror", "custom"].includes(preferences.modelDownloadSourceKind)
+      ? preferences.modelDownloadSourceKind
+      : "official",
+    modelDownloadCustomBase: typeof preferences.modelDownloadCustomBase === "string"
+      && /^https?:\/\//.test(preferences.modelDownloadCustomBase.trim())
+        ? preferences.modelDownloadCustomBase.trim().slice(0, 500)
+        : ""
   };
   const target = preferencesPath();
   const temporary = `${target}.tmp`;
@@ -791,12 +801,29 @@ function registerIpc() {
   // models:catalog — 列出可下载模型目录及其本机安装状态，设置页下载列表调用。
   trustedHandle("models:catalog", () => listDownloadableModels(localModelDirectory()));
   // models:download — 下载模型到应用托管目录，进度经 models:download-progress 事件推送回渲染层。
-  trustedHandle("models:download", (event, modelId) => downloadModel(
-    modelId,
+  // 下载源取自偏好（官方 / 镜像 / 自定义），单源失败时由服务层自动回退其余预设源。
+  trustedHandle("models:download", async (event, modelId) => {
+    const preferences = await loadPreferences();
+    return downloadModel(
+      modelId,
+      localModelDirectory(),
+      (progress) => {
+        // Guard against the window closing mid-download: sending to a destroyed
+        // webContents throws "Object has been destroyed" and aborts the download.
+        if (!event.sender.isDestroyed()) event.sender.send("models:download-progress", progress);
+      },
+      {
+        sourceKind: preferences.modelDownloadSourceKind,
+        customBase: preferences.modelDownloadCustomBase
+      }
+    );
+  });
+  // models:download-url — 从用户粘贴的直链下载模型（无官方摘要，不做完整性校验），
+  // 进度同样经 models:download-progress 推送（modelId 为 custom:<文件名>）。
+  trustedHandle("models:download-url", (event, url) => downloadFromUrl(
+    url,
     localModelDirectory(),
     (progress) => {
-      // Guard against the window closing mid-download: sending to a destroyed
-      // webContents throws "Object has been destroyed" and aborts the download.
       if (!event.sender.isDestroyed()) event.sender.send("models:download-progress", progress);
     }
   ));

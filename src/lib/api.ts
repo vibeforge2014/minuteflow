@@ -26,24 +26,38 @@ const defaultPreferences: MeetingPreferences = {
   retentionDays: null,
   onboardingCompleted: false,
   systemPermissionsCompleted: false,
-  permissionsVersion: 0
+  permissionsVersion: 0,
+  modelDownloadSourceKind: "official",
+  modelDownloadCustomBase: ""
 };
 
-/** 浏览器预览与桌面端保持相同的模型目录；预览只展示，真实下载由 Electron 主进程执行。 */
+/**
+ * 浏览器预览与桌面端保持相同的模型目录；预览只展示，真实下载由 Electron 主进程执行。
+ * 三组：multilingual 多语言推荐 / quantized 轻量量化 / english 英文专用（体积与桌面端 catalog 一致）。
+ */
 const browserModelCatalog: DownloadableModel[] = [
-  ["ggml-tiny", "Whisper Tiny（GGML）", "最快、占用最低，适合快速草稿和低配置设备。", 77_691_713, "ggml-tiny.bin"],
-  ["ggml-base", "Whisper Base（GGML）", "轻量日常转写，速度和准确率优于 Tiny。", 147_951_465, "ggml-base.bin"],
-  ["ggml-small", "Whisper Small（GGML）", "中英混合表现均衡，推荐大多数会议使用。", 487_601_967, "ggml-small.bin"],
-  ["ggml-medium", "Whisper Medium（GGML）", "更重视中文和复杂音频准确率，推荐 16GB 内存。", 1_533_763_059, "ggml-medium.bin"],
-  ["ggml-large-v3-turbo-q5_0", "Whisper Large v3 Turbo Q5（GGML）", "Turbo 的 5-bit 量化版，约 0.55GB，中低配设备的准确率优选。", 574_041_195, "ggml-large-v3-turbo-q5_0.bin"],
-  ["ggml-large-v3-turbo", "Whisper Large v3 Turbo（GGML）", "高准确率与速度兼顾，适合性能较好的新款电脑。", 1_624_555_275, "ggml-large-v3-turbo.bin"],
-  ["ggml-large-v3", "Whisper Large v3（GGML）", "最高准确率，下载和运行占用较高，推荐 24GB 以上内存。", 3_095_033_483, "ggml-large-v3.bin"]
-].map(([id, name, description, sizeBytes, fileName]) => ({
+  ["ggml-tiny", "Whisper Tiny（GGML）", "最快、占用最低，适合快速草稿和低配置设备。", 77_691_713, "ggml-tiny.bin", "multilingual"],
+  ["ggml-base", "Whisper Base（GGML）", "轻量日常转写，速度和准确率优于 Tiny。", 147_951_465, "ggml-base.bin", "multilingual"],
+  ["ggml-small", "Whisper Small（GGML）", "中英混合表现均衡，推荐大多数会议使用。", 487_601_967, "ggml-small.bin", "multilingual"],
+  ["ggml-medium", "Whisper Medium（GGML）", "更重视中文和复杂音频准确率，推荐 16GB 内存。", 1_533_763_059, "ggml-medium.bin", "multilingual"],
+  ["ggml-large-v3-turbo-q5_0", "Whisper Large v3 Turbo Q5（GGML）", "Turbo 的 5-bit 量化版，约 0.55GB，中低配设备的准确率优选。", 574_041_195, "ggml-large-v3-turbo-q5_0.bin", "multilingual"],
+  ["ggml-large-v3-turbo", "Whisper Large v3 Turbo（GGML）", "高准确率与速度兼顾，适合性能较好的新款电脑。", 1_624_555_275, "ggml-large-v3-turbo.bin", "multilingual"],
+  ["ggml-large-v3", "Whisper Large v3（GGML）", "最高准确率，下载和运行占用较高，推荐 24GB 以上内存。", 3_095_033_483, "ggml-large-v3.bin", "multilingual"],
+  ["ggml-medium-q5_0", "Whisper Medium Q5（GGML）", "Medium 的 5-bit 量化版，约 0.52GB，存储紧张时的中文优选。", 539_212_467, "ggml-medium-q5_0.bin", "quantized"],
+  ["ggml-medium-q8_0", "Whisper Medium Q8（GGML）", "Medium 的 8-bit 量化版，约 0.8GB，接近原版准确率。", 823_369_779, "ggml-medium-q8_0.bin", "quantized"],
+  ["ggml-large-v3-q5_0", "Whisper Large v3 Q5（GGML）", "Large v3 的 5-bit 量化版，约 1GB，以更小体积获得旗舰准确率。", 1_081_140_203, "ggml-large-v3-q5_0.bin", "quantized"],
+  ["ggml-large-v3-turbo-q8_0", "Whisper Large v3 Turbo Q8（GGML）", "Turbo 的 8-bit 量化版，约 0.86GB，速度与准确率更均衡。", 874_188_075, "ggml-large-v3-turbo-q8_0.bin", "quantized"],
+  ["ggml-tiny.en", "Whisper Tiny.en（GGML）", "仅英文。占用最低的英文会议速记。", 77_704_715, "ggml-tiny.en.bin", "english"],
+  ["ggml-base.en", "Whisper Base.en（GGML）", "仅英文。轻量英文转写，速度和准确率优于 Tiny.en。", 147_964_211, "ggml-base.en.bin", "english"],
+  ["ggml-small.en", "Whisper Small.en（GGML）", "仅英文。英文会议的均衡之选。", 487_614_201, "ggml-small.en.bin", "english"],
+  ["ggml-medium.en", "Whisper Medium.en（GGML）", "仅英文。复杂英文音频的准确率优选。", 1_533_774_781, "ggml-medium.en.bin", "english"]
+].map(([id, name, description, sizeBytes, fileName, group]) => ({
   id: id as string,
   name: name as string,
   description: description as string,
-  engine: "whisper-cpp",
+  engine: "whisper-cpp" as const,
   format: "GGML",
+  group: group as "multilingual" | "quantized" | "english",
   sizeBytes: sizeBytes as number,
   fileName: fileName as string,
   source: "ggerganov/whisper.cpp",
@@ -289,6 +303,9 @@ const browserApi: MeetingAPI = {
       return browserModelCatalog;
     },
     async download() {
+      throw new Error("请在 Electron 桌面应用中下载本地模型。");
+    },
+    async downloadFromUrl() {
       throw new Error("请在 Electron 桌面应用中下载本地模型。");
     },
     onDownloadProgress() { return () => {}; }
