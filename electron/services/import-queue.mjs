@@ -18,6 +18,7 @@ import {
   createMeeting,
   listJobs,
   listModelProfiles,
+  listVoiceprintSamples,
   loadJob,
   loadMeeting,
   saveAudioAsset,
@@ -497,7 +498,10 @@ async function processJob(initial) {
       const profile = profiles.find((candidate) => candidate.kind === "diarization" && candidate.enabled);
       if (profile) {
         job = patchJob(job.id, { status: "diarizing", stage: "diarizing", progress: 0.73 });
-        const turns = await diarizeWithSherpa(profile, job.archivedPath, { expectedSpeakers: -1 });
+        const turns = await diarizeWithSherpa(profile, job.archivedPath, {
+          expectedSpeakers: -1,
+          voiceprints: listVoiceprintSamples()
+        });
         meeting = publishMeeting(saveMeeting({ ...meeting, transcript: applyDiarization(meeting.transcript, turns) }));
       }
       job = patchJob(job.id, { diarizationComplete: true, stage: "summarizing", progress: 0.8 });

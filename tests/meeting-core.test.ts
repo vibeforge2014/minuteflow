@@ -29,7 +29,12 @@ import {
   listDownloadableModels,
   looksLikeWhisperModel
 } from "../electron/services/local-models.mjs";
-import { applyDiarization } from "../electron/services/diarization.mjs";
+import {
+  applyDiarization,
+  cosineSimilarity,
+  matchVoiceprint,
+  voiceprintModelKey
+} from "../electron/services/diarization.mjs";
 import {
   checkForAppUpdate,
   compareVersions,
@@ -44,7 +49,9 @@ import { isMicrophonePermissionError, shouldRequestMicrophone } from "../src/lib
 import { lockSummaryField, mergeSummaryRevision, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { normalizeImportChunkSegments } from "../electron/services/import-queue.mjs";
 import { audioContentType, parseByteRange } from "../electron/services/media.mjs";
-import type { Meeting, TranscriptSegment } from "../src/types";
+import { buildRecordingReadiness, deriveWorkspaceStage } from "../src/lib/workspace";
+import type { RecorderPhase, WorkspaceStage } from "../src/lib/workspace";
+import type { Meeting, MeetingStatus, TranscriptSegment } from "../src/types";
 
 // database.mjs 只依赖 electron 的 app.getPath；用进程隔离的临时目录 mock 掉，
 // 使差量持久化测试可以真实跑 node:sqlite（不依赖 Electron 运行时）。
@@ -60,7 +67,15 @@ vi.mock("@fugood/whisper.node", () => ({
 vi.mock("@ffmpeg-installer/ffmpeg", () => ({
   default: { path: process.execPath }
 }));
-import { listMeetings, loadMeeting, saveMeeting } from "../electron/database.mjs";
+import {
+  deleteVoiceprintPerson,
+  listMeetings,
+  listVoiceprintPeople,
+  listVoiceprintSamples,
+  loadMeeting,
+  saveMeeting,
+  saveVoiceprintSample
+} from "../electron/database.mjs";
 
 /** 构造一条定稿转写段的测试工厂（默认 speaker-1/刘婷/system 轨）。 */
 const segment = (
@@ -116,6 +131,53 @@ const meeting: Meeting = {
 };
 
 afterEach(() => vi.restoreAllMocks());
+
+describe("phase-aware desktop workspace", () => {
+  it("derives prepare, live, and review without adding persisted UI state", () => {
+    const statuses: MeetingStatus[] = ["draft", "recording", "paused", "complete", "interrupted"];
+    const phases: RecorderPhase[] = ["idle", "starting", "recording", "paused", "stopping"];
+    const expectedIdle: Record<MeetingStatus, WorkspaceStage> = {
+      draft: "prepare",
+      recording: "live",
+      paused: "live",
+      complete: "review",
+      interrupted: "prepare"
+    };
+
+    for (const status of statuses) {
+      for (const phase of phases) {
+        expect(deriveWorkspaceStage(status, phase), `${status}/${phase}`).toBe(
+          phase === "idle" ? expectedIdle[status] : "live"
+        );
+      }
+    }
+  });
+
+  it("keeps recording available when transcription is not configured", () => {
+    const readiness = buildRecordingReadiness({
+      mode: "online",
+      microphone: "not-determined"
+    });
+    expect(readiness.hasTranscription).toBe(false);
+    expect(readiness.microphoneNeedsAttention).toBe(false);
+    expect(readiness.items.find((item) => item.id === "capture")?.value).toBe("麦克风 + 系统音频");
+    expect(readiness.items.find((item) => item.id === "transcription")).toMatchObject({
+      value: "尚未配置",
+      tone: "attention"
+    });
+  });
+
+  it("surfaces blocked microphone access separately from model readiness", () => {
+    const readiness = buildRecordingReadiness({
+      mode: "offline",
+      microphone: "denied",
+      transcriptionProfileName: "本机 Whisper Small"
+    });
+    expect(readiness.hasTranscription).toBe(true);
+    expect(readiness.microphoneNeedsAttention).toBe(true);
+    expect(readiness.items.find((item) => item.id === "microphone")?.value).toBe("需要处理");
+  });
+});
 
 describe("microphone permission routing", () => {
   it("requests access for stale or undecided states but not for granted", () => {
@@ -280,6 +342,31 @@ describe("transcript window merge", () => {
       segment("second", 5_000, 7_000, "第二位发言")
     ], turns);
     expect(result.map((item) => item.speakerName)).toEqual(["Speaker 1", "Speaker 2"]);
+  });
+
+  it("applies a confidently identified voiceprint name without changing the speaker id", () => {
+    const result = applyDiarization([
+      segment("known", 500, 2_500, "已识别发言")
+    ], [{ startMs: 0, endMs: 4_000, speakerId: "speaker-1", speakerName: "刘婷" }]);
+    expect(result[0]).toMatchObject({ speakerId: "speaker-1", speakerName: "刘婷" });
+  });
+
+  it("matches voiceprints conservatively and rejects ambiguous or weak candidates", () => {
+    const samples = [
+      { name: "刘婷", embedding: new Float32Array([1, 0, 0]) },
+      { name: "周哲", embedding: new Float32Array([0, 1, 0]) }
+    ];
+    expect(cosineSimilarity(new Float32Array([1, 0]), new Float32Array([2, 0]))).toBeCloseTo(1);
+    expect(matchVoiceprint(new Float32Array([0.98, 0.03, 0]), samples))
+      .toMatchObject({ name: "刘婷", sampleCount: 1 });
+    expect(matchVoiceprint(new Float32Array([0.7, 0.7, 0]), samples)).toBeNull();
+    expect(matchVoiceprint(new Float32Array([0, 0, 1]), samples)).toBeNull();
+  });
+
+  it("keys voiceprints by embedding model filename so moved models stay compatible", () => {
+    expect(voiceprintModelKey({ options: { embeddingModelPath: "/models/3d-speaker-v1.onnx" } }))
+      .toBe("3d-speaker-v1.onnx");
+    expect(voiceprintModelKey({ options: {} })).toBe("");
   });
 });
 
@@ -890,5 +977,31 @@ describe("database transcript diff persistence", () => {
     // FTS 全文索引随保存同步：新文本可搜到，被删除的文本搜不到。
     expect(listMeetings("已经改写").some((item) => item.id === id)).toBe(true);
     expect(listMeetings("将被删除").some((item) => item.id === id)).toBe(false);
+  });
+
+  it("stores voiceprint vectors locally, replaces a same-source sample, and forgets by name", () => {
+    const id = `voiceprint-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    const name = `测试发言人-${id}`;
+    saveMeeting(buildMeeting(id, [segment(`${id}-speaker`, 0, 5_000, "用于声纹学习的片段") ]));
+    saveVoiceprintSample({
+      name,
+      modelKey: "speaker-model.onnx",
+      embedding: new Float32Array([1, 0.25, -0.5]),
+      sourceMeetingId: id,
+      sourceSpeakerId: "speaker-1"
+    });
+    saveVoiceprintSample({
+      name,
+      modelKey: "speaker-model.onnx",
+      embedding: new Float32Array([0.9, 0.2, -0.45]),
+      sourceMeetingId: id,
+      sourceSpeakerId: "speaker-1"
+    });
+    const samples = listVoiceprintSamples("speaker-model.onnx").filter((item) => item.name === name);
+    expect(samples).toHaveLength(1);
+    expect(Array.from(samples[0].embedding)).toEqual([expect.closeTo(0.9), expect.closeTo(0.2), expect.closeTo(-0.45)]);
+    expect(listVoiceprintPeople()).toContainEqual(expect.objectContaining({ name, sampleCount: 1 }));
+    expect(deleteVoiceprintPerson(name)).toEqual({ deleted: 1 });
+    expect(listVoiceprintPeople().some((person) => person.name === name)).toBe(false);
   });
 });

@@ -16,6 +16,7 @@ const storageKey = "meeting-assistant-demo-state-v3";
 const profileKey = "meeting-assistant-demo-profiles-v1";
 const preferencesKey = "meeting-assistant-demo-preferences-v1";
 const importJobsKey = "meeting-assistant-demo-import-jobs-v1";
+const voiceprintsKey = "meeting-assistant-demo-voiceprints-v1";
 // 浏览器端没有主进程推送，用内存监听器集合模拟 imports.onJobUpdated 事件流。
 const importListeners = new Set<(job: ImportJob) => void>();
 const defaultPreferences: MeetingPreferences = {
@@ -226,6 +227,33 @@ const browserApi: MeetingAPI = {
       const restored = { ...meeting, deletedAt: undefined };
       saveBrowserMeetings(meetings.map((item) => item.id === id ? restored : item));
       return restored;
+    }
+  },
+  voiceprints: {
+    async list() {
+      return JSON.parse(localStorage.getItem(voiceprintsKey) || "[]");
+    },
+    async enroll(payload) {
+      const people = JSON.parse(localStorage.getItem(voiceprintsKey) || "[]") as Array<{
+        name: string; sampleCount: number; updatedAt: string;
+      }>;
+      const existing = people.find((person) => person.name === payload.name);
+      const learned = {
+        name: payload.name,
+        sampleCount: (existing?.sampleCount ?? 0) + 1,
+        updatedAt: new Date().toISOString()
+      };
+      localStorage.setItem(voiceprintsKey, JSON.stringify([
+        learned,
+        ...people.filter((person) => person.name !== payload.name)
+      ]));
+      return { learned: true, name: learned.name, sampleCount: learned.sampleCount };
+    },
+    async forget(name) {
+      const people = JSON.parse(localStorage.getItem(voiceprintsKey) || "[]") as Array<{ name: string }>;
+      const next = people.filter((person) => person.name !== name);
+      localStorage.setItem(voiceprintsKey, JSON.stringify(next));
+      return { deleted: people.length - next.length };
     }
   },
   recordings: {

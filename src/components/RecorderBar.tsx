@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowsOutSimple,
   BookmarkSimple,
+  CheckCircle,
   Microphone,
   Pause,
   Play,
@@ -28,6 +29,8 @@ interface RecorderBarProps {
   levels: { microphone: number; system: number };
   /** 在途转写任务数。 */
   queue: number;
+  /** 本次会议是否配置了可用的实时转写档案。 */
+  transcriptionReady: boolean;
   onStart(): Promise<void>;
   onPause(): Promise<void>;
   onStop(): Promise<void>;
@@ -41,6 +44,7 @@ export function RecorderBar({
   elapsed,
   levels,
   queue,
+  transcriptionReady,
   onStart,
   onPause,
   onStop,
@@ -98,7 +102,7 @@ export function RecorderBar({
 
   return (
     <div className={`recorder-bar ${mini ? "is-mini" : ""}`}>
-      <div className="record-state">
+      <div className="record-state" aria-live="polite">
         <span className={`record-dot ${live ? "is-live" : ""}`} />
         <div>
           <strong>{formatDuration(visualElapsed)}</strong>
@@ -113,8 +117,11 @@ export function RecorderBar({
       {!mini && (
         <>
           <Level label="麦克风" icon={<Microphone size={18} />} value={levels.microphone} />
-          <Level label="系统声音" icon={<SpeakerHigh size={18} />} value={levels.system} />
-          {queue > 0 && <span className="queue-badge">转录队列 {queue}</span>}
+          {meeting.mode === "online" && <Level label="系统声音" icon={<SpeakerHigh size={18} />} value={levels.system} />}
+          <span className={`transcription-status ${transcriptionReady ? "is-ready" : "is-limited"}`} aria-live="polite">
+            {transcriptionReady ? <CheckCircle size={14} weight="fill" /> : <WarningCircle size={14} weight="fill" />}
+            {transcriptionReady ? queue > 0 ? `转写处理中 ${queue}` : "实时转写正常" : "仅录音"}
+          </span>
           {silentMic && (
             <span className="recorder-warning" role="alert">
               <WarningCircle size={14} weight="fill" />未检测到麦克风声音，请检查输入设备
@@ -126,7 +133,7 @@ export function RecorderBar({
       <div className="recorder-actions">
         {!live ? (
           <button className="record-action record-action--start" onClick={onStart}>
-            <Play size={18} weight="fill" />开始
+            <Play size={18} weight="fill" />开始录音
           </button>
         ) : phase === "starting" ? (
           <button className="record-action record-action--stop" onClick={onStop}>

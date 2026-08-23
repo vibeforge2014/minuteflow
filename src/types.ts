@@ -508,6 +508,13 @@ export interface ImportJob {
   updatedAt: string;
 }
 
+/** 渲染层可见的本地声纹簿摘要；生物特征向量只存在主进程数据库中，不经过 contextBridge。 */
+export interface VoiceprintPerson {
+  name: string;
+  sampleCount: number;
+  updatedAt: string;
+}
+
 /**
  * 渲染层与后端的完整 API 契约。Electron 下由 preload 通过 contextBridge 注入 window.meetingAPI（IPC 代理到主进程）；
  * 纯浏览器/演示模式下 lib/api.ts 提供同构的 localStorage 兜底实现。
@@ -524,6 +531,16 @@ export interface MeetingAPI {
     save(meeting: Meeting): Promise<Meeting>;
     delete(id: string): Promise<boolean>;
     restore(id: string): Promise<Meeting>;
+  };
+  /** 本地声纹簿：列摘要、从一场已分离会议学习姓名，以及主动忘记某人。 */
+  voiceprints: {
+    list(): Promise<VoiceprintPerson[]>;
+    enroll(payload: {
+      meetingId: string;
+      speakerId: string;
+      name: string;
+    }): Promise<{ learned: true; name: string; sampleCount: number }>;
+    forget(name: string): Promise<{ deleted: number }>;
   };
   /** 录音会话：主进程侧建会话、按序号追加音频块、停止（等落盘后返回产出文件）、中止、打开录音目录与列出播放资产。 */
   recordings: {

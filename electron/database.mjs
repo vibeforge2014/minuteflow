@@ -5,7 +5,7 @@
  * 主要导出：openDatabase、listMeetings、loadMeeting、saveMeeting、createMeeting、
  * softDeleteMeeting、restoreMeeting、appendAudioChunk、finalizeAudioPath、
  * listMeetingAudioPaths、listExpiredAudioPaths、deleteAudioPathRecord、saveAudioAsset、
- * listMeetingAudioAssets、loadAudioAsset、saveJob、loadJob、listJobs、
+ * listMeetingAudioAssets、loadAudioAsset、saveJob、loadJob、listJobs、声纹样本读写、
  * markRunningJobsInterrupted、listModelProfiles、saveModelProfile、markInterruptedRecordings。
  * 被 main.mjs 注册的 IPC 处理器与 services/import-queue.mjs 导入流水线调用。
  */
@@ -219,6 +219,20 @@ function createSchema(db) {
       duration_ms INTEGER,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS voiceprint_samples (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      model_key TEXT NOT NULL,
+      dimension INTEGER NOT NULL,
+      embedding BLOB NOT NULL,
+      source_meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+      source_speaker_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(source_meeting_id, source_speaker_id, model_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_voiceprint_name_model
+      ON voiceprint_samples(name, model_key, updated_at);
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       meeting_id TEXT,
@@ -721,6 +735,73 @@ export function listMeetingAudioAssets(meetingId) {
 /** 按 UUID 读取单个音频资产（minuteflow-media 协议处理器调用），不存在返回 null。 */
 export function loadAudioAsset(id) {
   return listMeetingAudioAssetsByRows(openDatabase().prepare("SELECT * FROM audio_assets WHERE id = ?").all(id))[0] || null;
+}
+
+/**
+ * 保存一场会议中一个已命名发言人的声纹。同一会议/标签/模型重复学习时覆盖旧向量，
+ * 其他会议的样本继续保留，识别时按姓名聚合以提高抗噪性。
+ */
+export function saveVoiceprintSample(sample) {
+  const vector = Float32Array.from(sample.embedding ?? []);
+  if (!sample.name?.trim() || !sample.modelKey || !vector.length) {
+    throw new Error("声纹样本不完整。");
+  }
+  const timestamp = nowIso();
+  const bytes = new Uint8Array(vector.buffer.slice(vector.byteOffset, vector.byteOffset + vector.byteLength));
+  openDatabase().prepare(`
+    INSERT INTO voiceprint_samples(
+      id, name, model_key, dimension, embedding, source_meeting_id,
+      source_speaker_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(source_meeting_id, source_speaker_id, model_key) DO UPDATE SET
+      name = excluded.name,
+      dimension = excluded.dimension,
+      embedding = excluded.embedding,
+      updated_at = excluded.updated_at
+  `).run(
+    sample.id || randomUUID(), sample.name.trim(), sample.modelKey, vector.length, bytes,
+    sample.sourceMeetingId, sample.sourceSpeakerId, timestamp, timestamp
+  );
+  return { name: sample.name.trim(), modelKey: sample.modelKey, dimension: vector.length, updatedAt: timestamp };
+}
+
+/** 读取匹配用的原始本地声纹样本；只在主进程内部使用，不经 IPC 暴露向量。 */
+export function listVoiceprintSamples(modelKey) {
+  const rows = modelKey
+    ? openDatabase().prepare("SELECT * FROM voiceprint_samples WHERE model_key = ? ORDER BY updated_at DESC").all(modelKey)
+    : openDatabase().prepare("SELECT * FROM voiceprint_samples ORDER BY updated_at DESC").all();
+  return rows.flatMap((row) => {
+    const bytes = row.embedding;
+    if (!bytes || bytes.byteLength !== row.dimension * Float32Array.BYTES_PER_ELEMENT) return [];
+    const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    return [{
+      id: row.id,
+      name: row.name,
+      modelKey: row.model_key,
+      embedding: new Float32Array(copy),
+      sourceMeetingId: row.source_meeting_id,
+      sourceSpeakerId: row.source_speaker_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }];
+  });
+}
+
+/** 给渲染层的声纹簿摘要：永不返回向量，只显示姓名、样本数与最近学习时间。 */
+export function listVoiceprintPeople() {
+  return openDatabase().prepare(`
+    SELECT name, COUNT(*) AS sample_count, MAX(updated_at) AS updated_at
+    FROM voiceprint_samples GROUP BY name ORDER BY updated_at DESC
+  `).all().map((row) => ({
+    name: row.name,
+    sampleCount: Number(row.sample_count),
+    updatedAt: row.updated_at
+  }));
+}
+
+/** 用户主动“忘记”姓名时删除其全部模型/会议样本。 */
+export function deleteVoiceprintPerson(name) {
+  return { deleted: Number(openDatabase().prepare("DELETE FROM voiceprint_samples WHERE name = ?").run(name).changes) };
 }
 
 function listMeetingAudioAssetsByRows(rows) {

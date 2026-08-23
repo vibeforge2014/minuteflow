@@ -37,6 +37,7 @@ import {
   listMeetingAudioAssets,
   listMeetingAudioPaths,
   listModelProfiles,
+  listVoiceprintPeople,
   loadMeeting,
   loadAudioAsset,
   markRunningJobsInterrupted,
@@ -44,6 +45,8 @@ import {
   restoreMeeting,
   saveMeeting,
   saveModelProfile,
+  saveVoiceprintSample,
+  deleteVoiceprintPerson,
   softDeleteMeeting
 } from "./database.mjs";
 import { deleteSecret, flushSecrets, readSecret, storeSecret, warmSecretCache } from "./services/secrets.mjs";
@@ -88,6 +91,7 @@ import {
   retryImport,
   wakeImportQueue
 } from "./services/import-queue.mjs";
+import { extractVoiceprintEmbedding, voiceprintModelKey } from "./services/diarization.mjs";
 
 // 当前文件所在目录：用于定位 preload.cjs 与打包后的前端产物。
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -440,6 +444,57 @@ function registerIpc() {
   trustedHandle("meetings:delete", (_event, id) => softDeleteMeeting(id));
   // meetings:restore — 从回收站恢复会议。
   trustedHandle("meetings:restore", (_event, id) => restoreMeeting(id));
+
+  // voiceprints:* — 本地声纹簿。IPC 只返回姓名与样本数；实际向量始终留在主进程数据库中。
+  trustedHandle("voiceprints:list", () => listVoiceprintPeople());
+  trustedHandle("voiceprints:forget", (_event, name) => {
+    const normalized = typeof name === "string" ? name.trim() : "";
+    if (!normalized || normalized.length > 80) throw new Error("声纹姓名格式无效。");
+    return deleteVoiceprintPerson(normalized);
+  });
+  trustedHandle("voiceprints:enroll", async (_event, payload) => {
+    await requireLicense();
+    assertUuid(payload?.meetingId, "会议 ID");
+    const speakerId = typeof payload?.speakerId === "string" ? payload.speakerId.trim() : "";
+    const name = typeof payload?.name === "string" ? payload.name.trim() : "";
+    if (!speakerId || speakerId.length > 120 || !name || name.length > 80) {
+      throw new Error("发言人信息格式无效。");
+    }
+    const meeting = loadMeeting(payload.meetingId);
+    if (!meeting) throw new Error("会议不存在。");
+    const intervals = meeting.transcript
+      .filter((segment) => segment.speakerId === speakerId && segment.status === "final")
+      .map((segment) => ({ startMs: segment.startMs, endMs: segment.endMs }));
+    if (!intervals.length) throw new Error("这个发言人还没有可用于学习的定稿语音。");
+    const profile = listModelProfiles().find((candidate) => candidate.kind === "diarization" && candidate.enabled);
+    if (!profile) throw new Error("请先配置并启用说话人分离模型，再记住发言人。");
+    const modelKey = voiceprintModelKey(profile);
+    if (!modelKey) throw new Error("说话人分离档案缺少 3D-Speaker 模型。");
+
+    const assets = listMeetingAudioAssets(meeting.id);
+    const preferredTrack = meeting.transcript.find((segment) => segment.speakerId === speakerId)?.track;
+    const asset = assets.find((candidate) => candidate.sourceType === "import" && candidate.track === "mixed")
+      || assets.find((candidate) => candidate.track === preferredTrack)
+      || assets.find((candidate) => candidate.track === "mixed");
+    const audioPath = asset?.playbackPath || asset?.path;
+    const audioStat = audioPath ? await stat(audioPath).catch(() => null) : null;
+    if (!audioPath || !audioStat?.isFile() || audioStat.size <= 0) {
+      throw new Error("找不到可提取声纹的本地音频；请先完成录音导入与说话人分离。");
+    }
+    const embedding = await extractVoiceprintEmbedding(profile, audioPath, intervals);
+    saveVoiceprintSample({
+      name,
+      modelKey,
+      embedding,
+      sourceMeetingId: meeting.id,
+      sourceSpeakerId: speakerId
+    });
+    return {
+      learned: true,
+      name,
+      sampleCount: listVoiceprintPeople().find((person) => person.name === name)?.sampleCount ?? 1
+    };
+  });
 
   // recordings:start — 开始录音（付费功能）：校验授权后为麦克风/系统双轨各建一个
   // .partial 文件与串行写队列；渲染层录音工具栏调用。

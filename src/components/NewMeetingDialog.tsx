@@ -4,7 +4,7 @@
  * 目标会作为 AI 总结的提示输入。创建后由 App 立即选中并可直接开始录音。
  */
 import { useEffect, useRef, useState } from "react";
-import { CalendarBlank, Microphone, Users, WarningCircle, X } from "@phosphor-icons/react";
+import { CalendarBlank, CaretDown, Microphone, Users, WarningCircle, X } from "@phosphor-icons/react";
 import type { CreateMeetingInput, MeetingMode } from "../types";
 import { useMeetingStore } from "../store/meetingStore";
 
@@ -31,6 +31,7 @@ export function NewMeetingDialog({
   const [mode, setMode] = useState<MeetingMode>("online");
   const [participants, setParticipants] = useState("我");
   const [goal, setGoal] = useState("");
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   // 创建失败的行内错误：保留弹窗与用户已填内容，方便直接重试。
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +40,10 @@ export function NewMeetingDialog({
   const preferences = useMeetingStore((state) => state.preferences);
   // 每次打开时把默认模式同步为用户偏好（可再手动切换）。
   useEffect(() => {
-    if (open) setMode(preferences.defaultMode);
+    if (open) {
+      setMode(preferences.defaultMode);
+      setDetailsOpen(false);
+    }
   }, [open, preferences.defaultMode]);
   // Esc 关闭弹窗（创建请求进行中时不关，避免与提交竞态）。
   useEffect(() => {
@@ -56,6 +60,15 @@ export function NewMeetingDialog({
     <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <form
         className="dialog new-meeting-dialog"
+        onKeyDown={(event) => {
+          // 桌面 WebView 对隐式表单提交的处理并不完全一致；统一把 Enter 明确映射为
+          // “先创建会议”。文本域保留换行，主按钮仍通过 click 单独开启录音。
+          if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+          if ((event.target as HTMLElement).tagName === "TEXTAREA") return;
+          event.preventDefault();
+          startRecordingRef.current = false;
+          event.currentTarget.requestSubmit();
+        }}
         onSubmit={async (event) => {
           event.preventDefault();
           if (busy) return;
@@ -121,20 +134,36 @@ export function NewMeetingDialog({
           </div>
           <small>{mode === "online" ? "同时录制麦克风和系统音频。" : "仅录制麦克风，并对现场发言人进行分离。"}</small>
         </div>
-        <label className="field">
-          <span>参与者</span>
-          <input value={participants} onChange={(event) => setParticipants(event.target.value)} placeholder="使用逗号分隔" />
-        </label>
-        <label className="field">
-          <span>会议目标</span>
-          <textarea value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="这次会议希望达成什么结果？" rows={3} />
-        </label>
+        <button
+          type="button"
+          className={`meeting-details-toggle ${detailsOpen ? "is-open" : ""}`}
+          aria-expanded={detailsOpen}
+          onClick={() => setDetailsOpen((value) => !value)}
+        >
+          <span>
+            <strong>补充会议信息</strong>
+            <small>{goal.trim() ? "已填写会议目标" : "参与者与目标，可稍后再补充"}</small>
+          </span>
+          <CaretDown size={16} />
+        </button>
+        {detailsOpen && (
+          <div className="meeting-details-fields">
+            <label className="field">
+              <span>参与者</span>
+              <input value={participants} onChange={(event) => setParticipants(event.target.value)} placeholder="使用逗号分隔" />
+            </label>
+            <label className="field">
+              <span>会议目标</span>
+              <textarea value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="这次会议希望达成什么结果？" rows={3} />
+            </label>
+          </div>
+        )}
         {error && <p className="dialog-error" role="alert"><WarningCircle size={14} weight="fill" />{error}</p>}
         <footer>
           <span><CalendarBlank size={16} />默认每 {formatInterval(preferences.summaryIntervalSeconds)} 更新纪要</span>
           <div>
-            <button type="button" className="button" onClick={onClose}>取消</button>
-            <button type="submit" className="button" disabled={busy}>仅创建</button>
+            <button type="button" className="text-button dialog-cancel" onClick={onClose}>取消</button>
+            <button type="submit" className="button" disabled={busy}>先创建会议</button>
             <button
               type="submit"
               className="button button--primary"

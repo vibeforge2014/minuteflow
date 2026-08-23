@@ -7,6 +7,7 @@ release/
 coverage/
 .vite/
 *.partial
+.zcode/
 
 # iOS
 ios/**/build/

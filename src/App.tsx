@@ -39,6 +39,8 @@ import { useMeetingRecorder } from "./hooks/useMeetingRecorder";
 import { api } from "./lib/api";
 import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Meeting } from "./types";
 import { BrandMark } from "./components/BrandMark";
+import { buildRecordingReadiness, deriveWorkspaceStage, type WorkspaceStage } from "./lib/workspace";
+import type { SystemPermissionStatus } from "./types";
 
 export function App() {
   const {
@@ -83,8 +85,13 @@ export function App() {
   const [seekToMs, setSeekToMs] = useState<number | null>(null);
   const [playerAvailable, setPlayerAvailable] = useState(false);
   const [playerOpen, setPlayerOpen] = useState(false);
+  const [permissionStatus, setPermissionStatus] = useState<SystemPermissionStatus | null>(null);
+  const [continueRecordingOpen, setContinueRecordingOpen] = useState(false);
+  const [recentlyFinalizedId, setRecentlyFinalizedId] = useState<string | null>(null);
   // 已提示过“导入完成”的任务 id 集合：防止事件订阅重放历史任务时重复弹 Toast。
   const completedImports = useRef(new Set<string>());
+  const previousWorkspaceRef = useRef<{ meetingId: string; stage: WorkspaceStage } | null>(null);
+  const autoLayoutKeyRef = useRef("");
 
   /** 统一的提示入口：可附带直达动作（如更新提示一键打开软件更新）。 */
   const notify = useCallback((message: string, action?: { label: string; run: () => void }) => {
@@ -168,6 +175,59 @@ export function App() {
   }, [meeting?.id]);
   // 录音生命周期 hook：传入当前会议，返回 phase/elapsed/levels/queue 等驱动 RecorderBar 的状态。
   const recorder = useMeetingRecorder(meeting);
+  const workspaceStage = meeting
+    ? meetingImportJob && recorder.phase === "idle"
+      ? "review"
+      : deriveWorkspaceStage(meeting.status, recorder.phase)
+    : null;
+  const importProcessingStatus = useMemo(
+    () => describeImportProcessing(meetingImportJob),
+    [meetingImportJob]
+  );
+  const transcriptionProfile = useMemo(
+    () => profiles.find((profile) => profile.kind === "stt" && profile.enabled),
+    [profiles]
+  );
+  const recordingReadiness = useMemo(() => meeting ? buildRecordingReadiness({
+    mode: meeting.mode,
+    microphone: permissionStatus?.microphone ?? null,
+    transcriptionProfileName: transcriptionProfile?.name
+  }) : null, [meeting, permissionStatus?.microphone, transcriptionProfile?.name]);
+
+  // 会前只读取权限状态，不触发系统授权；真正的麦克风请求仍由“开始录音”动作负责。
+  const refreshPermissionStatus = useCallback(async () => {
+    try {
+      setPermissionStatus(await api.system.getPermissions());
+    } catch {
+      setPermissionStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!meeting || workspaceStage !== "prepare") return;
+    void refreshPermissionStatus();
+  }, [meeting?.id, refreshPermissionStatus, workspaceStage]);
+
+  // 每次进入一个新阶段只应用一次默认布局；用户随后手动收起侧栏时不会被转写更新重新打开。
+  useEffect(() => {
+    if (!meeting || !workspaceStage) return;
+    const key = `${meeting.id}:${workspaceStage}`;
+    if (autoLayoutKeyRef.current === key) return;
+    const previous = previousWorkspaceRef.current;
+    if (previous?.meetingId === meeting.id && previous.stage === "live" && workspaceStage === "review") {
+      setRecentlyFinalizedId(meeting.id);
+    } else if (previous?.meetingId !== meeting.id) {
+      setRecentlyFinalizedId(null);
+    }
+    if (workspaceStage === "prepare") {
+      setRightPanelOpen(false);
+    } else {
+      setRightPanelOpen(true);
+      setRightPanelTab("transcript");
+    }
+    previousWorkspaceRef.current = { meetingId: meeting.id, stage: workspaceStage };
+    autoLayoutKeyRef.current = key;
+  }, [meeting?.id, workspaceStage]);
 
   useEffect(() => {
     if (recorder.warning) {
@@ -241,6 +301,7 @@ export function App() {
         return;
       }
       if (event.key === "Escape") {
+        if (continueRecordingOpen) { setContinueRecordingOpen(false); return; }
         if (moreOpen) { setMoreOpen(false); return; }
         if (exportOpen) { setExportOpen(false); return; }
         if (importOpen) { setImportOpen(false); return; }
@@ -248,7 +309,7 @@ export function App() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [exportOpen, importOpen, moreOpen]);
+  }, [continueRecordingOpen, exportOpen, importOpen, moreOpen]);
 
   // 导入入口（文件选择器 / 拖拽）：先过付费墙，再把候选文件交给右侧确认抽屉，确认后才入队归档。
   const handleImport = async () => {
@@ -291,7 +352,11 @@ export function App() {
   }
 
   return (
-    <div className="app-shell" onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
+    <div
+      className={`app-shell ${rightPanelOpen ? "app-shell--right-open" : ""}`}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={handleDrop}
+    >
       <Sidebar
         meetings={meetings}
         selectedId={selectedId}
@@ -304,16 +369,21 @@ export function App() {
         onSettings={() => openSettings()}
       />
 
-      <main className="main-pane">
+      <main className={`main-pane ${workspaceStage ? `main-pane--${workspaceStage}` : ""}`}>
         {meeting ? (
           <>
-            <header className="document-header">
+            <header className={`document-header document-header--${workspaceStage}`}>
               <div className="document-header__title">
-                <input
-                  aria-label="会议标题"
-                  value={meeting.title}
-                  onChange={(event) => handleMeetingChange({ ...meeting, title: event.target.value })}
-                />
+                <div className="document-header__heading">
+                  <input
+                    aria-label="会议标题"
+                    value={meeting.title}
+                    onChange={(event) => handleMeetingChange({ ...meeting, title: event.target.value })}
+                  />
+                  <span className={`workspace-stage workspace-stage--${workspaceStage}`}>
+                    {workspaceStage === "prepare" ? "会前准备" : workspaceStage === "live" ? "会议进行中" : "会后整理"}
+                  </span>
+                </div>
                 <button
                   className={`icon-button ${meeting.favorite ? "is-active" : ""}`}
                   aria-label={meeting.favorite ? "取消收藏" : "收藏"}
@@ -382,6 +452,14 @@ export function App() {
                         <Star size={16} weight={meeting.favorite ? "fill" : "regular"} />
                         {meeting.favorite ? "取消收藏" : "添加到收藏"}
                       </button>
+                      {workspaceStage === "review" && (
+                        <button onClick={() => {
+                          setMoreOpen(false);
+                          setContinueRecordingOpen(true);
+                        }}>
+                          <PlayCircle size={16} />继续录音
+                        </button>
+                      )}
                       <button className="is-danger" onClick={async () => {
                         await deleteMeeting(meeting.id);
                         setMoreOpen(false);
@@ -416,7 +494,17 @@ export function App() {
 
             <DocumentWorkspace
               meeting={meeting}
+              stage={workspaceStage!}
+              readiness={recordingReadiness!}
+              elapsed={recorder.elapsed}
+              recentlyFinalized={recentlyFinalizedId === meeting.id}
+              processingStatus={importProcessingStatus}
               onChange={handleMeetingChange}
+              onStartRecording={async () => {
+                if (requirePremium("录音、实时转写与自动纪要")) await recorder.start();
+              }}
+              onConfigureTranscription={() => openSettings("transcription")}
+              onOpenPermissions={() => setPermissionsOpen(true)}
               onGenerateSummary={() => {
                 // final 由 hook 按会议状态自动推导：录音/暂停中为滚动增量，会后为终稿总结。
                 if (requirePremium("生成 AI 会议纪要")) void recorder.generateSummary();
@@ -425,28 +513,31 @@ export function App() {
               summaryBusy={recorder.summaryBusy}
             />
 
-            <RecorderBar
-              meeting={meeting}
-              phase={recorder.phase}
-              elapsed={recorder.elapsed}
-              levels={recorder.levels}
-              queue={recorder.queue}
-              onStart={async () => {
-                if (requirePremium("录音、实时转写与自动纪要")) await recorder.start();
-              }}
-              onPause={recorder.pause}
-              onStop={recorder.stop}
-              onMark={() => {
-                const time = formatDuration(recorder.elapsed);
-                const marker = `[${time}] 重点标记`;
-                handleMeetingChange({
-                  ...meeting,
-                  notes: [...meeting.notes, marker],
-                  notesMarkdown: [meeting.notesMarkdown || meeting.notes.join("\n\n"), marker].filter(Boolean).join("\n\n")
-                });
-                notify(`已在 ${time} 添加重点标记。`);
-              }}
-            />
+            {workspaceStage === "live" && (
+              <RecorderBar
+                meeting={meeting}
+                phase={recorder.phase}
+                elapsed={recorder.elapsed}
+                levels={recorder.levels}
+                queue={recorder.queue}
+                transcriptionReady={recordingReadiness?.hasTranscription ?? false}
+                onStart={async () => {
+                  if (requirePremium("录音、实时转写与自动纪要")) await recorder.start();
+                }}
+                onPause={recorder.pause}
+                onStop={recorder.stop}
+                onMark={() => {
+                  const time = formatDuration(recorder.elapsed);
+                  const marker = `[${time}] 重点标记`;
+                  handleMeetingChange({
+                    ...meeting,
+                    notes: [...meeting.notes, marker],
+                    notesMarkdown: [meeting.notesMarkdown || meeting.notes.join("\n\n"), marker].filter(Boolean).join("\n\n")
+                  });
+                  notify(`已在 ${time} 添加重点标记。`);
+                }}
+              />
+            )}
           </>
         ) : searching ? (
           <EmptyState
@@ -474,6 +565,7 @@ export function App() {
         <TranscriptPanel
           meeting={meeting}
           importJob={meetingImportJob}
+          stage={workspaceStage!}
           tab={rightPanelTab}
           onTabChange={setRightPanelTab}
           onChange={handleMeetingChange}
@@ -521,6 +613,7 @@ export function App() {
         onComplete={async () => {
           await updatePreferences({ ...preferences, systemPermissionsCompleted: true, permissionsVersion: 2 });
           setPermissionsOpen(false);
+          void refreshPermissionStatus();
         }}
         onSkip={async () => {
           // 跳过首run权限墙：只记录“已走完该流程”，不动系统权限。
@@ -530,6 +623,31 @@ export function App() {
           notify("已跳过授权。首次开始录音时会再引导你完成麦克风授权。");
         }}
       />
+      {meeting && continueRecordingOpen && (
+        <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setContinueRecordingOpen(false)}>
+          <section className="dialog continue-recording-dialog" role="dialog" aria-modal="true" aria-labelledby="continue-recording-title">
+            <header>
+              <div>
+                <h2 id="continue-recording-title">继续这场会议的录音？</h2>
+                <p>新的声音会追加到当前会议；已有笔记、转写和纪要不会被清空。</p>
+              </div>
+            </header>
+            <div className="continue-recording-dialog__body">
+              <PlayCircle size={24} weight="duotone" />
+              <span>录音开始后，工作区会重新进入会中模式。</span>
+            </div>
+            <footer>
+              <button className="button" onClick={() => setContinueRecordingOpen(false)}>取消</button>
+              <button className="button button--primary" onClick={async () => {
+                setContinueRecordingOpen(false);
+                if (requirePremium("继续录音、实时转写与自动纪要")) await recorder.start();
+              }}>
+                继续录音
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
       <PaywallDialog
         open={paywallOpen}
         reason={paywallReason}
@@ -592,4 +710,20 @@ function formatDuration(seconds: number) {
   const minutes = Math.floor((seconds % 3600) / 60);
   const remaining = seconds % 60;
   return [hours, minutes, remaining].map((value) => String(value).padStart(2, "0")).join(":");
+}
+
+function describeImportProcessing(job: ImportJob | undefined) {
+  if (!job || job.status === "complete" || job.status === "cancelled") return undefined;
+  if (job.status === "failed") return "录音处理已暂停，可在导入队列中重试";
+  if (job.status === "waiting_for_model") return "录音已归档，等待配置转写模型";
+  if (job.status === "waiting_for_audio_tool") return "录音已归档，等待音频组件恢复";
+  if (job.status === "transcribing" || job.stage === "transcribing") {
+    return job.totalChunks
+      ? `正在转写第 ${Math.min((job.completedChunks || 0) + 1, job.totalChunks)}/${job.totalChunks} 段`
+      : "正在生成第一段转写";
+  }
+  if (job.status === "diarizing") return "转写完成，正在识别发言人";
+  if (job.status === "summarizing") return "转写完成，正在整理会议纪要";
+  if (job.status === "copying" || job.stage === "copying") return "正在安全归档录音";
+  return "录音已加入处理队列";
 }

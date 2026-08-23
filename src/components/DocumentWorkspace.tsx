@@ -8,6 +8,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowClockwise,
+  CaretRight,
+  CheckCircle,
   CheckSquare,
   Eye,
   FileArrowUp,
@@ -16,10 +18,12 @@ import {
   ListBullets,
   Lock,
   LockOpen,
+  Microphone,
   NotePencil,
   PencilSimple,
   Plus,
   Target,
+  WarningCircle,
   XCircle
 } from "@phosphor-icons/react";
 import { useEditor, EditorContent } from "@tiptap/react";
@@ -33,10 +37,19 @@ import { api } from "../lib/api";
 import { lockSummaryField, toggleSummaryLock } from "../lib/summary";
 import { formatDuration, formatInterval } from "../lib/format";
 import { useMeetingStore } from "../store/meetingStore";
+import type { RecordingReadiness, WorkspaceStage } from "../lib/workspace";
 
 interface DocumentWorkspaceProps {
   meeting: Meeting;
+  stage: WorkspaceStage;
+  readiness: RecordingReadiness;
+  elapsed: number;
+  recentlyFinalized: boolean;
+  processingStatus?: string;
   onChange(meeting: Meeting): void;
+  onStartRecording(): Promise<void>;
+  onConfigureTranscription(): void;
+  onOpenPermissions(): void;
   /** 手动触发 AI 总结（录音中为滚动增量，会后为终稿）。 */
   onGenerateSummary(): void;
   /** 取消进行中的总结请求（生成按钮在 busy 态变为“取消”）。 */
@@ -46,7 +59,15 @@ interface DocumentWorkspaceProps {
 
 export function DocumentWorkspace({
   meeting,
+  stage,
+  readiness,
+  elapsed,
+  recentlyFinalized,
+  processingStatus,
   onChange,
+  onStartRecording,
+  onConfigureTranscription,
+  onOpenPermissions,
   onGenerateSummary,
   onCancelSummary,
   summaryBusy
@@ -137,8 +158,8 @@ export function DocumentWorkspace({
 
   return (
     <div className="document-scroll">
-      <article className="meeting-document">
-        <div className="document-date">
+      <article className={`meeting-document meeting-document--${stage}`}>
+        <div className="document-date document-date--workspace-meta">
           {formatMeetingDate(meeting.scheduledAt)}
           <span>·</span>
           <input
@@ -152,9 +173,77 @@ export function DocumentWorkspace({
             title="编辑参与者，用顿号或逗号分隔"
           />
         </div>
-        <h1>{meeting.title}</h1>
 
-        <DocumentSection icon={<Target size={20} weight="duotone" />} title="会议目标">
+        {stage === "prepare" && (
+          <section className="preparation-card" aria-labelledby="preparation-title">
+            <div className="preparation-card__intro">
+              <span className="eyebrow">会前准备</span>
+              <h1 id="preparation-title">一切就绪后，直接开始记录</h1>
+              <p>先确认录音范围、权限和转写方式。缺少转写服务不会影响本地录音。</p>
+            </div>
+            <div className="readiness-grid">
+              {readiness.items.map((item) => (
+                <div className={`readiness-item readiness-item--${item.tone}`} key={item.id}>
+                  <span className="readiness-item__icon">
+                    {item.tone === "ready" ? <CheckCircle size={18} weight="fill" /> : item.tone === "attention" ? <WarningCircle size={18} weight="fill" /> : <Microphone size={18} />}
+                  </span>
+                  <div>
+                    <small>{item.label}</small>
+                    <strong>{item.value}</strong>
+                    <p>{item.detail}</p>
+                  </div>
+                  {item.id === "microphone" && readiness.microphoneNeedsAttention && (
+                    <button className="text-button" onClick={onOpenPermissions}>查看授权</button>
+                  )}
+                  {item.id === "transcription" && !readiness.hasTranscription && (
+                    <button className="text-button" onClick={onConfigureTranscription}>配置转写</button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <button className="preparation-start" onClick={() => void onStartRecording()}>
+              <Microphone size={20} weight="fill" />
+              <span><strong>开始录音</strong><small>{meeting.mode === "online" ? "记录麦克风与系统音频" : "记录现场麦克风声音"}</small></span>
+              <CaretRight size={18} weight="bold" />
+            </button>
+          </section>
+        )}
+
+        {stage === "live" && (
+          <section className="live-context" aria-label="本次会议目标">
+            <span><i />正在记录</span>
+            <div>
+              {meeting.goals.length
+                ? meeting.goals.slice(0, 3).map((goal) => <span key={goal}>{goal}</span>)
+                : <span>先专注记录，目标可以随时补充</span>}
+            </div>
+          </section>
+        )}
+
+        {stage === "review" && (
+          <section className={`review-hero ${recentlyFinalized || processingStatus ? "is-fresh" : ""}`}>
+            <div>
+              <span className="eyebrow">{processingStatus ? "录音处理中" : "会后整理"}</span>
+              <h1>{processingStatus || (recentlyFinalized ? "录音已安全保存" : "把讨论收束成清晰结果")}</h1>
+              <p>{processingStatus
+                ? "处理会在后台继续，你可以先补充笔记或查看已经出现的转写。"
+                : meeting.summary.stale
+                  ? "转写或笔记有了新内容，更新纪要后再确认行动项。"
+                  : meeting.summary.keyPoints.length
+                    ? `已整理 ${meeting.summary.keyPoints.length} 条结论和 ${meeting.summary.actionItems.length} 个行动项。`
+                    : "录音和个人记录已保留；需要时再生成最终纪要。"}</p>
+            </div>
+            {!processingStatus && (summaryBusy ? (
+              <button className="button button--secondary" onClick={onCancelSummary}><XCircle size={16} />取消生成</button>
+            ) : (
+              <button className="button button--primary" onClick={onGenerateSummary}>
+                <ArrowClockwise size={16} />{meeting.summary.stale ? "更新纪要" : "生成最终纪要"}
+              </button>
+            ))}
+          </section>
+        )}
+
+        <DocumentSection kind="goals" icon={<Target size={20} weight="duotone" />} title="会议目标">
           <EditableList
             values={meeting.goals}
             placeholder="添加会议目标"
@@ -162,7 +251,7 @@ export function DocumentWorkspace({
           />
         </DocumentSection>
 
-        <DocumentSection icon={<NotePencil size={20} weight="duotone" />} title="我的记录">
+        <DocumentSection kind="notes" icon={<NotePencil size={20} weight="duotone" />} title="我的记录">
           <div className="note-toolbar-row">
             <div className="editor-toolbar" aria-label="笔记格式工具栏">
               <button
@@ -184,7 +273,7 @@ export function DocumentWorkspace({
                 disabled={noteMode !== "rich"}
               ><ListBullets size={17} /></button>
               <button
-                onClick={() => editor?.chain().focus().insertContent(`[${formatDuration(meeting.durationSeconds)}] `).run()}
+                onClick={() => editor?.chain().focus().insertContent(`[${formatDuration(stage === "live" ? elapsed : meeting.durationSeconds)}] `).run()}
                 aria-label="插入时间戳"
                 disabled={noteMode !== "rich"}
               ><LinkSimple size={16} /></button>
@@ -223,14 +312,17 @@ export function DocumentWorkspace({
         </DocumentSection>
 
         <DocumentSection
+          kind="summary"
           icon={<FileText size={20} weight="duotone" />}
-          title="AI 会议纪要"
+          title={stage === "live" ? "会议进展" : "关键结论"}
           badge={
             <span className="summary-cadence">
-              <i /> {meeting.summary.generationMode === "local" ? "本机基础归纳" : "AI 自动整理"} · 约每 {formatInterval(summaryIntervalSeconds)}
+              <i /> {meeting.summary.keyPoints.length
+                ? meeting.summary.generationMode === "local" ? "本机基础归纳" : "AI 自动整理"
+                : "尚未生成"}{stage === "live" ? ` · 约每 ${formatInterval(summaryIntervalSeconds)}` : ""}
             </span>
           }
-          action={
+          action={stage === "review" ? undefined :
             summaryBusy ? (
               <button className="text-button" onClick={onCancelSummary} title="中止这次总结请求">
                 <XCircle size={15} />取消生成
@@ -240,7 +332,7 @@ export function DocumentWorkspace({
                 <ArrowClockwise size={15} />
                 {meeting.summary.stale
                   ? "更新纪要"
-                  : meeting.status === "recording" || meeting.status === "paused"
+                  : stage === "live"
                     ? "立即总结"
                     : "生成最终纪要"}
               </button>
@@ -289,7 +381,7 @@ export function DocumentWorkspace({
           </div>
         </DocumentSection>
 
-        <DocumentSection icon={<CheckSquare size={20} weight="duotone" />} title="行动项">
+        <DocumentSection kind="actions" icon={<CheckSquare size={20} weight="duotone" />} title="行动项">
           <div className="action-table">
             <div className="action-table__head">
               <span>任务</span><span>负责人</span><span>截止时间</span><span>状态</span>
@@ -370,7 +462,7 @@ export function DocumentWorkspace({
           </div>
         </DocumentSection>
 
-        <DocumentSection icon={<CheckSquare size={20} weight="duotone" />} title="决策、问题与下一步">
+        <DocumentSection kind="details" icon={<CheckSquare size={20} weight="duotone" />} title="决策、问题与下一步">
           <div className="summary-detail-grid">
             <EditableSummaryList title="已确认决策" values={meeting.summary.decisions} locks={meeting.summary.manualLocks} lockKey="decisions" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("decisions", values, index)} />
             <EditableSummaryList title="未决问题" values={meeting.summary.openQuestions} locks={meeting.summary.manualLocks} lockKey="openQuestions" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("openQuestions", values, index)} />
@@ -441,12 +533,14 @@ function EditableSummaryList({
 
 /** 文档区块骨架：图标 + 标题 + 徽标 + 右侧动作按钮 + 内容。 */
 function DocumentSection({
+  kind,
   icon,
   title,
   badge,
   action,
   children
 }: {
+  kind: "goals" | "notes" | "summary" | "actions" | "details";
   icon: React.ReactNode;
   title: string;
   badge?: React.ReactNode;
@@ -454,7 +548,7 @@ function DocumentSection({
   children: React.ReactNode;
 }) {
   return (
-    <section className="document-section">
+    <section className={`document-section document-section--${kind}`}>
       <header>
         <div className="document-section__title">{icon}<h2>{title}</h2>{badge}</div>
         {action}

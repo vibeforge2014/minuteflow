@@ -11,6 +11,11 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     delete: (id) => invoke("meetings:delete", id),
     restore: (id) => invoke("meetings:restore", id)
   },
+  voiceprints: {
+    list: () => invoke("voiceprints:list"),
+    enroll: (payload) => invoke("voiceprints:enroll", payload),
+    forget: (name) => invoke("voiceprints:forget", name)
+  },
   recordings: {
     start: (meetingId) => invoke("recordings:start", meetingId),
     append: (payload) => invoke("recordings:append", payload),
