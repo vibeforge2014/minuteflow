@@ -53,6 +53,52 @@ export interface ActionItem {
   evidenceSegmentIds?: string[];
 }
 
+/** 视觉纪要章节的布局类型与强调色；渲染层只接受这些有限值，模型不能注入任意样式。 */
+export type VisualSummaryLayout = "table" | "cards" | "callout";
+export type VisualSummaryTone = "coral" | "amber" | "violet" | "green";
+
+export interface VisualSummaryTable {
+  /** 2–4 列的表头。 */
+  columns: string[];
+  /** 最多 5 行；每行列数必须与 columns 一致。 */
+  rows: string[][];
+}
+
+export interface VisualSummaryCard {
+  title: string;
+  status?: string;
+  /** 最多 4 条要点。 */
+  bullets: string[];
+  takeaway?: string;
+}
+
+export interface VisualSummarySection {
+  id: string;
+  /** 01–05 的显示序号，由模型返回、校验层重排。 */
+  number: number;
+  title: string;
+  tone: VisualSummaryTone;
+  layout: VisualSummaryLayout;
+  table?: VisualSummaryTable;
+  cards?: VisualSummaryCard[];
+  callout?: string;
+}
+
+/**
+ * 应用原生渲染的视觉纪要。模型只返回受限 JSON；不接受 HTML、Markdown、图片 URL 或任意 CSS。
+ */
+export interface VisualSummary {
+  schemaVersion: 1;
+  title: string;
+  subtitle: string;
+  sections: VisualSummarySection[];
+  generatedAt: string;
+  /** 普通结构化纪要的 updatedAt；两者不一致时视觉版视为过期。 */
+  sourceSummaryUpdatedAt: string;
+  stale?: boolean;
+  providerProfileId?: string;
+}
+
 /**
  * AI 会议纪要：结构化的会议产出，分为主题、要点、决定、行动项、待澄清问题、风险与下一步。
  * stale 表示转写有更新而纪要尚未重新生成；manualLocks 记录用户手动锁定、AI 不得覆盖的字段键。
@@ -82,6 +128,8 @@ export interface MeetingSummary {
   stale?: boolean;
   /** 手动锁定字段键集合（如 "keyPoints:0"、"action:<id>"），AI 重算时保留这些内容。 */
   manualLocks?: string[];
+  /** 已验证在线模型生成、由应用原生排版的视觉纪要。 */
+  visualSummary?: VisualSummary;
 }
 
 /**
@@ -163,6 +211,12 @@ export interface ModelProfile {
     transcriptionEndpoint?: string;
     /** 附加请求头。 */
     headers?: Record<string, string>;
+    /** 用户显式开启视觉纪要能力；仅在 verifiedAt 与当前配置指纹匹配时生效。 */
+    visualSummaryEnabled?: boolean;
+    /** 最近一次视觉 schema 测试成功时间。 */
+    visualSummaryVerifiedAt?: string;
+    /** 验证时的端点/协议/模型指纹；配置变化会让验证自动失效。 */
+    visualSummaryVerifiedFingerprint?: string;
   };
   /** 是否启用；录音与总结只挑选已启用的档案。 */
   enabled: boolean;
@@ -588,19 +642,38 @@ export interface MeetingAPI {
       final: boolean;
       input: {
         title: string;
+        participants?: string[];
         goals: string[];
         notes: string[];
         transcript: TranscriptSegment[];
         previousSummary: MeetingSummary;
       };
-    }): Promise<MeetingSummary & { degraded?: boolean; degradedReason?: string }>;
+    }): Promise<MeetingSummary & {
+      degraded?: boolean;
+      degradedReason?: string;
+      visualDegraded?: boolean;
+      visualDegradedReason?: string;
+    }>;
+    /** 仅根据已经保存的普通纪要重试视觉版，不再次上传完整转录。 */
+    generateVisual(payload: {
+      meetingId: string;
+      profileId?: string;
+      title: string;
+      participants: string[];
+      summary: MeetingSummary;
+    }): Promise<VisualSummary>;
     /** 取消一场会议进行中的总结请求（中止主进程侧的 AbortController）。 */
     cancel(meetingId: string): Promise<{ ok: true }>;
   };
   models: {
     list(): Promise<ModelProfile[]>;
     save(profile: ModelProfile, apiKey?: string): Promise<ModelProfile>;
-    test(profile: ModelProfile, apiKey?: string): Promise<{ ok: boolean; message: string }>;
+    test(profile: ModelProfile, apiKey?: string): Promise<{
+      ok: boolean;
+      message: string;
+      visualSummaryVerifiedAt?: string;
+      visualSummaryVerifiedFingerprint?: string;
+    }>;
     deleteSecret(secretId: string): Promise<void>;
     scanLocal(): Promise<LocalModelScanResult>;
     chooseLocal(): Promise<LocalModelFile | null>;

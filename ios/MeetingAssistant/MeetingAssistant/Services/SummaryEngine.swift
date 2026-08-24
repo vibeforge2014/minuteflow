@@ -50,6 +50,103 @@ struct SummaryDraft: Equatable, Codable {
   }
 }
 
+// MARK: - 视觉纪要 schema
+
+enum VisualSummaryLayout: String, Codable {
+  case table
+  case cards
+  case callout
+}
+
+enum VisualSummaryTone: String, Codable {
+  case coral
+  case amber
+  case violet
+  case green
+}
+
+struct VisualSummaryTable: Equatable, Codable {
+  var columns: [String]
+  var rows: [[String]]
+}
+
+struct VisualSummaryCard: Equatable, Codable {
+  var title: String
+  var status: String?
+  var bullets: [String]
+  var takeaway: String?
+}
+
+struct VisualSummarySection: Equatable, Codable, Identifiable {
+  var id: String
+  var number: Int
+  var title: String
+  var tone: VisualSummaryTone
+  var layout: VisualSummaryLayout
+  var table: VisualSummaryTable?
+  var cards: [VisualSummaryCard]?
+  var callout: String?
+}
+
+struct VisualSummary: Equatable, Codable {
+  var schemaVersion: Int
+  var title: String
+  var subtitle: String
+  var sections: [VisualSummarySection]
+  var generatedAt: Date
+  var sourceSummaryUpdatedAt: Date
+  var stale: Bool
+
+  /// 对模型返回的受限 schema 做跨平台一致校验；所有字段必须为纯文本。
+  func validated() throws -> VisualSummary {
+    guard schemaVersion == 1, !title.isEmpty, !subtitle.isEmpty,
+      (1...5).contains(sections.count), Self.isPlain(title), Self.isPlain(subtitle)
+    else { throw SummaryServiceError.invalidVisualSummary }
+
+    var normalized = self
+    for index in normalized.sections.indices {
+      var section = normalized.sections[index]
+      guard !section.id.isEmpty, Self.isPlain(section.title) else {
+        throw SummaryServiceError.invalidVisualSummary
+      }
+      section.number = index + 1
+      switch section.layout {
+      case .table:
+        guard let table = section.table,
+          (2...4).contains(table.columns.count), table.rows.count <= 5,
+          table.columns.allSatisfy(Self.isPlain),
+          table.rows.allSatisfy({ $0.count == table.columns.count && $0.allSatisfy(Self.isPlain) })
+        else { throw SummaryServiceError.invalidVisualSummary }
+      case .cards:
+        guard let cards = section.cards, (1...4).contains(cards.count),
+          cards.allSatisfy({ card in
+            Self.isPlain(card.title) && card.bullets.count <= 4
+              && card.bullets.allSatisfy(Self.isPlain)
+              && card.status.map(Self.isPlain) ?? true
+              && card.takeaway.map(Self.isPlain) ?? true
+          })
+        else { throw SummaryServiceError.invalidVisualSummary }
+      case .callout:
+        guard let callout = section.callout, Self.isPlain(callout) else {
+          throw SummaryServiceError.invalidVisualSummary
+        }
+      }
+      normalized.sections[index] = section
+    }
+    return normalized
+  }
+
+  private static func isPlain(_ value: String) -> Bool {
+    guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      value.count <= 240
+    else { return false }
+    return value.range(
+      of: #"(<[^>]+>|```|https?://|^\s{0,3}#{1,6}\s)"#,
+      options: [.regularExpression, .caseInsensitive]
+    ) == nil
+  }
+}
+
 // MARK: - 本地引擎
 
 /// 本地关键词纪要引擎（离线可用，无副作用）。

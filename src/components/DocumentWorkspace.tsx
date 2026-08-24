@@ -22,6 +22,7 @@ import {
   NotePencil,
   PencilSimple,
   Plus,
+  Sparkle,
   Target,
   WarningCircle,
   XCircle
@@ -38,6 +39,7 @@ import { lockSummaryField, toggleSummaryLock } from "../lib/summary";
 import { formatDuration, formatInterval } from "../lib/format";
 import { useMeetingStore } from "../store/meetingStore";
 import type { RecordingReadiness, WorkspaceStage } from "../lib/workspace";
+import { VisualSummaryView } from "./VisualSummaryView";
 
 interface DocumentWorkspaceProps {
   meeting: Meeting;
@@ -54,6 +56,8 @@ interface DocumentWorkspaceProps {
   onGenerateSummary(): void;
   /** 取消进行中的总结请求（生成按钮在 busy 态变为“取消”）。 */
   onCancelSummary(): void;
+  /** 仅用普通纪要重试视觉版。 */
+  onRetryVisualSummary(): void;
   summaryBusy: boolean;
 }
 
@@ -70,9 +74,14 @@ export function DocumentWorkspace({
   onOpenPermissions,
   onGenerateSummary,
   onCancelSummary,
+  onRetryVisualSummary,
   summaryBusy
 }: DocumentWorkspaceProps) {
   const summaryIntervalSeconds = useMeetingStore((state) => state.preferences.summaryIntervalSeconds);
+  const profiles = useMeetingStore((state) => state.profiles);
+  const visualCapable = profiles.some((profile) => profile.kind === "llm" && profile.enabled
+    && profile.options.visualSummaryEnabled && profile.options.visualSummaryVerifiedAt);
+  const [summaryView, setSummaryView] = useState<"normal" | "visual">("normal");
   /** 笔记显示模式：富文本编辑 / Markdown 源码 / 只读预览。 */
   const [noteMode, setNoteMode] = useState<"rich" | "markdown" | "preview">("rich");
   /** 最近导入的 .md 文件名（显示导入成功提示）。 */
@@ -109,6 +118,14 @@ export function DocumentWorkspace({
     const next = markdownToHtml(meetingMarkdown(meeting));
     if (editor.getHTML() !== next) editor.commands.setContent(next, { emitUpdate: false });
   }, [editor, meeting.id, meeting.notes, meeting.notesMarkdown]);
+
+  useEffect(() => {
+    setSummaryView(stage === "review" && meeting.summary.visualSummary && !meeting.summary.visualSummary.stale ? "visual" : "normal");
+  }, [meeting.id, stage]);
+
+  useEffect(() => {
+    if (stage === "review" && meeting.summary.visualSummary && !meeting.summary.visualSummary.stale) setSummaryView("visual");
+  }, [meeting.summary.visualSummary?.generatedAt, stage]);
 
   /** 导入 .md 文件：规范化换行/BOM 后写入编辑器与 notesMarkdown，并切到预览态。 */
   const importMarkdown = async () => {
@@ -158,7 +175,7 @@ export function DocumentWorkspace({
 
   return (
     <div className="document-scroll">
-      <article className={`meeting-document meeting-document--${stage}`}>
+      <article className={`meeting-document meeting-document--${stage} ${summaryView === "visual" ? "meeting-document--visual" : ""}`}>
         <div className="document-date document-date--workspace-meta">
           {formatMeetingDate(meeting.scheduledAt)}
           <span>·</span>
@@ -241,6 +258,28 @@ export function DocumentWorkspace({
               </button>
             ))}
           </section>
+        )}
+
+        {stage === "review" && (
+          <div className="summary-view-switch" role="tablist" aria-label="纪要显示方式">
+            <button role="tab" aria-selected={summaryView === "normal"} className={summaryView === "normal" ? "is-active" : ""} onClick={() => setSummaryView("normal")}>
+              <FileText size={15} />普通纪要
+            </button>
+            <button role="tab" aria-selected={summaryView === "visual"} className={summaryView === "visual" ? "is-active" : ""} onClick={() => setSummaryView("visual")}>
+              <Sparkle size={15} />视觉纪要
+              {meeting.summary.visualSummary && !meeting.summary.visualSummary.stale && <span />}
+            </button>
+          </div>
+        )}
+
+        {stage === "review" && summaryView === "visual" && (
+          <VisualSummaryView
+            meeting={meeting}
+            visual={meeting.summary.visualSummary}
+            capable={Boolean(visualCapable)}
+            busy={summaryBusy}
+            onRetry={onRetryVisualSummary}
+          />
         )}
 
         <DocumentSection kind="goals" icon={<Target size={20} weight="duotone" />} title="会议目标">

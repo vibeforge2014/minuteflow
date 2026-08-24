@@ -3,7 +3,7 @@
 //  MeetingAssistant
 //
 //  底部悬浮录音工具条：展示录音状态红点与计时、麦克风音量条、
-//  标记/暂停/停止（或开始录音）按钮；停止时固化音频与转录并生成最终纪要。
+//  标记/暂停/停止（或开始录音）按钮；停止时只固化音频与转录，最终纪要由用户主动生成。
 //  所属层：视图层。
 //
 
@@ -27,7 +27,7 @@ struct RecorderBar: View {
 
   /// 录音错误文案（alert 展示）。
   @State private var errorMessage: String?
-  /// 是否正在停止并生成最终纪要（防重复点击）。
+  /// 是否正在停止并固化本地录音（防重复点击）。
   @State private var isFinishing = false
 
   // MARK: - 视图内容
@@ -197,11 +197,10 @@ struct RecorderBar: View {
     try? modelContext.save()
   }
 
-  /// 停止录音：固化音频文件名与整段实时转录、保存会议，再生成最终纪要。
+  /// 停止录音：固化音频文件名与整段实时转录并保存会议，不访问远程模型。
   ///
   /// - 副作用：结束音频/识别会话；追加 TranscriptSegmentRecord；调用纪要服务
-  ///   （远程模式发起网络调用）；多次保存 SwiftData。纪要失败时录音仍安全保存，
-  ///   会议停留在“整理中”待手动重试。
+  ///   多次保存 SwiftData。最终纪要由 AI 纪要页的用户操作显式触发。
   private func stopAndFinalize() async {
     isFinishing = true
     // 先快照会话数据，再停止协调器（停止后临时状态会被清理）。
@@ -226,23 +225,9 @@ struct RecorderBar: View {
     // 先本地落盘（时长/音频名/状态），再做最终纪要。
     meeting.duration = TimeInterval(elapsed)
     meeting.audioFilename = audioName
-    meeting.status = .processing
+    meeting.status = .completed
     meeting.updatedAt = .now
     try? modelContext.save()
-
-    do {
-      let draft = try await SummaryService().summarize(
-        transcript: meeting.transcriptText,
-        notes: meeting.personalNotes,
-        preferences: preferences
-      )
-      meeting.apply(summary: draft)
-      meeting.status = .completed
-      try modelContext.save()
-    } catch {
-      meeting.status = .processing
-      errorMessage = "录音已安全保存，最终纪要稍后可重试：\(error.localizedDescription)"
-    }
     recorder.clearCompletedSession()
     isFinishing = false
   }

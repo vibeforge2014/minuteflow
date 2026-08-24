@@ -44,7 +44,8 @@ struct MeetingAssistantApp: App {
       let configuration = ModelConfiguration(
         "MeetingAssistant",
         schema: schema,
-        isStoredInMemoryOnly: false
+        // UI 测试每次从全新演示数据启动，避免旧模拟器数据库掩盖轻量迁移或视觉纪要状态。
+        isStoredInMemoryOnly: ProcessInfo.processInfo.arguments.contains("UI_TESTING")
       )
       modelContainer = try ModelContainer(
         for: schema,

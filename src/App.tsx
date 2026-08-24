@@ -510,6 +510,9 @@ export function App() {
                 if (requirePremium("生成 AI 会议纪要")) void recorder.generateSummary();
               }}
               onCancelSummary={() => void recorder.cancelSummary()}
+              onRetryVisualSummary={() => {
+                if (requirePremium("生成视觉会议纪要")) void recorder.generateVisualSummary();
+              }}
               summaryBusy={recorder.summaryBusy}
             />
 
@@ -589,22 +592,26 @@ export function App() {
         onClose={() => setNewMeetingOpen(false)}
         onCreate={handleCreate}
       />
-      <SettingsDialog open={settingsOpen} initialTab={settingsTab} onClose={() => setSettingsOpen(false)} />
+      <SettingsDialog open={settingsOpen} initialTab={settingsTab} onClose={() => {
+        setSettingsOpen(false);
+        // 首次配置期间从设置返回时继续留在向导当前步骤，不提前写入完成标记。
+        if (!preferences.onboardingCompleted) setOnboardingOpen(true);
+      }} />
       <DeletedMeetingsDialog
         open={trashOpen}
         onClose={() => setTrashOpen(false)}
         onRestored={initialize}
       />
       <OnboardingDialog
-        open={onboardingOpen}
+        open={onboardingOpen && !settingsOpen}
+        profiles={profiles}
         onComplete={async () => {
           await updatePreferences({ ...preferences, onboardingCompleted: true });
           setOnboardingOpen(false);
         }}
-        onConfigureModels={async () => {
-          await updatePreferences({ ...preferences, onboardingCompleted: true });
+        onConfigureModels={(tab) => {
           setOnboardingOpen(false);
-          openSettings();
+          openSettings(tab);
         }}
       />
       <SystemPermissionsDialog

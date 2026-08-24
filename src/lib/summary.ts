@@ -48,7 +48,9 @@ export function mergeSummaryRevision(
   const merged: MeetingSummary = {
     ...incoming,
     manualLocks: [...locks],
-    stale: false
+    stale: false,
+    visualSummary: incoming.visualSummary
+      ?? (current.visualSummary ? { ...current.visualSummary, stale: true } : undefined)
   };
 
   // 主题整列表锁定：AI 不得整体改写讨论主题。

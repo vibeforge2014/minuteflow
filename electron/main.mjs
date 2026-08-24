@@ -51,6 +51,8 @@ import {
 } from "./database.mjs";
 import { deleteSecret, flushSecrets, readSecret, storeSecret, warmSecretCache } from "./services/secrets.mjs";
 import {
+  generateVisualSummaryWithOpenAICompatible,
+  isVisualSummaryProfileVerified,
   summarizeLocally,
   summarizeWithOpenAICompatible,
   testModelProfile,
@@ -742,6 +744,7 @@ function registerIpc() {
     }
     const sanitized = {
       title: String(input.title ?? ""),
+      participants: Array.isArray(input.participants) ? input.participants.map((item) => String(item)) : [],
       goals: Array.isArray(input.goals) ? input.goals.map((item) => String(item)) : [],
       notes: Array.isArray(input.notes) ? input.notes.map((item) => String(item)) : [],
       transcript: input.transcript.filter((segment) => segment && typeof segment.text === "string"),
@@ -779,7 +782,25 @@ function registerIpc() {
         Boolean(payload.final),
         controller.signal
       );
-      return { ...summary, updatedAt: finishedAt(), generationMode: "online", sourceThroughMs, stale: false };
+      const completed = { ...summary, updatedAt: finishedAt(), generationMode: "online", sourceThroughMs, stale: false };
+      if (payload.final && isVisualSummaryProfileVerified(profile)) {
+        try {
+          completed.visualSummary = await generateVisualSummaryWithOpenAICompatible(
+            profile,
+            readSecret(profile.secretId),
+            { title: sanitized.title, participants: sanitized.participants, summary: completed },
+            controller.signal
+          );
+        } catch (error) {
+          if (controller.signal.aborted || error?.name === "AbortError") throw error;
+          return {
+            ...completed,
+            visualDegraded: true,
+            visualDegradedReason: `普通纪要已生成，但视觉版生成失败（${error instanceof Error ? error.message : String(error)}）。`
+          };
+        }
+      }
+      return completed;
     } catch (error) {
       // 用户主动取消不降级，原样抛出；其余失败（断网/超时/鉴权）回退本地纪要并明确告知。
       if (controller.signal.aborted || error?.name === "AbortError") throw error;
@@ -793,6 +814,33 @@ function registerIpc() {
         degraded: true,
         degradedReason: `在线总结失败（${reason}），已回退生成本机基础纪要。`
       };
+    } finally {
+      if (activeSummaryRequests.get(meetingKey) === controller) activeSummaryRequests.delete(meetingKey);
+    }
+  });
+
+  // summary:generate-visual — 仅用已保存的普通纪要重试视觉版，不读取或上传完整转录。
+  trustedHandle("summary:generate-visual", async (_event, payload) => {
+    await requireLicense();
+    const profile = listModelProfiles().find((item) => item.id === payload?.profileId && item.kind === "llm");
+    if (!profile || !isVisualSummaryProfileVerified(profile)) {
+      throw new Error("当前总结模型尚未通过视觉纪要能力验证，请先在设置中开启并测试连接。");
+    }
+    const meetingKey = typeof payload?.meetingId === "string" ? payload.meetingId : "default";
+    const controller = new AbortController();
+    activeSummaryRequests.get(meetingKey)?.abort();
+    activeSummaryRequests.set(meetingKey, controller);
+    try {
+      return await generateVisualSummaryWithOpenAICompatible(
+        profile,
+        readSecret(profile.secretId),
+        {
+          title: String(payload?.title ?? ""),
+          participants: Array.isArray(payload?.participants) ? payload.participants.map(String) : [],
+          summary: payload?.summary ?? {}
+        },
+        controller.signal
+      );
     } finally {
       if (activeSummaryRequests.get(meetingKey) === controller) activeSummaryRequests.delete(meetingKey);
     }

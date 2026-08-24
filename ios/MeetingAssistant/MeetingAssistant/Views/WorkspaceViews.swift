@@ -22,7 +22,7 @@ struct TabletWorkspaceView: View {
       MeetingLibraryView(meetings: meetings, onImport: onImport)
     } content: {
       if let meeting = selectedMeeting {
-        MeetingDocumentView(meeting: meeting)
+        MeetingDocumentView(meeting: meeting, showsVisualSwitcher: true)
       } else {
         EmptyMeetingSelectionView()
       }

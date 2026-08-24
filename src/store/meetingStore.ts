@@ -238,7 +238,13 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     await get().updateMeeting(id, (meeting) => ({
       ...meeting,
       transcript: mergeTranscriptSegments(meeting.transcript, segment),
-      summary: { ...meeting.summary, stale: true }
+      summary: {
+        ...meeting.summary,
+        stale: true,
+        visualSummary: meeting.summary.visualSummary
+          ? { ...meeting.summary.visualSummary, stale: true }
+          : undefined
+      }
     }), false);
     const existing = flushTimers.get(id);
     if (existing === undefined) {

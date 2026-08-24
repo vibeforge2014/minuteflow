@@ -80,6 +80,10 @@ final class MeetingRecord {
   var audioFilename: String?
   /// 最近一次应用 AI 纪要的时间；实时纪要卡片展示用。
   var lastSummaryAt: Date?
+  /// 视觉纪要受限 schema 的 JSON；可选字段支持旧 SwiftData 存储轻量迁移。
+  var visualSummaryData: Data?
+  /// 视觉版所依据的普通纪要更新时间，用于判断过期。
+  var visualSummarySourceUpdatedAt: Date?
 
   /// 转录片段（一对多）；deleteRule .cascade 表示删除会议时一并删除全部片段，
   /// inverse 指向 TranscriptSegmentRecord.meeting 完成双向绑定。
@@ -121,6 +125,8 @@ final class MeetingRecord {
     risksText: String = "",
     nextStepsText: String = "",
     audioFilename: String? = nil,
+    visualSummaryData: Data? = nil,
+    visualSummarySourceUpdatedAt: Date? = nil,
     transcriptSegments: [TranscriptSegmentRecord] = [],
     actionItems: [ActionItemRecord] = []
   ) {
@@ -145,6 +151,8 @@ final class MeetingRecord {
     self.risksText = risksText
     self.nextStepsText = nextStepsText
     self.audioFilename = audioFilename
+    self.visualSummaryData = visualSummaryData
+    self.visualSummarySourceUpdatedAt = visualSummarySourceUpdatedAt
     self.transcriptSegments = transcriptSegments
     self.actionItems = actionItems
   }
@@ -195,6 +203,30 @@ final class MeetingRecord {
     orderedSegments.map(\.text).joined(separator: "\n")
   }
 
+  /// 解码视觉纪要；损坏或旧版本 JSON 不阻断普通纪要展示。
+  var visualSummary: VisualSummary? {
+    guard let visualSummaryData else { return nil }
+    return try? JSONDecoder.visualSummary.decode(VisualSummary.self, from: visualSummaryData).validated()
+  }
+
+  /// 从已持久化的可编辑字段重建结构化普通纪要，供视觉版重试使用。
+  var summaryDraft: SummaryDraft {
+    let lines: (String) -> [String] = { value in
+      value.split(whereSeparator: \.isNewline)
+        .map { String($0).replacingOccurrences(of: #"^[\s#•\-*]+"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    }
+    return SummaryDraft(
+      topics: [],
+      keyPoints: lines(summaryText),
+      decisions: lines(decisionsText),
+      actionItems: orderedActionItems.map(\.title),
+      openQuestions: lines(openQuestionsText),
+      risks: lines(risksText),
+      nextSteps: lines(nextStepsText)
+    )
+  }
+
   // MARK: - 纪要应用
 
   /// 把一次 SummaryDraft 结果写回会议，并增量补录不重复的行动项。
@@ -210,11 +242,40 @@ final class MeetingRecord {
     nextStepsText = summary.nextSteps.map { "• \($0)" }.joined(separator: "\n")
     lastSummaryAt = .now
     updatedAt = .now
+    if var previous = visualSummary {
+      previous.stale = true
+      visualSummaryData = try? JSONEncoder.visualSummary.encode(previous)
+    }
 
     // 以标题去重，避免重复应用纪要时生成重复行动项。
     let existingTitles = Set(actionItems.map(\.title))
     for title in summary.actionItems where !existingTitles.contains(title) {
       actionItems.append(ActionItemRecord(title: title, meeting: self))
     }
+  }
+
+
+  /// 保存经过校验的视觉纪要；普通纪要始终保留为事实源。
+  func apply(visualSummary: VisualSummary) throws {
+    let validated = try visualSummary.validated()
+    visualSummaryData = try JSONEncoder.visualSummary.encode(validated)
+    visualSummarySourceUpdatedAt = validated.sourceSummaryUpdatedAt
+    updatedAt = .now
+  }
+}
+
+private extension JSONEncoder {
+  static var visualSummary: JSONEncoder {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    return encoder
+  }
+}
+
+private extension JSONDecoder {
+  static var visualSummary: JSONDecoder {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    return decoder
   }
 }

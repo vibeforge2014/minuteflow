@@ -8,11 +8,11 @@
  * 主要导出：api（当前生效的 MeetingAPI 实例）、isElectronRuntime（是否 Electron 环境）。
  */
 import { demoMeetings } from "../data/demo";
-import type { CreateMeetingInput, DownloadableModel, ImportCandidate, ImportJob, Meeting, MeetingAPI, MeetingPreferences, MeetingSummary, ModelProfile } from "../types";
+import type { CreateMeetingInput, DownloadableModel, ImportCandidate, ImportJob, Meeting, MeetingAPI, MeetingPreferences, MeetingSummary, ModelProfile, VisualSummary } from "../types";
 import { simplifyChinese, simplifySummary } from "./chinese";
 
 // —— 浏览器兜底实现的 localStorage 键位与内存事件总线 ——
-const storageKey = "meeting-assistant-demo-state-v3";
+const storageKey = "meeting-assistant-demo-state-v5";
 const profileKey = "meeting-assistant-demo-profiles-v1";
 const preferencesKey = "meeting-assistant-demo-preferences-v1";
 const importJobsKey = "meeting-assistant-demo-import-jobs-v1";
@@ -156,6 +156,47 @@ function localSummary(input: {
   });
 }
 
+/** 浏览器预览用的确定性视觉纪要；真实 Electron/iOS 由已验证在线模型返回同一 schema。 */
+function browserVisualSummary(title: string, summary: MeetingSummary): VisualSummary {
+  const updatedAt = summary.updatedAt || new Date().toISOString();
+  const rows = [
+    ...(summary.decisions ?? []).slice(0, 2).map((item) => ["已确认决策", item, "已决策"]),
+    ...(summary.risks ?? []).slice(0, 1).map((item) => ["主要风险", item, "需关注"]),
+    ...(summary.openQuestions ?? []).slice(0, 1).map((item) => ["待澄清", item, "待确认"])
+  ].slice(0, 5);
+  return {
+    schemaVersion: 1,
+    title,
+    subtitle: summary.topics?.length ? `聚焦 ${summary.topics.slice(0, 3).join("、")}` : "把讨论收束为清晰结论与行动",
+    sections: [
+      {
+        id: "overview", number: 1, title: "结论与风险总览", tone: "amber", layout: "table",
+        table: { columns: ["类型", "核心内容", "状态"], rows: rows.length ? rows : [["讨论重点", summary.keyPoints[0] || "暂无可视化内容", "待推进"]] }
+      },
+      {
+        id: "progress", number: 2, title: "关键进展", tone: "violet", layout: "cards",
+        cards: (summary.keyPoints ?? []).slice(0, 2).map((item, index) => ({
+          title: `进展 ${index + 1}`, status: index === 0 ? "进行中" : "已同步", bullets: [item], takeaway: summary.nextSteps?.[index]
+        }))
+      },
+      {
+        id: "actions", number: 3, title: "行动安排", tone: "green", layout: "cards",
+        cards: (summary.actionItems ?? []).slice(0, 2).map((item) => ({
+          title: item.title, status: item.done ? "已完成" : item.status === "in_progress" ? "进行中" : "待开始",
+          bullets: [`负责人：${item.owner || "待确认"}`, `截止：${item.dueDate || "待确认"}`]
+        }))
+      },
+      {
+        id: "closing", number: 4, title: "会议定调", tone: "coral", layout: "callout",
+        callout: summary.nextSteps?.[0] || summary.decisions?.[0] || summary.keyPoints?.[0] || "继续根据会议结论推进后续工作。"
+      }
+    ].filter((section) => section.layout !== "cards" || (section.cards?.length ?? 0) > 0) as VisualSummary["sections"],
+    generatedAt: new Date().toISOString(),
+    sourceSummaryUpdatedAt: updatedAt,
+    stale: false
+  };
+}
+
 /**
  * 浏览器/演示模式的 MeetingAPI 兜底实现：接口签名与 Electron preload 桥完全一致。
  * 数据落在 localStorage；文件/录音/下载等本地能力要么用 <input> 模拟，要么直接抛出引导用户回到桌面端。
@@ -296,7 +337,17 @@ const browserApi: MeetingAPI = {
     // 模拟 900ms 生成延迟后返回本地拼装的伪纪要。
     async generate(payload) {
       await new Promise((resolve) => setTimeout(resolve, 900));
-      return localSummary(payload.input);
+      const summary = localSummary(payload.input);
+      const profile = (JSON.parse(localStorage.getItem(profileKey) || "[]") as ModelProfile[])
+        .find((item) => item.id === payload.profileId && item.kind === "llm");
+      if (payload.final && profile?.options.visualSummaryEnabled && profile.options.visualSummaryVerifiedAt) {
+        summary.visualSummary = browserVisualSummary(payload.input.title, summary);
+      }
+      return summary;
+    },
+    async generateVisual(payload) {
+      await new Promise((resolve) => setTimeout(resolve, 650));
+      return browserVisualSummary(payload.title, payload.summary);
     },
     async cancel() {
       return { ok: true };
@@ -316,8 +367,22 @@ const browserApi: MeetingAPI = {
       localStorage.setItem(profileKey, JSON.stringify(next));
       return saved;
     },
-    async test() {
+    async test(profile) {
       await new Promise((resolve) => setTimeout(resolve, 500));
+      if (profile.options.visualSummaryEnabled) {
+        return {
+          ok: true,
+          message: "浏览器预览已模拟通过视觉纪要结构验证；Electron 中会发起真实请求。",
+          visualSummaryVerifiedAt: new Date().toISOString(),
+          visualSummaryVerifiedFingerprint: JSON.stringify({
+            transport: profile.transport,
+            baseUrl: profile.baseUrl.trim().replace(/\/+$/, ""),
+            model: profile.model.trim(),
+            apiFlavor: profile.options.apiFlavor ?? "openai",
+            chatEndpoint: profile.options.chatEndpoint ?? ""
+          })
+        };
+      }
       return { ok: true, message: "浏览器预览配置有效；Electron 中会发起真实连接测试。" };
     },
     async deleteSecret() {},
@@ -443,6 +508,16 @@ const browserApi: MeetingAPI = {
           : 60,
         summaryCadenceVersion: 1
       };
+      // 视觉验收入口：浏览器预览显式带 onboarding=1 时重现首启模型向导，
+      // 并跳过无法在浏览器完成的桌面系统权限墙。
+      if (new URLSearchParams(window.location.search).get("onboarding") === "1") {
+        return {
+          ...preferences,
+          onboardingCompleted: false,
+          systemPermissionsCompleted: true,
+          permissionsVersion: 2
+        };
+      }
       localStorage.setItem(preferencesKey, JSON.stringify(preferences));
       return preferences;
     },

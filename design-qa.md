@@ -1,75 +1,107 @@
-# Design QA — 桌面核心会议工作流三态重设计
+# Design QA — 跨平台视觉纪要与会后布局
 
 ## Evidence
 
-- Source visual truth: `/Users/zqian15/.codex/generated_images/019fb0bc-fbcb-7e43-9466-3ebdf9e5dba6/call_1Z4kzuiPHEUQd1XCaaJAnBNL.png`
-- Final implementation screenshot: `/Users/zqian15/.codex/visualizations/2026/08/23/01a02eb7-37ad-7a93-8cdc-2ef4a7285bc3/minuteflow-qa/live-populated-1440x1024.png`
-- Combined full-view comparison: `/Users/zqian15/.codex/visualizations/2026/08/23/01a02eb7-37ad-7a93-8cdc-2ef4a7285bc3/minuteflow-qa/comparison-full.png`
-- Focused header/document comparison: `/Users/zqian15/.codex/visualizations/2026/08/23/01a02eb7-37ad-7a93-8cdc-2ef4a7285bc3/minuteflow-qa/comparison-header.png`
-- Focused recorder/action comparison: `/Users/zqian15/.codex/visualizations/2026/08/23/01a02eb7-37ad-7a93-8cdc-2ef4a7285bc3/minuteflow-qa/comparison-recorder.png`
-- Supplementary states: `prepare-1280x720.png`, `new-meeting-1280x720.png`, `review-1280x720.png`, `review-1440x1024.png`, `review-1024x720.png`, and `live-1024x720.png` in the same `minuteflow-qa` directory.
-- Source pixels: 1487 × 1058.
-- Implementation pixels: 1440 × 1024 at a 1440 × 1024 CSS viewport and device pixel ratio 1.
-- Density normalization: the source was Lanczos-scaled to 1440 × 1024; the implementation remained at native 1× density. The normalized frames were placed side by side at 2880 × 1024.
-- Primary comparison state: populated live meeting, light theme, left meeting library, notes-first center document, live transcript on the right, recording controls docked at the bottom.
+- Source visual truth: `/var/folders/br/w5xj47hx5rn3sg6zmvz51k900000gn/T/codex-clipboard-637dd8de-2ab4-41c8-a9ea-c875e3ec608e.png` (竞品会后布局) and `/var/folders/br/w5xj47hx5rn3sg6zmvz51k900000gn/T/codex-clipboard-d769c652-9fbd-4741-ab02-6a8f6e5c8c68.png` (竞品视觉纪要信息图).
+- Final browser-rendered implementation screenshot: `/Users/zqian15/Desktop/minuteflow/artifacts/implementation-visual-transcript-1366x1038-final.png`.
+- Long-content lower-region screenshot: `/Users/zqian15/Desktop/minuteflow/artifacts/implementation-visual-lower-1366x1038.png`.
+- Narrow-window screenshot: `/Users/zqian15/Desktop/minuteflow/artifacts/implementation-visual-narrow-1100x800.png`.
+- Combined full-view comparison: `/Users/zqian15/Desktop/minuteflow/artifacts/design-qa-visual-comparison-final.png`.
+- Source pixels: 2138 × 1624, normalized to 1366 × 1038 with Lanczos resampling (same 1.316 aspect ratio).
+- Implementation pixels and CSS viewport: 1366 × 1038 at density 1. A second browser pass used 1100 × 800.
+- Primary state: completed meeting, light theme, visual-summary tab selected, left meeting library retained, structured infographic in the center, real timestamped transcript on the right.
 
 ## Findings
 
 - No actionable P0, P1, or P2 findings remain.
-- Fonts and typography: the implementation keeps the source's system-style Chinese sans-serif hierarchy, restrained weights, compact metadata, and document-first text density. The single 68 px title bar intentionally replaces the source's repeated in-document meeting title.
-- Spacing and layout rhythm: the three-column proportions, lightweight dividers, document margins, transcript density, and compact action table remain aligned with the source. Stage-specific reordering is intentional: live meetings put personal notes before rolling minutes; review meetings put conclusions and actions first.
-- Colors and visual tokens: the source's blue product accent is intentionally mapped to MinuteFlow's locked warm-orange palette, pale peach selection, warm off-white surfaces, and semantic green/red status colors. Contrast remains clear in primary actions and status badges.
-- Image quality and asset fidelity: this workspace contains no required raster illustration or product imagery. The existing real MinuteFlow brand mark and Phosphor icon set are retained; no emoji, handcrafted SVG, placeholder asset, or CSS illustration was introduced.
-- Copy and content: preparation guidance explains capture scope, permission status, and non-blocking missing transcription. Live and review copy distinguish rolling progress from user-triggered final minutes and never implies an automatic final AI call after stopping.
-- Accessibility and behavior: tabs expose tab semantics, dynamic recording states use polite live regions, core recording controls are at least 40 px, visible focus styles remain, temporary transcript text cannot be edited, and reduced-motion rules suppress recording pulses and disclosure transitions.
+- Fonts and typography: the implementation uses the product's system Chinese sans-serif stack, bold document title, restrained metadata, compact table text, and clear section/card hierarchy. Long Chinese copy wraps naturally without truncation; table and card labels remain legible at 1100 px.
+- Spacing and layout rhythm: the reference's dense infographic hierarchy is preserved through a hero, numbered sections, constrained tables, two-column cards, and a final callout. MinuteFlow intentionally retains its left meeting library and right transcript, so the center canvas is narrower than the competitor's content-only view; the document remains centered and scrolls independently.
+- Colors and visual tokens: the competitor's blue/purple product chrome is intentionally mapped to MinuteFlow coral orange, pale peach, amber, violet, and semantic green. Surfaces use warm off-white, lightweight borders, and restrained elevation without gradients.
+- Image quality and asset fidelity: no raster illustration or generated text image is required. The visual summary is native DOM/SwiftUI content with the existing MinuteFlow mark and library icons, so Chinese remains sharp at display and PNG-export resolutions. No emoji, handcrafted SVG, placeholder imagery, or CSS illustration substitutes were introduced.
+- Copy and content: visual content is meeting-specific and coherent on its own. The persistent label states that the model organizes content while MinuteFlow renders it locally. The right panel remains transcript/structured-summary content and intentionally does not copy the competitor's AI Q&A.
+- Icons and controls: the existing Phosphor/SF Symbols families are retained, active tabs and numbered sections are visually distinct, and export exposes “视觉纪要图” only for a valid non-stale visual summary.
+- Responsiveness and accessibility: 1366 × 1038 and 1100 × 800 show no overlap, clipped persistent controls, or horizontal page overflow. Tabs expose semantic tab roles, table markup remains native, visible text contrast is adequate, and the center document supports independent scrolling through the final callout.
 
 ## Full-view comparison evidence
 
-- The combined image compares the reference and implementation in the same normalized live-meeting state and density.
-- The implementation preserves the meeting-library/document/transcript skeleton, section rhythm, action-table geometry, live transcript anatomy, and bottom transport controls.
-- Intentional product-plan changes are visible rather than drift: one editable title instead of two, no always-visible document toolbar, notes first while live, warm-orange primary actions, and a fixed non-overlapping recording region instead of a floating overlay.
+- The combined image places the normalized 1366 × 1038 source and implementation in one comparison input. Both establish a dominant information-dense summary canvas with a strong title, a numbered comparison table, colored card groups, and an adjacent utility panel.
+- Deliberate product constraints explain the remaining structural differences: MinuteFlow keeps the meeting library, removes AI Q&A, uses a user-triggered “生成最终纪要” stage, and shows the existing transcript panel. Playback is intentionally absent from this demo meeting because no verified local audio asset exists; the product keeps playback on demand rather than rendering an empty player.
+- The implementation matches the requested information density without copying competitor branding or directly generating a Chinese-text bitmap.
 
 ## Focused-region comparison evidence
 
-- `comparison-header.png` verifies the compressed single-title header, document metadata, notes anatomy, and right-panel tabs at readable scale.
-- `comparison-recorder.png` verifies action-table density and that the bottom recorder keeps timer, capture tracks, transcription state, marker, pause, stop, and mini-window controls without covering document content.
-- Responsive evidence at 1024 × 720 confirms the 350 px transcript drawer does not introduce horizontal overflow and does not cover the recording stop controls.
+- The upper implementation screenshot verifies title hierarchy, metadata, numbered section 01, four-column table, right-panel transcript density, and the ordinary/visual switch at readable scale.
+- The lower screenshot verifies sections 02–04, two-column cards, status pills, dynamic document height, final callout, and the local-rendering attribution. No card or table content overflows its container.
+- The 1100 × 800 screenshot verifies that the three-column workspace remains usable at a narrow desktop width; the visual table stays contained and transcript text wraps without covering the document.
 
 ## Comparison history
 
-1. First pass — P1 layout: closing the right panel left its full grid track reserved, producing a large blank area beside the preparation document.
-   - Fix: made the app shell use two columns by default and add the third grid track only while the right panel is open.
-   - Post-fix evidence: `prepare-1280x720.png` shows the preparation document expanding across the available workspace with no dead panel column.
-2. Responsive pass — P1 control obstruction: at 1024 × 720 the fixed transcript drawer covered the recorder's pause/stop controls.
-   - Fix: while the drawer is open below 1040 px, constrain the live recorder region to end exactly at the drawer's left edge.
-   - Post-fix evidence: `live-1024x720.png` shows all persistent recorder controls visible and clickable; measured recorder right edge and drawer left edge both equal 674 CSS px.
-3. Interaction pass — P2 implicit submit inconsistency: the browser WebView did not reliably submit the new-meeting form when Enter was pressed in the title field.
-   - Fix: explicitly map Enter outside textareas to `requestSubmit()` with `startRecording=false`; the primary button still opts into immediate recording.
-   - Post-fix evidence: browser verification created “三态工作流验收” in preparation state with no recorder bar and no right panel, while the primary button created a separate meeting and entered live recording.
+1. First visual pass — P2 section hierarchy: numbered section badges rendered white-on-white because `currentColor` resolved after the badge text color was set to white.
+   - Fix: introduced a per-tone `--visual-accent` token and used it explicitly for the badge background while retaining white numerals.
+   - Post-fix evidence: `implementation-visual-1366x1038-final.png` and the final combined comparison show visible amber, violet, green, and coral section numbers.
+2. First full-view pass — P2 right-panel realism: the completed demo meeting had no transcript, leaving a blank right panel and weakening the intended “visual minutes + existing transcript” state.
+   - Fix: added realistic, timestamped two-speaker transcript segments to the completed browser fixture.
+   - Post-fix evidence: `implementation-visual-transcript-1366x1038-final.png` shows four readable transcript segments alongside the visual canvas.
+3. Native iPad pass — P1 missing switch: a `NavigationSplitView` content column can receive a compact horizontal size class even on iPad, so a child-level size-class check hid the ordinary/visual control.
+   - Fix: the iPad workspace now explicitly enables the center visual switch; iPhone continues to use the AI-minutes secondary picker.
+   - Post-fix evidence: the iPad UI tests switch to “视觉纪要”, verify the poster title and final callout, then return to “普通纪要”.
 
 ## Primary interactions tested
 
-- Enter creates only; the primary button creates and starts recording.
-- Preparation permission/readiness display and non-blocking missing transcription.
-- Start, pause, continue, two-step stop, safe-save review transition, and no automatic final summary.
-- Transcript explicit edit/Escape exit, speaker management entry, follow control, and no-audio timestamp feedback.
-- Continue-recording confirmation from the review overflow menu.
-- Playback drawer, play/pause, and advancing local timeline in the Electron build.
-- 1440 × 1024, 1280 × 720, and 1024 × 720 responsive layouts.
-- Fresh in-app browser page console errors/warnings: none.
+- Desktop ordinary/visual tab switching and independent long-document scrolling.
+- Desktop valid-visual export menu gating, including the “视觉纪要图” PNG item.
+- Desktop completed-meeting selection, timestamped transcript visibility, 1366 × 1038 and 1100 × 800 layouts.
+- Desktop recording-start transition and permission-timeout fallback; the browser preview correctly returned to a safe preparation state when real capture was unavailable.
+- iPhone completed-meeting navigation, AI-minutes tab, ordinary/visual secondary switching, visual title/final callout, and return to editable ordinary minutes.
+- iPad three-column document/transcript coexistence and center ordinary/visual switching.
+- Browser console warnings/errors in the final page: none.
 
 ## Implementation checklist
 
-- [x] Three-state workspace derivation and one-time stage layouts.
-- [x] Preparation readiness and single primary action.
-- [x] Simplified new-meeting flow with explicit Enter behavior.
-- [x] Notes-first live workspace, readable transcripts, follow control, and docked recorder.
-- [x] Conclusions-first review workspace, manual final summary, on-demand playback, and protected continuation.
-- [x] Responsive transcript drawer and accessible persistent controls.
-- [x] Typecheck, 61 core tests, production build, Sites packaging tests, browser QA, and Electron recording/player smoke.
+- [x] Constrained cross-platform `VisualSummary` schema and Simplified Chinese normalization.
+- [x] Verified capability fingerprint, real schema connection test, and invalidation after model configuration changes.
+- [x] Two-stage final summary with ordinary-summary persistence, cancellation, stale marking, retry, and explicit fallback semantics.
+- [x] Electron native visual canvas, conditional export menu, and hidden-window PNG rendering.
+- [x] iPhone/iPad SwiftUI visual canvas, SwiftData optional-field migration path, retry/fallback state, JSON backup preservation, and `ImageRenderer` PNG export.
+- [x] Desktop browser interaction QA, iPhone/iPad UI tests, schema/persistence/PNG unit tests, production build, and Sites packaging tests.
 
 ## Follow-up polish
 
-- P3: very long live goals are intentionally truncated into compact chips; a tooltip could expose their full text without increasing live-document density.
+- P3: the 1100 px layout intentionally uses very compact table type to preserve four columns; a future user preference could offer a larger-text single-card table presentation without changing the current default density.
+
+final result: passed
+
+---
+
+# Design QA — 首次启动模型配置向导
+
+## Evidence
+
+- Existing visual-system anchors: desktop `SystemPermissionsDialog`, the warm-light settings workbench, coral primary actions, neutral document surfaces, and the iOS `MeetingTheme` tokens.
+- Desktop welcome state: `/Users/zqian15/Desktop/minuteflow/artifacts/onboarding-welcome-808x800.png`.
+- Desktop AI-summary state: `/Users/zqian15/Desktop/minuteflow/artifacts/onboarding-summary-808x800.png`.
+- Desktop completion state: `/Users/zqian15/Desktop/minuteflow/artifacts/onboarding-ready-808x800.png`.
+- Browser viewport: 808 × 800 at density 1; the real application workspace remains visible behind the modal.
+
+## Findings
+
+- No actionable P0, P1, or P2 findings remain.
+- Hierarchy: the four-step progress indicator, single task title, short explanation, setup choices, current readiness state, and one primary action create a clear sequential path without duplicating the full settings editor.
+- Product consistency: typography, borders, restrained shadows, warm coral tint, pale peach surfaces, semantic green success, and Phosphor/SF Symbols match the existing desktop and iOS systems.
+- Behavior: desktop opens the real Whisper or AI-summary settings workbench and returns to the same wizard step. Readiness updates from persisted profiles; finishing without Whisper states “only save audio,” while finishing without an online LLM states “local basic summary.”
+- iOS adaptation: the same order is retained in an adaptive full-screen flow. Apple Speech is the built-in alternative to remote Whisper; remote API fields and credentials are saved through the existing preferences and Keychain services.
+- Privacy and model semantics: no network call occurs merely because the wizard opens or finishes. Visual-summary capability remains gated behind the existing real schema connection test.
+- Accessibility: desktop controls retain native button/dialog semantics and visible focus targets. iOS fields use native SwiftUI controls, explicit accessibility identifiers, and a spoken progress label.
+
+## Interaction verification
+
+- [x] First launch opens after the versioned permissions wall.
+- [x] Welcome → Whisper → AI summary → completion navigation.
+- [x] Whisper setup opens the real transcription settings page.
+- [x] Closing settings resumes the current onboarding step.
+- [x] Explicit audio-only and local-basic-summary fallback copy.
+- [x] Completion persists and enters the meeting workspace.
+- [x] iPhone UI automation completes the full local-default onboarding path.
+- [x] No clipping or overflow at 808 × 800; long content remains scrollable on iPhone/iPad.
 
 final result: passed

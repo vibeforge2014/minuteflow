@@ -44,6 +44,8 @@ final class AppPreferences {
     static let summaryProvider = "model.summary.provider"
     static let summaryBaseURL = "model.summary.baseURL"
     static let summaryModel = "model.summary.model"
+    static let visualSummaryEnabled = "model.summary.visual.enabled"
+    static let visualSummaryVerifiedFingerprint = "model.summary.visual.verifiedFingerprint"
     static let transcriptionProvider = "model.transcription.provider"
     static let transcriptionBaseURL = "model.transcription.baseURL"
     static let transcriptionModel = "model.transcription.model"
@@ -56,16 +58,29 @@ final class AppPreferences {
 
   /// 纪要 Provider；默认本地基础纪要。
   var summaryProvider: SummaryProviderKind {
-    didSet { persist() }
+    didSet { invalidateVisualVerificationIfNeeded(oldValue.rawValue, summaryProvider.rawValue) }
   }
 
   /// OpenAI 兼容纪要接口的 Base URL。
   var summaryBaseURL: String {
-    didSet { persist() }
+    didSet { invalidateVisualVerificationIfNeeded(oldValue, summaryBaseURL) }
   }
 
   /// 纪要模型名称。
   var summaryModel: String {
+    didSet { invalidateVisualVerificationIfNeeded(oldValue, summaryModel) }
+  }
+
+  /// 用户显式开启视觉纪要；仍需当前配置通过真实 schema 测试。
+  var visualSummaryEnabled: Bool {
+    didSet {
+      if !visualSummaryEnabled { visualSummaryVerifiedFingerprint = "" }
+      persist()
+    }
+  }
+
+  /// 最近一次验证成功的非敏感配置指纹。
+  var visualSummaryVerifiedFingerprint: String {
     didSet { persist() }
   }
 
@@ -115,6 +130,8 @@ final class AppPreferences {
       defaults.string(forKey: Key.summaryBaseURL)
       ?? "https://api.openai.com/v1"
     summaryModel = defaults.string(forKey: Key.summaryModel) ?? "gpt-4.1-mini"
+    visualSummaryEnabled = defaults.bool(forKey: Key.visualSummaryEnabled)
+    visualSummaryVerifiedFingerprint = defaults.string(forKey: Key.visualSummaryVerifiedFingerprint) ?? ""
     transcriptionProvider =
       TranscriptionProviderKind(
         rawValue: defaults.string(forKey: Key.transcriptionProvider) ?? ""
@@ -129,7 +146,9 @@ final class AppPreferences {
     let storedInterval = defaults.integer(forKey: Key.summaryInterval)
     summaryIntervalSeconds = storedInterval > 0 ? storedInterval : 120
     hasCompletedOnboarding = defaults.bool(forKey: Key.hasCompletedOnboarding)
-    if ProcessInfo.processInfo.arguments.contains("UI_TESTING") {
+    if ProcessInfo.processInfo.arguments.contains("UI_TESTING_ONBOARDING") {
+      hasCompletedOnboarding = false
+    } else if ProcessInfo.processInfo.arguments.contains("UI_TESTING") {
       hasCompletedOnboarding = true
     }
   }
@@ -142,11 +161,38 @@ final class AppPreferences {
     defaults.set(summaryProvider.rawValue, forKey: Key.summaryProvider)
     defaults.set(summaryBaseURL, forKey: Key.summaryBaseURL)
     defaults.set(summaryModel, forKey: Key.summaryModel)
+    defaults.set(visualSummaryEnabled, forKey: Key.visualSummaryEnabled)
+    defaults.set(visualSummaryVerifiedFingerprint, forKey: Key.visualSummaryVerifiedFingerprint)
     defaults.set(transcriptionProvider.rawValue, forKey: Key.transcriptionProvider)
     defaults.set(transcriptionBaseURL, forKey: Key.transcriptionBaseURL)
     defaults.set(transcriptionModel, forKey: Key.transcriptionModel)
     defaults.set(language, forKey: Key.language)
     defaults.set(summaryIntervalSeconds, forKey: Key.summaryInterval)
     defaults.set(hasCompletedOnboarding, forKey: Key.hasCompletedOnboarding)
+  }
+
+  /// 当前 Provider / Base URL / 模型三元组的稳定指纹（不含 API Key）。
+  var visualSummaryConfigurationFingerprint: String {
+    [
+      summaryProvider.rawValue,
+      summaryBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+      summaryModel.trimmingCharacters(in: .whitespacesAndNewlines)
+    ].joined(separator: "|")
+  }
+
+  var visualSummaryIsVerified: Bool {
+    visualSummaryEnabled
+      && summaryProvider == .openAICompatible
+      && !visualSummaryVerifiedFingerprint.isEmpty
+      && visualSummaryVerifiedFingerprint == visualSummaryConfigurationFingerprint
+  }
+
+  func markVisualSummaryVerified() {
+    visualSummaryVerifiedFingerprint = visualSummaryConfigurationFingerprint
+  }
+
+  private func invalidateVisualVerificationIfNeeded(_ oldValue: String, _ newValue: String) {
+    if oldValue != newValue { visualSummaryVerifiedFingerprint = "" }
+    persist()
   }
 }

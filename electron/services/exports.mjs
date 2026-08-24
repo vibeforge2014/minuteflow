@@ -19,6 +19,41 @@ const escapeHtml = (value) => String(value)
   .replaceAll("<", "&lt;")
   .replaceAll(">", "&gt;");
 
+/** 视觉纪要 PNG 的固定画布 HTML；全部模型文本先转义，禁止注入样式或脚本。 */
+function visualSummaryHtml(meeting) {
+  const visual = meeting.summary?.visualSummary;
+  if (!visual) throw new Error("这场会议还没有可导出的视觉纪要。");
+  const tone = { coral: "#c95e44", amber: "#c99614", violet: "#8359c6", green: "#559637" };
+  const sectionHtml = visual.sections.map((section) => {
+    const color = tone[section.tone] ?? tone.coral;
+    let body = "";
+    if (section.layout === "table" && section.table) {
+      body = `<div class="table-wrap"><table><thead><tr>${section.table.columns.map((item) => `<th>${escapeHtml(item)}</th>`).join("")}</tr></thead><tbody>${section.table.rows.map((row) => `<tr>${row.map((item) => `<td>${escapeHtml(item)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+    } else if (section.layout === "cards" && section.cards) {
+      body = `<div class="cards">${section.cards.map((card) => `<article><div><h3>${escapeHtml(card.title)}</h3>${card.status ? `<span>${escapeHtml(card.status)}</span>` : ""}</div>${card.bullets?.length ? `<ul>${card.bullets.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}${card.takeaway ? `<p>${escapeHtml(card.takeaway)}</p>` : ""}</article>`).join("")}</div>`;
+    } else if (section.layout === "callout" && section.callout) {
+      body = `<div class="callout">${escapeHtml(section.callout)}</div>`;
+    }
+    return `<section style="--tone:${color}"><header><strong>${String(section.number).padStart(2, "0")}</strong><h2>${escapeHtml(section.title)}</h2></header>${body}</section>`;
+  }).join("");
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+    *{box-sizing:border-box}html,body{margin:0;background:#fffdfa;color:#292522;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}body{width:1600px;padding:80px 86px 64px}.kicker{color:#b3513b;font-size:17px;font-weight:750;letter-spacing:.12em}.hero h1{margin:18px 0 10px;font-size:54px;line-height:1.18;letter-spacing:-.035em}.hero p{margin:0 0 26px;color:#756d67;font-size:22px;line-height:1.6}.meta{display:flex;gap:28px;color:#99908a;font-size:16px;padding-bottom:32px;border-bottom:2px solid #ebe4df}.sections{display:grid;gap:38px;padding-top:38px}section>header{display:flex;align-items:center;gap:14px;margin-bottom:16px;border-bottom:2px solid color-mix(in srgb,var(--tone) 28%,transparent)}section>header strong{padding:8px 12px;color:white;background:var(--tone);border-radius:9px 9px 0 0;font-size:18px}section h2{margin:0;padding-bottom:8px;font-size:24px}.table-wrap,.cards,.callout{padding:20px;border-radius:18px;background:color-mix(in srgb,var(--tone) 7%,white)}table{width:100%;border-collapse:collapse;background:#ffffffdd;border-radius:12px;overflow:hidden;font-size:17px}th,td{padding:18px 20px;border-bottom:1px solid #eee9e5;text-align:left;vertical-align:top;line-height:1.55}th{background:color-mix(in srgb,var(--tone) 10%,white);color:#71665f}.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.cards article{padding:22px;background:#fffffff0;border:1px solid color-mix(in srgb,var(--tone) 18%,white);border-radius:14px}.cards article>div{display:flex;gap:12px}.cards h3{flex:1;margin:0;font-size:19px}.cards span{font-size:13px;padding:4px 9px;border:1px solid var(--tone);border-radius:999px}.cards ul{margin:16px 0 0;padding-left:22px;color:#665e59;font-size:16px;line-height:1.7}.cards p{margin:18px 0 0;padding:13px;background:color-mix(in srgb,var(--tone) 7%,white);border-radius:9px;font-size:15px;line-height:1.6}.callout{padding:24px 28px;border:1px solid color-mix(in srgb,var(--tone) 20%,white);font-size:20px;font-weight:650;line-height:1.65}.footer{padding-top:42px;color:#b1aaa5;font-size:14px;text-align:center}
+  </style></head><body><div class="hero"><div class="kicker">MINUTEFLOW 视觉纪要</div><h1>${escapeHtml(visual.title)}</h1><p>${escapeHtml(visual.subtitle)}</p><div class="meta"><span>${escapeHtml(meeting.scheduledAt)}</span><span>${escapeHtml(meeting.participants.join("、") || "参与者待补充")}</span><span>基于已确认纪要</span></div></div><div class="sections">${sectionHtml}</div><div class="footer">内容由模型整理，版式由 MinuteFlow 在本机生成</div></body></html>`;
+}
+
+async function visualSummaryPng(meeting) {
+  const window = new BrowserWindow({ show: false, width: 1600, height: 1200, webPreferences: { sandbox: true } });
+  try {
+    await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(visualSummaryHtml(meeting))}`);
+    const height = Math.min(8_000, Math.max(1_000, await window.webContents.executeJavaScript("Math.ceil(document.documentElement.scrollHeight)")));
+    window.setContentSize(1600, height);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return (await window.webContents.capturePage({ x: 0, y: 0, width: 1600, height })).toPNG();
+  } finally {
+    window.destroy();
+  }
+}
+
 /** 生成 PDF 导出用的 A4 打印页面（复用 markdown() 的文本，再转义 + 换行转 <br>）。 */
 function printHtml(meeting) {
   const md = markdown(meeting);
@@ -67,7 +102,7 @@ async function docxBuffer(meeting) {
 export async function exportMeeting(meeting, format, parentWindow, audioPaths = []) {
   const extensions = {
     md: "md", txt: "txt", srt: "srt", vtt: "vtt", json: "json",
-    docx: "docx", pdf: "pdf", zip: "zip"
+    docx: "docx", pdf: "pdf", zip: "zip", "visual-png": "png"
   };
   const extension = extensions[format] ?? "md";
   const result = await dialog.showSaveDialog(parentWindow, {
@@ -77,7 +112,9 @@ export async function exportMeeting(meeting, format, parentWindow, audioPaths = 
   });
   if (result.canceled || !result.filePath) return { canceled: true };
 
-  if (format === "pdf") {
+  if (format === "visual-png") {
+    await writeFile(result.filePath, await visualSummaryPng(meeting));
+  } else if (format === "pdf") {
     const window = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
     await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(printHtml(meeting))}`);
     const buffer = await window.webContents.printToPDF({ printBackground: true, pageSize: "A4" });

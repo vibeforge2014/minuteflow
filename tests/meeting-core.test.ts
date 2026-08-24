@@ -13,13 +13,18 @@ import path from "node:path";
 import { markdown, subtitle } from "../electron/services/formatters.mjs";
 import {
   buildSummaryPrompt,
+  buildVisualSummaryPrompt,
   extractJson,
+  isVisualSummaryProfileVerified,
   resolveProviderEndpoint,
+  generateVisualSummaryWithOpenAICompatible,
   summarizeWithOpenAICompatible,
   summarizeLocally,
   testModelProfile,
   transcribeRemote,
-  validateSummary
+  validateSummary,
+  validateVisualSummary,
+  visualSummaryProfileFingerprint
 } from "../electron/services/providers.mjs";
 import {
   buildModelDownloadUrl,
@@ -44,14 +49,15 @@ import {
 } from "../electron/services/updates.mjs";
 import { groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments } from "../src/lib/transcript";
 import { groupLibraryMeetings, splitHighlight } from "../src/lib/library";
-import { simplifyChinese } from "../src/lib/chinese";
+import { simplifyChinese, simplifySummary } from "../src/lib/chinese";
 import { isMicrophonePermissionError, shouldRequestMicrophone } from "../src/lib/permissions";
 import { lockSummaryField, mergeSummaryRevision, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { normalizeImportChunkSegments } from "../electron/services/import-queue.mjs";
 import { audioContentType, parseByteRange } from "../electron/services/media.mjs";
 import { buildRecordingReadiness, deriveWorkspaceStage } from "../src/lib/workspace";
+import { isOnboardingSummaryReady, isOnboardingTranscriptionReady } from "../src/lib/onboarding";
 import type { RecorderPhase, WorkspaceStage } from "../src/lib/workspace";
-import type { Meeting, MeetingStatus, TranscriptSegment } from "../src/types";
+import type { Meeting, MeetingStatus, ModelProfile, TranscriptSegment } from "../src/types";
 
 // database.mjs 只依赖 electron 的 app.getPath；用进程隔离的临时目录 mock 掉，
 // 使差量持久化测试可以真实跑 node:sqlite（不依赖 Electron 运行时）。
@@ -64,6 +70,31 @@ vi.mock("@fugood/whisper.node", () => ({
   loadWhisperModule: async () => ({ WhisperContext: class WhisperContext {} }),
   initWhisper: async () => ({})
 }));
+
+describe("首次模型配置向导", () => {
+  const profile = (changes: Partial<ModelProfile>): ModelProfile => ({
+    name: "测试配置",
+    kind: "stt",
+    transport: "whisper-cpp",
+    baseUrl: "",
+    model: "small",
+    options: {},
+    enabled: true,
+    ...changes
+  });
+
+  it("only marks a local Whisper profile ready after a model is selected", () => {
+    expect(isOnboardingTranscriptionReady(profile({}))).toBe(false);
+    expect(isOnboardingTranscriptionReady(profile({ options: { modelPath: "/models/ggml-small.bin" } }))).toBe(true);
+    expect(isOnboardingTranscriptionReady(profile({ enabled: false, options: { modelPath: "/models/ggml-small.bin" } }))).toBe(false);
+  });
+
+  it("accepts configured remote transcription and excludes basic summaries from LLM readiness", () => {
+    expect(isOnboardingTranscriptionReady(profile({ transport: "openai-audio", baseUrl: "https://api.example.com/v1", model: "whisper-1" }))).toBe(true);
+    expect(isOnboardingSummaryReady(profile({ kind: "llm", transport: "local-summary", model: "", baseUrl: "" }))).toBe(false);
+    expect(isOnboardingSummaryReady(profile({ kind: "llm", transport: "openai-chat", baseUrl: "https://api.example.com/v1", model: "qwen-plus" }))).toBe(true);
+  });
+});
 vi.mock("@ffmpeg-installer/ffmpeg", () => ({
   default: { path: process.execPath }
 }));
@@ -931,6 +962,158 @@ describe("desktop online updates", () => {
   });
 });
 
+describe("visual summary schema and capability gates", () => {
+  const visualPayload = {
+    schemaVersion: 1,
+    title: "產品週會視覺紀要",
+    subtitle: "聚焦登入改版與灰度上線",
+    sections: [
+      {
+        id: "decision-table",
+        number: 4,
+        title: "方案對比",
+        tone: "amber",
+        layout: "table",
+        table: {
+          columns: ["方案", "結論"],
+          rows: [["A 方案", "優先驗證"], ["B 方案", "暫緩"]]
+        }
+      },
+      {
+        id: "final-callout",
+        number: 5,
+        title: "會議定調",
+        tone: "green",
+        layout: "callout",
+        callout: "先以 5% 流量灰度，再根據資料決定擴量。"
+      }
+    ]
+  } as const;
+
+  it("validates, renumbers, and normalizes all generated copy to Simplified Chinese", () => {
+    const result = validateVisualSummary(visualPayload, {
+      sourceSummaryUpdatedAt: "2026-08-24T08:00:00.000Z",
+      generatedAt: "2026-08-24T08:01:00.000Z"
+    });
+    expect(result.title).toBe("产品周会视觉纪要");
+    expect(result.sections.map((section) => section.number)).toEqual([1, 2]);
+    expect(result.sections[0].table?.columns).toEqual(["方案", "结论"]);
+    expect(result.sections[1].callout).toContain("数据");
+    expect(simplifyChinese("聚焦核心任务與核心結論")).toBe("聚焦核心任务与核心结论");
+  });
+
+  it("rejects markup, URLs, oversized tables, and mismatched row widths", () => {
+    expect(() => validateVisualSummary({
+      ...visualPayload,
+      subtitle: "https://example.com/report"
+    })).toThrow(/结构不合法/);
+    expect(() => validateVisualSummary({
+      ...visualPayload,
+      sections: [{
+        ...visualPayload.sections[0],
+        table: { columns: ["方案", "结论"], rows: [["缺一列"]] }
+      }]
+    })).toThrow(/结构不合法/);
+    expect(() => validateVisualSummary({
+      ...visualPayload,
+      sections: [{
+        ...visualPayload.sections[0],
+        table: { columns: ["方案", "结论"], rows: Array.from({ length: 6 }, () => ["A", "通过"]) }
+      }]
+    })).toThrow(/结构不合法/);
+  });
+
+  it("invalidates verification when endpoint, protocol, or model settings change", () => {
+    const base = {
+      id: "visual-profile",
+      transport: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      model: "gpt-visual",
+      options: { apiFlavor: "openai", chatEndpoint: "chat/completions", visualSummaryEnabled: true }
+    };
+    const verified = {
+      ...base,
+      options: {
+        ...base.options,
+        visualSummaryVerifiedAt: "2026-08-24T08:00:00.000Z",
+        visualSummaryVerifiedFingerprint: visualSummaryProfileFingerprint(base)
+      }
+    };
+    expect(isVisualSummaryProfileVerified(verified)).toBe(true);
+    expect(isVisualSummaryProfileVerified({ ...verified, model: "gpt-visual-v2" })).toBe(false);
+    expect(isVisualSummaryProfileVerified({ ...verified, baseUrl: "https://other.example/v1" })).toBe(false);
+  });
+
+  it("builds the second-stage request from ordinary minutes without transcript or audio", () => {
+    const prompt = buildVisualSummaryPrompt({
+      title: "发布复盘",
+      participants: ["刘婷", "周哲"],
+      summary: meeting.summary,
+      transcript: "THIS MUST NEVER LEAVE THE DEVICE",
+      audio: "AUDIO-BYTES"
+    });
+    expect(prompt).toContain("发布复盘");
+    expect(prompt).toContain("普通纪要");
+    expect(prompt).not.toContain("THIS MUST NEVER LEAVE THE DEVICE");
+    expect(prompt).not.toContain("AUDIO-BYTES");
+  });
+
+  it("performs a real schema validation during connection test", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(visualPayload) } }]
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const result = await testModelProfile({
+      id: "visual-profile",
+      kind: "llm",
+      transport: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      model: "gpt-visual",
+      options: { apiFlavor: "openai", visualSummaryEnabled: true }
+    }, "secret");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.visualSummaryVerifiedAt).toBeTruthy();
+    expect(result.visualSummaryVerifiedFingerprint).toBeTruthy();
+  });
+
+  it("keeps the ordinary summary when visual generation fails and marks an older visual stale", () => {
+    const current = simplifySummary({
+      ...meeting.summary,
+      updatedAt: "2026-08-24T08:00:00.000Z",
+      visualSummary: validateVisualSummary(visualPayload, {
+        sourceSummaryUpdatedAt: "2026-08-24T08:00:00.000Z"
+      })
+    });
+    const incoming = {
+      ...meeting.summary,
+      decisions: ["改为周五发布"],
+      updatedAt: "2026-08-24T09:00:00.000Z"
+    };
+    const merged = mergeSummaryRevision(current, incoming);
+    expect(merged.decisions).toEqual(["改为周五发布"]);
+    expect(merged.visualSummary?.stale).toBe(true);
+  });
+
+  it("generates a validated visual summary through the compatible provider", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(visualPayload) } }]
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const result = await generateVisualSummaryWithOpenAICompatible({
+      id: "visual-profile",
+      transport: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      model: "gpt-visual",
+      options: { apiFlavor: "openai" }
+    }, "secret", {
+      title: meeting.title,
+      participants: meeting.participants,
+      summary: { ...meeting.summary, updatedAt: "2026-08-24T08:00:00.000Z" }
+    });
+    expect(result.schemaVersion).toBe(1);
+    expect(result.providerProfileId).toBe("visual-profile");
+    expect(result.sourceSummaryUpdatedAt).toBe("2026-08-24T08:00:00.000Z");
+  });
+});
+
 describe("export formatting", () => {
   it("renders all required meeting-note sections", () => {
     const output = markdown(meeting);
@@ -977,6 +1160,34 @@ describe("database transcript diff persistence", () => {
     // FTS 全文索引随保存同步：新文本可搜到，被删除的文本搜不到。
     expect(listMeetings("已经改写").some((item) => item.id === id)).toBe(true);
     expect(listMeetings("将被删除").some((item) => item.id === id)).toBe(false);
+  });
+
+  it("round-trips visual summary JSON without dropping fields from older meeting records", () => {
+    const id = `visual-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    const visualSummary = validateVisualSummary({
+      schemaVersion: 1,
+      title: "发布复盘视觉纪要",
+      subtitle: "聚焦决策、风险和下一步",
+      sections: [{
+        id: "final",
+        number: 1,
+        title: "会议定调",
+        tone: "green",
+        layout: "callout",
+        callout: "周四先以 5% 流量灰度发布。"
+      }]
+    }, { sourceSummaryUpdatedAt: "2026-08-24T08:00:00.000Z" });
+    saveMeeting({
+      ...buildMeeting(id, meeting.transcript),
+      summary: { ...meeting.summary, updatedAt: "2026-08-24T08:00:00.000Z", visualSummary }
+    });
+    const stored = loadMeeting(id);
+    expect(stored?.summary.visualSummary).toMatchObject({
+      schemaVersion: 1,
+      title: "发布复盘视觉纪要",
+      sourceSummaryUpdatedAt: "2026-08-24T08:00:00.000Z",
+      stale: false
+    });
   });
 
   it("stores voiceprint vectors locally, replaces a same-source sample, and forgets by name", () => {

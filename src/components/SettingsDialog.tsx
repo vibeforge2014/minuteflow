@@ -249,6 +249,13 @@ const normalizeLegacyProviderProfile = (profile: ModelProfile): ModelProfile => 
   ? { ...profile, options: { ...profile.options, apiFlavor: "openai" } }
   : profile;
 
+/** 端点、协议或模型变化后旧的视觉 schema 验证不再可信。 */
+const invalidateVisualVerification = (options: ModelProfile["options"]): ModelProfile["options"] => ({
+  ...options,
+  visualSummaryVerifiedAt: undefined,
+  visualSummaryVerifiedFingerprint: undefined
+});
+
 /** 设置页标签：五个标签页（软件更新仅桌面端展示）。 */
 export type SettingsTab = "llm" | "transcription" | "general" | "storage" | "updates";
 
@@ -363,6 +370,20 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
     setStatus(null);
     try {
       const result = await api.models.test(editing, apiKey || undefined);
+      if (result.visualSummaryVerifiedAt && result.visualSummaryVerifiedFingerprint) {
+        const verified: ModelProfile = {
+          ...editing,
+          options: {
+            ...editing.options,
+            visualSummaryVerifiedAt: result.visualSummaryVerifiedAt,
+            visualSummaryVerifiedFingerprint: result.visualSummaryVerifiedFingerprint
+          }
+        };
+        const saved = await api.models.save(verified, apiKey || undefined);
+        setEditing(saved);
+        setApiKey("");
+        await loadProfiles();
+      }
       setStatus(result.message);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "连接失败");
@@ -509,7 +530,7 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                       <label className="field"><span>名称</span><input value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></label>
                       <div className="field"><span>用于</span><div className="readonly-control">{tab === "llm" ? "会议总结与行动项" : "会议语音转文字"}</div></div>
                       <div className="field"><span>连接方式</span><div className="readonly-control">{editing.transport === "local-summary" ? "本机离线规则引擎" : isLocalWhisperTransport(editing.transport) ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
-                      {!isLocalWhisperTransport(editing.transport) && editing.transport !== "local-summary" && <label className="field"><span>模型</span><input value={editing.model} onChange={(event) => setEditing({ ...editing, model: event.target.value })} placeholder={tab === "llm" ? "例如 gpt-4.1-mini" : "例如 whisper-1"} /></label>}
+                      {!isLocalWhisperTransport(editing.transport) && editing.transport !== "local-summary" && <label className="field"><span>模型</span><input value={editing.model} onChange={(event) => setEditing({ ...editing, model: event.target.value, options: invalidateVisualVerification(editing.options) })} placeholder={tab === "llm" ? "例如 gpt-4.1-mini" : "例如 whisper-1"} /></label>}
                     </div>
                     {editing.transport === "local-summary" ? (
                       <div className="field"><span>说明</span><div className="readonly-control">完全离线的规则纪要：从转录中提取要点、决策、行动项与风险，不发起任何网络请求，适合无网环境或隐私优先场景；追求更高质量可另配在线总结服务。</div></div>
@@ -530,14 +551,14 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                           <div className="field"><span>接口格式</span><div className="readonly-control">OpenAI 兼容</div></div>
                         ) : (
                           <label className="field"><span>兼容协议</span>
-                            <select value={editing.options.apiFlavor || "openai"} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, apiFlavor: event.target.value as "openai" | "anthropic" | "gemini" } })}>
+                            <select value={editing.options.apiFlavor || "openai"} onChange={(event) => setEditing({ ...editing, options: { ...invalidateVisualVerification(editing.options), apiFlavor: event.target.value as "openai" | "anthropic" | "gemini" } })}>
                               <option value="openai">OpenAI 兼容</option>
                               <option value="anthropic">Anthropic 原生</option>
                               <option value="gemini">Google Gemini 原生</option>
                             </select>
                           </label>
                         )}
-                        <label className="field"><span>Base URL</span><input value={editing.baseUrl} onChange={(event) => setEditing({ ...editing, baseUrl: event.target.value })} placeholder={editing.transport === "openai-audio" ? "https://example.com/v1，也可粘贴完整转录端点" : undefined} /></label>
+                        <label className="field"><span>Base URL</span><input value={editing.baseUrl} onChange={(event) => setEditing({ ...editing, baseUrl: event.target.value, options: invalidateVisualVerification(editing.options) })} placeholder={editing.transport === "openai-audio" ? "https://example.com/v1，也可粘贴完整转录端点" : undefined} /></label>
                         {editing.transport !== "ollama" && <label className="field"><span>API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={editing.secretId ? "已安全保存；留空保持不变" : "sk-…"} /></label>}
                         {editing.transport === "openai-audio" && (
                           <label className="field"><span>返回格式</span>
@@ -553,10 +574,31 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                           {editing.transport === "openai-audio" ? (
                             <label className="field"><span>转录端点（可选）</span><input value={editing.options.transcriptionEndpoint || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, transcriptionEndpoint: event.target.value } })} placeholder="留空自动尝试 /v1/audio/transcriptions" /></label>
                           ) : (
-                            <label className="field"><span>聊天端点（可选）</span><input value={editing.options.chatEndpoint || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, chatEndpoint: event.target.value } })} placeholder="留空自动使用 /v1/chat/completions" /></label>
+                            <label className="field"><span>聊天端点（可选）</span><input value={editing.options.chatEndpoint || ""} onChange={(event) => setEditing({ ...editing, options: { ...invalidateVisualVerification(editing.options), chatEndpoint: event.target.value } })} placeholder="留空自动使用 /v1/chat/completions" /></label>
                           )}
                         </details>}
                       </>
+                    )}
+                    {tab === "llm" && editing.transport !== "local-summary" && (
+                      <section className="visual-capability-setting">
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(editing.options.visualSummaryEnabled)}
+                            onChange={(event) => setEditing({
+                              ...editing,
+                              options: {
+                                ...invalidateVisualVerification(editing.options),
+                                visualSummaryEnabled: event.target.checked
+                              }
+                            })}
+                          />
+                          <span><strong>启用视觉纪要</strong><small>最终纪要完成后，再用结构化内容生成可分享的信息图。</small></span>
+                        </label>
+                        <span className={editing.options.visualSummaryVerifiedAt ? "is-verified" : ""}>
+                          {editing.options.visualSummaryVerifiedAt ? "已通过结构验证" : "开启后请测试连接"}
+                        </span>
+                      </section>
                     )}
                     {status && <div className="connection-status">{status}</div>}
                     <div className="profile-actions">

@@ -16,6 +16,8 @@ enum SummaryServiceError: LocalizedError {
   case invalidEndpoint
   case missingAPIKey
   case invalidResponse
+  case invalidVisualSummary
+  case visualSummaryNotVerified
   case server(String)
 
   var errorDescription: String? {
@@ -26,6 +28,10 @@ enum SummaryServiceError: LocalizedError {
       "请先在设置中保存 API Key"
     case .invalidResponse:
       "模型返回的纪要格式无法解析"
+    case .invalidVisualSummary:
+      "模型返回的视觉纪要结构不符合要求"
+    case .visualSummaryNotVerified:
+      "请先在设置中开启视觉纪要并通过连接测试"
     case .server(let message):
       message
     }
@@ -74,6 +80,14 @@ struct SummaryService {
       let message: Message
     }
     let choices: [Choice]
+  }
+
+  /// 模型仅返回内容 schema；时间与来源版本由客户端写入，不能由模型伪造。
+  private struct VisualPayload: Decodable {
+    let schemaVersion: Int
+    let title: String
+    let subtitle: String
+    let sections: [VisualSummarySection]
   }
 
   // MARK: - 公有方法
@@ -162,16 +176,45 @@ struct SummaryService {
     return draft
   }
 
+  /// 根据已经保存的普通纪要生成视觉 schema；不会重复发送完整转录或音频。
+  func generateVisualSummary(
+    title: String,
+    participants: [String],
+    summary: SummaryDraft,
+    sourceSummaryUpdatedAt: Date,
+    preferences: AppPreferences
+  ) async throws -> VisualSummary {
+    guard preferences.visualSummaryIsVerified else {
+      throw SummaryServiceError.visualSummaryNotVerified
+    }
+    return try await requestVisualSummary(
+      title: title,
+      participants: participants,
+      summary: summary,
+      sourceSummaryUpdatedAt: sourceSummaryUpdatedAt,
+      preferences: preferences
+    )
+  }
+
   /// 用一段固定转录做最小纪要请求，验证接口连通性（设置页“测试连接”）。
   ///
   /// - Parameter preferences: 用户偏好。
   /// - 副作用：同 summarize（远程模式含 Keychain 读取与网络调用）。
   func testConnection(preferences: AppPreferences) async throws {
-    _ = try await summarize(
+    let draft = try await summarize(
       transcript: "连接测试：请输出主题“连接成功”。",
       notes: "",
       preferences: preferences
     )
+    if preferences.visualSummaryEnabled {
+      _ = try await requestVisualSummary(
+        title: "视觉纪要能力测试",
+        participants: ["测试参与者"],
+        summary: draft,
+        sourceSummaryUpdatedAt: .now,
+        preferences: preferences
+      )
+    }
   }
 
   // MARK: - 私有方法
@@ -193,5 +236,71 @@ struct SummaryService {
     }
     components.path = currentPath
     return components.url
+  }
+
+  private func requestVisualSummary(
+    title: String,
+    participants: [String],
+    summary: SummaryDraft,
+    sourceSummaryUpdatedAt: Date,
+    preferences: AppPreferences
+  ) async throws -> VisualSummary {
+    guard preferences.summaryProvider == .openAICompatible else {
+      throw SummaryServiceError.visualSummaryNotVerified
+    }
+    guard
+      let apiKey = try KeychainService().load(account: KeychainService.summaryAPIKeyAccount),
+      !apiKey.isEmpty
+    else { throw SummaryServiceError.missingAPIKey }
+    guard let endpoint = endpoint(baseURL: preferences.summaryBaseURL, path: "chat/completions")
+    else { throw SummaryServiceError.invalidEndpoint }
+
+    let summaryJSON = String(data: try JSONEncoder().encode(summary), encoding: .utf8) ?? "{}"
+    let prompt = """
+      你是中文信息设计师。请把已经确认的结构化会议纪要整理成应用可原生排版的视觉纪要。
+      只输出 JSON，不要输出 Markdown、HTML、URL、CSS、图片或解释。全部使用简体中文。
+      schemaVersion 必须为 1，并返回 title、subtitle、sections（最多 5 个）。
+      section 包含 id、number、title、tone、layout；tone 只能是 coral/amber/violet/green，layout 只能是 table/cards/callout。
+      table 的 columns 为 2–4 个，rows 最多 5 行且列数一致；cards 为 1–4 张，每张包含 title、可选 status、最多 4 条 bullets、可选 takeaway；callout 只放一句最终结论。
+      不要为了套模板编造对比项、负责人、日期或结论。
+
+      会议标题：\(title)
+      参与者：\(participants.joined(separator: "、"))
+      普通纪要：\(summaryJSON)
+      """
+    let body = ChatRequest(
+      model: preferences.summaryModel,
+      messages: [
+        ChatMessage(role: "system", content: "只输出符合要求的视觉纪要 JSON。"),
+        ChatMessage(role: "user", content: prompt),
+      ],
+      temperature: 0.15,
+      responseFormat: ResponseFormat()
+    )
+    var request = URLRequest(url: endpoint)
+    request.httpMethod = "POST"
+    request.timeoutInterval = 60
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+    request.httpBody = try JSONEncoder().encode(body)
+    let (data, response) = try await URLSession.shared.data(for: request)
+    guard let http = response as? HTTPURLResponse else { throw SummaryServiceError.invalidResponse }
+    guard (200..<300).contains(http.statusCode) else {
+      throw SummaryServiceError.server("视觉纪要请求失败（\(http.statusCode)）：\(String(data: data, encoding: .utf8) ?? "请求失败")")
+    }
+    let chat = try JSONDecoder().decode(ChatResponse.self, from: data)
+    guard let content = chat.choices.first?.message.content,
+      let payloadData = content.data(using: .utf8),
+      let payload = try? JSONDecoder().decode(VisualPayload.self, from: payloadData)
+    else { throw SummaryServiceError.invalidVisualSummary }
+    return try VisualSummary(
+      schemaVersion: payload.schemaVersion,
+      title: payload.title,
+      subtitle: payload.subtitle,
+      sections: payload.sections,
+      generatedAt: .now,
+      sourceSummaryUpdatedAt: sourceSummaryUpdatedAt,
+      stale: false
+    ).validated()
   }
 }

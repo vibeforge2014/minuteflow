@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import SwiftUI
 
 // MARK: - 导出格式
 
@@ -17,6 +18,7 @@ enum MeetingExportFormat: String, CaseIterable, Identifiable {
   case text = "TXT"
   case subtitles = "SRT"
   case backup = "JSON 备份"
+  case visualPNG = "视觉纪要图"
 
   var id: String { rawValue }
 
@@ -27,6 +29,7 @@ enum MeetingExportFormat: String, CaseIterable, Identifiable {
     case .text: "txt"
     case .subtitles: "srt"
     case .backup: "json"
+    case .visualPNG: "png"
     }
   }
 }
@@ -49,6 +52,7 @@ struct ExportService {
     let summary: String
     let transcript: [TranscriptBackup]
     let actionItems: [ActionBackup]
+    let visualSummary: VisualSummary?
   }
 
   /// 备份中的转录片段 DTO。
@@ -76,6 +80,7 @@ struct ExportService {
   ///   - format: 目标格式。
   /// - Returns: 临时目录中的文件 URL。
   /// - 副作用：按需创建 tmp/MeetingAssistantExports 目录并写文件（同名覆盖）。
+  @MainActor
   func makeFile(
     meeting: MeetingRecord,
     format: MeetingExportFormat
@@ -139,12 +144,30 @@ struct ExportService {
             dueDate: $0.dueDate,
             status: $0.status.title
           )
-        }
+        },
+        visualSummary: meeting.visualSummary
       )
       let encoder = JSONEncoder()
       encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
       encoder.dateEncodingStrategy = .iso8601
       try encoder.encode(backup).write(to: url, options: .atomic)
+    case .visualPNG:
+      guard let visual = meeting.visualSummary, !visual.stale else {
+        throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "这场会议还没有可导出的视觉纪要"])
+      }
+      let renderer = ImageRenderer(
+        content: VisualSummaryPoster(meeting: meeting, visual: visual)
+          .frame(width: 1_200)
+          .fixedSize(horizontal: false, vertical: true)
+          .padding(48)
+          .background(Color.white)
+      )
+      renderer.proposedSize = ProposedViewSize(width: 1_296, height: nil)
+      renderer.scale = 4.0 / 3.0
+      guard let data = renderer.uiImage?.pngData() else {
+        throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "无法生成视觉纪要图片"])
+      }
+      try data.write(to: url, options: .atomic)
     }
     return url
   }

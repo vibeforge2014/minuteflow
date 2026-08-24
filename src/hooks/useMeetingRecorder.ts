@@ -125,12 +125,13 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     summaryBusyRef.current = true;
     setSummaryBusy(true);
     try {
-      const { degraded, degradedReason, ...summary } = await api.summary.generate({
+      const { degraded, degradedReason, visualDegraded, visualDegradedReason, ...summary } = await api.summary.generate({
         meetingId: current.id,
         profileId: llmProfile?.id,
         final: isFinal,
         input: {
           title: current.title,
+          participants: current.participants,
           goals: current.goals,
           notes: current.notes,
           transcript: finalTranscript,
@@ -149,6 +150,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
         || JSON.stringify(latest.notes) !== baseNotes;
       await updateSummary(current.id, merged);
       if (degraded && degradedReason) setWarning(degradedReason);
+      else if (visualDegraded && visualDegradedReason) setWarning(visualDegradedReason);
     } catch (error) {
       setWarning(error instanceof Error ? error.message : "生成纪要失败");
     } finally {
@@ -156,6 +158,31 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       setSummaryBusy(false);
     }
   }, [llmProfile?.id, updateMeeting, updateSummary]);
+
+  /** 只根据已经保存的普通纪要重试视觉版，不重复发送完整转录。 */
+  const generateVisualSummary = useCallback(async () => {
+    const current = meetingRef.current;
+    if (!current || summaryBusyRef.current) return;
+    summaryBusyRef.current = true;
+    setSummaryBusy(true);
+    try {
+      const visualSummary = await api.summary.generateVisual({
+        meetingId: current.id,
+        profileId: llmProfile?.id,
+        title: current.title,
+        participants: current.participants,
+        summary: current.summary
+      });
+      const latest = meetingRef.current;
+      if (!latest || latest.id !== current.id) return;
+      await updateSummary(current.id, { ...latest.summary, visualSummary });
+    } catch (error) {
+      setWarning(error instanceof Error ? error.message : "生成视觉纪要失败");
+    } finally {
+      summaryBusyRef.current = false;
+      setSummaryBusy(false);
+    }
+  }, [llmProfile?.id, updateSummary]);
 
   const generateSummaryRef = useRef(generateSummary);
   useEffect(() => {
@@ -341,6 +368,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     pause,
     stop,
     generateSummary,
+    generateVisualSummary,
     cancelSummary
   };
 }

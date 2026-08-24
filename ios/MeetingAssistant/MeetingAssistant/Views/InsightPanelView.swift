@@ -211,6 +211,11 @@ private struct LiveTranscriptRow: View {
 /// AI 纪要面板：手动“更新”按钮 + 决策/未决/风险/下一步四张可编辑卡片。
 /// 导航位置：iPad 为 InsightPanelView 的“AI 纪要”标签；iPhone 为详情页同名分段。
 struct SummaryPanelView: View {
+  private enum DisplayMode: String, CaseIterable, Identifiable {
+    case normal = "普通纪要"
+    case visual = "视觉纪要"
+    var id: String { rawValue }
+  }
   /// SwiftData 上下文（保存纪要结果）。
   @Environment(\.modelContext) private var modelContext
   /// 录音协调器（拼接实时转录）。
@@ -223,6 +228,7 @@ struct SummaryPanelView: View {
   @State private var isSummarizing = false
   /// 纪要失败文案（alert 展示）。
   @State private var errorMessage: String?
+  @State private var displayMode: DisplayMode = .normal
 
   var body: some View {
     ScrollView {
@@ -250,35 +256,73 @@ struct SummaryPanelView: View {
           .disabled(isSummarizing)
         }
 
-        SummarySectionCard(
-          title: "关键决策",
-          systemImage: "checkmark.seal",
-          text: $meeting.decisionsText
-        )
-        SummarySectionCard(
-          title: "未决问题",
-          systemImage: "questionmark.bubble",
-          text: $meeting.openQuestionsText
-        )
-        SummarySectionCard(
-          title: "风险",
-          systemImage: "exclamationmark.triangle",
-          text: $meeting.risksText
-        )
-        SummarySectionCard(
-          title: "下一步",
-          systemImage: "arrow.right.circle",
-          text: $meeting.nextStepsText
-        )
+        Picker("纪要显示方式", selection: $displayMode) {
+          ForEach(DisplayMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+        }
+        .pickerStyle(.segmented)
 
-        // 无纪要时的空状态提示。
-        if meeting.summaryText.isEmpty {
-          ContentUnavailableView(
-            "尚未生成纪要",
-            systemImage: "sparkles",
-            description: Text("开始录音后每两分钟自动更新，也可以手动生成")
+        if displayMode == .normal {
+          SummarySectionCard(
+            title: "关键决策",
+            systemImage: "checkmark.seal",
+            text: $meeting.decisionsText
           )
-          .frame(minHeight: 180)
+          SummarySectionCard(
+            title: "未决问题",
+            systemImage: "questionmark.bubble",
+            text: $meeting.openQuestionsText
+          )
+          SummarySectionCard(
+            title: "风险",
+            systemImage: "exclamationmark.triangle",
+            text: $meeting.risksText
+          )
+          SummarySectionCard(
+            title: "下一步",
+            systemImage: "arrow.right.circle",
+            text: $meeting.nextStepsText
+          )
+
+          if meeting.summaryText.isEmpty {
+            ContentUnavailableView(
+              "尚未生成纪要",
+              systemImage: "sparkles",
+              description: Text("停止录音只会安全保存内容；需要时请主动生成最终纪要")
+            )
+            .frame(minHeight: 180)
+          }
+        } else if let visual = meeting.visualSummary {
+          if visual.stale {
+            Label("普通纪要已有更新，当前视觉版基于上一版本", systemImage: "exclamationmark.triangle.fill")
+              .font(.caption)
+              .foregroundStyle(MeetingTheme.warning)
+          }
+          VisualSummaryPoster(meeting: meeting, visual: visual)
+          Button {
+            Task { await retryVisualSummary() }
+          } label: {
+            Label("重试视觉版", systemImage: "arrow.clockwise")
+          }
+          .buttonStyle(.bordered)
+          .disabled(isSummarizing || !preferences.visualSummaryIsVerified)
+        } else {
+          ContentUnavailableView(
+            preferences.visualSummaryIsVerified ? "尚未生成视觉纪要" : "当前使用普通纪要",
+            systemImage: "rectangle.3.group",
+            description: Text(preferences.visualSummaryIsVerified
+              ? "生成最终纪要后会自动排成可分享的信息图"
+              : "请在设置中开启视觉纪要并通过结构验证")
+          )
+          .frame(minHeight: 220)
+          if preferences.visualSummaryIsVerified && !meeting.summaryText.isEmpty {
+            Button {
+              Task { await retryVisualSummary() }
+            } label: {
+              Label("生成视觉纪要", systemImage: "sparkles")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isSummarizing)
+          }
         }
       }
       .padding(16)
@@ -316,6 +360,48 @@ struct SummaryPanelView: View {
       )
       meeting.apply(summary: draft)
       try modelContext.save()
+      if meeting.status == .completed && preferences.visualSummaryIsVerified,
+        let sourceDate = meeting.lastSummaryAt
+      {
+        do {
+          let visual = try await SummaryService().generateVisualSummary(
+            title: meeting.title,
+            participants: meeting.participants,
+            summary: draft,
+            sourceSummaryUpdatedAt: sourceDate,
+            preferences: preferences
+          )
+          try meeting.apply(visualSummary: visual)
+          try modelContext.save()
+          displayMode = .visual
+        } catch {
+          displayMode = .normal
+          errorMessage = "普通纪要已保存，但视觉版生成失败：\(error.localizedDescription)"
+        }
+      }
+    } catch {
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  private func retryVisualSummary() async {
+    guard let sourceDate = meeting.lastSummaryAt else {
+      errorMessage = "请先生成普通纪要"
+      return
+    }
+    isSummarizing = true
+    defer { isSummarizing = false }
+    do {
+      let visual = try await SummaryService().generateVisualSummary(
+        title: meeting.title,
+        participants: meeting.participants,
+        summary: meeting.summaryDraft,
+        sourceSummaryUpdatedAt: sourceDate,
+        preferences: preferences
+      )
+      try meeting.apply(visualSummary: visual)
+      try modelContext.save()
+      displayMode = .visual
     } catch {
       errorMessage = error.localizedDescription
     }
@@ -345,5 +431,180 @@ private struct SummarySectionCard: View {
       MeetingTheme.surfaceRaised,
       in: RoundedRectangle(cornerRadius: 12)
     )
+  }
+}
+
+/// iPhone/iPad 共用的原生视觉纪要画布；导出 PNG 时复用同一视图。
+struct VisualSummaryPoster: View {
+  let meeting: MeetingRecord
+  let visual: VisualSummary
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 22) {
+      VStack(alignment: .leading, spacing: 9) {
+        Label("MINUTEFLOW 视觉纪要", systemImage: "sparkles")
+          .font(.caption2.weight(.bold))
+          .tracking(1.2)
+          .foregroundStyle(MeetingTheme.primary)
+        Text(visual.title)
+          .font(.title2.weight(.bold))
+          .tracking(-0.6)
+        Text(visual.subtitle)
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: 12) {
+          Text(MeetingFormatters.dateTime(meeting.startedAt))
+          if !meeting.participants.isEmpty { Text(meeting.participants.joined(separator: "、")) }
+        }
+        .font(.caption2)
+        .foregroundStyle(.tertiary)
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.bottom, 16)
+      .overlay(alignment: .bottom) { Divider() }
+
+      ForEach(visual.sections) { section in
+        VisualSummarySectionView(section: section)
+      }
+
+      Text("内容由模型整理，版式由 MinuteFlow 在本机生成")
+        .font(.caption2)
+        .foregroundStyle(.tertiary)
+        .frame(maxWidth: .infinity)
+    }
+    .padding(22)
+    .background(MeetingTheme.surface, in: RoundedRectangle(cornerRadius: 18))
+    .overlay { RoundedRectangle(cornerRadius: 18).stroke(MeetingTheme.divider) }
+  }
+}
+
+private struct VisualSummarySectionView: View {
+  let section: VisualSummarySection
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 11) {
+      HStack(spacing: 9) {
+        Text(String(format: "%02d", section.number))
+          .font(.caption.weight(.bold).monospacedDigit())
+          .foregroundStyle(.white)
+          .padding(.horizontal, 8)
+          .padding(.vertical, 5)
+          .background(tone, in: RoundedRectangle(cornerRadius: 6))
+        Text(section.title)
+          .font(.headline)
+        Rectangle()
+          .fill(tone.opacity(0.25))
+          .frame(height: 1)
+      }
+
+      switch section.layout {
+      case .table:
+        if let table = section.table { VisualSummaryTableView(table: table, tone: tone) }
+      case .cards:
+        if let cards = section.cards {
+          LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 10)], spacing: 10) {
+            ForEach(Array(cards.enumerated()), id: \.offset) { _, card in
+              VisualSummaryCardView(card: card, tone: tone)
+            }
+          }
+          .padding(10)
+          .background(tone.opacity(0.07), in: RoundedRectangle(cornerRadius: 13))
+        }
+      case .callout:
+        if let callout = section.callout {
+          Label(callout, systemImage: "checkmark.seal.fill")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.primary)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(tone.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+            .overlay { RoundedRectangle(cornerRadius: 12).stroke(tone.opacity(0.25)) }
+        }
+      }
+    }
+  }
+
+  private var tone: Color {
+    switch section.tone {
+    case .coral: MeetingTheme.primary
+    case .amber: MeetingTheme.warning
+    case .violet: MeetingTheme.speakerViolet
+    case .green: MeetingTheme.success
+    }
+  }
+}
+
+private struct VisualSummaryTableView: View {
+  let table: VisualSummaryTable
+  let tone: Color
+
+  var body: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
+      Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+        GridRow {
+          ForEach(Array(table.columns.enumerated()), id: \.offset) { _, column in
+            Text(column)
+              .font(.caption.weight(.semibold))
+              .frame(minWidth: 118, maxWidth: 190, alignment: .leading)
+              .padding(10)
+              .background(tone.opacity(0.1))
+          }
+        }
+        ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
+          Divider()
+          GridRow {
+            ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+              Text(cell)
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(minWidth: 118, maxWidth: 190, alignment: .topLeading)
+                .padding(10)
+            }
+          }
+        }
+      }
+      .background(MeetingTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 12))
+    }
+    .padding(10)
+    .background(tone.opacity(0.07), in: RoundedRectangle(cornerRadius: 13))
+  }
+}
+
+private struct VisualSummaryCardView: View {
+  let card: VisualSummaryCard
+  let tone: Color
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 9) {
+      HStack(alignment: .top) {
+        Text(card.title).font(.subheadline.weight(.semibold))
+        Spacer(minLength: 6)
+        if let status = card.status {
+          Text(status)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(tone)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .overlay { Capsule().stroke(tone.opacity(0.7)) }
+        }
+      }
+      ForEach(Array(card.bullets.enumerated()), id: \.offset) { _, bullet in
+        Label(bullet, systemImage: "circle.fill")
+          .font(.caption)
+          .symbolRenderingMode(.monochrome)
+          .foregroundStyle(.secondary)
+      }
+      if let takeaway = card.takeaway {
+        Text(takeaway)
+          .font(.caption)
+          .padding(8)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .background(tone.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+      }
+    }
+    .padding(12)
+    .background(MeetingTheme.surfaceRaised, in: RoundedRectangle(cornerRadius: 11))
+    .overlay { RoundedRectangle(cornerRadius: 11).stroke(tone.opacity(0.18)) }
   }
 }

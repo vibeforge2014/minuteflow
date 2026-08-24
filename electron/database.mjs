@@ -73,6 +73,20 @@ const seedMeetings = [
       risks: ["第三方登录合规评估可能影响上线时间。"],
       nextSteps: ["完成小流量灰度后复盘转化和留存表现。"],
       updatedAt: "2026-07-30T10:20:00+08:00",
+      visualSummary: {
+        schemaVersion: 1,
+        title: "登录流程改版与灰度决策",
+        subtitle: "聚焦体验方案、数据验证与合规风险，形成可执行的上线闭环",
+        generatedAt: "2026-07-30T10:21:00+08:00",
+        sourceSummaryUpdatedAt: "2026-07-30T10:20:00+08:00",
+        stale: false,
+        sections: [
+          { id: "overview", number: 1, title: "方案与风险总览", tone: "amber", layout: "table", table: { columns: ["议题", "核心结论", "风险 / 约束", "状态"], rows: [["登录体验", "A 方案可用性反馈优于 B 方案", "仍需验证真实流量表现", "主推方向"], ["数据验证", "先以 5% 流量启动灰度", "失败原因埋点需要补齐", "准备中"], ["第三方登录", "进入法务合规评估", "可能影响上线时间", "需关注"]] } },
+          { id: "delivery", number: 2, title: "系统对接与验证", tone: "violet", layout: "cards", cards: [{ title: "埋点方案评审", status: "进行中", bullets: ["细分登录失败原因", "统一转化与留存口径", "周四前完成评审"], takeaway: "先补齐数据能力，再进入灰度。" }, { title: "跨团队协作", status: "待协调", bullets: ["邀请客服参与需求评审", "整理两类高频用户问题", "同步法务合规结论"], takeaway: "把体验、数据和合规放进同一条发布链路。" }] },
+          { id: "actions", number: 3, title: "行动安排", tone: "green", layout: "cards", cards: [{ title: "输出 AB 测试方案", status: "刘婷 · 08-03", bullets: ["明确 5% 灰度范围", "定义转化与留存观察指标"] }, { title: "补充失败原因埋点", status: "周哲 · 08-01", bullets: ["拆分失败类型", "完成评审并冻结口径"] }] },
+          { id: "closing", number: 4, title: "会议定调", tone: "coral", layout: "callout", callout: "先完成埋点与合规前置，再启动 5% 小流量灰度，并在下周复盘真实用户表现。" }
+        ]
+      },
       stale: false
     },
     transcript: [

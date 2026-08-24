@@ -184,11 +184,20 @@ struct SettingsView: View {
             }
             .disabled(summaryAPIKey.isEmpty || isTestingConnection)
           }
+
+          Toggle("启用视觉纪要", isOn: $preferences.visualSummaryEnabled)
+          if preferences.visualSummaryEnabled {
+            LabeledContent(
+              "视觉结构验证",
+              value: preferences.visualSummaryIsVerified ? "已通过" : "请测试连接"
+            )
+            .foregroundStyle(preferences.visualSummaryIsVerified ? MeetingTheme.success : .secondary)
+          }
         }
       } header: {
         Text("AI 纪要")
       } footer: {
-        Text("本地基础纪要不会上传数据。配置远程模型后，只发送新增转录和人工笔记。")
+        Text("本地基础纪要不会上传数据。视觉纪要需显式开启并测试；生成视觉版时只发送已保存的普通纪要和必要会议元信息。")
       }
 
       Section {
@@ -316,7 +325,12 @@ struct SettingsView: View {
     defer { isTestingConnection = false }
     do {
       try await SummaryService().testConnection(preferences: preferences)
-      statusMessage = "连接成功"
+      if preferences.visualSummaryEnabled {
+        preferences.markVisualSummaryVerified()
+        statusMessage = "连接与视觉纪要结构验证成功"
+      } else {
+        statusMessage = "连接成功"
+      }
     } catch {
       statusMessage = error.localizedDescription
     }
@@ -368,120 +382,393 @@ private struct RecentlyDeletedView: View {
 
 // MARK: - 首次引导
 
-/// 三页式首次引导：产品介绍 → 本地优先说明 → 权限申请。
-/// 导航位置：首启 fullScreenCover（完成前不可下拉关闭）。
+/// 四步首次引导：产品说明 → 权限 → 语音转录 → 大模型总结。
+/// iOS 内置 Apple Speech，因此把它作为无需账号的本机转录路径，同时明确提供远程
+/// Whisper 配置；大模型可跳过，随后稳定降级为本机基础纪要。
 struct OnboardingView: View {
-  /// 录音协调器（最后一页请求权限）。
   @Environment(RecordingCoordinator.self) private var recorder
-  /// 用户偏好（写入引导完成标记）。
   @Environment(AppPreferences.self) private var preferences
-  /// 当前引导页索引（0~2）。
+
   @State private var page = 0
-  /// 权限被拒提示文案。
-  @State private var permissionMessage: String?
+  @State private var transcriptionAPIKey = ""
+  @State private var summaryAPIKey = ""
+  @State private var errorMessage: String?
+  @State private var isRequestingPermission = false
+
+  private let pageTitles = ["欢迎", "录音权限", "语音转录", "AI 纪要"]
 
   var body: some View {
     VStack(spacing: 0) {
-      TabView(selection: $page) {
-        onboardingPage(
-          systemImage: "waveform.badge.mic",
-          title: "记录每一次重要讨论",
-          message: "录音、实时转录、我的记录与结构化纪要，在同一个工作区完成。"
-        )
-        .tag(0)
+      onboardingHeader
 
-        onboardingPage(
-          systemImage: "lock.shield.fill",
-          title: "本地优先，数据由你掌控",
-          message: "会议内容默认保存在设备上。只有配置远程模型后，才会发送必要片段。"
-        )
-        .tag(1)
-
-        onboardingPage(
-          systemImage: "mic.and.signal.meter.fill",
-          title: "允许录音与语音识别",
-          message: "麦克风用于保存会议音频，语音识别用于生成实时文字稿。"
-        )
-        .tag(2)
-      }
-      .tabViewStyle(.page(indexDisplayMode: .always))
-
-      VStack(spacing: 12) {
-        // 前两页显示“继续”；最后一页请求权限完成引导，或稍后在设置中开启。
-        if page < 2 {
-          Button("继续") {
-            withAnimation { page += 1 }
+      ScrollView {
+        Group {
+          switch page {
+          case 0: welcomePage
+          case 1: permissionPage
+          case 2: transcriptionPage
+          default: summaryPage
           }
-          .buttonStyle(.borderedProminent)
-          .controlSize(.large)
-          .frame(maxWidth: 420)
-        } else {
-          Button("允许并开始使用") {
-            Task {
-              let granted = await recorder.requestPermissions()
-              if granted {
-                preferences.hasCompletedOnboarding = true
-              } else {
-                permissionMessage = recorder.errorMessage
-              }
-            }
-          }
-          .buttonStyle(.borderedProminent)
-          .controlSize(.large)
-          .frame(maxWidth: 420)
-
-          Button("稍后在设置中允许") {
-            preferences.hasCompletedOnboarding = true
-          }
-          .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: 620)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 30)
+        .frame(maxWidth: .infinity, minHeight: 420)
       }
-      .padding(.horizontal, 28)
-      .padding(.bottom, 34)
+
+      onboardingFooter
     }
     .background(MeetingTheme.canvas)
+    .tint(MeetingTheme.primary)
     .interactiveDismissDisabled()
-    // 权限未开启提示：可继续体验或取消。
+    .task {
+      transcriptionAPIKey = (try? KeychainService().load(
+        account: KeychainService.transcriptionAPIKeyAccount
+      )) ?? ""
+      summaryAPIKey = (try? KeychainService().load(
+        account: KeychainService.summaryAPIKeyAccount
+      )) ?? ""
+    }
     .alert(
-      "权限未开启",
+      "无法完成设置",
       isPresented: Binding(
-        get: { permissionMessage != nil },
-        set: { if !$0 { permissionMessage = nil } }
+        get: { errorMessage != nil },
+        set: { if !$0 { errorMessage = nil } }
       )
     ) {
-      Button("继续体验") {
-        preferences.hasCompletedOnboarding = true
-        permissionMessage = nil
-      }
-      Button("取消", role: .cancel) { permissionMessage = nil }
+      Button("好") { errorMessage = nil }
     } message: {
-      Text(permissionMessage ?? "")
+      Text(errorMessage ?? "")
     }
   }
 
-  /// 单页引导内容：大图标 + 标题 + 说明。
-  private func onboardingPage(
-    systemImage: String,
-    title: String,
-    message: String
-  ) -> some View {
-    VStack(spacing: 24) {
-      Spacer()
-      Image(systemName: systemImage)
-        .font(.system(size: 64, weight: .medium))
-        .foregroundStyle(MeetingTheme.primary)
-        .symbolRenderingMode(.hierarchical)
-      Text(title)
-        .font(.largeTitle.bold())
-        .multilineTextAlignment(.center)
-      Text(message)
-        .font(.title3)
-        .foregroundStyle(.secondary)
-        .multilineTextAlignment(.center)
-        .frame(maxWidth: 520)
-      Spacer()
+  private var onboardingHeader: some View {
+    VStack(spacing: 14) {
+      HStack {
+        VStack(alignment: .leading, spacing: 3) {
+          Text("首次设置 · \(page + 1)/\(pageTitles.count)")
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(MeetingTheme.primary)
+          Text(pageTitles[page])
+            .font(.title2.bold())
+        }
+        Spacer()
+        Text("MinuteFlow")
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(.secondary)
+      }
+
+      HStack(spacing: 7) {
+        ForEach(pageTitles.indices, id: \.self) { index in
+          Capsule()
+            .fill(index <= page ? MeetingTheme.primary : Color.secondary.opacity(0.15))
+            .frame(height: 5)
+        }
+      }
+      .accessibilityLabel("设置进度，第 \(page + 1) 步，共 \(pageTitles.count) 步")
     }
-    .padding(36)
+    .padding(.horizontal, 28)
+    .padding(.top, 22)
+    .padding(.bottom, 18)
+    .background(.background)
+    .overlay(alignment: .bottom) { Divider() }
+  }
+
+  private var welcomePage: some View {
+    VStack(spacing: 22) {
+      onboardingSymbol("waveform.badge.mic")
+      VStack(spacing: 10) {
+        Text("先配置两项能力")
+          .font(.largeTitle.bold())
+          .multilineTextAlignment(.center)
+        Text("完成语音转录与 AI 总结设置后，会议结束即可生成清晰纪要。会议、录音和索引仍默认保存在设备上。")
+          .font(.title3)
+          .foregroundStyle(.secondary)
+          .multilineTextAlignment(.center)
+      }
+      HStack(spacing: 12) {
+        onboardingFeature("waveform", title: "语音转录", detail: "Apple Speech 或 Whisper")
+        Image(systemName: "arrow.right")
+          .foregroundStyle(.tertiary)
+        onboardingFeature("sparkles", title: "AI 纪要", detail: "本机基础或在线大模型")
+      }
+    }
+  }
+
+  private var permissionPage: some View {
+    VStack(spacing: 22) {
+      onboardingSymbol("mic.and.signal.meter.fill")
+      VStack(spacing: 10) {
+        Text("允许录音")
+          .font(.largeTitle.bold())
+        Text("麦克风用于保存会议音频和生成实时文字。iPhone 与 iPad 只录制麦克风，不会捕获其他 App 的受保护音频。")
+          .font(.title3)
+          .foregroundStyle(.secondary)
+          .multilineTextAlignment(.center)
+      }
+      Label("权限只在你主动开始会议时使用，可随时在系统设置中撤销。", systemImage: "lock.shield.fill")
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 14))
+    }
+  }
+
+  private var transcriptionPage: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      onboardingSectionIntro(
+        "waveform",
+        eyebrow: "第一项 · 语音转录",
+        title: "让声音变成可靠文字",
+        detail: "Apple Speech 是内置路径；需要跨平台 Whisper 服务时，可在这里直接配置。"
+      )
+
+      VStack(alignment: .leading, spacing: 14) {
+        Picker("转录方式", selection: Binding(
+          get: { preferences.transcriptionProvider },
+          set: { preferences.transcriptionProvider = $0 }
+        )) {
+          ForEach(TranscriptionProviderKind.allCases) { provider in
+            Text(provider.rawValue).tag(provider)
+          }
+        }
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("onboarding-transcription-provider")
+
+        Picker("主要语言", selection: Binding(
+          get: { preferences.language },
+          set: { preferences.language = $0 }
+        )) {
+          Text("中文（简体）").tag("zh-CN")
+          Text("English").tag("en-US")
+          Text("日本語").tag("ja-JP")
+        }
+
+        if preferences.transcriptionProvider == .remoteWhisper {
+          Divider()
+          TextField("Base URL", text: Binding(
+            get: { preferences.transcriptionBaseURL },
+            set: { preferences.transcriptionBaseURL = $0 }
+          ))
+          .textInputAutocapitalization(.never)
+          .keyboardType(.URL)
+          TextField("模型名称", text: Binding(
+            get: { preferences.transcriptionModel },
+            set: { preferences.transcriptionModel = $0 }
+          ))
+          .textInputAutocapitalization(.never)
+          SecureField("Whisper API Key", text: $transcriptionAPIKey)
+            .textContentType(.password)
+        } else {
+          Label("无需账号，使用系统语音识别；录音仍保存在本机。", systemImage: "checkmark.circle.fill")
+            .font(.footnote)
+            .foregroundStyle(MeetingTheme.success)
+        }
+      }
+      .padding(18)
+      .background(.background, in: RoundedRectangle(cornerRadius: 18))
+      .overlay { RoundedRectangle(cornerRadius: 18).stroke(Color.secondary.opacity(0.12)) }
+    }
+  }
+
+  private var summaryPage: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      onboardingSectionIntro(
+        "sparkles",
+        eyebrow: "第二项 · AI 纪要",
+        title: "把文字整理成可执行纪要",
+        detail: "在线模型生成更完整的终稿；不配置时会自动使用本机基础纪要。"
+      )
+
+      VStack(alignment: .leading, spacing: 14) {
+        Picker("纪要方式", selection: Binding(
+          get: { preferences.summaryProvider },
+          set: { preferences.summaryProvider = $0 }
+        )) {
+          ForEach(SummaryProviderKind.allCases) { provider in
+            Text(provider.rawValue).tag(provider)
+          }
+        }
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("onboarding-summary-provider")
+
+        if preferences.summaryProvider == .openAICompatible {
+          TextField("Base URL", text: Binding(
+            get: { preferences.summaryBaseURL },
+            set: { preferences.summaryBaseURL = $0 }
+          ))
+          .textInputAutocapitalization(.never)
+          .keyboardType(.URL)
+          TextField("模型名称", text: Binding(
+            get: { preferences.summaryModel },
+            set: { preferences.summaryModel = $0 }
+          ))
+          .textInputAutocapitalization(.never)
+          SecureField("大模型 API Key", text: $summaryAPIKey)
+            .textContentType(.password)
+          Toggle("启用视觉纪要", isOn: Binding(
+            get: { preferences.visualSummaryEnabled },
+            set: { preferences.visualSummaryEnabled = $0 }
+          ))
+          Text("视觉纪要需要稍后在设置中测试连接并通过结构验证，模型配置不会按名称猜测能力。")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        } else {
+          Label("无需密钥，会议内容不上传；信息密度会低于在线终稿。", systemImage: "lock.shield.fill")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
+      }
+      .padding(18)
+      .background(.background, in: RoundedRectangle(cornerRadius: 18))
+      .overlay { RoundedRectangle(cornerRadius: 18).stroke(Color.secondary.opacity(0.12)) }
+    }
+  }
+
+  private var onboardingFooter: some View {
+    HStack(spacing: 12) {
+      if page > 0 {
+        Button("返回") {
+          withAnimation(.easeInOut(duration: 0.2)) { page -= 1 }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+      }
+      Spacer()
+
+      if page == 0 {
+        Button("开始设置") { advance() }
+          .buttonStyle(.borderedProminent)
+          .controlSize(.large)
+          .accessibilityIdentifier("onboarding-start")
+      } else if page == 1 {
+        Button("稍后允许，继续配置") { advance() }
+          .foregroundStyle(.secondary)
+        Button {
+          Task {
+            isRequestingPermission = true
+            let granted = await recorder.requestPermissions()
+            isRequestingPermission = false
+            if granted { advance() } else { errorMessage = recorder.errorMessage }
+          }
+        } label: {
+          if isRequestingPermission { ProgressView() } else { Text("允许并继续") }
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(isRequestingPermission)
+      } else if page == 2 {
+        Button("继续") {
+          do {
+            try saveTranscriptionConfiguration()
+            advance()
+          } catch { errorMessage = error.localizedDescription }
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(!transcriptionConfigurationIsComplete)
+        .accessibilityIdentifier("onboarding-transcription-next")
+      } else {
+        Button(preferences.summaryProvider == .local ? "使用本机纪要并完成" : "保存并完成") {
+          do {
+            try saveSummaryConfiguration()
+            preferences.hasCompletedOnboarding = true
+          } catch { errorMessage = error.localizedDescription }
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(!summaryConfigurationIsComplete)
+        .accessibilityIdentifier("onboarding-summary-finish")
+      }
+    }
+    .padding(.horizontal, 28)
+    .padding(.vertical, 18)
+    .background(.background)
+    .overlay(alignment: .top) { Divider() }
+  }
+
+  private var transcriptionConfigurationIsComplete: Bool {
+    preferences.transcriptionProvider == .appleSpeech || (
+      !preferences.transcriptionBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        && !preferences.transcriptionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        && !transcriptionAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    )
+  }
+
+  private var summaryConfigurationIsComplete: Bool {
+    preferences.summaryProvider == .local || (
+      !preferences.summaryBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        && !preferences.summaryModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        && !summaryAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    )
+  }
+
+  private func advance() {
+    withAnimation(.easeInOut(duration: 0.2)) { page = min(page + 1, pageTitles.count - 1) }
+  }
+
+  private func saveTranscriptionConfiguration() throws {
+    guard preferences.transcriptionProvider == .remoteWhisper else { return }
+    try KeychainService().save(
+      transcriptionAPIKey.trimmingCharacters(in: .whitespacesAndNewlines),
+      account: KeychainService.transcriptionAPIKeyAccount
+    )
+  }
+
+  private func saveSummaryConfiguration() throws {
+    guard preferences.summaryProvider == .openAICompatible else { return }
+    try KeychainService().save(
+      summaryAPIKey.trimmingCharacters(in: .whitespacesAndNewlines),
+      account: KeychainService.summaryAPIKeyAccount
+    )
+  }
+
+  private func onboardingSymbol(_ name: String) -> some View {
+    Image(systemName: name)
+      .font(.system(size: 54, weight: .medium))
+      .foregroundStyle(MeetingTheme.primary)
+      .symbolRenderingMode(.hierarchical)
+      .frame(width: 92, height: 92)
+      .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 26))
+  }
+
+  private func onboardingFeature(_ icon: String, title: String, detail: String) -> some View {
+    HStack(spacing: 10) {
+      Image(systemName: icon)
+        .font(.title3)
+        .foregroundStyle(MeetingTheme.primary)
+      VStack(alignment: .leading, spacing: 3) {
+        Text(title).font(.subheadline.bold())
+        Text(detail).font(.caption).foregroundStyle(.secondary)
+      }
+    }
+    .padding(14)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(.background, in: RoundedRectangle(cornerRadius: 16))
+    .overlay { RoundedRectangle(cornerRadius: 16).stroke(Color.secondary.opacity(0.12)) }
+  }
+
+  private func onboardingSectionIntro(
+    _ icon: String,
+    eyebrow: String,
+    title: String,
+    detail: String
+  ) -> some View {
+    HStack(alignment: .top, spacing: 14) {
+      Image(systemName: icon)
+        .font(.title2)
+        .foregroundStyle(MeetingTheme.primary)
+        .frame(width: 50, height: 50)
+        .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 15))
+      VStack(alignment: .leading, spacing: 6) {
+        Text(eyebrow.uppercased())
+          .font(.caption2.bold())
+          .foregroundStyle(MeetingTheme.primary)
+        Text(title).font(.title.bold())
+        Text(detail).font(.body).foregroundStyle(.secondary)
+      }
+    }
   }
 }
 

@@ -13,6 +13,11 @@ import SwiftUI
 /// 会议文档视图：轻量文档式中央编辑区。
 /// 导航位置：iPad 为 NavigationSplitView 中栏（content）；iPhone 为详情页“文档”分段。
 struct MeetingDocumentView: View {
+  private enum DocumentMode: String, CaseIterable, Identifiable {
+    case normal = "普通纪要"
+    case visual = "视觉纪要"
+    var id: String { rawValue }
+  }
   // MARK: - 环境与状态
 
   /// SwiftData 上下文（编辑后保存）。
@@ -21,10 +26,13 @@ struct MeetingDocumentView: View {
   @Environment(AppPreferences.self) private var preferences
   /// 双向绑定的会议模型。
   @Bindable var meeting: MeetingRecord
+  /// iPad 三栏中栏显式开启切换；不能依赖中栏自身的 size class（窄列会被系统标记为 compact）。
+  var showsVisualSwitcher = false
   /// 导出成功的文件（非 nil 时弹出系统分享面板）。
   @State private var shareItem: ShareItem?
   /// 导出失败文案（alert 展示）。
   @State private var exportError: String?
+  @State private var documentMode: DocumentMode = .normal
 
   // MARK: - 视图内容
 
@@ -32,18 +40,47 @@ struct MeetingDocumentView: View {
     // 文档纵向结构：页眉 + 各内容卡片。
     VStack(spacing: 0) {
       documentHeader
-      ScrollView {
-        LazyVStack(spacing: 14) {
-          goalAndAgenda
-          personalNotes
-          liveMinutes
-          actionItems
-          decisionsAndFollowUp
+      if showsVisualSwitcher {
+        Picker("纪要显示方式", selection: $documentMode) {
+          ForEach(DocumentMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
         }
-        .padding(20)
-        .padding(.bottom, 86)
+        .pickerStyle(.segmented)
+        .frame(maxWidth: 280)
+        .padding(.top, 10)
       }
-      .scrollDismissesKeyboard(.interactively)
+      if showsVisualSwitcher, documentMode == .visual {
+        ScrollView {
+          if let visual = meeting.visualSummary {
+            VisualSummaryPoster(meeting: meeting, visual: visual)
+              .frame(maxWidth: 920)
+              .padding(20)
+              .padding(.bottom, 86)
+          } else {
+            ContentUnavailableView(
+              preferences.visualSummaryIsVerified ? "尚未生成视觉纪要" : "当前使用普通纪要",
+              systemImage: "rectangle.3.group",
+              description: Text(preferences.visualSummaryIsVerified
+                ? "生成最终纪要后会自动排成可分享的信息图"
+                : "请在设置中开启视觉纪要并通过结构验证")
+            )
+            .frame(maxWidth: .infinity, minHeight: 420)
+            .padding(20)
+          }
+        }
+      } else {
+        ScrollView {
+          LazyVStack(spacing: 14) {
+            goalAndAgenda
+            personalNotes
+            liveMinutes
+            actionItems
+            decisionsAndFollowUp
+          }
+          .padding(20)
+          .padding(.bottom, 86)
+        }
+        .scrollDismissesKeyboard(.interactively)
+      }
     }
     .background(MeetingTheme.canvas)
     .navigationSplitViewColumnWidth(min: 420, ideal: 620)
@@ -66,6 +103,9 @@ struct MeetingDocumentView: View {
     // 标题或笔记变化时刷新更新时间并保存。
     .onChange(of: meeting.title) { _, _ in markUpdated() }
     .onChange(of: meeting.personalNotes) { _, _ in markUpdated() }
+    .onChange(of: meeting.visualSummary?.generatedAt) { _, generatedAt in
+      if generatedAt != nil, showsVisualSwitcher { documentMode = .visual }
+    }
   }
 
   // MARK: - 分区视图
@@ -89,7 +129,7 @@ struct MeetingDocumentView: View {
         .accessibilityLabel(meeting.isFavorite ? "取消收藏" : "收藏")
 
         Menu {
-          ForEach(MeetingExportFormat.allCases) { format in
+          ForEach(MeetingExportFormat.allCases.filter { $0 != .visualPNG || (meeting.visualSummary?.stale == false) }) { format in
             Button(format.rawValue) {
               export(format)
             }

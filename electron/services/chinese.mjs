@@ -8,7 +8,9 @@ import { Converter } from "opencc-js";
 const toSimplified = Converter({ from: "twp", to: "cn" });
 
 export function simplifyChinese(value) {
-  return typeof value === "string" ? toSimplified(value) : value;
+  return typeof value === "string"
+    ? toSimplified(value).replace(/内核(?=(任务|内容|观点|结论|流程|能力|目标))/g, "核心")
+    : value;
 }
 
 export function simplifyTranscriptResult(result = {}) {
@@ -23,6 +25,35 @@ export function simplifyTranscriptResult(result = {}) {
 
 export function simplifySummary(summary = {}) {
   const list = (value) => Array.isArray(value) ? value.map((item) => simplifyChinese(String(item))) : [];
+  const visualSummary = summary.visualSummary && typeof summary.visualSummary === "object"
+    ? {
+        ...summary.visualSummary,
+        title: simplifyChinese(String(summary.visualSummary.title ?? "")),
+        subtitle: simplifyChinese(String(summary.visualSummary.subtitle ?? "")),
+        sections: Array.isArray(summary.visualSummary.sections)
+          ? summary.visualSummary.sections.map((section) => ({
+              ...section,
+              title: simplifyChinese(String(section.title ?? "")),
+              table: section.table
+                ? {
+                    columns: list(section.table.columns),
+                    rows: Array.isArray(section.table.rows) ? section.table.rows.map(list) : []
+                  }
+                : undefined,
+              cards: Array.isArray(section.cards)
+                ? section.cards.map((card) => ({
+                    ...card,
+                    title: simplifyChinese(String(card.title ?? "")),
+                    status: card.status ? simplifyChinese(String(card.status)) : undefined,
+                    bullets: list(card.bullets),
+                    takeaway: card.takeaway ? simplifyChinese(String(card.takeaway)) : undefined
+                  }))
+                : undefined,
+              callout: section.callout ? simplifyChinese(String(section.callout)) : undefined
+            }))
+          : []
+      }
+    : undefined;
   return {
     ...summary,
     topics: list(summary.topics),
@@ -33,7 +64,8 @@ export function simplifySummary(summary = {}) {
       : [],
     openQuestions: list(summary.openQuestions),
     risks: list(summary.risks),
-    nextSteps: list(summary.nextSteps)
+    nextSteps: list(summary.nextSteps),
+    visualSummary
   };
 }
 

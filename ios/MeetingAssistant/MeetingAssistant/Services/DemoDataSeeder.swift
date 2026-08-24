@@ -110,19 +110,77 @@ enum DemoDataSeeder {
       ("Q3 规划讨论", -8, 4_702.0, "规划、Q3"),
       ("需求澄清会：数据导出", -9, 1_931.0, "需求、数据"),
     ]
-    for item in previousMeetings {
+    for (index, item) in previousMeetings.enumerated() {
       let date = Calendar.current.date(byAdding: .day, value: item.1, to: .now) ?? .now
-      modelContext.insert(
-        MeetingRecord(
-          title: item.0,
-          createdAt: date,
-          startedAt: date,
-          duration: item.2,
-          status: .completed,
-          tagsText: item.3,
-          summaryText: "## 会议纪要\n- 已完成会议整理，可继续编辑和补充。"
-        )
+      let previous = MeetingRecord(
+        title: item.0,
+        createdAt: date,
+        startedAt: date,
+        duration: item.2,
+        status: .completed,
+        participantsText: "刘婷、周哲、王敏",
+        tagsText: item.3,
+        summaryText: "## 会议纪要\n- 已完成会议整理，可继续编辑和补充。",
+        decisionsText: "• 第一阶段先覆盖核心流程\n• 两周后根据数据复盘",
+        risksText: "• 回归窗口较紧，需要提前锁定范围",
+        nextStepsText: "• 补齐异常路径\n• 完成灰度检查表"
       )
+      if index == 0 {
+        try previous.apply(visualSummary: VisualSummary(
+          schemaVersion: 1,
+          title: "移动端体验优化复盘",
+          subtitle: "聚焦核心路径、交付节奏与灰度风险",
+          sections: [
+            VisualSummarySection(
+              id: "strategy", number: 1, title: "方案分析与决策", tone: .amber, layout: .table,
+              table: VisualSummaryTable(
+                columns: ["方向", "核心判断", "评估结论"],
+                rows: [
+                  ["登录链路", "优先压缩首屏步骤", "主推方向"],
+                  ["数据导出", "补齐失败重试与状态反馈", "并行推进"],
+                  ["设置中心", "延后非核心信息架构调整", "后续优化"],
+                ]
+              ), cards: nil, callout: nil
+            ),
+            VisualSummarySection(
+              id: "delivery", number: 2, title: "系统交付与体验突破", tone: .violet, layout: .cards,
+              table: nil,
+              cards: [
+                VisualSummaryCard(
+                  title: "核心流程回归", status: "进行中",
+                  bullets: ["覆盖登录与导出关键路径", "补齐异常反馈", "周五前形成检查表"],
+                  takeaway: "先保证高频任务稳定"
+                ),
+                VisualSummaryCard(
+                  title: "灰度与指标", status: "待确认",
+                  bullets: ["首批覆盖 5% 用户", "观察成功率与任务耗时", "两周后统一复盘"],
+                  takeaway: "用真实数据决定扩量"
+                ),
+              ], callout: nil
+            ),
+            VisualSummarySection(
+              id: "collaboration", number: 3, title: "协作与风险控制", tone: .green, layout: .cards,
+              table: nil,
+              cards: [
+                VisualSummaryCard(
+                  title: "跨团队协作", status: "已对齐",
+                  bullets: ["产品锁定优先级", "设计补齐空状态", "研发同步回归窗口"],
+                  takeaway: "减少交付过程中的反复"
+                )
+              ], callout: nil
+            ),
+            VisualSummarySection(
+              id: "conclusion", number: 4, title: "会议定调", tone: .coral, layout: .callout,
+              table: nil, cards: nil,
+              callout: "第一阶段聚焦核心任务闭环，小流量灰度验证后再逐步扩展改版范围。"
+            ),
+          ],
+          generatedAt: date,
+          sourceSummaryUpdatedAt: date,
+          stale: false
+        ))
+      }
+      modelContext.insert(previous)
     }
     try modelContext.save()
   }

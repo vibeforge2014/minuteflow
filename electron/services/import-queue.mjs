@@ -27,6 +27,8 @@ import {
 } from "../database.mjs";
 import { readSecret } from "./secrets.mjs";
 import {
+  generateVisualSummaryWithOpenAICompatible,
+  isVisualSummaryProfileVerified,
   summarizeLocally,
   summarizeWithOpenAICompatible,
   transcribeRemote,
@@ -93,6 +95,8 @@ function mergeSummaryPreservingLocks(current = {}, incoming = {}) {
     ...(incoming.actionItems ?? []).map((item) => lockedById.get(item.id) ?? item),
     ...lockedActions.filter((item) => !(incoming.actionItems ?? []).some((other) => other.id === item.id))
   ];
+  merged.visualSummary = incoming.visualSummary
+    ?? (current.visualSummary ? { ...current.visualSummary, stale: true } : undefined);
   return merged;
 }
 
@@ -541,12 +545,34 @@ async function processJob(initial) {
         summary = summarizeLocally(input);
       }
       const sourceThroughMs = meeting.transcript.reduce((maximum, segment) => Math.max(maximum, segment.endMs || 0), 0);
+      const updatedAt = new Date().toISOString();
+      const ordinarySummary = {
+        ...mergeSummaryPreservingLocks(meeting.summary, summary),
+        updatedAt,
+        generationMode,
+        sourceThroughMs,
+        stale: false
+      };
+      if (generationMode === "online" && llmProfile && isVisualSummaryProfileVerified(llmProfile)) {
+        try {
+          ordinarySummary.visualSummary = await generateVisualSummaryWithOpenAICompatible(
+            llmProfile,
+            llmProfile.transport === "ollama" ? "" : readSecret(llmProfile.secretId),
+            {
+              title: meeting.title,
+              participants: meeting.participants,
+              summary: ordinarySummary
+            },
+            controller.signal
+          );
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          // 视觉阶段是增强能力；失败不得把已完成的普通纪要或导入任务标记为失败。
+        }
+      }
       meeting = publishMeeting(saveMeeting({
         ...meeting,
-        summary: {
-          ...mergeSummaryPreservingLocks(meeting.summary, summary),
-          updatedAt: new Date().toISOString(), generationMode, sourceThroughMs, stale: false
-        }
+        summary: ordinarySummary
       }));
       job = patchJob(job.id, { summaryComplete: true, progress: 0.98 });
     } else if (!job.autoSummarize) {

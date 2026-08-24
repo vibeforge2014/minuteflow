@@ -44,6 +44,93 @@ const summarySchema = z.object({
   nextSteps: z.array(z.string()).default([])
 });
 
+const plainVisualText = (maximum = 240) => z.string().trim().min(1).max(maximum).refine(
+  (value) => !/(?:<[^>]+>|```|https?:\/\/|^\s{0,3}#{1,6}\s)/im.test(value),
+  "必须是纯文本，不能包含 HTML、Markdown 标题、代码围栏或 URL"
+);
+
+const visualCardSchema = z.object({
+  title: plainVisualText(),
+  status: plainVisualText(32).optional(),
+  bullets: z.array(plainVisualText()).max(4).default([]),
+  takeaway: plainVisualText().optional()
+});
+
+const visualSectionSchema = z.object({
+  id: z.string().trim().min(1).max(48),
+  number: z.number().int().min(1).max(5),
+  title: plainVisualText(80),
+  tone: z.enum(["coral", "amber", "violet", "green"]),
+  layout: z.enum(["table", "cards", "callout"]),
+  table: z.object({
+    columns: z.array(plainVisualText(40)).min(2).max(4),
+    rows: z.array(z.array(plainVisualText(160)).min(2).max(4)).max(5)
+  }).optional(),
+  cards: z.array(visualCardSchema).min(1).max(4).optional(),
+  callout: plainVisualText().optional()
+}).superRefine((section, context) => {
+  if (section.layout === "table") {
+    if (!section.table) context.addIssue({ code: "custom", message: "table 章节缺少 table 数据" });
+    else if (section.table.rows.some((row) => row.length !== section.table.columns.length)) {
+      context.addIssue({ code: "custom", message: "table 行列数量不一致" });
+    }
+  }
+  if (section.layout === "cards" && !section.cards?.length) {
+    context.addIssue({ code: "custom", message: "cards 章节缺少卡片" });
+  }
+  if (section.layout === "callout" && !section.callout) {
+    context.addIssue({ code: "custom", message: "callout 章节缺少结论" });
+  }
+});
+
+const visualSummarySchema = z.object({
+  schemaVersion: z.literal(1).default(1),
+  title: plainVisualText(100),
+  subtitle: plainVisualText(180),
+  sections: z.array(visualSectionSchema).min(1).max(5)
+});
+
+/** 视觉纪要能力的稳定配置指纹；不包含密钥。 */
+export function visualSummaryProfileFingerprint(profile) {
+  return JSON.stringify({
+    transport: profile.transport,
+    baseUrl: normalizeBaseUrl(String(profile.baseUrl ?? "")),
+    model: String(profile.model ?? "").trim(),
+    apiFlavor: profile.options?.apiFlavor ?? "openai",
+    chatEndpoint: profile.options?.chatEndpoint ?? ""
+  });
+}
+
+/** 只有用户显式开启、成功验证且配置未变化时才允许第二阶段视觉请求。 */
+export function isVisualSummaryProfileVerified(profile) {
+  return Boolean(
+    profile?.options?.visualSummaryEnabled
+    && profile.options.visualSummaryVerifiedAt
+    && profile.options.visualSummaryVerifiedFingerprint === visualSummaryProfileFingerprint(profile)
+  );
+}
+
+/** 校验并规范视觉纪要 JSON，章节序号由校验层按显示顺序重排。 */
+export function validateVisualSummary(value, metadata = {}) {
+  const result = visualSummarySchema.safeParse(value);
+  if (!result.success) {
+    const issues = result.error.issues.slice(0, 3)
+      .map((issue) => `${issue.path.join(".") || "根对象"} ${issue.message}`)
+      .join("；");
+    throw new Error(`模型返回的视觉纪要结构不合法（${issues}）。`);
+  }
+  const generatedAt = metadata.generatedAt ?? new Date().toISOString();
+  const normalized = simplifySummary({ visualSummary: result.data }).visualSummary;
+  return {
+    ...normalized,
+    sections: normalized.sections.map((section, index) => ({ ...section, number: index + 1 })),
+    generatedAt,
+    sourceSummaryUpdatedAt: metadata.sourceSummaryUpdatedAt ?? generatedAt,
+    stale: false,
+    providerProfileId: metadata.providerProfileId
+  };
+}
+
 /** 去除 baseUrl 尾部斜杠（兼容用户把带 / 或不带 / 的地址粘进配置）。 */
 const normalizeBaseUrl = (value) => value.trim().replace(/\/+$/, "");
 
@@ -272,6 +359,76 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
     }
   }
   throw lastError;
+}
+
+/** 第二阶段视觉纪要提示词：只消费普通纪要和会议元信息，不重复上传转录或音频。 */
+export function buildVisualSummaryPrompt(input) {
+  return [
+    "你是中文信息设计师。请把已经确认的结构化会议纪要整理成一张可由应用原生排版的视觉纪要。",
+    "只输出 JSON，不要输出 Markdown、HTML、URL、CSS、图片或解释。所有文本必须是简体中文。",
+    "schemaVersion 必须为 1；包含 title、subtitle、sections。sections 最多 5 个。",
+    "每个 section 包含 id、number、title、tone、layout。tone 只能是 coral/amber/violet/green；layout 只能是 table/cards/callout。",
+    "table: columns 2–4 个、rows 最多 5 行且列数一致。cards: 1–4 张，每张含 title、可选 status、bullets 最多 4 条、可选 takeaway。callout: 一句最终结论。",
+    "不要为了套模板编造对比项、负责人、日期、状态或结论。没有自然对比时优先使用 cards。",
+    `会议标题：${String(input.title ?? "")}`,
+    `参与者：${Array.isArray(input.participants) ? input.participants.join("、") : ""}`,
+    `普通纪要：${JSON.stringify(input.summary ?? {})}`
+  ].join("\n\n");
+}
+
+/** 调用已验证的在线总结模型生成视觉纪要 schema。 */
+export async function generateVisualSummaryWithOpenAICompatible(profile, apiKey, input, signal) {
+  const prompt = buildVisualSummaryPrompt(input);
+  let content;
+  if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
+    const payload = profile.options.apiFlavor === "anthropic"
+      ? await requestAnthropic(profile, apiKey, prompt, 8_192, signal)
+      : await requestGemini(profile, apiKey, prompt, 8_192, signal);
+    content = extractMessageContent(payload);
+  } else {
+    const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const body = {
+          model: profile.model,
+          temperature: 0.15,
+          messages: [
+            { role: "system", content: "只输出符合要求的视觉纪要 JSON。" },
+            { role: "user", content: prompt }
+          ]
+        };
+        if (attempt === 0) body.response_format = { type: "json_object" };
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...authorizationHeaders(profile, apiKey),
+            ...(profile.options?.headers ?? {})
+          },
+          body: JSON.stringify(body),
+          signal: requestSignal(signal, profile.options?.timeoutMs ?? 60_000)
+        });
+        if (!response.ok) {
+          const error = new Error(`视觉纪要模型请求失败：${response.status} ${await response.text()}`);
+          error.retriableWithoutResponseFormat = [400, 404, 422].includes(response.status)
+            || /response_format/i.test(error.message);
+          throw error;
+        }
+        content = extractMessageContent(await response.json());
+        break;
+      } catch (error) {
+        if (signal?.aborted || !error.retriableWithoutResponseFormat) throw error;
+        lastError = error;
+      }
+    }
+    if (!content && lastError) throw lastError;
+  }
+  if (!content) throw new Error("视觉纪要模型没有返回内容。");
+  return validateVisualSummary(JSON.parse(extractJson(content)), {
+    sourceSummaryUpdatedAt: input.summary?.updatedAt,
+    providerProfileId: profile.id
+  });
 }
 
 /** 按中英文句末标点（。！？!?…）切分句子，供本地规则纪要做句子级匹配。 */
@@ -802,6 +959,29 @@ export async function testModelProfile(profile, apiKey) {
     return { ok: true, message: "测试音频转录成功，接口可用。" };
   }
   if (profile.kind === "llm") {
+    if (profile.options?.visualSummaryEnabled) {
+      await generateVisualSummaryWithOpenAICompatible(profile, apiKey, {
+        title: "视觉纪要能力测试",
+        participants: ["测试参与者"],
+        summary: {
+          topics: ["连接验证"],
+          keyPoints: ["模型需要返回受限的视觉纪要 JSON。"],
+          decisions: ["验证 schema 后启用视觉纪要。"],
+          actionItems: [],
+          openQuestions: [],
+          risks: [],
+          nextSteps: ["保存验证结果。"],
+          updatedAt: new Date().toISOString()
+        }
+      });
+      const visualSummaryVerifiedAt = new Date().toISOString();
+      return {
+        ok: true,
+        message: "模型调用与视觉纪要结构验证均成功。",
+        visualSummaryVerifiedAt,
+        visualSummaryVerifiedFingerprint: visualSummaryProfileFingerprint(profile)
+      };
+    }
     if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
       const payload = profile.options.apiFlavor === "anthropic"
         ? await requestAnthropic(profile, apiKey, "只回复 OK", 16)
