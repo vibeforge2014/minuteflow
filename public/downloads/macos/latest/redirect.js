@@ -25,7 +25,12 @@ fetch("../../../releases/latest-macos.json", { headers: { Accept: "application/j
     return response.json();
   })
   .then((manifest) => {
-    if (!trustedAssetUrl(manifest.assetUrl)) throw new Error("invalid asset URL");
+    if (manifest?.schemaVersion !== 1 || manifest.platform !== "darwin") {
+      throw new Error("invalid macOS manifest");
+    }
+    if (!trustedAssetUrl(manifest.assetUrl) || !new URL(manifest.assetUrl).pathname.toLowerCase().endsWith(".dmg")) {
+      throw new Error("invalid macOS asset URL");
+    }
     statusElement.textContent = `MinuteFlow ${manifest.version} 即将开始下载。`;
     downloadElement.textContent = "如果没有自动下载，请点这里";
     downloadElement.href = manifest.assetUrl;

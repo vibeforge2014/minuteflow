@@ -411,7 +411,8 @@ async function runUpdateCheck({ notify = false } = {}) {
     latestUpdateCheck = await checkForAppUpdate({
       currentVersion: app.getVersion(),
       platform: process.platform,
-      arch: process.arch
+      arch: process.arch,
+      systemVersion: typeof process.getSystemVersion === "function" ? process.getSystemVersion() : ""
     });
   } catch (error) {
     latestUpdateCheck = {

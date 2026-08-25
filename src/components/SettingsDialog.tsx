@@ -1,6 +1,6 @@
 /**
  * 设置工作台：左侧分类导航 + 中栏二级服务目录 + 右侧配置面板。
- * 五个标签页：AI 总结（llm）、转录设置（stt）、通用设置、存储与隐私、软件更新（仅 macOS）。
+ * 五个标签页：AI 总结（llm）、转录设置（stt）、通用设置、存储与隐私、软件更新（macOS / Windows）。
  * AI 总结/转录页共用「模型目录 + 档案编辑器」结构：本地（Ollama/本地 Whisper 零路径配置）与
  * 在线服务预设（国内外厂商 + New API 网关）一键预填端点/接口格式/推荐模型，通常只需填密钥。
  * 实际的模型调用与本地运行时解析在 electron/services/providers.mjs 与 local-models.mjs。
@@ -275,6 +275,10 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
   const [busy, setBusy] = useState(false);
   const [updateState, setUpdateState] = useState<AppUpdateCheckResult | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  // 正式桌面端支持 macOS / Windows；开发环境额外显示，便于用 ?preview=desktop 做浏览器视觉验收。
+  const showUpdateSettings = api.system.platform === "darwin"
+    || api.system.platform === "win32"
+    || import.meta.env.DEV;
 
   // 打开设置时刷新档案列表。
   useEffect(() => {
@@ -454,7 +458,7 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
             </div>
             <div className="settings-nav__group settings-nav__group--bottom">
               <span className="settings-nav__label">关于</span>
-            {api.system.platform === "darwin" && (
+            {showUpdateSettings && (
               <button className={tab === "updates" ? "is-active" : ""} onClick={() => setTab("updates")}><ArrowClockwise size={18} />软件更新</button>
             )}
               <div className="settings-nav__privacy"><ShieldCheck size={15} weight="fill" /><span>本地优先<br /><small>你的会议数据默认留在本机</small></span></div>

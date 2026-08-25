@@ -563,17 +563,17 @@ const browserApi: MeetingAPI = {
     async getState() {
       return {
         status: "unsupported",
-        currentVersion: "0.1.3",
+        currentVersion: "网页预览",
         checkedAt: "",
-        message: "请在 macOS 桌面应用中检查更新。"
+        message: "请在 macOS 或 Windows 桌面应用中检查更新。"
       };
     },
     async check() {
       return {
         status: "unsupported",
-        currentVersion: "0.1.3",
+        currentVersion: "网页预览",
         checkedAt: new Date().toISOString(),
-        message: "请在 macOS 桌面应用中检查更新。"
+        message: "请在 macOS 或 Windows 桌面应用中检查更新。"
       };
     },
     async openDownload() {

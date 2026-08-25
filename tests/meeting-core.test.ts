@@ -43,6 +43,7 @@ import {
 import {
   checkForAppUpdate,
   compareVersions,
+  compareSystemVersions,
   normalizeGitHubRelease,
   updateManifestUrls,
   validateUpdateManifest
@@ -880,6 +881,13 @@ describe("desktop online updates", () => {
     expect(compareVersions("0.2.0", "0.2.0-beta.2")).toBe(1);
   });
 
+  it("compares macOS and Windows dotted system versions", () => {
+    expect(compareSystemVersions("14.2.1", "14.2")).toBe(1);
+    expect(compareSystemVersions("10.0.19045", "10.0.19045.0")).toBe(0);
+    expect(compareSystemVersions("10.0.19044", "10.0.19045")).toBe(-1);
+    expect(() => compareSystemVersions("14.2-beta", "14.2")).toThrow("系统版本号格式无效");
+  });
+
   it("selects per-platform manifest sources and rejects other platforms", () => {
     expect(updateManifestUrls("darwin")[0]).toContain("latest-macos.json");
     expect(updateManifestUrls("win32")[0]).toContain("latest-windows.json");
@@ -914,6 +922,24 @@ describe("desktop online updates", () => {
       currentVersion: "0.1.1",
       update: { version: "0.2.0", platform: "darwin" }
     });
+  });
+
+  it("does not offer a release that requires a newer operating system", async () => {
+    const result = await checkForAppUpdate({
+      currentVersion: "0.1.1",
+      platform: "darwin",
+      arch: "arm64",
+      systemVersion: "13.6.9",
+      fetchImpl: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ...updateManifest,
+        minimumSystemVersion: "14.2"
+      }), { status: 200 }))
+    });
+    expect(result).toMatchObject({
+      status: "unsupported",
+      update: { version: "0.2.0", minimumSystemVersion: "14.2" }
+    });
+    expect(result.message).toContain("当前系统为 13.6.9");
   });
 
   it("falls back to the official GitHub release when the website manifest is unavailable", async () => {

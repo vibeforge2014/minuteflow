@@ -86,6 +86,30 @@ export function compareVersions(leftVersion, rightVersion) {
 }
 
 /**
+ * 比较操作系统的点分版本号（例如 macOS 14.2.1 / Windows 10.0.19045）。
+ * 系统版本不使用 semver 的预发布语义，因此允许 2～4 个纯数字段并把缺失段视为 0。
+ * @returns {number} 左边更新返回 1，右边更新返回 -1，相等返回 0；格式非法抛错
+ */
+export function compareSystemVersions(leftVersion, rightVersion) {
+  const parse = (value) => {
+    const normalized = String(value || "").trim();
+    if (!/^\d+(?:\.\d+){1,3}$/.test(normalized)) {
+      throw new Error("系统版本号格式无效。");
+    }
+    return normalized.split(".").map(Number);
+  };
+  const left = parse(leftVersion);
+  const right = parse(rightVersion);
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = left[index] ?? 0;
+    const rightPart = right[index] ?? 0;
+    if (leftPart !== rightPart) return leftPart > rightPart ? 1 : -1;
+  }
+  return 0;
+}
+
+/**
  * 判断 URL 是否为 HTTPS 且宿主在 allow-list 内。
  * 安全边界：更新清单、下载地址、版本说明链接都要先过这一关，
  * 防止被篡改的清单把用户引向任意站点。
@@ -221,6 +245,7 @@ export async function checkForAppUpdate({
   currentVersion,
   platform,
   arch,
+  systemVersion = "",
   manifestUrl = process.env.MEETING_ASSISTANT_UPDATE_MANIFEST_URL,
   fetchImpl = globalThis.fetch
 }) {
@@ -269,6 +294,21 @@ export async function checkForAppUpdate({
       update: manifest,
       message: `最新版本暂不支持当前 ${arch} 架构。`
     };
+  }
+  if (systemVersion && manifest.minimumSystemVersion) {
+    try {
+      if (compareSystemVersions(systemVersion, manifest.minimumSystemVersion) < 0) {
+        return {
+          status: "unsupported",
+          currentVersion,
+          checkedAt,
+          update: manifest,
+          message: `新版本需要 ${PLATFORM_LABELS[platform]} ${manifest.minimumSystemVersion} 或更高版本；当前系统为 ${systemVersion}。`
+        };
+      }
+    } catch {
+      // Electron 偶尔会在预览/兼容层返回非标准系统版本；此时不应阻断正常版本检查。
+    }
   }
   // Dev/unpackaged builds may report a non-semver app version; treat that as
   // "cannot compare" rather than throwing and breaking the update card.

@@ -25,7 +25,12 @@ fetch("../../../releases/latest-windows.json", { headers: { Accept: "application
     return response.json();
   })
   .then((manifest) => {
-    if (!trustedAssetUrl(manifest.assetUrl)) throw new Error("invalid asset URL");
+    if (manifest?.schemaVersion !== 1 || manifest.platform !== "win32") {
+      throw new Error("invalid Windows manifest");
+    }
+    if (!trustedAssetUrl(manifest.assetUrl) || !new URL(manifest.assetUrl).pathname.toLowerCase().endsWith(".exe")) {
+      throw new Error("invalid Windows asset URL");
+    }
     statusElement.textContent = `MinuteFlow ${manifest.version} 即将开始下载。`;
     downloadElement.textContent = "如果没有自动下载，请点这里";
     downloadElement.href = manifest.assetUrl;
