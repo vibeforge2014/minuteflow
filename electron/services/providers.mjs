@@ -606,7 +606,17 @@ export async function transcribeRemote(
   const defaultResponseFormat = profile.options?.responseFormat
     ?? (profile.options?.apiFlavor === "new-api" || profile.model !== "whisper-1" ? "json" : "verbose_json");
   const form = new FormData();
-  form.append("file", new Blob([audioBuffer]), fileName);
+  const extension = path.extname(String(fileName || "")).toLowerCase();
+  const audioMimeType = ({
+    ".wav": "audio/wav",
+    ".webm": "audio/webm",
+    ".m4a": "audio/mp4",
+    ".mp4": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".flac": "audio/flac"
+  })[extension] || "application/octet-stream";
+  form.append("file", new Blob([audioBuffer], { type: audioMimeType }), fileName);
   form.append("model", profile.model);
   if (language) form.append("language", language);
   if (defaultResponseFormat !== "text") form.append("response_format", defaultResponseFormat);

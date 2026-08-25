@@ -64,6 +64,7 @@ import {
 } from "./services/providers.mjs";
 import { simplifyTranscriptResult } from "./services/chinese.mjs";
 import { audioContentType, parseByteRange } from "./services/media.mjs";
+import { normalizeRemoteTranscriptionAudio } from "./services/transcription-audio.mjs";
 import { chooseImportFiles, exportMeeting } from "./services/exports.mjs";
 import {
   describeLocalModel,
@@ -71,6 +72,7 @@ import {
   downloadFromUrl,
   downloadModel,
   listDownloadableModels,
+  managedFfmpegPath,
   resolveLocalModelProfile
 } from "./services/local-models.mjs";
 import {
@@ -708,16 +710,27 @@ function registerIpc() {
     const localProfile = isLocal
       ? await resolveLocalTranscriptionProfile(profile)
       : profile;
-    const rawResult = isLocal
-      ? await transcribeLocally(localProfile, audio, payload.fileName, payload.language, payload.glossary)
-      : await transcribeRemote(
-        profile,
-        readSecret(profile.secretId),
+    let rawResult;
+    if (isLocal) {
+      rawResult = await transcribeLocally(localProfile, audio, payload.fileName, payload.language, payload.glossary);
+    } else {
+      // Chromium 的短 WebM 块通常没有 Duration 元数据。部分 New API / OpenAI
+      // 兼容网关会在进入 Whisper 前先解析时长计费并直接 500；上传前转成固定采样率
+      // PCM WAV，让服务端无需完整 EBML parser 也能可靠得到时长。
+      const prepared = await normalizeRemoteTranscriptionAudio(
         audio,
         payload.fileName,
+        await managedFfmpegPath()
+      );
+      rawResult = await transcribeRemote(
+        profile,
+        readSecret(profile.secretId),
+        prepared.audio,
+        prepared.fileName,
         payload.language,
         payload.glossary
       );
+    }
     const result = simplifyTranscriptResult(rawResult);
     return {
       id: randomUUID(),

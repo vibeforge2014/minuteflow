@@ -7,7 +7,7 @@
  * 网络与子进程调用均以 vi.fn()/vi.stubGlobal() 模拟，不产生真实请求。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { markdown, subtitle } from "../electron/services/formatters.mjs";
@@ -54,6 +54,10 @@ import { isMicrophonePermissionError, shouldRequestMicrophone } from "../src/lib
 import { lockSummaryField, mergeSummaryRevision, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { normalizeImportChunkSegments } from "../electron/services/import-queue.mjs";
 import { audioContentType, parseByteRange } from "../electron/services/media.mjs";
+import {
+  needsRemoteTranscriptionNormalization,
+  normalizeRemoteTranscriptionAudio
+} from "../electron/services/transcription-audio.mjs";
 import { buildRecordingReadiness, deriveWorkspaceStage } from "../src/lib/workspace";
 import { isOnboardingSummaryReady, isOnboardingTranscriptionReady } from "../src/lib/onboarding";
 import type { RecorderPhase, WorkspaceStage } from "../src/lib/workspace";
@@ -331,6 +335,42 @@ describe("local audio streaming", () => {
   });
 });
 
+describe("remote live transcription audio", () => {
+  it("normalizes browser WebM chunks to 16 kHz mono PCM WAV before upload", async () => {
+    const source = Buffer.from("standalone-webm-chunk");
+    let invoked = false;
+    const prepared = await normalizeRemoteTranscriptionAudio(
+      source,
+      "microphone-8000.webm",
+      "/managed/ffmpeg",
+      undefined,
+      async (command: string, args: string[]) => {
+        invoked = true;
+        expect(command).toBe("/managed/ffmpeg");
+        expect(args).toEqual(expect.arrayContaining([
+          "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-f", "wav"
+        ]));
+        const inputPath = args[args.indexOf("-i") + 1];
+        expect(await readFile(inputPath)).toEqual(source);
+        const wave = Buffer.alloc(48);
+        wave.write("RIFF", 0, "ascii");
+        await writeFile(args.at(-1)!, wave);
+      }
+    );
+    expect(invoked).toBe(true);
+    expect(prepared.fileName).toBe("microphone-8000.wav");
+    expect(prepared.audio.subarray(0, 4).toString("ascii")).toBe("RIFF");
+  });
+
+  it("does not transcode an existing WAV transcription chunk", async () => {
+    const source = Buffer.from("RIFF-ready-wave");
+    expect(needsRemoteTranscriptionNormalization("chunk.webm")).toBe(true);
+    expect(needsRemoteTranscriptionNormalization("chunk.wav")).toBe(false);
+    await expect(normalizeRemoteTranscriptionAudio(source, "chunk.wav", undefined))
+      .resolves.toEqual({ audio: source, fileName: "chunk.wav" });
+  });
+});
+
 describe("transcript window merge", () => {
   it("replaces an overlapping provisional window with the final segment", () => {
     const provisional = segment("p1", 0, 8_000, "临时文本", "provisional");
@@ -582,6 +622,21 @@ describe("model provider compatibility", () => {
       "https://new-api.example/v1/audio/transcriptions"
     ]);
     expect(result.text).toBe("测试转录");
+  });
+
+  it("labels WAV transcription uploads with an audio MIME type", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ text: "测试转录" }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      }));
+    await transcribeRemote({
+      baseUrl: "https://new-api.example",
+      model: "whisper-1",
+      options: { apiFlavor: "new-api" }
+    }, "secret", new Uint8Array([1, 2, 3]), "sample.wav");
+    const form = fetchMock.mock.calls[0][1]?.body as FormData;
+    expect((form.get("file") as Blob).type).toBe("audio/wav");
   });
 
   it("tests a full transcription URL by uploading a built-in WAV instead of appending /models", async () => {
