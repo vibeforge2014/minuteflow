@@ -102,6 +102,8 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     getPermissions: () => invoke("system:get-permissions"),
     requestMicrophone: () => invoke("system:request-microphone"),
     openSettings: (kind = "microphone") => invoke("system:open-settings", kind),
+    startAppDrag: () => ipcRenderer.send("system:start-app-drag"),
+    closePermissionHelper: () => ipcRenderer.send("system:close-permission-helper"),
     onSuspend: (callback) => {
       const listener = () => callback();
       ipcRenderer.on("system:suspend", listener);

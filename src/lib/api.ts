@@ -588,6 +588,8 @@ const browserApi: MeetingAPI = {
     async getPermissions() { return { microphone: "granted", screen: "granted", systemAudioRequired: false, systemAudioPickerHint: false }; },
     async requestMicrophone() { return "granted"; },
     async openSettings() {},
+    startAppDrag() {},
+    closePermissionHelper() {},
     onSuspend() { return () => {}; },
     onResume() { return () => {}; }
   },

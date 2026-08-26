@@ -8,6 +8,7 @@ import { lazy, StrictMode, Suspense, useEffect } from "react";
 import { createRoot, type Root as ReactRoot } from "react-dom/client";
 import { api, isElectronRuntime } from "./lib/api";
 import { MarketingSite } from "./MarketingSite";
+import { PermissionDragHelper } from "./components/PermissionDragHelper";
 import "./styles.css";
 import "./marketing.css";
 
@@ -16,8 +17,13 @@ const DesktopApp = lazy(() => import("./App").then((module) => ({ default: modul
 
 // 把平台标识写到 <html data-platform> 上，供 CSS 按平台做差异化样式（如 macOS 红绿灯留白）。
 document.documentElement.dataset.platform = api.system.platform;
+const requestedSurface = new URLSearchParams(window.location.search).get("surface");
+if (requestedSurface) document.documentElement.dataset.surface = requestedSurface;
 
 function Root() {
+  if (requestedSurface === "permission-helper") {
+    return <PermissionDragHelper />;
+  }
   // 本地浏览器开发预览桌面 UI 的开关：DEV 模式且 URL 带 ?preview=desktop 时也渲染桌面工作台。
   const isLocalDesktopPreview = import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "desktop";
 

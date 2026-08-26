@@ -14,8 +14,10 @@ import {
   desktopCapturer,
   dialog,
   ipcMain,
+  nativeImage,
   powerMonitor,
   protocol,
+  screen,
   session,
   shell,
   systemPreferences
@@ -103,6 +105,7 @@ const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 // 特权协议，才能支持 fetch 与流式传输（会议播放器按需读取本地音频文件）。
 protocol.registerSchemesAsPrivileged([{ scheme: "minuteflow-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let mainWindow;
+let permissionHelperWindow;
 let latestUpdateCheck;
 // 录音会话的运行时状态（文件句柄 + 串行写队列 + 首个错误），键为 `${sessionId}:${track}`。
 // 仅存在于内存中；崩溃重启后由 database 的 markInterruptedRecordings 兜底为 interrupted 状态。
@@ -335,6 +338,70 @@ async function createMainWindow() {
   } else {
     await mainWindow.loadFile(path.join(currentDirectory, "..", "dist", "client", "index.html"));
   }
+
+  mainWindow.on("closed", () => {
+    if (permissionHelperWindow && !permissionHelperWindow.isDestroyed()) permissionHelperWindow.close();
+    permissionHelperWindow = undefined;
+    mainWindow = undefined;
+  });
+}
+
+/** 当前 Electron 可执行文件所属的 .app；开发模式下对应 Electron.app。 */
+function currentMacApplicationPath() {
+  const marker = ".app/";
+  const index = process.execPath.toLowerCase().lastIndexOf(marker);
+  return index >= 0 ? process.execPath.slice(0, index + marker.length - 1) : process.execPath;
+}
+
+/**
+ * 在系统设置上方显示一个不抢焦点的拖拽助手。用户可把真实 .app 文件拖入
+ * 「屏幕与系统音频录制」列表；这比让用户自行寻找安装目录更直接。
+ */
+async function showPermissionHelper() {
+  if (process.platform !== "darwin") return;
+  if (permissionHelperWindow && !permissionHelperWindow.isDestroyed()) {
+    permissionHelperWindow.showInactive();
+    return;
+  }
+  const { workArea } = screen.getPrimaryDisplay();
+  const width = Math.min(780, workArea.width - 36);
+  const height = 148;
+  permissionHelperWindow = new BrowserWindow({
+    width,
+    height,
+    x: Math.round(workArea.x + (workArea.width - width) / 2),
+    y: Math.round(workArea.y + workArea.height - height - 28),
+    minWidth: 560,
+    minHeight: height,
+    maxHeight: height,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    hasShadow: true,
+    webPreferences: {
+      preload: path.join(currentDirectory, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  permissionHelperWindow.setAlwaysOnTop(true, "floating");
+  permissionHelperWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  permissionHelperWindow.on("closed", () => { permissionHelperWindow = undefined; });
+  if (process.env.VITE_DEV_SERVER_URL) {
+    const helperUrl = new URL(process.env.VITE_DEV_SERVER_URL);
+    helperUrl.searchParams.set("surface", "permission-helper");
+    await permissionHelperWindow.loadURL(helperUrl.toString());
+  } else {
+    await permissionHelperWindow.loadFile(path.join(currentDirectory, "..", "dist", "client", "index.html"), {
+      query: { surface: "permission-helper" }
+    });
+  }
+  permissionHelperWindow.showInactive();
 }
 
 /**
@@ -1069,15 +1136,29 @@ function registerIpc() {
       : "unknown";
   });
   // system:open-settings — 跳转到系统设置的对应隐私面板，权限被拒后的引导入口调用。
-  trustedHandle("system:open-settings", (_event, kind = "microphone") => {
+  trustedHandle("system:open-settings", async (_event, kind = "microphone") => {
     if (process.platform === "darwin") {
       const pane = kind === "screen" ? "Privacy_ScreenCapture" : "Privacy_Microphone";
-      return shell.openExternal(`x-apple.systempreferences:com.apple.preference.security?${pane}`);
+      await shell.openExternal(`x-apple.systempreferences:com.apple.preference.security?${pane}`);
+      if (kind === "screen") await showPermissionHelper();
+      return;
     }
     // Windows: route both microphone and screen capture to the microphone
     // privacy page (Windows treats desktop/audio capture under microphone
     // access). broadfilesystemaccess was the wrong pane.
     return shell.openExternal("ms-settings:privacy-microphone");
+  });
+  ipcMain.on("system:start-app-drag", (event) => {
+    if (!senderIsTrusted(event) || process.platform !== "darwin") return;
+    const iconPath = path.join(currentDirectory, "..", "assets", "app-icon.png");
+    event.sender.startDrag({
+      file: currentMacApplicationPath(),
+      icon: nativeImage.createFromPath(iconPath).resize({ width: 64, height: 64 })
+    });
+  });
+  ipcMain.on("system:close-permission-helper", (event) => {
+    if (!senderIsTrusted(event)) return;
+    permissionHelperWindow?.close();
   });
   // window:toggle-mini — 切换迷你悬浮条模式（置顶小窗），录音工具栏调用；状态变化经 window:mini-changed 广播。
   trustedHandle("window:toggle-mini", (_event, enabled) => {

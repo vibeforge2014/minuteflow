@@ -1,3 +1,65 @@
+# Design QA — macOS 权限引导与应用拖拽助手
+
+## Evidence
+
+- Source visual truth: `/var/folders/br/w5xj47hx5rn3sg6zmvz51k900000gn/T/codex-clipboard-ef019016-e661-41ce-b89b-158d78eb1a53.png` (1446 × 1270 px).
+- Main permission guide: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-guide-1080x720-final.png` (1080 × 720 px at a 1080 × 720 CSS viewport).
+- Floating drag helper: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-drag-helper-780x148-final.png` (780 × 148 px; native window target 780 × 148 CSS px, 6px shadow inset, content box 768 × 136 CSS px).
+- Combined focused comparison: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-design-qa-comparison.png`.
+- State: macOS first run; microphone not determined; screen/system-audio permission denied; helper visible before app drop.
+
+## Findings
+
+- No actionable P0, P1, or P2 findings remain.
+- Fonts and typography: the system/PingFang stack matches the macOS context. Compact helper copy remains readable, with no truncation or unintended wrapping.
+- Spacing and layout rhythm: the 74px app tile is an easy drag target; the helper's 20px radius, 14px gaps, and 6px shadow inset preserve the source's floating-banner anatomy without covering excessive system content. The 760px main dialog fits a 1080 × 720 viewport without clipping.
+- Colors and tokens: the helper retains the source's dark translucent material while using MinuteFlow coral for direction and status. The parent dialog uses the product's warm white, peach, and coral tokens.
+- Image quality and assets: the real MinuteFlow brand image is used in the guide; native drag uses the packaged app icon. No emoji, placeholder, CSS-drawn logo, or improvised SVG substitutes it.
+- Copy and content: the implementation correctly targets “屏幕与系统音频录制”, explains the toggle step, provides the list “+” fallback, and explicitly avoids the unrelated “辅助功能” permission shown in the reference.
+- [P3] The source helper is slightly taller relative to its app tile. The implementation deliberately uses a slimmer 148px native window so it obscures less of System Settings while retaining a 74px drag target.
+
+## Full-view comparison evidence
+
+- The interaction model matches the reference: dark always-on-top surface, prominent draggable app tile, upward cue, short target instruction, and dismiss control.
+- The parent guide supplies missing task context: current permission state, normal authorization, manual recovery, privacy explanation, and re-check action.
+- Product styling intentionally follows MinuteFlow rather than copying the reference brand.
+
+## Focused region comparison evidence
+
+- The combined comparison verifies the draggable tile, upward arrow, two-level instruction hierarchy, dark material, rounded container, and close affordance in one image.
+- DOM bounds show no focused-helper overflow: helper client 766 × 134, app tile 268 × 72, copy block 358 × 61.
+
+## Comparison history
+
+1. Initial 1080 × 720 capture found a P2 horizontal clipping issue: the permission wall still inherited the generic 560px dialog width, clipping row actions and the settings route.
+2. Fixed by targeting `.dialog.permission-wall` at 760px. The final capture has a 758px client width with no overflow or clipped controls.
+3. Focused helper capture confirmed the 780 × 148 native-window composition and no internal overflow. Copy was tightened to include the settings-list “+” fallback.
+
+## Primary interactions tested
+
+- Main guide renders both permission states and all actions at the desktop minimum viewport.
+- “重新检查”, “暂不授权，先体验”, “开始授权”, “请求权限”, “手动添加”, and “打开系统设置” are enabled and keyboard-reachable.
+- Helper exposes the app tile as a draggable button and exposes a keyboard-reachable close action.
+- Browser console checked for both surfaces: no warnings or errors.
+- Electron main/preload syntax checks, TypeScript, production build, core tests, and Sites packaging tests pass.
+
+## Implementation checklist
+
+- [x] Correct macOS permission target.
+- [x] Real `.app` payload through Electron `webContents.startDrag`.
+- [x] Always-on-top helper that does not steal focus.
+- [x] Non-drag System Settings / list-add fallback.
+- [x] Automatic helper dismissal after permission is granted, plus manual close.
+- [x] Reduced-motion/transparency-compatible product styling.
+
+## Follow-up polish
+
+- P3: verify the exact localized pane title on each supported macOS minor version during release QA; Apple may adjust wording while keeping the `Privacy_ScreenCapture` route.
+
+final result: passed
+
+---
+
 # Design QA — 跨平台视觉纪要与会后布局
 
 ## Evidence

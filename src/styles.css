@@ -2056,8 +2056,10 @@ button {
   backdrop-filter: blur(12px) saturate(120%);
 }
 
-.permission-wall {
-  width: min(680px, calc(100vw - 40px));
+.dialog.permission-wall {
+  width: min(760px, calc(100vw - 40px));
+  display: flex;
+  flex-direction: column;
   border-radius: 18px;
   box-shadow: 0 32px 100px rgba(13, 17, 25, 0.3);
   animation: wall-materialize 280ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
@@ -2067,7 +2069,8 @@ button {
   display: grid !important;
   grid-template-columns: 48px 1fr;
   align-items: center !important;
-  padding: 28px 28px 22px !important;
+  flex: 0 0 auto;
+  padding: 25px 28px 20px !important;
 }
 
 .permission-wall__symbol,
@@ -2092,9 +2095,11 @@ button {
 .permission-wall__header h2 { margin-top: 3px !important; }
 
 .permission-wall__list {
+  min-height: 0;
+  overflow-y: auto;
   display: grid;
   gap: 9px;
-  padding: 18px 24px;
+  padding: 16px 24px;
 }
 
 .permission-wall__list article {
@@ -2120,6 +2125,7 @@ button {
 .permission-wall__list article p { margin: 4px 0 0; color: #797f88; font-size: 10px; line-height: 1.55; }
 
 .permission-wall__note {
+  flex: 0 0 auto;
   display: flex;
   gap: 8px;
   margin: 0 24px 18px;
@@ -2132,7 +2138,10 @@ button {
 }
 
 .permission-wall__hint {
-  margin: -4px 24px 14px;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 1px 2px 0;
   padding: 9px 12px;
   color: #6a4a2e;
   background: var(--accent-soft, #fcf1e9);
@@ -2140,6 +2149,54 @@ button {
   font-size: 10px;
   line-height: 1.55;
 }
+
+.permission-wall__hint svg { flex: 0 0 auto; margin-top: 1px; color: var(--accent-strong); }
+
+.permission-wall__drag-guide {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 12px 18px;
+  padding: 16px 17px;
+  background: #fffaf7;
+  border: 1px solid #efd9d1;
+  border-radius: 13px;
+}
+
+.permission-wall__drag-copy > span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--accent-strong);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: .06em;
+}
+
+.permission-wall__drag-copy > strong { color: #32363d; font-size: 13px; }
+.permission-wall__drag-copy > p { margin: 5px 0 0; color: #777d86; font-size: 10px; line-height: 1.5; }
+
+.permission-wall__drag-route {
+  grid-row: span 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.permission-wall__drag-route > div {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  color: #50555e;
+  background: rgba(255, 255, 255, .86);
+  border: 1px solid #eadfd9;
+  border-radius: 11px;
+}
+
+.permission-wall__drag-route > svg { color: #d4775f; }
+.permission-wall__drag-route strong { display: block; color: #3b3f46; font-size: 10px; }
+.permission-wall__drag-route small { display: block; margin-top: 3px; color: #92969d; font-size: 8px; white-space: nowrap; }
+.permission-wall__settings-button { justify-self: start; min-height: 32px; color: var(--accent-strong); border-color: #e7c4b9; background: white; font-size: 11px; }
 
 .permission-wall__error {
   display: flex;
@@ -2156,6 +2213,7 @@ button {
 }
 
 .permission-wall > footer {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2180,6 +2238,65 @@ button {
 
 .permission-wall__skip:hover { color: var(--ink); }
 .permission-wall__skip:disabled { opacity: 0.5; }
+
+/* macOS 系统设置上方的小型拖拽助手窗口。 */
+html[data-surface="permission-helper"],
+html[data-surface="permission-helper"] body,
+html[data-surface="permission-helper"] #root {
+  min-width: 0;
+  min-height: 0;
+  background: transparent;
+}
+
+.permission-helper {
+  position: relative;
+  width: min(calc(100% - 12px), 768px);
+  height: min(calc(100% - 12px), 136px);
+  margin: 6px;
+  display: grid;
+  grid-template-columns: minmax(220px, 270px) 42px 1fr;
+  align-items: center;
+  gap: 14px;
+  padding: 17px 50px 17px 18px;
+  color: #f3f3f4;
+  background: rgba(35, 36, 39, .94);
+  border: 1px solid rgba(255, 255, 255, .2);
+  border-radius: 20px;
+  box-shadow: 0 18px 54px rgba(0, 0, 0, .32);
+  backdrop-filter: blur(24px) saturate(120%);
+  -webkit-app-region: drag;
+}
+
+.permission-helper button { -webkit-app-region: no-drag; }
+.permission-helper__app {
+  min-width: 0;
+  min-height: 74px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 14px 11px 8px;
+  color: #f7f7f8;
+  background: rgba(255, 255, 255, .1);
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 14px;
+  cursor: grab;
+  transition: transform 150ms ease, background 150ms ease, border-color 150ms ease;
+}
+
+.permission-helper__app:hover { background: rgba(255, 255, 255, .14); border-color: rgba(255, 255, 255, .3); transform: translateY(-1px); }
+.permission-helper__app:active,
+.permission-helper__app.is-dragging { cursor: grabbing; transform: scale(.98); }
+.permission-helper__app > svg { flex: 0 0 auto; color: #8f9197; }
+.permission-helper__app img { flex: 0 0 auto; border-radius: 10px; box-shadow: 0 6px 16px rgba(0, 0, 0, .26); }
+.permission-helper__app span { min-width: 0; text-align: left; }
+.permission-helper__app strong { display: block; overflow: hidden; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.permission-helper__app small { display: block; margin-top: 5px; color: #acadb2; font-size: 10px; }
+.permission-helper__arrow { color: #ea846a; }
+.permission-helper__copy > strong { display: block; font-size: 14px; line-height: 1.35; }
+.permission-helper__copy > span { display: block; margin-top: 5px; color: #b8b9be; font-size: 11px; line-height: 1.45; }
+.permission-helper__copy > small { display: flex; align-items: center; gap: 5px; margin-top: 7px; color: #d5a08f; font-size: 9px; }
+.permission-helper__close { position: absolute; top: 13px; right: 13px; width: 28px; height: 28px; display: grid; place-items: center; padding: 0; color: #aaaab0; background: rgba(255, 255, 255, .08); border: 0; border-radius: 999px; }
+.permission-helper__close:hover { color: white; background: rgba(255, 255, 255, .15); }
 
 .paywall-dialog {
   position: relative;
@@ -4488,6 +4605,7 @@ button {
 
 @media (prefers-reduced-motion: reduce) {
   .permission-wall,
+  .permission-helper__app,
   .paywall-dialog,
   .floating-unlock,
   .record-dot,
@@ -4504,6 +4622,7 @@ button {
 
 @media (prefers-reduced-transparency: reduce) {
   .permission-wall-backdrop,
+  .permission-helper,
   .paywall-backdrop,
   .floating-unlock {
     backdrop-filter: none;
@@ -4511,5 +4630,6 @@ button {
 
   .permission-wall-backdrop,
   .paywall-backdrop { background: rgba(19, 22, 28, 0.72); }
+  .permission-helper { background: #2f3034; }
   .floating-unlock { background: #fff7f3; }
 }
