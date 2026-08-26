@@ -24,6 +24,10 @@ const notarizeOptions = appleNotaryProfile
 
 export default {
   packagerConfig: {
+    // Release jobs can point Forge at a previously verified Electron ZIP so
+    // transient GitHub/CDN failures do not make an otherwise offline package
+    // step nondeterministic.
+    electronZipDir: process.env.ELECTRON_ZIP_DIR || undefined,
     asar: {
       // Native Whisper bindings and the extensionless FFmpeg executable must
       // live outside app.asar so Electron can load/execute them at runtime.
