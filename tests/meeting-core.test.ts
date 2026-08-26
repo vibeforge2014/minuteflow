@@ -59,7 +59,7 @@ import {
   needsRemoteTranscriptionNormalization,
   normalizeRemoteTranscriptionAudio
 } from "../electron/services/transcription-audio.mjs";
-import { buildRecordingReadiness, deriveWorkspaceStage } from "../src/lib/workspace";
+import { buildRecordingReadiness, deriveWorkspaceStage, shouldAutoOpenRightPanel } from "../src/lib/workspace";
 import { isOnboardingSummaryReady, isOnboardingTranscriptionReady } from "../src/lib/onboarding";
 import type { RecorderPhase, WorkspaceStage } from "../src/lib/workspace";
 import type { Meeting, MeetingStatus, ModelProfile, TranscriptSegment } from "../src/types";
@@ -212,6 +212,14 @@ describe("phase-aware desktop workspace", () => {
     expect(readiness.hasTranscription).toBe(true);
     expect(readiness.microphoneNeedsAttention).toBe(true);
     expect(readiness.items.find((item) => item.id === "microphone")?.value).toBe("需要处理");
+  });
+
+  it("opens the right panel only when the current stage has useful live or review content", () => {
+    expect(shouldAutoOpenRightPanel({ stage: "prepare", transcriptCount: 12 })).toBe(false);
+    expect(shouldAutoOpenRightPanel({ stage: "live", transcriptCount: 0 })).toBe(true);
+    expect(shouldAutoOpenRightPanel({ stage: "review", transcriptCount: 0 })).toBe(false);
+    expect(shouldAutoOpenRightPanel({ stage: "review", transcriptCount: 2 })).toBe(true);
+    expect(shouldAutoOpenRightPanel({ stage: "review", transcriptCount: 0, hasProcessingStatus: true })).toBe(true);
   });
 });
 

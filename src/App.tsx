@@ -39,7 +39,7 @@ import { useMeetingRecorder } from "./hooks/useMeetingRecorder";
 import { api } from "./lib/api";
 import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Meeting } from "./types";
 import { BrandMark } from "./components/BrandMark";
-import { buildRecordingReadiness, deriveWorkspaceStage, type WorkspaceStage } from "./lib/workspace";
+import { buildRecordingReadiness, deriveWorkspaceStage, shouldAutoOpenRightPanel, type WorkspaceStage } from "./lib/workspace";
 import type { SystemPermissionStatus } from "./types";
 
 export function App() {
@@ -219,15 +219,17 @@ export function App() {
     } else if (previous?.meetingId !== meeting.id) {
       setRecentlyFinalizedId(null);
     }
-    if (workspaceStage === "prepare") {
-      setRightPanelOpen(false);
-    } else {
-      setRightPanelOpen(true);
+    setRightPanelOpen(shouldAutoOpenRightPanel({
+      stage: workspaceStage,
+      transcriptCount: meeting.transcript.length,
+      hasProcessingStatus: Boolean(importProcessingStatus)
+    }));
+    if (workspaceStage !== "prepare") {
       setRightPanelTab("transcript");
     }
     previousWorkspaceRef.current = { meetingId: meeting.id, stage: workspaceStage };
     autoLayoutKeyRef.current = key;
-  }, [meeting?.id, workspaceStage]);
+  }, [importProcessingStatus, meeting?.id, workspaceStage]);
 
   useEffect(() => {
     if (recorder.warning) {

@@ -3,10 +3,11 @@
  * 模式决定录音采集策略（线上=麦克风+系统音频，线下=仅麦克风）；
  * 目标会作为 AI 总结的提示输入。创建后由 App 立即选中并可直接开始录音。
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CalendarBlank, CaretDown, Microphone, Users, WarningCircle, X } from "@phosphor-icons/react";
 import type { CreateMeetingInput, MeetingMode } from "../types";
 import { useMeetingStore } from "../store/meetingStore";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 
 /** 内置会议模板：选择后预填标题与目标。 */
 const templates = {
@@ -37,6 +38,8 @@ export function NewMeetingDialog({
   const [error, setError] = useState<string | null>(null);
   // 「创建并开始录音」按钮在提交前置位；表单隐式提交（输入框回车）走默认的「仅创建」。
   const startRecordingRef = useRef(false);
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
   const preferences = useMeetingStore((state) => state.preferences);
   // 每次打开时把默认模式同步为用户偏好（可再手动切换）。
   useEffect(() => {
@@ -45,21 +48,23 @@ export function NewMeetingDialog({
       setDetailsOpen(false);
     }
   }, [open, preferences.defaultMode]);
-  // Esc 关闭弹窗（创建请求进行中时不关，避免与提交竞态）。
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, busy, onClose]);
+  const handleEscape = useCallback(() => {
+    if (!busyRef.current) onClose();
+  }, [onClose]);
+  const dialogRef = useDialogFocus<HTMLFormElement>(open, {
+    initialFocus: "[data-dialog-initial-focus]",
+    onEscape: handleEscape
+  });
   if (!open) return null;
 
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
       <form
+        ref={dialogRef}
         className="dialog new-meeting-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="new-meeting-title"
         onKeyDown={(event) => {
           // 桌面 WebView 对隐式表单提交的处理并不完全一致；统一把 Enter 明确映射为
           // “先创建会议”。文本域保留换行，主按钮仍通过 click 单独开启录音。
@@ -96,10 +101,10 @@ export function NewMeetingDialog({
       >
         <header>
           <div>
-            <h2>新建会议</h2>
+            <h2 id="new-meeting-title">新建会议</h2>
             <p>创建一份会随着讨论持续生长的会议文档。</p>
           </div>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭新建会议"><X size={18} /></button>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭新建会议" disabled={busy}><X size={18} /></button>
         </header>
         <label className="field">
           <span>会议模板</span>
@@ -120,7 +125,7 @@ export function NewMeetingDialog({
         </label>
         <label className="field">
           <span>会议标题</span>
-          <input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：产品团队周会" />
+          <input data-dialog-initial-focus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：产品团队周会" />
         </label>
         <div className="field">
           <span>会议模式</span>
@@ -162,8 +167,8 @@ export function NewMeetingDialog({
         <footer>
           <span><CalendarBlank size={16} />默认每 {formatInterval(preferences.summaryIntervalSeconds)} 更新纪要</span>
           <div>
-            <button type="button" className="text-button dialog-cancel" onClick={onClose}>取消</button>
-            <button type="submit" className="button" disabled={busy}>先创建会议</button>
+            <button type="button" className="text-button dialog-cancel" onClick={onClose} disabled={busy}>取消</button>
+            <button type="submit" className="text-button new-meeting-create-only" disabled={busy}>仅创建，稍后录音</button>
             <button
               type="submit"
               className="button button--primary"

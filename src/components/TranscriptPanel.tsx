@@ -348,11 +348,15 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
             )) : (
               <div className="panel-empty">
                 <MagicWand size={24} weight="duotone" />
-                <p>{importJob ? importTranscriptStatus(importJob, 0) : "开始录音后，转录会出现在这里。"}</p>
+                <p>{importJob
+                  ? importTranscriptStatus(importJob, 0)
+                  : stage === "review"
+                    ? "这场会议暂无可用逐字稿。笔记和已生成的纪要仍会保留；需要补充内容时，可从更多选项继续录音。"
+                    : "开始录音后，转录会出现在这里。"}</p>
               </div>
             )}
           </div>
-          <button
+          {meeting.transcript.length > 0 && <button
             className={`follow-control ${autoScroll ? "is-active" : ""}`}
             aria-pressed={autoScroll}
             onClick={() => {
@@ -363,7 +367,7 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
           >
             {autoScroll ? <CheckCircle size={14} weight="fill" /> : <ArrowDown size={14} weight="bold" />}
             {autoScroll ? "正在跟随" : "恢复跟随"}
-          </button>
+          </button>}
         </>
       ) : (
         <div className="ai-panel" id="summary-content" role="tabpanel" aria-labelledby="summary-tab">

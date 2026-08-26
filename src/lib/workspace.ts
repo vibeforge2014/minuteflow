@@ -28,6 +28,20 @@ export interface RecordingReadiness {
 }
 
 /**
+ * 阶段切换时是否自动打开右栏：会前保持专注；会中始终显示实时转写；
+ * 会后只有确有逐字稿或后台处理状态时才打开，避免空白侧栏挤压纪要正文。
+ */
+export function shouldAutoOpenRightPanel(input: {
+  stage: WorkspaceStage;
+  transcriptCount: number;
+  hasProcessingStatus?: boolean;
+}) {
+  if (input.stage === "prepare") return false;
+  if (input.stage === "live") return true;
+  return input.transcriptCount > 0 || Boolean(input.hasProcessingStatus);
+}
+
+/**
  * starting/stopping 属于会中：此时必须持续显示录音状态与取消/保存反馈。
  * renderer 刚恢复时 meeting 可能仍是 recording/paused，短暂归入 live，随后录音
  * hook 会将不可恢复的会话标记为 interrupted 并自然回到 prepare。

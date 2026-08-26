@@ -81,6 +81,12 @@ export function DocumentWorkspace({
   const profiles = useMeetingStore((state) => state.profiles);
   const visualCapable = profiles.some((profile) => profile.kind === "llm" && profile.enabled
     && profile.options.visualSummaryEnabled && profile.options.visualSummaryVerifiedAt);
+  const hasOrdinarySummary = meeting.summary.keyPoints.length > 0
+    || meeting.summary.decisions.length > 0
+    || meeting.summary.actionItems.length > 0
+    || meeting.summary.openQuestions.length > 0
+    || meeting.summary.risks.length > 0
+    || meeting.summary.nextSteps.length > 0;
   const [summaryView, setSummaryView] = useState<"normal" | "visual">("normal");
   /** 笔记显示模式：富文本编辑 / Markdown 源码 / 只读预览。 */
   const [noteMode, setNoteMode] = useState<"rich" | "markdown" | "preview">("rich");
@@ -246,7 +252,9 @@ export function DocumentWorkspace({
                 ? "处理会在后台继续，你可以先补充笔记或查看已经出现的转写。"
                 : meeting.summary.stale
                   ? "转写或笔记有了新内容，更新纪要后再确认行动项。"
-                  : meeting.summary.keyPoints.length
+                  : summaryView === "visual" && meeting.summary.visualSummary && !meeting.summary.visualSummary.stale
+                    ? "视觉版已基于普通纪要生成；切回普通纪要可以继续编辑结论与行动项。"
+                  : hasOrdinarySummary
                     ? `已整理 ${meeting.summary.keyPoints.length} 条结论和 ${meeting.summary.actionItems.length} 个行动项。`
                     : "录音和个人记录已保留；需要时再生成最终纪要。"}</p>
             </div>
@@ -254,7 +262,7 @@ export function DocumentWorkspace({
               <button className="button button--secondary" onClick={onCancelSummary}><XCircle size={16} />取消生成</button>
             ) : (
               <button className="button button--primary" onClick={onGenerateSummary}>
-                <ArrowClockwise size={16} />{meeting.summary.stale ? "更新纪要" : "生成最终纪要"}
+                <ArrowClockwise size={16} />{meeting.summary.stale ? "更新纪要" : hasOrdinarySummary ? "重新生成纪要" : "生成最终纪要"}
               </button>
             ))}
           </section>

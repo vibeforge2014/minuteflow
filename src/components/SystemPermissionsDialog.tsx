@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ArrowClockwise, Check, Microphone, Monitor, ShieldCheck, WarningCircle } from "@phosphor-icons/react";
 import { api } from "../lib/api";
 import type { SystemPermissionStatus, SystemPermissionValue } from "../types";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 
 /** 初始状态：macOS 上录制系统音频必须有屏幕录制权限（Chromium 的 CoreAudio Tap 依赖它）。 */
 const initialStatus: SystemPermissionStatus = {
@@ -35,6 +36,9 @@ export function SystemPermissionsDialog({
   // 非 macOS 无需一次性屏幕采集探测，直接视为就绪。
   const [capturePrepared, setCapturePrepared] = useState(api.system.platform !== "darwin");
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useDialogFocus<HTMLElement>(open, {
+    initialFocus: ".permission-wall__footer .button--primary"
+  });
 
   /** 向主进程重新查询权限状态。 */
   const refresh = useCallback(async () => {
@@ -94,7 +98,7 @@ export function SystemPermissionsDialog({
   };
 
   return <div className="modal-backdrop permission-wall-backdrop">
-    <section className="dialog permission-wall" role="dialog" aria-modal="true" aria-labelledby="permission-wall-title">
+    <section ref={dialogRef} className="dialog permission-wall" role="dialog" aria-modal="true" aria-labelledby="permission-wall-title">
       <header className="permission-wall__header">
         <div className="permission-wall__symbol"><ShieldCheck size={27} weight="duotone" /></div>
         <div>

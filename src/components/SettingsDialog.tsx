@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 import {
   ArrowClockwise,
+  CaretDown,
   CaretRight,
   CheckCircle,
   CloudArrowDown,
@@ -30,6 +31,7 @@ import {
 } from "@phosphor-icons/react";
 import { api, isElectronRuntime } from "../lib/api";
 import { useMeetingStore } from "../store/meetingStore";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import type {
   DownloadableModel,
   LocalModelFile,
@@ -275,6 +277,10 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
   const [busy, setBusy] = useState(false);
   const [updateState, setUpdateState] = useState<AppUpdateCheckResult | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const dialogRef = useDialogFocus<HTMLDivElement>(open, {
+    initialFocus: ".settings-nav button.is-active",
+    onEscape: onClose
+  });
   // 正式桌面端支持 macOS / Windows；开发环境额外显示，便于用 ?preview=desktop 做浏览器视觉验收。
   const showUpdateSettings = api.system.platform === "darwin"
     || api.system.platform === "win32"
@@ -442,11 +448,11 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
 
   return (
     <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="dialog settings-dialog">
+      <div ref={dialogRef} className="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="设置分类">
             <div className="settings-nav__title">
-              <span>设置</span>
+              <span id="settings-dialog-title">设置</span>
               <small>MinuteFlow</small>
             </div>
             <div className="settings-nav__group">
@@ -706,6 +712,13 @@ const MODEL_GROUP_LABELS: Record<DownloadableModel["group"], string> = {
   english: "英文专用"
 };
 
+/** 默认只呈现三个可理解的性能档位；完整官方目录仍保留在高级展开区。 */
+const RECOMMENDED_LOCAL_MODELS = [
+  { id: "ggml-base", badge: "轻量入门", guidance: "体积小，适合旧电脑或先快速体验。" },
+  { id: "ggml-small", badge: "日常推荐", guidance: "中文与中英混合会议的均衡选择。" },
+  { id: "ggml-large-v3-turbo-q5_0", badge: "准确优先", guidance: "更高准确率，仍保持较合理的体积。" }
+] as const;
+
 /**
  * 本地 Whisper 模型管理器（零路径配置）：搜索本机 / 选择文件 / 应用内下载三条路径。
  * 全程不暴露可执行文件、模型或 FFmpeg 路径——运行时组件由主进程托管解析；
@@ -867,6 +880,36 @@ function LocalModelManager({
       ].filter((label): label is string => typeof label === "string")
     : [];
 
+  const renderDownloadModelCard = (model: DownloadableModel, recommendation?: typeof RECOMMENDED_LOCAL_MODELS[number]) => {
+    const currentProgress = progress?.modelId === model.id ? progress : null;
+    const percent = currentProgress?.totalBytes
+      ? Math.min(100, Math.round(currentProgress.downloadedBytes / currentProgress.totalBytes * 100))
+      : 0;
+    return (
+      <div className={`download-model-card ${recommendation ? "download-model-card--recommended" : ""}`} key={model.id}>
+        <div>
+          {recommendation && <em>{recommendation.badge}</em>}
+          <strong>{model.name}</strong>
+          <small>{recommendation?.guidance || model.description}</small>
+          <span>{model.format} · {formatBytes(model.sizeBytes)} · {model.license}</span>
+        </div>
+        {model.installed && model.localPath ? (
+          <button className="button button--small" disabled={busy} onClick={async () => {
+            const discovery = scan ?? await api.models.scanLocal();
+            setScan(discovery);
+            await applyModel({ path: model.localPath!, name: model.fileName, format: model.format, engine: model.engine, sizeBytes: model.sizeBytes }, discovery.runtimes);
+          }}>{profile.options.modelPath === model.localPath ? "使用中" : "已下载 · 使用"}</button>
+        ) : (
+          <button className="button button--small" disabled={busy} onClick={() => downloadModel(model.id)}><CloudArrowDown size={15} />{currentProgress ? (currentProgress.status === "downloading" ? `${percent}%` : currentProgress.status === "verifying" ? "校验中" : currentProgress.status === "ready" ? "已就绪" : currentProgress.status === "error" ? "重试" : "准备中") : "下载"}</button>
+        )}
+        {currentProgress && <>
+          <progress max="100" value={currentProgress.status === "ready" ? 100 : percent} aria-label={`${model.name} 下载进度`} />
+          {currentProgress.message && <small>{currentProgress.message}</small>}
+        </>}
+      </div>
+    );
+  };
+
   return (
     <section className="local-model-manager">
       <div className="local-model-manager__heading">
@@ -889,92 +932,83 @@ function LocalModelManager({
         </div>
       )}
       <div className="local-model-library-heading">
-        <strong>在线模型库</strong>
-        <small>{catalog.length} 款 Whisper 官方模型 · 下载后自动校验并启用</small>
+        <strong>推荐模型</strong>
+        <small>选一个即可开始，下载后会自动校验并启用</small>
       </div>
-      <div className="download-source-row">
-        <label>
-          <span><strong>下载源</strong><small>官方源连不上时会自动尝试另一个预设源</small></span>
-          <select
-            value={preferences.modelDownloadSourceKind}
-            onChange={(event) => updatePreferences({ ...preferences, modelDownloadSourceKind: event.target.value as "official" | "mirror" | "custom" })}
-          >
-            <option value="official">Hugging Face 官方</option>
-            <option value="mirror">hf-mirror.com（国内镜像）</option>
-            <option value="custom">自定义源…</option>
-          </select>
-        </label>
-        {preferences.modelDownloadSourceKind === "custom" && (
-          <label>
-            <span><strong>自定义源地址</strong><small>需与 HuggingFace 下载地址格式兼容，或提供含 {("{fileName}")} 占位符的链接模板</small></span>
-            <input
-              value={preferences.modelDownloadCustomBase}
-              onChange={(event) => updatePreferences({ ...preferences, modelDownloadCustomBase: event.target.value })}
-              placeholder="https://hf.example.com 或 https://example.com/models/{fileName}"
-              spellCheck={false}
-            />
-          </label>
-        )}
+      <div className="recommended-model-list">
+        {RECOMMENDED_LOCAL_MODELS.map((recommendation) => {
+          const model = catalog.find((item) => item.id === recommendation.id);
+          return model ? renderDownloadModelCard(model, recommendation) : null;
+        })}
       </div>
-      <div className="download-model-list">
-        {(Object.keys(MODEL_GROUP_LABELS) as Array<DownloadableModel["group"]>).map((group) => (
-          <div className="download-model-group" key={group}>
-            <small className="download-model-group__label">{MODEL_GROUP_LABELS[group]}</small>
-            {catalog.filter((model) => model.group === group).map((model) => {
-              const currentProgress = progress?.modelId === model.id ? progress : null;
-              const percent = currentProgress?.totalBytes
-                ? Math.min(100, Math.round(currentProgress.downloadedBytes / currentProgress.totalBytes * 100))
-                : 0;
-              return (
-                <div className="download-model-card" key={model.id}>
-                  <div><strong>{model.name}</strong><small>{model.description}</small><span>{model.format} · {formatBytes(model.sizeBytes)} · {model.license}</span></div>
-                  {model.installed && model.localPath ? (
-                    <button className="button button--small" disabled={busy} onClick={async () => {
-                      const discovery = scan ?? await api.models.scanLocal();
-                      setScan(discovery);
-                      await applyModel({ path: model.localPath!, name: model.fileName, format: model.format, engine: model.engine, sizeBytes: model.sizeBytes }, discovery.runtimes);
-                    }}>{profile.options.modelPath === model.localPath ? "使用中" : "已下载 · 使用"}</button>
-                  ) : (
-                    <button className="button button--small" disabled={busy} onClick={() => downloadModel(model.id)}><CloudArrowDown size={15} />{currentProgress ? (currentProgress.status === "downloading" ? `${percent}%` : currentProgress.status === "verifying" ? "校验中" : currentProgress.status === "ready" ? "已就绪" : currentProgress.status === "error" ? "重试" : "准备中") : "下载"}</button>
-                  )}
-                  {currentProgress && <>
-                    <progress max="100" value={currentProgress.status === "ready" ? 100 : percent} aria-label={`${model.name} 下载进度`} />
-                    {currentProgress.message && <small>{currentProgress.message}</small>}
-                  </>}
-                </div>
-              );
-            })}
+      <details className="local-model-catalog-details">
+        <summary>
+          <span><strong>浏览全部模型与下载选项</strong><small>{catalog.length} 款官方模型、量化版、英文专用与自定义直链</small></span>
+          <CaretDown size={16} />
+        </summary>
+        <div className="local-model-catalog-details__body">
+          <div className="download-source-row">
+            <label>
+              <span><strong>下载源</strong><small>官方源连不上时会自动尝试另一个预设源</small></span>
+              <select
+                value={preferences.modelDownloadSourceKind}
+                onChange={(event) => updatePreferences({ ...preferences, modelDownloadSourceKind: event.target.value as "official" | "mirror" | "custom" })}
+              >
+                <option value="official">Hugging Face 官方</option>
+                <option value="mirror">hf-mirror.com（国内镜像）</option>
+                <option value="custom">自定义源…</option>
+              </select>
+            </label>
+            {preferences.modelDownloadSourceKind === "custom" && (
+              <label>
+                <span><strong>自定义源地址</strong><small>需与 HuggingFace 下载地址格式兼容，或提供含 {("{fileName}")} 占位符的链接模板</small></span>
+                <input
+                  value={preferences.modelDownloadCustomBase}
+                  onChange={(event) => updatePreferences({ ...preferences, modelDownloadCustomBase: event.target.value })}
+                  placeholder="https://hf.example.com 或 https://example.com/models/{fileName}"
+                  spellCheck={false}
+                />
+              </label>
+            )}
           </div>
-        ))}
-      </div>
-      <div className="download-url-row">
-        <div className="download-url-row__heading">
-          <strong>从链接下载</strong>
-          <small>目录之外的模型可粘贴直链（.bin / .gguf / .pt）。自定义直链不经过完整性校验，请仅使用信任来源。</small>
+          <div className="download-model-list">
+            {(Object.keys(MODEL_GROUP_LABELS) as Array<DownloadableModel["group"]>).map((group) => (
+              <div className="download-model-group" key={group}>
+                <small className="download-model-group__label">{MODEL_GROUP_LABELS[group]}</small>
+                {catalog.filter((model) => model.group === group).map((model) => renderDownloadModelCard(model))}
+              </div>
+            ))}
+          </div>
+          <div className="download-url-row">
+            <div className="download-url-row__heading">
+              <strong>从链接下载</strong>
+              <small>目录之外的模型可粘贴直链（.bin / .gguf / .pt）。自定义直链不经过完整性校验，请仅使用信任来源。</small>
+            </div>
+            <div className="download-url-row__controls">
+              <input
+                value={customUrl}
+                onChange={(event) => setCustomUrl(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter" && !busy && customUrl.trim()) void downloadFromLink(); }}
+                placeholder="https://example.com/ggml-base.bin"
+                spellCheck={false}
+                disabled={busy}
+              />
+              <button className="button button--small" disabled={busy || !customUrl.trim()} onClick={() => void downloadFromLink()}><CloudArrowDown size={15} />下载</button>
+            </div>
+            {(() => {
+              const customProgress = progress?.modelId.startsWith("custom:") ? progress : null;
+              if (!customProgress) return null;
+              const percent = customProgress.totalBytes
+                ? Math.min(100, Math.round(customProgress.downloadedBytes / customProgress.totalBytes * 100))
+                : 0;
+              return <>
+                <progress max="100" value={customProgress.status === "ready" ? 100 : percent} aria-label="自定义链接下载进度" />
+                {customProgress.message && <small>{customProgress.message}</small>}
+              </>;
+            })()}
+          </div>
         </div>
-        <div className="download-url-row__controls">
-          <input
-            value={customUrl}
-            onChange={(event) => setCustomUrl(event.target.value)}
-            onKeyDown={(event) => { if (event.key === "Enter" && !busy && customUrl.trim()) void downloadFromLink(); }}
-            placeholder="https://example.com/ggml-base.bin"
-            spellCheck={false}
-            disabled={busy}
-          />
-          <button className="button button--small" disabled={busy || !customUrl.trim()} onClick={() => void downloadFromLink()}><CloudArrowDown size={15} />下载</button>
-        </div>
-        {(() => {
-          const customProgress = progress?.modelId.startsWith("custom:") ? progress : null;
-          if (!customProgress) return null;
-          const percent = customProgress.totalBytes
-            ? Math.min(100, Math.round(customProgress.downloadedBytes / customProgress.totalBytes * 100))
-            : 0;
-          return <>
-            <progress max="100" value={customProgress.status === "ready" ? 100 : percent} aria-label="自定义链接下载进度" />
-            {customProgress.message && <small>{customProgress.message}</small>}
-          </>;
-        })()}
-      </div>
+      </details>
       {error && <div className="connection-status is-error">{error}</div>}
       {success && <div className="connection-status is-success">{success}</div>}
     </section>

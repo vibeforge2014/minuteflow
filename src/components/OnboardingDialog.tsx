@@ -24,6 +24,7 @@ import {
   LOCAL_WHISPER_TRANSPORTS
 } from "../lib/onboarding";
 import type { SettingsTab } from "./SettingsDialog";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 
 export function OnboardingDialog({
   open,
@@ -45,13 +46,16 @@ export function OnboardingDialog({
     () => profiles.find(isOnboardingSummaryReady),
     [profiles]
   );
+  const dialogRef = useDialogFocus<HTMLElement>(open, {
+    initialFocus: ".onboarding-wizard__footer .button--primary"
+  });
 
   if (!open) return null;
   const steps = ["欢迎", "语音转录", "AI 纪要", "完成"];
 
   return (
     <div className="modal-backdrop onboarding-backdrop">
-      <section className="dialog onboarding-dialog onboarding-wizard" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+      <section ref={dialogRef} className="dialog onboarding-dialog onboarding-wizard" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
         <header className="onboarding-wizard__header">
           <div>
             <span>首次设置 · {step + 1}/{steps.length}</span>
@@ -80,7 +84,7 @@ export function OnboardingDialog({
               readyDescription={transcriptionProfile
                 ? `${LOCAL_WHISPER_TRANSPORTS.has(transcriptionProfile.transport) ? "在本机完成转写" : "通过你选择的服务转写"} · ${transcriptionProfile.model || "自动模型"}`
                 : "你仍可继续，但会议只会保存录音，无法自动生成文字稿。"}
-              actionLabel={transcriptionProfile ? "检查或更换 Whisper" : "配置 Whisper"}
+              actionLabel={transcriptionProfile ? "检查或更换 Whisper" : "去配置 Whisper"}
               onConfigure={() => onConfigureModels("transcription")}
             >
               <SetupChoice icon={<Cpu size={20} />} title="本地 Whisper" description="下载后离线运行，适合重视隐私的会议。" recommended />
@@ -98,7 +102,7 @@ export function OnboardingDialog({
               readyDescription={summaryProfile
                 ? `${summaryProfile.model} · 仅在你主动生成终稿时访问服务`
                 : "不影响录音和转写，纪要会降级为本机规则整理，可稍后补充模型。"}
-              actionLabel={summaryProfile ? "检查或更换大模型" : "配置大模型"}
+              actionLabel={summaryProfile ? "检查或更换大模型" : "去配置大模型"}
               onConfigure={() => onConfigureModels("llm")}
             >
               <SetupChoice icon={<Sparkle size={20} />} title="在线大模型" description="生成高质量结构化终稿，并可启用视觉纪要。" recommended />
@@ -115,11 +119,11 @@ export function OnboardingDialog({
             <ArrowLeft size={15} />返回
           </button>
           <div>
-            {step === 1 && !transcriptionProfile && <span>可以稍后配置，届时仅保存录音</span>}
-            {step === 2 && !summaryProfile && <span>可以跳过，继续使用本机基础纪要</span>}
+            {step === 1 && !transcriptionProfile && <span>继续即明确选择“仅保存录音”</span>}
+            {step === 2 && !summaryProfile && <span>继续即使用“本机基础纪要”</span>}
             {step < 3 ? (
               <button className="button button--primary" onClick={() => setStep((current) => Math.min(3, current + 1))}>
-                {step === 0 ? "开始配置" : "继续"}<ArrowRight size={15} />
+                {step === 0 ? "开始配置" : step === 1 && !transcriptionProfile ? "仅保存录音，继续" : step === 2 && !summaryProfile ? "使用基础纪要，继续" : "继续"}<ArrowRight size={15} />
               </button>
             ) : (
               <button className="button button--primary" onClick={onComplete}>进入 MinuteFlow</button>
@@ -177,7 +181,7 @@ function SetupChoice({ icon, title, description, recommended = false }: {
   description: string;
   recommended?: boolean;
 }) {
-  return <article>
+  return <article aria-label={`${title}${recommended ? "，推荐" : ""}`}>
     <span>{icon}</span>
     <div><strong>{title}{recommended && <em>推荐</em>}</strong><small>{description}</small></div>
   </article>;
