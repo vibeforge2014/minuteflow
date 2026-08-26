@@ -37,7 +37,7 @@ export default {
       // Native iOS sources and local release/QA outputs are not desktop app
       // resources. Excluding them also prevents an older installer from being
       // recursively embedded when a release is built from a reused checkout.
-      /^\/(?:ios|release|artifacts)(?:\/|$)/
+      /^\/(?:ios|release|artifacts|\.build)(?:\/|$)/
     ],
     appBundleId: "com.meetingassistant.desktop",
     appCategoryType: "public.app-category.productivity",
