@@ -1,3 +1,76 @@
+# Design QA — macOS 权限引导完成率优化（渐进式流程）
+
+## Evidence
+
+- Source visual truth: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-audit-2026-08-30/06-usability-pass-main.png` (1280 × 720 px) and `/Users/zqian15/Desktop/minuteflow/artifacts/permission-audit-2026-08-30/08-usability-pass-helper.png` (780 × 176 px). These preserve the selected warm permission wall and dark real-app drag-helper direction from the prior accepted pass.
+- Electron implementation states: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-completion-2026-08-30/01-microphone.jpeg`, `02-screen-settings.jpeg`, `03-restart.jpeg`, `05-verify.jpeg`, and `06-success.jpeg` (each 1152 × 768 physical px). The BrowserWindow was 1440 × 960 CSS px on a 0.8 macOS capture scale.
+- Native System Settings handoff evidence: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-completion-2026-08-30/04-system-settings.jpeg` (723 × 515 px); it opens the localized “录屏与系统录音” pane without changing any TCC switch.
+- Full-view comparison input: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-completion-2026-08-30/09-main-comparison.png` (2560 × 768 px). The 1280 × 720 source is vertically padded to 1280 × 768; the 1152 × 768 implementation is horizontally padded to the same frame without resampling.
+- Five-state implementation board: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-completion-2026-08-30/11-state-board.png` (1728 × 768 px), covering microphone, screen settings, restart, verify, and success.
+- Focused helper comparison input: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-completion-2026-08-30/10-helper-comparison.png` (1560 × 176 px). The Electron helper capture was 622 × 140 physical px and was normalized back to its 780 × 176 CSS size before comparison.
+- Minimum helper evidence after the responsive fix: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-completion-2026-08-30/12-helper-560.jpeg` (454 × 140 physical px, representing the 560 × 176 CSS helper at the same 0.8 capture scale plus its outer margin).
+- State: macOS first-run authorization, with microphone initially undecided, screen/system-audio denied, System Settings return, restart-required recovery, post-relaunch verification, and automatic completion.
+
+## Findings
+
+- No actionable P0, P1, or P2 findings remain.
+- Fonts and typography: the system/PingFang stack and existing compact optical hierarchy are retained. Phase titles, two permission rows, helper instructions, and footer actions remain readable without truncation; the 560 px helper uses a deliberately tighter but still coherent scale.
+- Spacing and layout rhythm: the first screen now contains only the two permission rows and one current action. The drag tutorial appears only during the system-audio task. Restart, verify, and success use a single compact status surface, keeping the dialog below the 672 CSS px maximum available at a 1280 × 720 viewport.
+- Colors and visual tokens: warm white, pale peach, coral actions, amber restart, and semantic green success map to MinuteFlow's established tokens. The dark helper preserves the macOS floating-material contrast without copying System Settings chrome.
+- Image quality and asset fidelity: the real MinuteFlow brand asset and packaged app icon remain in use; Phosphor supplies standard interface icons. No emoji, handcrafted SVG, CSS-drawn logo, or placeholder image was introduced.
+- Copy and content: duplicate privacy explanations are reduced to one consent/local-storage note. Each phase explains the current outcome, restart necessity, local-only verification, and the Finder/list “+” recovery path. The guide explicitly says that screen imagery is not saved and that Accessibility permission is not required.
+- States and interaction: all five main phases render and transition; the success feedback remains visible for about one second and then closes automatically. The helper exposes idle, dragging, dropped, restarting, and success copy, with “开关已打开，重启” and “在访达中显示” available in the dropped state.
+- Accessibility: native buttons remain keyboard reachable, focus starts on the phase primary action, progress/status changes use live regions, verification failures use alert semantics, reduced-motion/transparency rules include the new stages, and the Finder fallback supports keyboard-only completion.
+- Viewport resilience: no main-stage persistent control is clipped in the captured smaller physical viewport. The focused 780 × 176 helper fits, and the revised 560 × 176 compact layout keeps both fallback buttons and the “不需要辅助功能权限” reassurance inside the dark surface.
+
+## Full-view comparison evidence
+
+- The combined main input shows the intentional progressive reduction from the previous all-at-once wall: the implementation preserves the accepted typography, rows, warm palette, radii, and action hierarchy while removing the early drag tutorial and duplicate authorization note.
+- The five-state board confirms that only one task-specific panel is added at a time and that restart/verify/success do not increase the modal beyond the screen-settings stage.
+- The implementation uses one coral primary action in every active stage. “暂不授权，先体验” remains a quiet exit, while restart and verify expose only their phase-specific recovery control.
+
+## Focused region comparison evidence
+
+- The helper comparison confirms the same draggable application tile, upward direction cue, dark rounded material, target instruction, close control, Finder fallback, and no-Accessibility reassurance as the accepted source.
+- The focused 560 px evidence is necessary because the dropped state adds a second button. After the compact-grid fix, all visible copy and controls remain inside the 176 px helper with no crop or scroll burden.
+
+## Comparison history
+
+1. First responsive pass — P2 helper overflow at the 560 × 176 minimum: in the dropped/restart state, the no-Accessibility reassurance wrapped below the fixed dark helper surface.
+   - Fix: introduced the same compact grid used by the real `max-width: 600px` breakpoint for deterministic development preview; narrowed the draggable tile, tightened type and gaps, and kept the restart/Finder actions on one compact row.
+   - Post-fix evidence: `12-helper-560.jpeg`; the dark surface contains the application tile, direction cue, title, description, both actions, reassurance, and close control.
+2. Post-fix comparison found no remaining P0/P1/P2 visual or interaction mismatch, so no further iteration was required.
+
+## Primary interactions tested
+
+- “允许麦克风” advances to the system-audio task without showing the drag tutorial early.
+- “打开系统设置” opens the correct localized macOS pane and moves the main guide to the recoverable restart state after return.
+- “重启并继续” advances to verification in the safe development preview; production uses the new atomic resume-marker IPC before relaunch.
+- “验证系统音频” reaches success; success automatically closes after roughly one second.
+- Helper idle and dropped/restart states render at 780 × 176 and 560 × 176; Finder and restart controls are present in the accessibility tree.
+- The actual System Settings pane was observed but no OS permission switch, TCC database, or unrelated system setting was modified.
+- TypeScript, Electron main/preload syntax, 85 core tests, production build, and 4 Sites worker tests pass.
+
+## Implementation checklist
+
+- [x] `microphone → screen-settings → restart → verify → success` pure phase state.
+- [x] Atomic `permissionSetupResume` persistence and relaunch API.
+- [x] Resume overrides prior completed/skipped flow state; completion and skip clear the marker.
+- [x] Friendly permission-error recovery instead of Chromium error text.
+- [x] One-second success feedback with automatic continuation.
+- [x] Five drag-helper states plus Finder and list “+” recovery.
+- [x] Cursor-display positioning, reopen recomputation, and work-area clamping.
+- [x] 780 × 176 and 560 × 176 helper layouts without clipping.
+- [x] Existing no-Accessibility, no-screen-save, and no-normal-recording-picker constraints preserved.
+
+## Follow-up polish
+
+- P3 release gate: the final native drag acceptance, actual TCC toggle/relaunch, VoiceOver announcement order, and post-signing bundle identity still require the planned macOS 14.2+ smoke test with a signed test package and isolated account. This implementation pass intentionally does not reset the current user's TCC data, bump the version, sign, notarize, or publish.
+
+final result: passed
+
+---
+
 # Design QA — macOS 权限引导易用性迭代
 
 ## Evidence

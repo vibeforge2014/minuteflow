@@ -349,6 +349,8 @@ export interface MeetingPreferences {
   systemPermissionsCompleted: boolean;
   /** 权限引导流程版本号，递增以便老用户重新走新版流程。 */
   permissionsVersion: number;
+  /** 系统权限变更触发应用重启时，下一次启动继续打开权限引导。 */
+  permissionSetupResume: boolean;
   /** 本地模型下载源：官方 / 国内镜像 / 自定义；失败时自动回退其余预设源。 */
   modelDownloadSourceKind: "official" | "mirror" | "custom";
   /** 自定义下载源：HF 兼容站点根地址，或含 {fileName} 占位符的链接模板。 */
@@ -735,6 +737,8 @@ export interface MeetingAPI {
     startAppDrag(): void;
     /** macOS：在访达中定位当前 .app，供键盘操作或“+”文件选择器作为拖拽退路。 */
     revealApplication(): Promise<void>;
+    /** macOS：持久化权限引导恢复标记后安全重启应用。 */
+    relaunchForPermissionSetup(): Promise<{ relaunching: true }>;
     /** 关闭系统设置上方的权限拖拽引导浮层。 */
     closePermissionHelper(): void;
     onSuspend(callback: () => void): () => void;

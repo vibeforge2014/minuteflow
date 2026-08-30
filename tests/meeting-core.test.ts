@@ -51,7 +51,7 @@ import {
 import { groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments } from "../src/lib/transcript";
 import { groupLibraryMeetings, splitHighlight } from "../src/lib/library";
 import { simplifyChinese, simplifySummary } from "../src/lib/chinese";
-import { getPermissionSetupAction, isMicrophonePermissionError, shouldRequestMicrophone } from "../src/lib/permissions";
+import { derivePermissionSetupPhase, finishPermissionSetup, isMicrophonePermissionError, isScreenPermissionError, shouldOpenPermissionSetup, shouldRequestMicrophone } from "../src/lib/permissions";
 import { lockSummaryField, mergeSummaryRevision, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { normalizeImportChunkSegments } from "../electron/services/import-queue.mjs";
 import { audioContentType, parseByteRange } from "../electron/services/media.mjs";
@@ -238,13 +238,65 @@ describe("microphone permission routing", () => {
     expect(isMicrophonePermissionError(new Error("device missing"))).toBe(false);
   });
 
-  it("advances first-run authorization through one deterministic next action", () => {
+  it("advances first-run authorization through deterministic phases", () => {
     const input = { screen: "denied" as const, systemAudioRequired: true, capturePrepared: false };
-    expect(getPermissionSetupAction({ ...input, microphone: "not-determined" })).toBe("request-microphone");
-    expect(getPermissionSetupAction({ ...input, microphone: "denied" })).toBe("open-microphone-settings");
-    expect(getPermissionSetupAction({ ...input, microphone: "granted" })).toBe("open-screen-settings");
-    expect(getPermissionSetupAction({ ...input, microphone: "granted", screen: "granted" })).toBe("verify-system-audio");
-    expect(getPermissionSetupAction({ ...input, microphone: "granted", screen: "granted", capturePrepared: true })).toBe("complete");
+    expect(derivePermissionSetupPhase({ ...input, microphone: "not-determined" })).toBe("microphone");
+    expect(derivePermissionSetupPhase({ ...input, microphone: "denied" })).toBe("microphone");
+    expect(derivePermissionSetupPhase({ ...input, microphone: "granted" })).toBe("screen-settings");
+    expect(derivePermissionSetupPhase({ ...input, microphone: "granted", returnedFromScreenSettings: true })).toBe("restart");
+    expect(derivePermissionSetupPhase({ ...input, microphone: "granted", screen: "granted" })).toBe("verify");
+    expect(derivePermissionSetupPhase({ ...input, microphone: "granted", screen: "granted", restartRequired: true })).toBe("restart");
+    expect(derivePermissionSetupPhase({ ...input, microphone: "granted", screen: "granted", capturePrepared: true })).toBe("success");
+    expect(derivePermissionSetupPhase({ ...input, microphone: "granted", systemAudioRequired: false })).toBe("success");
+  });
+
+  it("recognizes screen-permission failures that should return to restart guidance", () => {
+    for (const name of ["NotAllowedError", "PermissionDeniedError", "SecurityError"]) {
+      const error = new Error("screen denied");
+      error.name = name;
+      expect(isScreenPermissionError(error)).toBe(true);
+    }
+    expect(isScreenPermissionError({ name: "NotAllowedError" })).toBe(true);
+    expect(isScreenPermissionError(new Error("no audio track"))).toBe(false);
+  });
+
+  it("reopens after a relaunch marker even when the prior flow was already complete", () => {
+    expect(shouldOpenPermissionSetup({
+      permissionSetupResume: true,
+      systemPermissionsCompleted: true,
+      permissionsVersion: 2
+    })).toBe(true);
+    expect(shouldOpenPermissionSetup({
+      permissionSetupResume: false,
+      systemPermissionsCompleted: true,
+      permissionsVersion: 2
+    })).toBe(false);
+    expect(shouldOpenPermissionSetup({
+      permissionSetupResume: false,
+      systemPermissionsCompleted: false,
+      permissionsVersion: 2
+    })).toBe(true);
+  });
+
+  it("clears the relaunch marker when setup is completed or skipped", () => {
+    const preferences = {
+      summaryIntervalSeconds: 60,
+      summaryCadenceVersion: 1,
+      defaultMode: "online" as const,
+      glossary: [],
+      retentionDays: null,
+      onboardingCompleted: false,
+      systemPermissionsCompleted: false,
+      permissionsVersion: 0,
+      permissionSetupResume: true,
+      modelDownloadSourceKind: "official" as const,
+      modelDownloadCustomBase: ""
+    };
+    expect(finishPermissionSetup(preferences)).toMatchObject({
+      systemPermissionsCompleted: true,
+      permissionsVersion: 2,
+      permissionSetupResume: false
+    });
   });
 });
 

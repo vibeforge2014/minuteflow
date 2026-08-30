@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.22",
+  "version": "0.1.23",
   "platform": "darwin",
   "architectures": [
     "arm64"
   ],
-  "publishedAt": "2026-08-30T13:09:27Z",
+  "publishedAt": "2026-08-30T17:06:30Z",
   "minimumSystemVersion": "14.2",
-  "notes": "MinuteFlow 0.1.22 已发布。包含最新的功能改进、兼容性优化与问题修复。",
+  "notes": "MinuteFlow 0.1.23 优化 macOS 权限引导：支持重启后恢复、系统音频验证、拖拽助手状态反馈与双显示器定位。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.22",
-  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.22/MinuteFlow-0.1.22-macOS-arm64.dmg",
-  "sha256": "44345739d1a05e6e54b6f6e0047027048484e696cababe7aeed6accd506f4ca3"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.23",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.23/MinuteFlow-0.1.23-macOS-arm64.dmg",
+  "sha256": "e3bd189300cc0f8cd8c29761e80c900a3aea9c906588935b89f51dd1b6ddf8b0"
 }

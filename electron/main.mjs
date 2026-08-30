@@ -150,6 +150,7 @@ const defaultPreferences = {
   onboardingCompleted: false,
   systemPermissionsCompleted: false,
   permissionsVersion: 0,
+  permissionSetupResume: false,
   modelDownloadSourceKind: "official",
   modelDownloadCustomBase: ""
 };
@@ -258,6 +259,7 @@ async function persistPreferences(preferences) {
     onboardingCompleted: Boolean(preferences.onboardingCompleted),
     systemPermissionsCompleted: Boolean(preferences.systemPermissionsCompleted),
     permissionsVersion: Math.max(0, Number(preferences.permissionsVersion) || 0),
+    permissionSetupResume: Boolean(preferences.permissionSetupResume),
     modelDownloadSourceKind: ["official", "mirror", "custom"].includes(preferences.modelDownloadSourceKind)
       ? preferences.modelDownloadSourceKind
       : "official",
@@ -359,19 +361,26 @@ function currentMacApplicationPath() {
  */
 async function showPermissionHelper() {
   if (process.platform !== "darwin") return;
+  const { workArea } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const availableWidth = Math.max(320, workArea.width - 36);
+  const width = Math.min(780, availableWidth);
+  const height = Math.min(176, Math.max(132, workArea.height - 36));
+  const minWidth = Math.min(560, width);
+  const bounds = {
+    width,
+    height,
+    x: Math.max(workArea.x, Math.round(workArea.x + (workArea.width - width) / 2)),
+    y: Math.max(workArea.y, Math.round(workArea.y + workArea.height - height - 28))
+  };
   if (permissionHelperWindow && !permissionHelperWindow.isDestroyed()) {
+    permissionHelperWindow.setMinimumSize(minWidth, height);
+    permissionHelperWindow.setBounds(bounds, false);
     permissionHelperWindow.showInactive();
     return;
   }
-  const { workArea } = screen.getPrimaryDisplay();
-  const width = Math.min(780, workArea.width - 36);
-  const height = 176;
   permissionHelperWindow = new BrowserWindow({
-    width,
-    height,
-    x: Math.round(workArea.x + (workArea.width - width) / 2),
-    y: Math.round(workArea.y + workArea.height - height - 28),
-    minWidth: 560,
+    ...bounds,
+    minWidth,
     minHeight: height,
     maxHeight: height,
     frame: false,
@@ -1162,6 +1171,24 @@ function registerIpc() {
     if (process.platform !== "darwin") return;
     shell.showItemInFolder(currentMacApplicationPath());
   });
+  // system:relaunch-for-permission-setup — macOS 在系统设置里改动屏幕录制权限后
+  // 需要重启才能生效。先原子持久化恢复标记，再安全退出并由 Electron 拉起新进程。
+  trustedHandle("system:relaunch-for-permission-setup", async () => {
+    if (process.platform !== "darwin") return { relaunching: true };
+    preferenceWriteQueue = preferenceWriteQueue.then(async () => {
+      const preferences = await loadPreferences();
+      return persistPreferences({ ...preferences, permissionSetupResume: true });
+    }, async () => {
+      const preferences = await loadPreferences();
+      return persistPreferences({ ...preferences, permissionSetupResume: true });
+    });
+    await preferenceWriteQueue;
+    setTimeout(() => {
+      app.relaunch();
+      app.quit();
+    }, 80);
+    return { relaunching: true };
+  });
   ipcMain.on("system:close-permission-helper", (event) => {
     if (!senderIsTrusted(event)) return;
     permissionHelperWindow?.close();
@@ -1265,7 +1292,7 @@ app.on("before-quit", (event) => {
   // preventDefault, drain the recording write queues synchronously, then exit.
   // Without this, the last audio chunk can be lost and .partial files are
   // never renamed on quit-while-recording.
-  if (isQuitting || recordingFiles.size === 0) return;
+  if (isQuitting) return;
   event.preventDefault();
   isQuitting = true;
   void (async () => {

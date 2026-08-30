@@ -28,6 +28,7 @@ const defaultPreferences: MeetingPreferences = {
   onboardingCompleted: false,
   systemPermissionsCompleted: false,
   permissionsVersion: 0,
+  permissionSetupResume: false,
   modelDownloadSourceKind: "official",
   modelDownloadCustomBase: ""
 };
@@ -515,7 +516,8 @@ const browserApi: MeetingAPI = {
           ...preferences,
           onboardingCompleted: false,
           systemPermissionsCompleted: true,
-          permissionsVersion: 2
+          permissionsVersion: 2,
+          permissionSetupResume: false
         };
       }
       // 权限视觉验收入口：无需清空浏览器已有偏好即可稳定复现 macOS
@@ -525,7 +527,8 @@ const browserApi: MeetingAPI = {
           ...preferences,
           onboardingCompleted: true,
           systemPermissionsCompleted: false,
-          permissionsVersion: 0
+          permissionsVersion: 0,
+          permissionSetupResume: false
         };
       }
       localStorage.setItem(preferencesKey, JSON.stringify(preferences));
@@ -600,6 +603,7 @@ const browserApi: MeetingAPI = {
     async openSettings() {},
     startAppDrag() {},
     async revealApplication() {},
+    async relaunchForPermissionSetup() { return { relaunching: true as const }; },
     closePermissionHelper() {},
     onSuspend() { return () => {}; },
     onResume() { return () => {}; }

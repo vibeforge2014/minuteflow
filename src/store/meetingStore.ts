@@ -102,6 +102,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     onboardingCompleted: false,
     systemPermissionsCompleted: false,
     permissionsVersion: 0,
+    permissionSetupResume: false,
     modelDownloadSourceKind: "official",
     modelDownloadCustomBase: ""
   },

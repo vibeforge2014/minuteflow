@@ -2122,6 +2122,7 @@ button {
   box-shadow: 0 0 0 2px rgba(231, 111, 81, .08);
 }
 .permission-wall__list article.is-waiting { background: #fffaf3; border-color: #ead8b4; }
+.permission-wall__list article.is-restart { background: #fffaf3; border-color: #dfc78f; box-shadow: 0 0 0 2px rgba(193, 142, 45, .08); }
 .permission-wall__icon { color: #666d78; }
 .permission-wall__list article.is-ready .permission-wall__icon { color: #3b8052; }
 .permission-wall__title { display: flex; align-items: center; gap: 8px; }
@@ -2144,20 +2145,11 @@ button {
   line-height: 1.55;
 }
 
-.permission-wall__hint {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  margin: 1px 2px 0;
-  padding: 9px 12px;
-  color: #6a4a2e;
-  background: var(--accent-soft, #fcf1e9);
-  border-radius: 8px;
-  font-size: 11px;
-  line-height: 1.55;
+.permission-wall__stage {
+  min-height: 86px;
+  border-radius: 13px;
+  animation: permission-stage-enter 220ms cubic-bezier(.2, .8, .2, 1) both;
 }
-
-.permission-wall__hint svg { flex: 0 0 auto; margin-top: 1px; color: var(--accent-strong); }
 
 .permission-wall__drag-guide {
   display: grid;
@@ -2169,6 +2161,29 @@ button {
   border: 1px solid #efd9d1;
   border-radius: 13px;
 }
+
+.permission-wall__restart,
+.permission-wall__verify,
+.permission-wall__success {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  align-items: center;
+  gap: 13px;
+  padding: 15px 17px;
+}
+
+.permission-wall__restart { color: #7b5923; background: #fff9ec; border: 1px solid #ecd9ad; }
+.permission-wall__verify { color: #8d4d3d; background: #fff7f3; border: 1px solid #efd6ce; }
+.permission-wall__success { color: #33734a; background: #f3faf5; border: 1px solid #d5eadb; }
+.permission-wall__restart > svg,
+.permission-wall__verify > svg,
+.permission-wall__success > svg { justify-self: center; }
+.permission-wall__restart strong,
+.permission-wall__verify strong,
+.permission-wall__success strong { color: #34383f; font-size: 14px; }
+.permission-wall__restart p,
+.permission-wall__verify p,
+.permission-wall__success p { margin: 5px 0 0; color: #6c727c; font-size: 11px; line-height: 1.55; }
 
 .permission-wall__drag-copy > span {
   display: block;
@@ -2247,6 +2262,11 @@ button {
 .permission-wall__skip:hover { color: var(--ink); }
 .permission-wall__skip:disabled { opacity: 0.5; }
 
+@keyframes permission-stage-enter {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* macOS 系统设置上方的小型拖拽助手窗口。 */
 html[data-surface="permission-helper"],
 html[data-surface="permission-helper"] body,
@@ -2294,6 +2314,7 @@ html[data-surface="permission-helper"] #root {
 .permission-helper__app:hover { background: rgba(255, 255, 255, .14); border-color: rgba(255, 255, 255, .3); transform: translateY(-1px); }
 .permission-helper__app:active,
 .permission-helper__app.is-dragging { cursor: grabbing; transform: scale(.98); }
+.permission-helper__app:disabled { cursor: default; opacity: .78; }
 .permission-helper__app > svg { flex: 0 0 auto; color: #8f9197; }
 .permission-helper__app img { flex: 0 0 auto; border-radius: 10px; box-shadow: 0 6px 16px rgba(0, 0, 0, .26); }
 .permission-helper__app span { min-width: 0; text-align: left; }
@@ -2302,13 +2323,17 @@ html[data-surface="permission-helper"] #root {
 .permission-helper__arrow { color: #ea846a; }
 .permission-helper__copy > strong { display: block; font-size: 14px; line-height: 1.35; }
 .permission-helper__copy > span { display: block; margin-top: 5px; color: #b8b9be; font-size: 11px; line-height: 1.45; }
-.permission-helper__fallback { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+.permission-helper__fallback { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 9px; margin-top: 9px; }
 .permission-helper__fallback > button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 9px; color: #f8e5df; background: rgba(231, 111, 81, .18); border: 1px solid rgba(239, 148, 124, .28); border-radius: 8px; font-size: 10px; }
 .permission-helper__fallback > button:hover { background: rgba(231, 111, 81, .28); border-color: rgba(239, 148, 124, .42); }
+.permission-helper__fallback > button.is-primary { color: white; background: #c85f46; border-color: #dd7c63; }
+.permission-helper__fallback > button.is-primary:hover { background: #b7523c; }
 .permission-helper__fallback > small { display: flex; align-items: center; gap: 5px; color: #d5a08f; font-size: 9px; }
 .permission-helper__copy > p { display: flex; align-items: center; gap: 5px; margin: 6px 0 0; color: #ffc1b2; font-size: 9px; }
 .permission-helper__close { position: absolute; top: 13px; right: 13px; width: 28px; height: 28px; display: grid; place-items: center; padding: 0; color: #aaaab0; background: rgba(255, 255, 255, .08); border: 0; border-radius: 999px; }
 .permission-helper__close:hover { color: white; background: rgba(255, 255, 255, .15); }
+.permission-helper--success .permission-helper__arrow { color: #77c48d; }
+.permission-helper--success .permission-helper__app { border-color: rgba(119, 196, 141, .35); background: rgba(119, 196, 141, .12); }
 
 @media (max-width: 680px) {
   .permission-helper {
@@ -2324,6 +2349,44 @@ html[data-surface="permission-helper"] #root {
   .permission-helper__fallback { gap: 7px; margin-top: 6px; }
   .permission-helper__fallback > button { padding: 5px 7px; font-size: 9px; }
   .permission-helper__fallback > small { font-size: 8px; }
+}
+
+/* 开发态可在大窗口中以 560px 组件宽度复现原生最小助手；规则与下方真实窄窗口一致。 */
+.permission-helper--compact {
+  grid-template-columns: minmax(148px, 156px) 22px minmax(0, 1fr);
+  gap: 6px;
+  padding: 10px 34px 10px 10px;
+}
+.permission-helper--compact .permission-helper__app { min-height: 60px; gap: 7px; padding: 6px 7px 6px 4px; }
+.permission-helper--compact .permission-helper__app > svg { width: 14px; }
+.permission-helper--compact .permission-helper__app img { width: 38px; height: 38px; }
+.permission-helper--compact .permission-helper__app strong { font-size: 12px; }
+.permission-helper--compact .permission-helper__app small { margin-top: 3px; font-size: 8px; }
+.permission-helper--compact .permission-helper__arrow { width: 21px; }
+.permission-helper--compact .permission-helper__copy > strong { font-size: 10.5px; line-height: 1.2; }
+.permission-helper--compact .permission-helper__copy > span { margin-top: 3px; font-size: 7.5px; line-height: 1.25; }
+.permission-helper--compact .permission-helper__fallback { flex-wrap: nowrap; gap: 4px 5px; margin-top: 5px; }
+.permission-helper--compact .permission-helper__fallback > button { padding: 4px 5px; font-size: 7.5px; white-space: nowrap; }
+.permission-helper--compact .permission-helper__fallback > small { font-size: 7px; white-space: nowrap; }
+
+@media (max-width: 600px) {
+  .permission-helper {
+    grid-template-columns: minmax(148px, 156px) 22px minmax(0, 1fr);
+    gap: 6px;
+    padding: 10px 34px 10px 10px;
+  }
+
+  .permission-helper__app { min-height: 60px; gap: 7px; padding: 6px 7px 6px 4px; }
+  .permission-helper__app > svg { width: 14px; }
+  .permission-helper__app img { width: 38px; height: 38px; }
+  .permission-helper__app strong { font-size: 12px; }
+  .permission-helper__app small { margin-top: 3px; font-size: 8px; }
+  .permission-helper__arrow { width: 21px; }
+  .permission-helper__copy > strong { font-size: 10.5px; line-height: 1.2; }
+  .permission-helper__copy > span { margin-top: 3px; font-size: 7.5px; line-height: 1.25; }
+  .permission-helper__fallback { flex-wrap: nowrap; gap: 4px 5px; margin-top: 5px; }
+  .permission-helper__fallback > button { padding: 4px 5px; font-size: 7.5px; white-space: nowrap; }
+  .permission-helper__fallback > small { font-size: 7px; white-space: nowrap; }
 }
 
 .paywall-dialog {
@@ -4634,6 +4697,7 @@ html[data-surface="permission-helper"] #root {
 @media (prefers-reduced-motion: reduce) {
   .permission-wall,
   .permission-wall__list article,
+  .permission-wall__stage,
   .permission-helper__app,
   .paywall-dialog,
   .floating-unlock,

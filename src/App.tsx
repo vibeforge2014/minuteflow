@@ -41,8 +41,11 @@ import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Mee
 import { BrandMark } from "./components/BrandMark";
 import { buildRecordingReadiness, deriveWorkspaceStage, shouldAutoOpenRightPanel, type WorkspaceStage } from "./lib/workspace";
 import type { SystemPermissionStatus } from "./types";
+import { finishPermissionSetup, shouldOpenPermissionSetup } from "./lib/permissions";
 
 export function App() {
+  const forceMacPermissionPreview = import.meta.env.DEV
+    && new URLSearchParams(window.location.search).get("permissionPreview") === "mac";
   const {
     meetings,
     selectedId,
@@ -139,13 +142,20 @@ export function App() {
   }), [mergeImportedMeeting]);
 
   // 首次运行引导分两道门：先系统权限（版本化流程，v2 会重新弹出），完成后再新手引导。
+  // permissionSetupResume 让从系统设置重启的用户无论历史完成状态如何都能回到当前流程。
   useEffect(() => {
-    if (!loading && (!preferences.systemPermissionsCompleted || preferences.permissionsVersion < 2)) setPermissionsOpen(true);
-  }, [loading, preferences.permissionsVersion, preferences.systemPermissionsCompleted]);
+    if (!loading && (forceMacPermissionPreview || shouldOpenPermissionSetup(preferences))) setPermissionsOpen(true);
+  }, [forceMacPermissionPreview, loading, preferences.permissionSetupResume, preferences.permissionsVersion, preferences.systemPermissionsCompleted]);
 
   useEffect(() => {
-    if (!loading && preferences.systemPermissionsCompleted && !preferences.onboardingCompleted) setOnboardingOpen(true);
-  }, [loading, preferences.onboardingCompleted, preferences.systemPermissionsCompleted]);
+    if (
+      !loading
+      && !forceMacPermissionPreview
+      && !preferences.permissionSetupResume
+      && preferences.systemPermissionsCompleted
+      && !preferences.onboardingCompleted
+    ) setOnboardingOpen(true);
+  }, [forceMacPermissionPreview, loading, preferences.onboardingCompleted, preferences.permissionSetupResume, preferences.systemPermissionsCompleted]);
 
   // 付费功能守卫：已授权直接放行；未授权则记住触发原因并弹出门槛（¥99 一次性购买）对话框。
   const requirePremium = (reason: string) => {
@@ -618,16 +628,16 @@ export function App() {
       />
       <SystemPermissionsDialog
         open={permissionsOpen}
-        returningUser={preferences.systemPermissionsCompleted && preferences.permissionsVersion < 2}
+        returningUser={preferences.permissionSetupResume || (preferences.systemPermissionsCompleted && preferences.permissionsVersion < 2)}
         onComplete={async () => {
-          await updatePreferences({ ...preferences, systemPermissionsCompleted: true, permissionsVersion: 2 });
+          await updatePreferences(finishPermissionSetup(preferences));
           setPermissionsOpen(false);
           void refreshPermissionStatus();
         }}
         onSkip={async () => {
           // 跳过首run权限墙：只记录“已走完该流程”，不动系统权限。
           // 之后用户第一次点“开始录音”时会按需引导授权（含被拒绝时重新打开本对话框）。
-          await updatePreferences({ ...preferences, systemPermissionsCompleted: true, permissionsVersion: 2 });
+          await updatePreferences(finishPermissionSetup(preferences));
           setPermissionsOpen(false);
           notify("已跳过授权。首次开始录音时会再引导你完成麦克风授权。");
         }}
