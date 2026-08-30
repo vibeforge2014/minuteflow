@@ -365,7 +365,7 @@ async function showPermissionHelper() {
   }
   const { workArea } = screen.getPrimaryDisplay();
   const width = Math.min(780, workArea.width - 36);
-  const height = 148;
+  const height = 176;
   permissionHelperWindow = new BrowserWindow({
     width,
     height,
@@ -1155,6 +1155,12 @@ function registerIpc() {
       file: currentMacApplicationPath(),
       icon: nativeImage.createFromPath(iconPath).resize({ width: 64, height: 64 })
     });
+  });
+  // system:reveal-application — 拖拽不可用或仅用键盘时，在访达中定位真实 .app；
+  // 用户随后可通过系统设置列表下方的“+”完成添加，不要求辅助功能权限。
+  trustedHandle("system:reveal-application", async () => {
+    if (process.platform !== "darwin") return;
+    shell.showItemInFolder(currentMacApplicationPath());
   });
   ipcMain.on("system:close-permission-helper", (event) => {
     if (!senderIsTrusted(event)) return;

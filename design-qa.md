@@ -1,60 +1,69 @@
-# Design QA — macOS 权限引导与应用拖拽助手
+# Design QA — macOS 权限引导易用性迭代
 
 ## Evidence
 
-- Source visual truth: `/var/folders/br/w5xj47hx5rn3sg6zmvz51k900000gn/T/codex-clipboard-ef019016-e661-41ce-b89b-158d78eb1a53.png` (1446 × 1270 px).
-- Main permission guide: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-guide-1080x720-final.png` (1080 × 720 px at a 1080 × 720 CSS viewport).
-- Floating drag helper: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-drag-helper-780x148-final.png` (780 × 148 px; native window target 780 × 148 CSS px, 6px shadow inset, content box 768 × 136 CSS px).
-- Combined focused comparison: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-design-qa-comparison.png`.
-- State: macOS first run; microphone not determined; screen/system-audio permission denied; helper visible before app drop.
+- Source visual truth: the preserved prior permission-wall and drag-helper baselines at `/Users/zqian15/Desktop/minuteflow/artifacts/permission-audit-2026-08-30/03-optimized-permission-wall.png` (1280 × 720 px) and `/Users/zqian15/Desktop/minuteflow/artifacts/permission-audit-2026-08-30/02-current-drag-helper.png` (1280 × 720 px). They preserve the selected macOS drag-helper direction from the original attached reference.
+- Browser-rendered implementation: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-audit-2026-08-30/06-usability-pass-main.png` and `/Users/zqian15/Desktop/minuteflow/artifacts/permission-audit-2026-08-30/07-usability-pass-waiting.png` (both 1280 × 720 px at a 1280 × 720 CSS viewport, density 1).
+- Floating helper implementation: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-audit-2026-08-30/08-usability-pass-helper.png` (780 × 176 px at a 780 × 176 CSS viewport, density 1).
+- Full-view comparison: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-audit-2026-08-30/10-main-before-after.png` (2560 × 720 px).
+- Focused helper comparison: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-audit-2026-08-30/09-helper-before-after.png` (1560 × 176 px; the prior helper was cropped and padded to the same 780 × 176 comparison frame).
+- Minimum-width evidence: `/Users/zqian15/Desktop/minuteflow/artifacts/permission-audit-2026-08-30/12-helper-min-width-fixed.png` (560 × 176 px).
+- State: macOS first run, microphone initially not determined, screen/system-audio permission denied, then microphone granted and System Settings opened.
 
 ## Findings
 
 - No actionable P0, P1, or P2 findings remain.
-- Fonts and typography: the system/PingFang stack matches the macOS context. Compact helper copy remains readable, with no truncation or unintended wrapping.
-- Spacing and layout rhythm: the 74px app tile is an easy drag target; the helper's 20px radius, 14px gaps, and 6px shadow inset preserve the source's floating-banner anatomy without covering excessive system content. The 760px main dialog fits a 1080 × 720 viewport without clipping.
-- Colors and tokens: the helper retains the source's dark translucent material while using MinuteFlow coral for direction and status. The parent dialog uses the product's warm white, peach, and coral tokens.
-- Image quality and assets: the real MinuteFlow brand image is used in the guide; native drag uses the packaged app icon. No emoji, placeholder, CSS-drawn logo, or improvised SVG substitutes it.
-- Copy and content: the implementation correctly targets “屏幕与系统音频录制”, explains the toggle step, provides the list “+” fallback, and explicitly avoids the unrelated “辅助功能” permission shown in the reference.
-- [P3] The source helper is slightly taller relative to its app tile. The implementation deliberately uses a slimmer 148px native window so it obscures less of System Settings while retaining a 74px drag target.
+- Fonts and typography: the system/PingFang stack, restrained weight hierarchy, short labels, and compact helper copy remain legible at 780 px and the 560 px minimum. No text truncation or unintended overflow remains.
+- Spacing and layout rhythm: the main dialog retains its two-step hierarchy and single primary action. The helper keeps a large direct-manipulation tile, upward cue, target copy, fallback action, and close control in a 176 px non-blocking window.
+- Colors and visual tokens: the light guide continues to use MinuteFlow warm white, peach, coral, and semantic green. The helper keeps the reference's dark floating material, with coral reserved for direction and the Finder fallback.
+- Image quality and asset fidelity: both guide surfaces reuse the real MinuteFlow brand asset and the native drag payload uses the packaged app icon. Phosphor provides the standard UI icons; there are no emoji, placeholder images, CSS-drawn logos, or improvised SVG assets.
+- Copy and content: the guide clearly separates microphone from system audio, names “屏幕与系统音频录制”, states that MinuteFlow does not save screen video, and explains both drag and “+” recovery paths without asking for Accessibility permission.
+- Accessibility and agency: the drag tile exposes an instruction through `aria-describedby`, live drag/status copy announces state changes, errors use alert semantics, and “在访达中显示” gives keyboard-only users a workable path.
 
 ## Full-view comparison evidence
 
-- The interaction model matches the reference: dark always-on-top surface, prominent draggable app tile, upward cue, short target instruction, and dismiss control.
-- The parent guide supplies missing task context: current permission state, normal authorization, manual recovery, privacy explanation, and re-check action.
-- Product styling intentionally follows MinuteFlow rather than copying the reference brand.
+- The side-by-side main comparison shows that the added fallback sentence does not disrupt the established dialog proportions, step hierarchy, footer actions, or 1280 × 720 fit.
+- The post-click waiting state replaces vague “go back and check” guidance with “系统设置已打开 · 正在自动检查”, a waiting status on the system-audio row, “立即检查”, and a clearly labelled reopen action.
+- The implementation intentionally preserves MinuteFlow's visual system rather than copying the reference application's branding.
 
 ## Focused region comparison evidence
 
-- The combined comparison verifies the draggable tile, upward arrow, two-level instruction hierarchy, dark material, rounded container, and close affordance in one image.
-- DOM bounds show no focused-helper overflow: helper client 766 × 134, app tile 268 × 72, copy block 358 × 61.
+- The helper comparison verifies the same dark rounded surface, draggable app tile, upward arrow, target instruction, and dismiss affordance. The new implementation adds a visible Finder fallback while keeping the “不需要辅助功能权限” reassurance adjacent to it.
+- At the 560 × 176 minimum, the final helper reports a 548 × 164 outer box with 546 × 162 internal scroll bounds; no content is clipped or scrollable.
 
 ## Comparison history
 
-1. Initial 1080 × 720 capture found a P2 horizontal clipping issue: the permission wall still inherited the generic 560px dialog width, clipping row actions and the settings route.
-2. Fixed by targeting `.dialog.permission-wall` at 760px. The final capture has a 758px client width with no overflow or clipped controls.
-3. Focused helper capture confirmed the 780 × 148 native-window composition and no internal overflow. Copy was tightened to include the settings-list “+” fallback.
+1. Baseline usability gap — P1 keyboard recovery: the previous helper described the system-list “+” fallback but did not provide a way to locate the real app bundle without dragging.
+   - Fix: added a trusted `system:reveal-application` IPC route and a keyboard-operable “在访达中显示” button.
+   - Post-fix evidence: `08-usability-pass-helper.png`; Enter activation completed in the browser preview without errors.
+2. Baseline usability gap — P2 return-state ambiguity: after opening System Settings, the main guide gave no persistent feedback that the handoff succeeded.
+   - Fix: added an explicit waiting state, automatic 1.5-second background permission checks, “立即检查”, and “重新打开系统设置”.
+   - Post-fix evidence: `07-usability-pass-waiting.png`.
+3. First responsive pass — P2 helper clipping at the native 560 px minimum: the new fallback wrapped below the fixed helper surface.
+   - Fix: added a compact helper grid and type treatment below 680 px.
+   - Post-fix evidence: `12-helper-min-width-fixed.png`; internal height reduced from 175 px to 162 px inside the 164 px content surface.
 
 ## Primary interactions tested
 
-- Main guide renders both permission states and all actions at the desktop minimum viewport.
-- “重新检查”, “暂不授权，先体验”, “开始授权”, “请求权限”, “手动添加”, and “打开系统设置” are enabled and keyboard-reachable.
-- Helper exposes the app tile as a draggable button and exposes a keyboard-reachable close action.
-- Browser console checked for both surfaces: no warnings or errors.
-- Electron main/preload syntax checks, TypeScript, production build, core tests, and Sites packaging tests pass.
+- “允许麦克风” advances the first row to “已允许” and moves the primary action to “打开系统设置”.
+- “打开系统设置” changes the second row to “等待设置” and exposes the automatic-check/reopen state.
+- The helper's “在访达中显示” fallback is keyboard-operable with Enter.
+- Browser console errors checked on both surfaces: none.
+- TypeScript, Electron main/preload syntax, 82 core tests, production build, and 4 Sites worker tests pass.
 
 ## Implementation checklist
 
-- [x] Correct macOS permission target.
-- [x] Real `.app` payload through Electron `webContents.startDrag`.
-- [x] Always-on-top helper that does not steal focus.
-- [x] Non-drag System Settings / list-add fallback.
-- [x] Automatic helper dismissal after permission is granted, plus manual close.
-- [x] Reduced-motion/transparency-compatible product styling.
+- [x] Single sequential primary action.
+- [x] Real `.app` drag payload through Electron.
+- [x] Keyboard/Finder fallback for the system-list “+” route.
+- [x] Automatic permission recognition after opening System Settings.
+- [x] Explicit waiting, success, warning, and error feedback.
+- [x] 560 px native helper minimum without clipping.
+- [x] Reduced-motion/transparency compatibility preserved.
 
 ## Follow-up polish
 
-- P3: verify the exact localized pane title on each supported macOS minor version during release QA; Apple may adjust wording while keeping the `Privacy_ScreenCapture` route.
+- P3 test gap: the browser preview verifies layout and state transitions, but the final signed `.app` should still receive a release smoke test against the localized macOS 14.2+ System Settings pane because native drag acceptance is controlled by macOS.
 
 final result: passed
 

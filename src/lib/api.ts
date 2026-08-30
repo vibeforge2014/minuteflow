@@ -518,6 +518,16 @@ const browserApi: MeetingAPI = {
           permissionsVersion: 2
         };
       }
+      // 权限视觉验收入口：无需清空浏览器已有偏好即可稳定复现 macOS
+      // 首次授权墙；只在本地 ?preview=desktop 开发预览中生效。
+      if (new URLSearchParams(window.location.search).get("permissionPreview") === "mac") {
+        return {
+          ...preferences,
+          onboardingCompleted: true,
+          systemPermissionsCompleted: false,
+          permissionsVersion: 0
+        };
+      }
       localStorage.setItem(preferencesKey, JSON.stringify(preferences));
       return preferences;
     },
@@ -589,6 +599,7 @@ const browserApi: MeetingAPI = {
     async requestMicrophone() { return "granted"; },
     async openSettings() {},
     startAppDrag() {},
+    async revealApplication() {},
     closePermissionHelper() {},
     onSuspend() { return () => {}; },
     onResume() { return () => {}; }

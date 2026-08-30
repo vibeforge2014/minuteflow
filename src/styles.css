@@ -2105,24 +2105,31 @@ button {
 .permission-wall__list article {
   min-height: 88px;
   display: grid;
-  grid-template-columns: 38px 1fr auto;
+  grid-template-columns: 38px 1fr;
   align-items: center;
   gap: 13px;
-  padding: 14px;
+  padding: 14px 16px;
   background: #f8f8f9;
   border: 1px solid #e8e9ec;
   border-radius: 12px;
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
 }
 
 .permission-wall__list article.is-ready { background: #f5faf6; border-color: #dcebe0; }
 .permission-wall__list article.is-blocked { background: #fff9f7; border-color: #f1dcd6; }
+.permission-wall__list article.is-current {
+  border-color: #dfa38f;
+  box-shadow: 0 0 0 2px rgba(231, 111, 81, .08);
+}
+.permission-wall__list article.is-waiting { background: #fffaf3; border-color: #ead8b4; }
 .permission-wall__icon { color: #666d78; }
 .permission-wall__list article.is-ready .permission-wall__icon { color: #3b8052; }
 .permission-wall__title { display: flex; align-items: center; gap: 8px; }
-.permission-wall__title strong { font-size: 12px; }
-.permission-wall__title span { display: inline-flex; align-items: center; gap: 3px; color: #8b9098; font-size: 9px; }
+.permission-wall__title small { color: var(--accent-strong); font-size: 10px; font-weight: 750; letter-spacing: .04em; }
+.permission-wall__title strong { font-size: 14px; }
+.permission-wall__title span { display: inline-flex; align-items: center; gap: 3px; color: #777d86; font-size: 11px; }
 .permission-wall__list article.is-ready .permission-wall__title span { color: #3b8052; }
-.permission-wall__list article p { margin: 4px 0 0; color: #797f88; font-size: 10px; line-height: 1.55; }
+.permission-wall__list article p { margin: 5px 0 0; color: #6f7580; font-size: 12px; line-height: 1.55; }
 
 .permission-wall__note {
   flex: 0 0 auto;
@@ -2133,7 +2140,7 @@ button {
   color: #866a36;
   background: #fff9ec;
   border-radius: 9px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.55;
 }
 
@@ -2146,7 +2153,7 @@ button {
   color: #6a4a2e;
   background: var(--accent-soft, #fcf1e9);
   border-radius: 8px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.55;
 }
 
@@ -2155,7 +2162,8 @@ button {
 .permission-wall__drag-guide {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto;
-  gap: 12px 18px;
+  align-items: center;
+  gap: 18px;
   padding: 16px 17px;
   background: #fffaf7;
   border: 1px solid #efd9d1;
@@ -2166,16 +2174,17 @@ button {
   display: block;
   margin-bottom: 4px;
   color: var(--accent-strong);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 750;
   letter-spacing: .06em;
 }
 
-.permission-wall__drag-copy > strong { color: #32363d; font-size: 13px; }
-.permission-wall__drag-copy > p { margin: 5px 0 0; color: #777d86; font-size: 10px; line-height: 1.5; }
+.permission-wall__drag-copy > strong { color: #32363d; font-size: 14px; }
+.permission-wall__drag-copy > ol { display: grid; gap: 4px; margin: 8px 0 0; padding-left: 18px; color: #686f79; font-size: 11px; line-height: 1.45; }
+.permission-wall__drag-copy > p { display: flex; align-items: flex-start; gap: 5px; margin: 8px 0 0; color: #85634f; font-size: 10px; line-height: 1.45; }
+.permission-wall__drag-copy > p svg { flex: 0 0 auto; margin-top: 1px; }
 
 .permission-wall__drag-route {
-  grid-row: span 2;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -2194,21 +2203,20 @@ button {
 }
 
 .permission-wall__drag-route > svg { color: #d4775f; }
-.permission-wall__drag-route strong { display: block; color: #3b3f46; font-size: 10px; }
-.permission-wall__drag-route small { display: block; margin-top: 3px; color: #92969d; font-size: 8px; white-space: nowrap; }
-.permission-wall__settings-button { justify-self: start; min-height: 32px; color: var(--accent-strong); border-color: #e7c4b9; background: white; font-size: 11px; }
+.permission-wall__drag-route strong { display: block; color: #3b3f46; font-size: 11px; }
+.permission-wall__drag-route small { display: block; margin-top: 3px; color: #7d838c; font-size: 9px; white-space: nowrap; }
 
 .permission-wall__error {
   display: flex;
   align-items: center;
   gap: 7px;
-  margin: -5px 24px 13px;
+  margin: 0 2px;
   padding: 9px 12px;
   color: #9a4937;
   background: #fff4f1;
   border: 1px solid #f3d7d0;
   border-radius: 8px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.45;
 }
 
@@ -2223,7 +2231,7 @@ button {
 }
 
 .permission-wall > footer > div { display: flex; align-items: center; gap: 13px; }
-.permission-wall > footer > div > span { color: #838892; font-size: 9px; }
+.permission-wall > footer > div > span { color: #747a84; font-size: 11px; }
 
 /* 「暂不授权，先体验」：次级文字按钮，弱于主按钮但清晰可达。 */
 .permission-wall__skip {
@@ -2231,7 +2239,7 @@ button {
   color: #7c828c;
   background: transparent;
   border: 0;
-  font-size: 10px;
+  font-size: 11px;
   text-decoration: underline;
   text-underline-offset: 3px;
 }
@@ -2251,7 +2259,7 @@ html[data-surface="permission-helper"] #root {
 .permission-helper {
   position: relative;
   width: min(calc(100% - 12px), 768px);
-  height: min(calc(100% - 12px), 136px);
+  height: min(calc(100% - 12px), 164px);
   margin: 6px;
   display: grid;
   grid-template-columns: minmax(220px, 270px) 42px 1fr;
@@ -2294,9 +2302,29 @@ html[data-surface="permission-helper"] #root {
 .permission-helper__arrow { color: #ea846a; }
 .permission-helper__copy > strong { display: block; font-size: 14px; line-height: 1.35; }
 .permission-helper__copy > span { display: block; margin-top: 5px; color: #b8b9be; font-size: 11px; line-height: 1.45; }
-.permission-helper__copy > small { display: flex; align-items: center; gap: 5px; margin-top: 7px; color: #d5a08f; font-size: 9px; }
+.permission-helper__fallback { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+.permission-helper__fallback > button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 9px; color: #f8e5df; background: rgba(231, 111, 81, .18); border: 1px solid rgba(239, 148, 124, .28); border-radius: 8px; font-size: 10px; }
+.permission-helper__fallback > button:hover { background: rgba(231, 111, 81, .28); border-color: rgba(239, 148, 124, .42); }
+.permission-helper__fallback > small { display: flex; align-items: center; gap: 5px; color: #d5a08f; font-size: 9px; }
+.permission-helper__copy > p { display: flex; align-items: center; gap: 5px; margin: 6px 0 0; color: #ffc1b2; font-size: 9px; }
 .permission-helper__close { position: absolute; top: 13px; right: 13px; width: 28px; height: 28px; display: grid; place-items: center; padding: 0; color: #aaaab0; background: rgba(255, 255, 255, .08); border: 0; border-radius: 999px; }
 .permission-helper__close:hover { color: white; background: rgba(255, 255, 255, .15); }
+
+@media (max-width: 680px) {
+  .permission-helper {
+    grid-template-columns: minmax(190px, 220px) 28px 1fr;
+    gap: 8px;
+    padding: 12px 38px 12px 12px;
+  }
+
+  .permission-helper__app { min-height: 68px; padding: 8px 10px 8px 6px; }
+  .permission-helper__arrow { width: 26px; }
+  .permission-helper__copy > strong { font-size: 12px; }
+  .permission-helper__copy > span { margin-top: 4px; font-size: 9px; line-height: 1.35; }
+  .permission-helper__fallback { gap: 7px; margin-top: 6px; }
+  .permission-helper__fallback > button { padding: 5px 7px; font-size: 9px; }
+  .permission-helper__fallback > small { font-size: 8px; }
+}
 
 .paywall-dialog {
   position: relative;
@@ -4605,6 +4633,7 @@ html[data-surface="permission-helper"] #root {
 
 @media (prefers-reduced-motion: reduce) {
   .permission-wall,
+  .permission-wall__list article,
   .permission-helper__app,
   .paywall-dialog,
   .floating-unlock,

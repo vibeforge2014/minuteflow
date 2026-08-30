@@ -733,6 +733,8 @@ export interface MeetingAPI {
     openSettings(kind?: "microphone" | "screen"): Promise<void>;
     /** macOS：从引导浮层把当前 .app 作为文件拖入系统设置的权限列表。 */
     startAppDrag(): void;
+    /** macOS：在访达中定位当前 .app，供键盘操作或“+”文件选择器作为拖拽退路。 */
+    revealApplication(): Promise<void>;
     /** 关闭系统设置上方的权限拖拽引导浮层。 */
     closePermissionHelper(): void;
     onSuspend(callback: () => void): () => void;

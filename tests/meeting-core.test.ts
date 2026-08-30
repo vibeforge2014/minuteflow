@@ -51,7 +51,7 @@ import {
 import { groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments } from "../src/lib/transcript";
 import { groupLibraryMeetings, splitHighlight } from "../src/lib/library";
 import { simplifyChinese, simplifySummary } from "../src/lib/chinese";
-import { isMicrophonePermissionError, shouldRequestMicrophone } from "../src/lib/permissions";
+import { getPermissionSetupAction, isMicrophonePermissionError, shouldRequestMicrophone } from "../src/lib/permissions";
 import { lockSummaryField, mergeSummaryRevision, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { normalizeImportChunkSegments } from "../electron/services/import-queue.mjs";
 import { audioContentType, parseByteRange } from "../electron/services/media.mjs";
@@ -236,6 +236,15 @@ describe("microphone permission routing", () => {
     denied.name = "NotAllowedError";
     expect(isMicrophonePermissionError(denied)).toBe(true);
     expect(isMicrophonePermissionError(new Error("device missing"))).toBe(false);
+  });
+
+  it("advances first-run authorization through one deterministic next action", () => {
+    const input = { screen: "denied" as const, systemAudioRequired: true, capturePrepared: false };
+    expect(getPermissionSetupAction({ ...input, microphone: "not-determined" })).toBe("request-microphone");
+    expect(getPermissionSetupAction({ ...input, microphone: "denied" })).toBe("open-microphone-settings");
+    expect(getPermissionSetupAction({ ...input, microphone: "granted" })).toBe("open-screen-settings");
+    expect(getPermissionSetupAction({ ...input, microphone: "granted", screen: "granted" })).toBe("verify-system-audio");
+    expect(getPermissionSetupAction({ ...input, microphone: "granted", screen: "granted", capturePrepared: true })).toBe("complete");
   });
 });
 
