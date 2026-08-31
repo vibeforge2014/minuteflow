@@ -67,6 +67,7 @@ import {
 import { simplifyTranscriptResult } from "./services/chinese.mjs";
 import { audioContentType, parseByteRange } from "./services/media.mjs";
 import { normalizeRemoteTranscriptionAudio } from "./services/transcription-audio.mjs";
+import { isTrustedPermissionRequest, isTrustedRendererUrl } from "./services/permissions.mjs";
 import { chooseImportFiles, exportMeeting } from "./services/exports.mjs";
 import {
   describeLocalModel,
@@ -98,6 +99,7 @@ import {
   wakeImportQueue
 } from "./services/import-queue.mjs";
 import { extractVoiceprintEmbedding, voiceprintModelKey } from "./services/diarization.mjs";
+import { splitTimedTranscriptText } from "./services/transcript-grouping.mjs";
 
 // 当前文件所在目录：用于定位 preload.cjs 与打包后的前端产物。
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -296,10 +298,7 @@ async function pruneExpiredRecordings() {
  * 生产环境只信任 file: 协议（本地打包产物）。IPC 调用与系统权限申请均以此做白名单。
  */
 function isTrustedRenderer(url) {
-  if (process.env.VITE_DEV_SERVER_URL) {
-    return url.startsWith(process.env.VITE_DEV_SERVER_URL);
-  }
-  return url.startsWith("file:");
+  return isTrustedRendererUrl(url, process.env.VITE_DEV_SERVER_URL);
 }
 
 /**
@@ -418,12 +417,25 @@ async function showPermissionHelper() {
  * 屏幕捕获请求固定接到第一块屏幕，并在 macOS/Windows 上附带 loopback 系统音频。
  */
 function configurePermissions() {
-  session.defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
-    if (!isTrustedRenderer(requestingOrigin)) return false;
-    return ["media", "display-capture"].includes(permission);
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    if (permission !== "media") return false;
+    return isTrustedPermissionRequest({
+      webContentsUrl: webContents?.getURL() ?? "",
+      requestingOrigin,
+      securityOrigin: details?.securityOrigin,
+      requestingUrl: details?.requestingUrl,
+      isMainFrame: details?.isMainFrame,
+      developmentServerUrl: process.env.VITE_DEV_SERVER_URL
+    });
   });
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    callback(isTrustedRenderer(webContents.getURL()) && ["media", "display-capture"].includes(permission));
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    callback(["media", "display-capture"].includes(permission) && isTrustedPermissionRequest({
+      webContentsUrl: webContents.getURL(),
+      securityOrigin: details && "securityOrigin" in details ? details.securityOrigin : "",
+      requestingUrl: details?.requestingUrl,
+      isMainFrame: details?.isMainFrame,
+      developmentServerUrl: process.env.VITE_DEV_SERVER_URL
+    }));
   });
 
   session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
@@ -809,15 +821,34 @@ function registerIpc() {
       );
     }
     const result = simplifyTranscriptResult(rawResult);
+    const chunkDurationMs = Math.max(1, payload.endMs - payload.startMs);
+    const sourceSegments = result.segments?.length
+      ? result.segments
+      : result.text.trim()
+        ? [{ startMs: 0, endMs: chunkDurationMs, text: result.text }]
+        : [];
+    const speakerId = payload.track === "microphone" ? "me" : "remote";
+    const speakerName = payload.track === "microphone" ? "我" : "远端发言人";
+    let fragmentIndex = 0;
     return {
-      id: randomUUID(),
-      startMs: payload.startMs,
-      endMs: payload.endMs,
-      speakerId: payload.track === "microphone" ? "me" : "remote",
-      speakerName: payload.track === "microphone" ? "我" : "远端发言人",
-      text: result.text,
-      status: "final",
-      track: payload.track
+      segments: sourceSegments.flatMap((segment) => {
+        const relativeStartMs = Math.max(0, Math.min(Math.max(0, chunkDurationMs - 1), Number(segment.startMs) || 0));
+        const relativeEndMs = Math.max(
+          relativeStartMs + 1,
+          Math.min(chunkDurationMs, Number(segment.endMs) || chunkDurationMs)
+        );
+        return splitTimedTranscriptText(segment.text, relativeStartMs, relativeEndMs).map((fragment) => ({
+          id: `live:${payload.track}:${payload.startMs}:${fragmentIndex++}`,
+          startMs: payload.startMs + fragment.startMs,
+          endMs: Math.min(payload.endMs, payload.startMs + fragment.endMs),
+          speakerId,
+          speakerName,
+          text: fragment.text,
+          status: "final",
+          track: payload.track,
+          ...(segment.confidence === undefined ? {} : { confidence: segment.confidence })
+        }));
+      })
     };
   });
 

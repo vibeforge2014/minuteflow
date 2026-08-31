@@ -9,9 +9,49 @@ import { simplifyTranscriptSegment } from "./chinese";
 
 const normalizedText = (value: string) => value.toLocaleLowerCase().replace(/[\s，。！？、,.!?;；:：'"“”‘’]/g, "");
 
+const TERMINAL_PUNCTUATION = /[。！？!?…]/g;
+const HARD_TERMINAL = /[！？!?]\s*$/;
+const COMPLETE_SENTENCE = /[。！？!?…]\s*$/;
+const TOPIC_OPENER = /^(?:接下来|另外(?:一个|一点|一方面)?|关于|至于|最后|总结一下|下一(?:项|点|个)|第[二三四五六七八九十]+[点项个]|next\b|regarding\b|finally\b)/i;
+const MAX_PARAGRAPH_CHARACTERS = 120;
+const MAX_PARAGRAPH_DURATION_MS = 45_000;
+const MAX_SILENCE_MS = 1_500;
+
+/**
+ * 把只有全文、没有模型时间片的结果拆成句子级原子片段。标点保留在原句中；
+ * 无句末标点时整段保留，后续由段落构建器的长度/时长上限兜底。
+ */
+export function splitTranscriptText(value: string): string[] {
+  const text = value.trim();
+  if (!text) return [];
+  return text.match(/[^。！？!?…]+(?:[。！？!?…]+|$)/g)?.map((part) => part.trim()).filter(Boolean) ?? [text];
+}
+
+/**
+ * 在一个已知时间窗口内按文字长度为句子分配近似时间。仅用于模型只返回全文的降级路径；
+ * 支持细粒度时间片的模型不会经过这一步。
+ */
+export function splitTimedTranscriptText(text: string, startMs: number, endMs: number) {
+  const parts = splitTranscriptText(text);
+  if (parts.length <= 1) return parts.map((part) => ({ startMs, endMs, text: part }));
+  const duration = Math.max(parts.length, endMs - startMs);
+  const weights = parts.map((part) => Math.max(1, normalizedText(part).length));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  let cursor = startMs;
+  return parts.map((part, index) => {
+    const next = index === parts.length - 1
+      ? endMs
+      : Math.min(endMs, Math.max(cursor + 1, startMs + Math.round(duration * weights.slice(0, index + 1).reduce((sum, weight) => sum + weight, 0) / totalWeight)));
+    const fragment = { startMs: cursor, endMs: Math.max(cursor + 1, next), text: part };
+    cursor = fragment.endMs;
+    return fragment;
+  });
+}
+
 /**
  * 把相邻短片段整理成自然发言段落。段落以第一片的 id 为稳定 id；临时片段不参与合并，
- * 因而最终结果仍能原位替换“转写中”占位。问句/感叹句、换人、长停顿或达到长度上限即断开。
+ * 因而最终结果仍能原位替换“转写中”占位。8/10 秒音频传输窗口不参与段落判断；
+ * 换人、长停顿、问句/感叹句、明确的话题起始或达到自然段落上限时才断开。
  */
 export function groupTranscriptSegments(segments: TranscriptSegment[]): TranscriptSegment[] {
   return [...segments].sort((left, right) => left.startMs - right.startMs).reduce<TranscriptSegment[]>((grouped, raw) => {
@@ -23,15 +63,16 @@ export function groupTranscriptSegments(segments: TranscriptSegment[]): Transcri
     }
     const gapMs = current.startMs - previous.endMs;
     const combinedText = `${previous.text}${/[a-z\d]$/i.test(previous.text) && /^[a-z\d]/i.test(current.text) ? " " : ""}${current.text}`;
-    const sentenceCount = combinedText.match(/[。！？!?]/g)?.length ?? 0;
+    const previousSentenceCount = previous.text.match(TERMINAL_PUNCTUATION)?.length ?? 0;
+    const startsNewTopic = COMPLETE_SENTENCE.test(previous.text) && TOPIC_OPENER.test(current.text.trim());
     const canMerge = previous.speakerId === current.speakerId
       && previous.track === current.track
-      && gapMs >= -500 && gapMs <= 1_500
-      && current.endMs - previous.startMs <= 18_000
-      && combinedText.length <= 80
-      && sentenceCount <= 4
-      && !/[！？!?]\s*$/.test(previous.text)
-      && !(/[。]\s*$/.test(previous.text) && (previous.text.match(/[。]/g)?.length ?? 0) >= 2);
+      && gapMs >= -500 && gapMs < MAX_SILENCE_MS
+      && current.endMs - previous.startMs <= MAX_PARAGRAPH_DURATION_MS
+      && combinedText.length <= MAX_PARAGRAPH_CHARACTERS
+      && previousSentenceCount < 2
+      && !HARD_TERMINAL.test(previous.text)
+      && !startsNewTopic;
     if (!canMerge) {
       grouped.push(current);
       return grouped;

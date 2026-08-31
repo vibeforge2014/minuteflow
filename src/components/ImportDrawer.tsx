@@ -7,6 +7,7 @@
 import { ArrowClockwise, Check, FileAudio, GearSix, Pause, Trash, WarningCircle, X } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import type { ImportCandidate, ImportJob, ModelProfile } from "../types";
+import { useEnteringItemIds } from "../hooks/useContentMotion";
 
 interface Props {
   open: boolean;
@@ -42,6 +43,8 @@ export function ImportDrawer(props: Props) {
   const [llmProfileId, setLlmProfileId] = useState(llmProfiles[0]?.id || "");
   const [diarizationEnabled, setDiarizationEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
+  const enteringCandidates = useEnteringItemIds("import-candidates", props.candidates.map((file) => file.sourcePath));
+  const enteringJobs = useEnteringItemIds("import-jobs", props.jobs.map((job) => job.id));
 
   // 档案列表后加载（如刚打开设置保存了新档案）时，把空选择补默认值。
   useEffect(() => { if (!sttProfileId && sttProfiles[0]?.id) setSttProfileId(sttProfiles[0].id); }, [sttProfileId, sttProfiles]);
@@ -52,9 +55,9 @@ export function ImportDrawer(props: Props) {
   const activeCount = props.jobs.filter((job) => !["complete", "cancelled", "failed"].includes(job.status)).length;
 
   return (
-    <aside className="import-drawer" aria-label="导入任务">
+    <aside className="import-drawer" aria-labelledby="import-drawer-title">
       <header className="import-drawer__header">
-        <div><h2>导入任务</h2><p>{activeCount ? `${activeCount} 项正在后台处理` : "检查文件并在后台处理"}</p></div>
+        <div><h2 id="import-drawer-title">导入任务</h2><p>{activeCount ? `${activeCount} 项正在后台处理` : "检查文件并在后台处理"}</p></div>
         <button className="icon-button" aria-label="收起导入任务" onClick={props.onClose}><X size={19} /></button>
       </header>
 
@@ -63,7 +66,7 @@ export function ImportDrawer(props: Props) {
           <div className="import-section-title"><span>待确认文件 · {props.candidates.length}</span><button onClick={props.onPick}>继续添加</button></div>
           <div className="import-files">
             {props.candidates.map((file, index) => (
-              <div className="import-file" key={`${file.sourcePath}-${index}`}>
+              <div className={`import-file ${enteringCandidates.has(file.sourcePath) ? "content-motion-enter" : ""}`} key={`${file.sourcePath}-${index}`}>
                 <div className="import-file__icon"><FileAudio size={20} /></div>
                 <div className="import-file__body">
                   <input
@@ -81,6 +84,7 @@ export function ImportDrawer(props: Props) {
             ))}
           </div>
 
+          <div className="import-subsection-heading"><strong>可选处理设置</strong><small>不影响文件先归档到本机</small></div>
           <div className="import-settings">
             <label>语言<select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动识别（中文/中英混合优先）</option><option value="zh">中文</option><option value="en">English</option></select></label>
             <label>转录模型<select value={sttProfileId} onChange={(event) => setSttProfileId(event.target.value)}><option value="">稍后配置</option>{sttProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
@@ -103,11 +107,11 @@ export function ImportDrawer(props: Props) {
         <div className="import-section-title"><span>任务队列</span><small>同一时间处理 1 项</small></div>
         {!props.jobs.length && <div className="import-empty"><FileAudio size={24} /><p>尚无导入任务</p><button onClick={props.onPick}>选择录音</button></div>}
         {props.jobs.map((job) => (
-          <article className={`import-job import-job--${job.status}`} key={job.id} onClick={() => job.meetingId && props.onOpenMeeting(job.meetingId)}>
-            <div className="import-job__top"><span className="import-job__state">{job.status === "complete" ? <Check size={14} weight="bold" /> : job.status === "cancelled" ? <Pause size={14} /> : <FileAudio size={14} />}{statusText[job.status]}</span><time>{new Date(job.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time></div>
+          <article className={`import-job import-job--${job.status} ${enteringJobs.has(job.id) ? "content-motion-enter" : ""}`} key={job.id} onClick={() => job.meetingId && props.onOpenMeeting(job.meetingId)}>
+            <div className="import-job__top"><span className="import-job__state content-status-enter" key={job.status}>{job.status === "complete" ? <Check size={14} weight="bold" /> : job.status === "cancelled" ? <Pause size={14} /> : <FileAudio size={14} />}{statusText[job.status]}</span><time>{new Date(job.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time></div>
             <h3>{job.title}</h3><p>{job.sourceName}</p>
             <div className="import-progress"><i style={{ width: `${Math.max(3, job.progress * 100)}%` }} /></div>
-            {job.error && <p className="import-job__error">{job.error}</p>}
+            {job.error && <p className="import-job__error content-motion-enter">{job.error}</p>}
             <div className="import-job__actions" onClick={(event) => event.stopPropagation()}>
               {/* 行内操作按钮阻止冒泡，避免触发整行「打开会议」。 */}
               {["failed", "cancelled"].includes(job.status) && <button onClick={() => props.onRetry(job.id)}><ArrowClockwise size={14} />重试当前阶段</button>}

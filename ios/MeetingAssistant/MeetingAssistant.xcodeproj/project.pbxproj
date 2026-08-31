@@ -27,6 +27,7 @@
 		8CF346A01AD188CE44EDA7A5 /* SummaryEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E1BB698A4EDAB70E0D317CE /* SummaryEngine.swift */; };
 		908FB54AC0F91A11A3FEAEDF /* MeetingTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 513005D944FC8CC06F1F85C3 /* MeetingTheme.swift */; };
 		9C5610A80C080D559694411A /* TranscriptSegmentRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E55A318162A4FFD88EF56BA /* TranscriptSegmentRecord.swift */; };
+		A0C4D9B23F154E75A1D50211 /* NaturalTranscriptParagraphBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C4D9B13F154E75A1D50211 /* NaturalTranscriptParagraphBuilder.swift */; };
 		A13C17296252F0E04F49CC7B /* RemoteWhisperService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5DE1ACFA3B43A5F93BA52AA /* RemoteWhisperService.swift */; };
 		D0C94C94214AF004A21F607D /* ExportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AB56F88CED06F7E3F5A7FCF /* ExportService.swift */; };
 		DAADC46749559FDC4ABC96D1 /* SummaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A63A76D1BD8EE3A61EB71801 /* SummaryService.swift */; };
@@ -74,6 +75,7 @@
 		8CD095BEDD72E6C12AC43B71 /* MeetingRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingRecord.swift; sourceTree = "<group>"; };
 		8FDFA9AFB1072984CB3BA1CB /* SummaryEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SummaryEngineTests.swift; sourceTree = "<group>"; };
 		90E75CF2735CA4ED5BAB78EE /* AppRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRootView.swift; sourceTree = "<group>"; };
+		A0C4D9B13F154E75A1D50211 /* NaturalTranscriptParagraphBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NaturalTranscriptParagraphBuilder.swift; sourceTree = "<group>"; };
 		948C3095526F931909018B2A /* WorkspaceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViews.swift; sourceTree = "<group>"; };
 		A63A76D1BD8EE3A61EB71801 /* SummaryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SummaryService.swift; sourceTree = "<group>"; };
 		A96504F739B6007AE4D623E6 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
@@ -189,6 +191,7 @@
 				5C2961720777A73D891E19F3 /* DemoDataSeeder.swift */,
 				7AB56F88CED06F7E3F5A7FCF /* ExportService.swift */,
 				49D394E001BBDC63D0525075 /* KeychainService.swift */,
+				A0C4D9B13F154E75A1D50211 /* NaturalTranscriptParagraphBuilder.swift */,
 				AB1203D3014E7CAF34ABEC53 /* RecordingCoordinator.swift */,
 				E5DE1ACFA3B43A5F93BA52AA /* RemoteWhisperService.swift */,
 				4E1BB698A4EDAB70E0D317CE /* SummaryEngine.swift */,
@@ -332,6 +335,7 @@
 				5AB9D9D2874B032186F8BEBA /* MeetingFormatters.swift in Sources */,
 				65554785518478D539B9FA59 /* MeetingLibraryView.swift in Sources */,
 				4F934FE8542967F934B53135 /* MeetingRecord.swift in Sources */,
+				A0C4D9B23F154E75A1D50211 /* NaturalTranscriptParagraphBuilder.swift in Sources */,
 				908FB54AC0F91A11A3FEAEDF /* MeetingTheme.swift in Sources */,
 				35ECC3C3602BA30C47DD9612 /* RecorderBar.swift in Sources */,
 				2C807D710C843F36A8785404 /* RecordingCoordinator.swift in Sources */,

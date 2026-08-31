@@ -319,18 +319,20 @@ const browserApi: MeetingAPI = {
     onWriteError() { return () => {}; }
   },
   transcription: {
-    // 模拟 700ms 转写延迟后返回占位段落：本地麦克风轨记为“我”，其余记为远端发言人。
+    // 模拟 700ms 转写延迟后返回原子片段：本地麦克风轨记为“我”，其余记为远端发言人。
     async processChunk(payload) {
       await new Promise((resolve) => setTimeout(resolve, 700));
       return {
-        id: crypto.randomUUID(),
-        startMs: payload.startMs,
-        endMs: payload.endMs,
-        speakerId: payload.track === "microphone" ? "me" : "remote",
-        speakerName: payload.track === "microphone" ? "我" : "远端发言人",
-        text: "浏览器预览未连接转录模型，Electron 运行时会处理真实音频。",
-        status: "final",
-        track: payload.track
+        segments: [{
+          id: `preview-${payload.track}-${payload.startMs}`,
+          startMs: payload.startMs,
+          endMs: payload.endMs,
+          speakerId: payload.track === "microphone" ? "me" : "remote",
+          speakerName: payload.track === "microphone" ? "我" : "远端发言人",
+          text: "浏览器预览未连接转录模型，Electron 运行时会处理真实音频。",
+          status: "final",
+          track: payload.track
+        }]
       };
     }
   },

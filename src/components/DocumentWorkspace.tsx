@@ -40,6 +40,8 @@ import { formatDuration, formatInterval } from "../lib/format";
 import { useMeetingStore } from "../store/meetingStore";
 import type { RecordingReadiness, WorkspaceStage } from "../lib/workspace";
 import { VisualSummaryView } from "./VisualSummaryView";
+import type { ContentChangeKind } from "../lib/content-motion";
+import { useEnteringItemIds, useSummaryContentMotion } from "../hooks/useContentMotion";
 
 interface DocumentWorkspaceProps {
   meeting: Meeting;
@@ -92,6 +94,11 @@ export function DocumentWorkspace({
   const [noteMode, setNoteMode] = useState<"rich" | "markdown" | "preview">("rich");
   /** 最近导入的 .md 文件名（显示导入成功提示）。 */
   const [importedFile, setImportedFile] = useState<string | null>(null);
+  const summaryMotion = useSummaryContentMotion(meeting.id, meeting.summary);
+  const enteringActionIds = useEnteringItemIds(
+    `${meeting.id}:actions`,
+    meeting.summary.actionItems.map((item) => item.id)
+  );
   // onUpdate 回调里要访问「最新」的 meeting/onChange，用 ref 避免编辑器重建。
   const meetingRef = useRef(meeting);
   const onChangeRef = useRef(onChange);
@@ -281,13 +288,15 @@ export function DocumentWorkspace({
         )}
 
         {stage === "review" && summaryView === "visual" && (
-          <VisualSummaryView
-            meeting={meeting}
-            visual={meeting.summary.visualSummary}
-            capable={Boolean(visualCapable)}
-            busy={summaryBusy}
-            onRetry={onRetryVisualSummary}
-          />
+          <div className="content-view-enter">
+            <VisualSummaryView
+              meeting={meeting}
+              visual={meeting.summary.visualSummary}
+              capable={Boolean(visualCapable)}
+              busy={summaryBusy}
+              onRetry={onRetryVisualSummary}
+            />
+          </div>
         )}
 
         <DocumentSection kind="goals" icon={<Target size={20} weight="duotone" />} title="会议目标">
@@ -393,8 +402,11 @@ export function DocumentWorkspace({
           )}
           <div className="summary-timeline">
             {meeting.summary.keyPoints.length ? meeting.summary.keyPoints.map((item, index) => (
-              // 最近 3 条标为「新增」，帮助用户快速看到滚动纪要的新内容。
-              <div key={`kp-${index}`} className={index >= meeting.summary.keyPoints.length - 3 ? "is-new" : ""}>
+              <div
+                key={`kp-${index}`}
+                className={`${summaryMotion.lists.keyPoints[index] === "added" ? "is-new content-motion-enter" : summaryMotion.lists.keyPoints[index] === "updated" ? "content-motion-update" : ""}`}
+                style={{ animationDelay: `${Math.min(index, 3) * 30}ms` }}
+              >
                 <time>{index + 1}</time>
                 <textarea
                   aria-label={`编辑纪要 ${index + 1}`}
@@ -420,7 +432,7 @@ export function DocumentWorkspace({
                     ? <Lock size={13} weight="fill" />
                     : <LockOpen size={13} />}
                 </button>
-                {index >= meeting.summary.keyPoints.length - 3 && <span>新增</span>}
+                {summaryMotion.lists.keyPoints[index] === "added" && <span className="content-status-enter">新增</span>}
               </div>
             )) : (
               <div className="section-empty">转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。</div>
@@ -436,7 +448,10 @@ export function DocumentWorkspace({
             {meeting.summary.actionItems.length ? meeting.summary.actionItems.map((item) => {
               const actionLocked = meeting.summary.manualLocks?.includes(`action:${item.id}`) ?? false;
               return (
-              <div className="action-row" key={item.id}>
+              <div
+                className={`action-row ${enteringActionIds.has(item.id) || summaryMotion.actions[item.id] === "added" ? "content-motion-enter" : summaryMotion.actions[item.id] === "updated" ? "content-motion-update" : ""}`}
+                key={item.id}
+              >
                 <label>
                   <input
                     type="checkbox"
@@ -511,10 +526,10 @@ export function DocumentWorkspace({
 
         <DocumentSection kind="details" icon={<CheckSquare size={20} weight="duotone" />} title="决策、问题与下一步">
           <div className="summary-detail-grid">
-            <EditableSummaryList title="已确认决策" values={meeting.summary.decisions} locks={meeting.summary.manualLocks} lockKey="decisions" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("decisions", values, index)} />
-            <EditableSummaryList title="未决问题" values={meeting.summary.openQuestions} locks={meeting.summary.manualLocks} lockKey="openQuestions" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("openQuestions", values, index)} />
-            <EditableSummaryList title="风险" values={meeting.summary.risks} locks={meeting.summary.manualLocks} lockKey="risks" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("risks", values, index)} />
-            <EditableSummaryList title="下一步" values={meeting.summary.nextSteps} locks={meeting.summary.manualLocks} lockKey="nextSteps" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("nextSteps", values, index)} />
+            <EditableSummaryList title="已确认决策" values={meeting.summary.decisions} motionKinds={summaryMotion.lists.decisions} locks={meeting.summary.manualLocks} lockKey="decisions" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("decisions", values, index)} />
+            <EditableSummaryList title="未决问题" values={meeting.summary.openQuestions} motionKinds={summaryMotion.lists.openQuestions} locks={meeting.summary.manualLocks} lockKey="openQuestions" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("openQuestions", values, index)} />
+            <EditableSummaryList title="风险" values={meeting.summary.risks} motionKinds={summaryMotion.lists.risks} locks={meeting.summary.manualLocks} lockKey="risks" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("risks", values, index)} />
+            <EditableSummaryList title="下一步" values={meeting.summary.nextSteps} motionKinds={summaryMotion.lists.nextSteps} locks={meeting.summary.manualLocks} lockKey="nextSteps" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("nextSteps", values, index)} />
           </div>
         </DocumentSection>
       </article>
@@ -529,6 +544,7 @@ export function DocumentWorkspace({
 function EditableSummaryList({
   title,
   values,
+  motionKinds,
   locks,
   lockKey,
   onToggleLock,
@@ -536,18 +552,24 @@ function EditableSummaryList({
 }: {
   title: string;
   values: string[];
+  motionKinds: ContentChangeKind[];
   locks?: string[];
   lockKey: "decisions" | "openQuestions" | "risks" | "nextSteps";
   onToggleLock(key: string): void;
   onChange(values: string[], lockedIndex: number): void;
 }) {
+  const enteringRows = useEnteringItemIds(`summary-detail:${title}`, values.map((_, index) => String(index)));
   return (
     <div className="summary-detail">
       <h3>{title}</h3>
       {values.length ? values.map((value, index) => {
         const locked = locks?.includes(`${lockKey}:${index}`) ?? false;
         return (
-          <div className="summary-detail-row" key={`${title}-${index}`}>
+          <div
+            className={`summary-detail-row ${enteringRows.has(String(index)) || motionKinds[index] === "added" ? "content-motion-enter" : motionKinds[index] === "updated" ? "content-motion-update" : ""}`}
+            key={`${title}-${index}`}
+            style={{ animationDelay: `${Math.min(index, 3) * 30}ms` }}
+          >
             <textarea
               aria-label={`编辑${title} ${index + 1}`}
               rows={2}

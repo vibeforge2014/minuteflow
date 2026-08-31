@@ -6,7 +6,7 @@
  * 关键区块：Hero、特性信号条、工作区解剖（三栏）、三阶段演示、隐私图解、
  * 平台对比、结尾 CTA、规格页（七节）、政策页四件套、页脚。
  */
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import {
   AppleLogo,
@@ -109,6 +109,20 @@ export function MarketingSite() {
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
+  // 移动菜单打开时锁定文档滚动，Esc 与页面遮罩都走同一关闭路径。
+  useEffect(() => {
+    document.body.classList.toggle("site-menu-open", menuOpen);
+    if (!menuOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.classList.remove("site-menu-open");
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [menuOpen]);
+
   // hash 路由变化（前进/后退/深链）时切换页面并回到顶部；同时收起移动端菜单。
   useEffect(() => {
     let currentRoute = getRoute();
@@ -118,6 +132,7 @@ export function MarketingSite() {
         currentRoute = nextRoute;
         setRoute(nextRoute);
         window.scrollTo({ top: 0, behavior: "auto" });
+        requestAnimationFrame(() => document.getElementById("main-content")?.focus({ preventScroll: true }));
       }
       setMenuOpen(false);
     };
@@ -167,16 +182,31 @@ function SiteHeader({
   setMenuOpen: (open: boolean) => void;
   isScrolled: boolean;
 }) {
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLElement>(null);
+  const wasMenuOpen = useRef(false);
+
+  useEffect(() => {
+    if (menuOpen) {
+      wasMenuOpen.current = true;
+      requestAnimationFrame(() => menuRef.current?.querySelector<HTMLAnchorElement>("a")?.focus());
+    } else if (wasMenuOpen.current) {
+      wasMenuOpen.current = false;
+      menuButtonRef.current?.focus();
+    }
+  }, [menuOpen]);
+
   return (
-    <header className={`site-header ${isScrolled ? "is-scrolled" : ""}`}>
-      <div className="site-nav">
+    <>
+      <header className={`site-header ${isScrolled ? "is-scrolled" : ""}`}>
+        <div className="site-nav">
         <a className="site-brand" href={siteHref("/")} aria-label="MinuteFlow首页">
           <BrandMark className="site-brand__mark" size={29} />
           <span>MinuteFlow</span>
         </a>
 
-        <nav className={`site-links ${menuOpen ? "is-open" : ""}`} aria-label="主导航">
-          <a href={siteHref("/")} aria-current={route === "home" ? "page" : undefined}>产品</a>
+        <nav ref={menuRef} id="site-navigation" className={`site-links ${menuOpen ? "is-open" : ""}`} aria-label="主导航">
+          <a href={siteHref("/")} onClick={() => setMenuOpen(false)} aria-current={route === "home" ? "page" : undefined}>产品</a>
           {route === "home" ? (
             <>
               <a
@@ -199,17 +229,18 @@ function SiteHeader({
               </a>
             </>
           ) : (
-            <a href={siteHref("/#/specs")}>概览</a>
+            <a href={siteHref("/#/specs")} onClick={() => setMenuOpen(false)}>概览</a>
           )}
-          <a href={siteHref("/#/specs")} aria-current={route === "specs" ? "page" : undefined}>规格</a>
-          <a href={siteHref("/pricing/")} aria-current={route === "pricing" ? "page" : undefined}>定价</a>
-          <a href={desktopReleaseUrl} target="_blank" rel="noreferrer">
+          <a href={siteHref("/#/specs")} onClick={() => setMenuOpen(false)} aria-current={route === "specs" ? "page" : undefined}>规格</a>
+          <a href={siteHref("/pricing/")} onClick={() => setMenuOpen(false)} aria-current={route === "pricing" ? "page" : undefined}>定价</a>
+          <a href={desktopReleaseUrl} target="_blank" rel="noreferrer" onClick={() => setMenuOpen(false)}>
             下载 <ArrowUpRight size={13} />
           </a>
           <a
             href="https://github.com/vibeforge2014/minuteflow"
             target="_blank"
             rel="noreferrer"
+            onClick={() => setMenuOpen(false)}
           >
             GitHub <ArrowUpRight size={13} />
           </a>
@@ -217,17 +248,23 @@ function SiteHeader({
 
         <div className="site-nav__actions">
           <button
+            ref={menuButtonRef}
             className="site-menu-button"
             type="button"
             aria-label={menuOpen ? "关闭菜单" : "打开菜单"}
             aria-expanded={menuOpen}
+            aria-controls="site-navigation"
             onClick={() => setMenuOpen(!menuOpen)}
           >
             {menuOpen ? <X size={20} /> : <List size={21} />}
           </button>
         </div>
       </div>
-    </header>
+      </header>
+      {menuOpen && (
+        <button className="site-menu-scrim" type="button" aria-label="关闭菜单" onClick={() => setMenuOpen(false)} />
+      )}
+    </>
   );
 }
 

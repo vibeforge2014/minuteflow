@@ -1,9 +1,9 @@
 /**
- * 右侧面板（工作区右栏）：「转录」与「AI 总结」两个标签页。
+ * 右侧面板（工作区右栏）：「转录」与「AI 纪要」两个标签页。
  * 转录页：发言人色点与改名/合并管理、可编辑的转写段落（textarea 直接改写文本并标记纪要过期）、
  * 时间戳点击跳转播放器、播放进度驱动的歌词式高亮（is-playing）、
  * 长会议按 200 条增量加载 + 跟随尾部自动滚动。
- * AI 总结页：主题/决策/未决问题/下一步的只读列表（编辑在中央文档区）。
+ * AI 纪要页：主题/决策/未决问题/下一步的只读列表（编辑在中央文档区）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -22,6 +22,8 @@ import type { ImportJob, Meeting, VoiceprintPerson } from "../types";
 import { api } from "../lib/api";
 import { mergeSpeakerLabels } from "../lib/transcript";
 import { toggleSummaryLock } from "../lib/summary";
+import { classifyTextChange, type ContentChangeKind, type SummaryListField } from "../lib/content-motion";
+import { useEnteringItemIds, useSummaryContentMotion } from "../hooks/useContentMotion";
 import type { WorkspaceStage } from "../lib/workspace";
 
 interface TranscriptPanelProps {
@@ -36,9 +38,12 @@ interface TranscriptPanelProps {
   playbackMs?: number;
   /** 点击时间戳时请求播放器跳转。 */
   onSeek?(ms: number): void;
+  /** 空逐字稿在会后提供唯一、明确的恢复动作。 */
+  emptyActionLabel?: string;
+  onEmptyAction?(): void;
 }
 
-export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, onChange, onClose, playbackMs = 0, onSeek }: TranscriptPanelProps) {
+export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, onChange, onClose, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction }: TranscriptPanelProps) {
   /** 正在重命名的说话人 id（显示浮层输入框）。 */
   const [speakerEditor, setSpeakerEditor] = useState<string | null>(null);
   const [managerOpen, setManagerOpen] = useState(false);
@@ -57,6 +62,11 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
     meeting.transcript.map((segment) => [segment.speakerId, segment.speakerName])
   )), [meeting.transcript]);
   const visibleSegments = meeting.transcript.slice(-visibleCount);
+  const visibleSegmentIds = useMemo(() => visibleSegments.map((segment) => segment.id), [visibleSegments]);
+  const enteringSegmentIds = useEnteringItemIds(meeting.id, visibleSegmentIds);
+  const summaryMotion = useSummaryContentMotion(meeting.id, meeting.summary);
+  const tailSegment = meeting.transcript.at(-1);
+  const tailSignature = tailSegment ? `${tailSegment.id}:${tailSegment.text.length}:${tailSegment.status}` : "";
 
   const refreshVoiceprints = useCallback(() => {
     api.voiceprints.list().then(setVoiceprints).catch(() => setVoiceprints([]));
@@ -76,10 +86,11 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
   useEffect(() => {
     const list = listRef.current;
     if (!list || !autoScroll || meeting.transcript.length === 0) return;
-    const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
-    if (distanceFromBottom > 80) return;
-    list.scrollTop = list.scrollHeight;
-  }, [meeting.transcript.length, autoScroll, visibleCount]);
+    list.scrollTo({
+      top: list.scrollHeight,
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+    });
+  }, [tailSignature, autoScroll, visibleCount]);
 
   /** 用户向上阅读时暂停跟随；回到底部或点击恢复后重新跟随最新内容。 */
   const handleTranscriptScroll = () => {
@@ -163,7 +174,7 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
             className={tab === "summary" ? "is-active" : ""}
             onClick={() => onTabChange("summary")}
           >
-            {stage === "live" ? "阶段要点" : "AI 总结"} <small>Beta</small>
+            {stage === "live" ? "阶段要点" : "AI 纪要"} <small>Beta</small>
           </button>
         </div>
         <button className="icon-button" onClick={onClose} aria-label="关闭侧栏"><X size={18} /></button>
@@ -299,7 +310,7 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
             )}
             {meeting.transcript.length ? visibleSegments.map((segment) => (
               // is-playing：当前播放位置落在该段落时间区间内时整行高亮（歌词式同步）。
-              <article className={`transcript-item transcript-item--${segment.status} ${playbackMs >= segment.startMs && playbackMs < segment.endMs ? "is-playing" : ""}`} key={segment.id}>
+              <article className={`transcript-item transcript-item--${segment.status} ${playbackMs >= segment.startMs && playbackMs < segment.endMs ? "is-playing" : ""} ${enteringSegmentIds.has(segment.id) ? "content-motion-enter" : ""}`} key={segment.id}>
                 <button className="transcript-time" onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
                 <div>
                   <button className={`speaker-name speaker-name--${speakerColor(segment.speakerId)}`} onClick={() => setSpeakerEditor(segment.speakerId)}>
@@ -328,9 +339,9 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
                       }}
                     />
                   ) : (
-                    <p className="transcript-copy">{segment.text}</p>
+                    <AnimatedTranscriptCopy text={segment.text} animate={!enteringSegmentIds.has(segment.id)} />
                   )}
-                  {segment.status === "provisional" && <span className="provisional">临时转写中…</span>}
+                  {segment.status === "provisional" && <span className="provisional content-status-enter">临时转写中…</span>}
                 </div>
                 <div className="transcript-item__actions">
                   {segment.status !== "provisional" && (
@@ -351,8 +362,13 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
                 <p>{importJob
                   ? importTranscriptStatus(importJob, 0)
                   : stage === "review"
-                    ? "这场会议暂无可用逐字稿。笔记和已生成的纪要仍会保留；需要补充内容时，可从更多选项继续录音。"
+                    ? "这场会议暂无可用逐字稿。笔记和已生成的纪要仍会保留。"
                     : "开始录音后，转录会出现在这里。"}</p>
+                {!importJob && stage === "review" && emptyActionLabel && onEmptyAction && (
+                  <button className="button button--secondary button--small" onClick={onEmptyAction}>
+                    {emptyActionLabel}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -361,7 +377,10 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
             aria-pressed={autoScroll}
             onClick={() => {
               const list = listRef.current;
-              if (list) list.scrollTop = list.scrollHeight;
+              if (list) list.scrollTo({
+                top: list.scrollHeight,
+                behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+              });
               setAutoScroll(true);
             }}
           >
@@ -370,7 +389,7 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
           </button>}
         </>
       ) : (
-        <div className="ai-panel" id="summary-content" role="tabpanel" aria-labelledby="summary-tab">
+        <div className="ai-panel content-view-enter" id="summary-content" role="tabpanel" aria-labelledby="summary-tab">
           <section>
             <h3>
               当前议题
@@ -388,19 +407,19 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
                   : <LockOpen size={13} />}
               </button>
             </h3>
-            <ul>{meeting.summary.topics.map((item) => <li key={item}>{item}</li>)}</ul>
+            <AnimatedSummaryList field="topics" values={meeting.summary.topics} kinds={summaryMotion.lists.topics} />
           </section>
           <section>
             <h3>已确认决策</h3>
-            <ul>{meeting.summary.decisions.map((item) => <li key={item}>{item}</li>)}</ul>
+            <AnimatedSummaryList field="decisions" values={meeting.summary.decisions} kinds={summaryMotion.lists.decisions} />
           </section>
           <section>
             <h3>未决问题</h3>
-            <ul>{meeting.summary.openQuestions.map((item) => <li key={item}>{item}</li>)}</ul>
+            <AnimatedSummaryList field="openQuestions" values={meeting.summary.openQuestions} kinds={summaryMotion.lists.openQuestions} />
           </section>
           <section>
             <h3>下一步</h3>
-            <ul>{meeting.summary.nextSteps.map((item) => <li key={item}>{item}</li>)}</ul>
+            <AnimatedSummaryList field="nextSteps" values={meeting.summary.nextSteps} kinds={summaryMotion.lists.nextSteps} />
           </section>
         </div>
       )}
@@ -421,6 +440,48 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
       )}
     </aside>
   );
+}
+
+/** 同一自然段续写时只让新增尾文出现；识别修正只给当前文字一次轻强调。 */
+function AnimatedTranscriptCopy({ text, animate }: { text: string; animate: boolean }) {
+  const previousRef = useRef(text);
+  const change = animate
+    ? classifyTextChange(previousRef.current, text)
+    : { kind: "unchanged" as const, prefix: text, suffix: "" };
+  useEffect(() => { previousRef.current = text; }, [text]);
+
+  if (change.kind === "appended") {
+    return (
+      <p className="transcript-copy">
+        {change.prefix}<span className="transcript-copy__tail" key={text}>{change.suffix}</span>
+      </p>
+    );
+  }
+  return <p className={`transcript-copy ${change.kind === "updated" ? "content-motion-update" : ""}`}>{text}</p>;
+}
+
+function AnimatedSummaryList({
+  field,
+  values,
+  kinds
+}: {
+  field: SummaryListField;
+  values: string[];
+  kinds: ContentChangeKind[];
+}) {
+  return (
+    <ul>{values.map((item, index) => (
+      <li
+        key={`${field}:${item}:${values.slice(0, index + 1).filter((value) => value === item).length}`}
+        className={contentMotionClass(kinds[index])}
+        style={{ animationDelay: `${Math.min(index, 3) * 30}ms` }}
+      >{item}</li>
+    ))}</ul>
+  );
+}
+
+function contentMotionClass(kind?: ContentChangeKind) {
+  return kind === "added" ? "content-motion-enter" : kind === "updated" ? "content-motion-update" : "";
 }
 
 /** 导入任务阶段 → 右栏即时状态；已有文本时仍保留状态行，不替换转录内容。 */

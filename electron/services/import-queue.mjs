@@ -40,7 +40,7 @@ import {
 import { applyDiarization, diarizeWithSherpa } from "./diarization.mjs";
 import { managedFfmpegPath, resolveLocalModelProfile } from "./local-models.mjs";
 import { simplifyTranscriptResult } from "./chinese.mjs";
-import { groupTranscriptSegments } from "./transcript-grouping.mjs";
+import { groupTranscriptSegments, splitTimedTranscriptText } from "./transcript-grouping.mjs";
 
 const LOCAL_TRANSCRIPTION_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"];
 /** 与 main.mjs 的 transcribeLocally 同构：按 transport 分派本地转录（导入流程不注入术语表）。 */
@@ -72,6 +72,7 @@ const LEGACY_TRANSCRIPTION_OVERLAP_MS = 1_000;
 const TRANSCRIPTION_PLAN_VERSION = 2;
 const TRANSCRIPTION_CHUNK_MS = 10_000;
 const TRANSCRIPTION_OVERLAP_MS = 2_000;
+const PARAGRAPHING_VERSION = 2;
 
 const summaryListKeys = ["keyPoints", "decisions", "openQuestions", "risks", "nextSteps"];
 
@@ -260,7 +261,8 @@ export async function enqueueImports(items, options = {}) {
       autoSummarize: options.autoSummarize !== false,
       chunkingVersion: TRANSCRIPTION_PLAN_VERSION,
       chunkDurationMs: TRANSCRIPTION_CHUNK_MS,
-      chunkOverlapMs: TRANSCRIPTION_OVERLAP_MS
+      chunkOverlapMs: TRANSCRIPTION_OVERLAP_MS,
+      paragraphingVersion: PARAGRAPHING_VERSION
     })));
   }
   void runQueue();
@@ -429,7 +431,8 @@ async function processJob(initial) {
       job = patchJob(job.id, {
         status: "transcribing", stage: "transcribing", progress: 0.35,
         sttProfileId: sttProfile.id, durationMs, totalChunks, completedChunks,
-        chunkingVersion, chunkDurationMs, chunkOverlapMs
+        chunkingVersion, chunkDurationMs, chunkOverlapMs,
+        paragraphingVersion: job.paragraphingVersion || PARAGRAPHING_VERSION
       });
       const language = job.language === "auto" ? "" : job.language;
       for (let chunkIndex = completedChunks; chunkIndex < totalChunks; chunkIndex += 1) {
@@ -506,7 +509,10 @@ async function processJob(initial) {
           expectedSpeakers: -1,
           voiceprints: listVoiceprintSamples()
         });
-        meeting = publishMeeting(saveMeeting({ ...meeting, transcript: applyDiarization(meeting.transcript, turns) }));
+        meeting = publishMeeting(saveMeeting({
+          ...meeting,
+          transcript: groupTranscriptSegments(applyDiarization(meeting.transcript, turns))
+        }));
       }
       job = patchJob(job.id, { diarizationComplete: true, stage: "summarizing", progress: 0.8 });
     }
@@ -612,11 +618,19 @@ async function processJob(initial) {
  * 作为纯函数导出，便于覆盖时间偏移、排序与重试去重测试。
  */
 export function normalizeImportChunkSegments(result, extractionStartMs, nominalStartMs, chunkEndMs, idPrefix, existing = []) {
-  const source = result.segments?.length
+  const sourceSegments = result.segments?.length
     ? result.segments
     : result.text?.trim()
       ? [{ startMs: 0, endMs: Math.max(1, chunkEndMs - extractionStartMs), text: result.text.trim() }]
       : [];
+  const source = sourceSegments.flatMap((segment) => {
+    const startMs = Math.max(0, Number(segment.startMs) || 0);
+    const endMs = Math.max(startMs + 1, Number(segment.endMs) || Math.max(1, chunkEndMs - extractionStartMs));
+    return splitTimedTranscriptText(segment.text, startMs, endMs).map((fragment) => ({
+      ...segment,
+      ...fragment
+    }));
+  });
   const recentTexts = existing.slice(-4).map((segment) => normalizeTranscriptText(segment.text));
   return source.flatMap((segment, index) => {
     const text = String(segment.text || "").trim();

@@ -4,6 +4,76 @@ import XCTest
 @testable import MeetingAssistant
 
 final class SummaryEngineTests: XCTestCase {
+  func testContentMotionClassifiesAppendCorrectionAndStableInsertions() {
+    XCTAssertEqual(
+      NaturalContentChangeClassifier.text(previous: "我们先确认目标。", next: "我们先确认目标。接下来讨论范围。"),
+      .appended
+    )
+    XCTAssertEqual(
+      NaturalContentChangeClassifier.text(previous: "周四上线。", next: "调整为周五上线。"),
+      .updated
+    )
+    XCTAssertEqual(
+      NaturalContentChangeClassifier.enteringIDs(
+        previousScope: "meeting-a",
+        nextScope: "meeting-a",
+        previous: Set(["old"]),
+        next: ["old", "new"]
+      ),
+      Set(["new"])
+    )
+    XCTAssertTrue(NaturalContentChangeClassifier.enteringIDs(
+      previousScope: "meeting-a",
+      nextScope: "meeting-b",
+      previous: Set(["old"]),
+      next: ["new"]
+    ).isEmpty)
+    XCTAssertEqual(
+      NaturalContentChangeClassifier.strings(previous: ["保留", "保留", "旧结论"], next: ["保留", "保留", "改写结论", "新增"]),
+      [.unchanged, .unchanged, .updated, .added]
+    )
+  }
+
+  func testNaturalParagraphsCrossTransportWindowsAndBreakOnTopic() {
+    let firstID = UUID()
+    let paragraphs = NaturalTranscriptParagraphBuilder.paragraphs(from: [
+      TranscriptFragment(id: firstID, startTime: 0, endTime: 8, speaker: "我", text: "我们先确认目标，"),
+      TranscriptFragment(startTime: 8, endTime: 16, speaker: "我", text: "再看执行路径。"),
+      TranscriptFragment(startTime: 16, endTime: 24, speaker: "我", text: "接下来讨论风险。"),
+    ])
+
+    XCTAssertEqual(paragraphs.count, 2)
+    XCTAssertEqual(paragraphs[0].id, firstID)
+    XCTAssertEqual(paragraphs[0].text, "我们先确认目标，再看执行路径。")
+    XCTAssertEqual(paragraphs[0].endTime, 16)
+    XCTAssertEqual(paragraphs[1].text, "接下来讨论风险。")
+  }
+
+  func testNaturalParagraphsBreakOnSpeakerPauseAndQuestion() {
+    let paragraphs = NaturalTranscriptParagraphBuilder.paragraphs(from: [
+      TranscriptFragment(startTime: 0, endTime: 2, speaker: "我", text: "这个方案可行吗？"),
+      TranscriptFragment(startTime: 2, endTime: 3.5, speaker: "我", text: "可以。"),
+      TranscriptFragment(startTime: 4, endTime: 6, speaker: "刘婷", text: "我补充一点。"),
+      TranscriptFragment(startTime: 7.5, endTime: 9, speaker: "刘婷", text: "继续。"),
+    ])
+
+    XCTAssertEqual(paragraphs.count, 4)
+  }
+
+  func testFlatTranscriptGetsProportionalStableTiming() {
+    let fragments = NaturalTranscriptParagraphBuilder.timedFragments(
+      text: "先确认。然后继续！最后收尾",
+      startTime: 10,
+      endTime: 20,
+      speaker: "Speaker 1"
+    )
+
+    XCTAssertEqual(fragments.map(\.text), ["先确认。", "然后继续！", "最后收尾"])
+    XCTAssertEqual(fragments.first?.startTime, 10)
+    XCTAssertEqual(fragments.last?.endTime, 20)
+    XCTAssertEqual(fragments[1].startTime, fragments[0].endTime)
+  }
+
   func testSummaryExtractsMeetingElements() {
     let draft = SummaryEngine.summarize(
       transcript: """

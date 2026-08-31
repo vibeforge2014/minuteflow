@@ -9,7 +9,7 @@
  */
 import { api } from "../lib/api";
 import { isMicrophonePermissionError, MICROPHONE_PERMISSION_REQUIRED, shouldRequestMicrophone } from "../lib/permissions";
-import type { AudioTrackKind, Meeting, ModelProfile, TranscriptSegment } from "../types";
+import type { AudioTrackKind, Meeting, ModelProfile, TranscriptSegment, TranscriptionChunkResult } from "../types";
 
 /** 可直接采集的轨道类型（"mixed" 仅用于已落盘的合成产物，不能采集）。 */
 type CaptureTrack = Exclude<AudioTrackKind, "mixed">;
@@ -39,6 +39,18 @@ interface RecorderBinding {
   sequence: number;
   /** 在途的 recordings.append 任务集合；stop() 必须等它们全部落盘后才能收尾。 */
   pendingWrites: Set<Promise<void>>;
+}
+
+interface CompletedTranscription {
+  provisionalId: string;
+  segments: TranscriptSegment[];
+}
+
+/** 每条采集轨独立按签发序号提交，网络返回顺序不会改变段落顺序或稳定 id。 */
+interface TrackTranscriptionState {
+  issued: number;
+  nextCommit: number;
+  completed: Map<number, CompletedTranscription>;
 }
 
 /** 按优先级挑一个当前浏览器支持的编码（Chromium 优先 Opus/WebM），保证归档可被 FFmpeg 解码。 */
@@ -84,6 +96,9 @@ export class MeetingRecorder {
   /** 电平表 rAF 句柄，stop 时取消。 */
   private analyserFrame = 0;
   private transcriptionQueue = 0;
+  /** 在途转录请求；正常停止会等待它们成功或明确失败后再持久化会议。 */
+  private pendingTranscriptions = new Set<Promise<void>>();
+  private transcriptionStates = new Map<CaptureTrack, TrackTranscriptionState>();
   /** 用户在启动过程中取消（start 会被 reject）。 */
   private startCancelled = false;
   /** 挂起的 getUserMedia/getDisplayMedia 的取消句柄。 */
@@ -281,6 +296,7 @@ export class MeetingRecorder {
     this.bindings.push(binding);
 
     if (this.sttProfile) {
+      this.transcriptionStates.set(track, { issued: 0, nextCommit: 0, completed: new Map() });
       this.transcriptionLoops.push(this.runTranscriptionLoop(track, stream));
     }
   }
@@ -292,6 +308,8 @@ export class MeetingRecorder {
    * 暂停期间只休眠不采集；块时间戳换算为相对会议起点，供转写段落排序与播放器同步。
    */
   private async runTranscriptionLoop(track: CaptureTrack, stream: MediaStream) {
+    const state = this.transcriptionStates.get(track);
+    if (!state) return;
     while (!this.stopTranscription && stream.active) {
       if (this.paused) {
         await new Promise((resolve) => setTimeout(resolve, 250));
@@ -302,9 +320,10 @@ export class MeetingRecorder {
       if (!blob?.size || this.stopTranscription || !this.sttProfile?.id) continue;
       const startMs = Math.max(0, chunkStarted - this.startedAt);
       const endMs = Math.max(startMs, Date.now() - this.startedAt);
+      const sequence = state.issued++;
       // 占位临时段：与最终段落共享时间区间与轨道，mergeTranscriptSegments 会用定稿结果替换它。
       const provisional: TranscriptSegment = {
-        id: `provisional-${track}-${startMs}`,
+        id: `provisional-${track}-${sequence}-${startMs}`,
         startMs,
         endMs,
         speakerId: track === "microphone" ? "me" : "remote",
@@ -328,28 +347,44 @@ export class MeetingRecorder {
       this.transcriptionQueue += 1;
       this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
       const request = () => api.transcription.processChunk(payload);
-      request().then((segment) => {
-        if (segment.text.trim()) this.callbacks.onTranscript(segment);
-        else this.callbacks.onProvisionalSettled(provisional.id);
-      }).catch(async (firstError) => {
-        if (this.stopTranscription) {
-          this.callbacks.onProvisionalSettled(provisional.id);
-          return;
-        }
-        // 瞬时故障（网络抖动/本地进程偶发失败）等 1.5 秒重试一次，仍失败才告警。
-        await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const transcription = (async () => {
+        let result: TranscriptionChunkResult = { segments: [] };
         try {
-          const segment = await request();
-          if (segment.text.trim()) this.callbacks.onTranscript(segment);
-          else this.callbacks.onProvisionalSettled(provisional.id);
-        } catch {
-          this.callbacks.onWarning(firstError instanceof Error ? firstError.message : "转录任务失败");
-          this.callbacks.onProvisionalSettled(provisional.id);
+          result = await request();
+        } catch (firstError) {
+          // 瞬时故障（网络抖动/本地进程偶发失败）等 1.5 秒重试一次，仍失败才告警。
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          try {
+            result = await request();
+          } catch {
+            this.callbacks.onWarning(firstError instanceof Error ? firstError.message : "转录任务失败");
+          }
         }
-      }).finally(() => {
+        state.completed.set(sequence, {
+          provisionalId: provisional.id,
+          segments: result.segments.filter((segment) => segment.text.trim())
+        });
+        this.commitCompletedTranscriptions(track);
+      })();
+      this.pendingTranscriptions.add(transcription);
+      void transcription.finally(() => {
+        this.pendingTranscriptions.delete(transcription);
         this.transcriptionQueue = Math.max(0, this.transcriptionQueue - 1);
         this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
       });
+    }
+  }
+
+  /** 只提交从 nextCommit 开始的连续完成结果；较晚窗口先返回时暂存在 completed 中。 */
+  private commitCompletedTranscriptions(track: CaptureTrack) {
+    const state = this.transcriptionStates.get(track);
+    if (!state) return;
+    while (state.completed.has(state.nextCommit)) {
+      const completed = state.completed.get(state.nextCommit)!;
+      state.completed.delete(state.nextCommit);
+      state.nextCommit += 1;
+      this.callbacks.onProvisionalSettled(completed.provisionalId);
+      for (const segment of completed.segments) this.callbacks.onTranscript(segment);
     }
   }
 
@@ -462,6 +497,7 @@ export class MeetingRecorder {
     }
     await this.audioContext?.close().catch(() => {});
     await Promise.allSettled(this.transcriptionLoops);
+    await Promise.allSettled(Array.from(this.pendingTranscriptions));
     return api.recordings.stop({
       meetingId: this.meeting.id,
       sessionId: this.sessionId,

@@ -7,6 +7,7 @@
 //  所属层：服务层（@Observable 环境对象，负责导入进度与错误展示）。
 //
 
+import AVFAudio
 import Foundation
 import Observation
 import Speech
@@ -93,28 +94,33 @@ final class AudioImportCoordinator {
     progressText = "正在转录音频…"
     do {
       // 按偏好选择转录路径：Apple Speech（本地系统）或远程 Whisper（网络）。
-      let text: String
+      let recognition: TranscriptRecognitionResult
       switch preferences.transcriptionProvider {
       case .appleSpeech:
-        text = try await transcribe(
+        recognition = try await transcribe(
           url: importedURL,
           language: preferences.language
         )
       case .remoteWhisper:
-        text = try await RemoteWhisperService().transcribe(
+        recognition = try await RemoteWhisperService().transcribe(
           audioURL: importedURL,
           preferences: preferences
         )
       }
-      // 导入的整段文本固化为一个片段，会议标记完成。
-      let segment = TranscriptSegmentRecord(
-        startTime: 0,
-        endTime: 0,
-        speaker: "Speaker 1",
-        text: text,
-        meeting: meeting
-      )
-      meeting.transcriptSegments.append(segment)
+      // 上传/识别窗口不作为可见段落；按自然发言边界分别固化。
+      let paragraphs = NaturalTranscriptParagraphBuilder.paragraphs(from: recognition.fragments)
+      for paragraph in paragraphs {
+        meeting.transcriptSegments.append(
+          TranscriptSegmentRecord(
+            id: paragraph.id,
+            startTime: paragraph.startTime,
+            endTime: paragraph.endTime,
+            speaker: paragraph.speaker,
+            text: paragraph.text,
+            meeting: meeting
+          )
+        )
+      }
       meeting.status = .completed
       meeting.updatedAt = .now
       try modelContext.save()
@@ -135,10 +141,10 @@ final class AudioImportCoordinator {
   /// - Parameters:
   ///   - url: 已复制到沙盒内的音频文件。
   ///   - language: BCP 47 语言标记。
-  /// - Returns: 识别出的完整文本。
+  /// - Returns: 识别全文与带时间片的原子片段。
   /// - 副作用：若授权状态为未决定，会触发系统语音识别授权弹窗
   ///   （SFSpeechRecognizer.requestAuthorization）。
-  private func transcribe(url: URL, language: String) async throws -> String {
+  private func transcribe(url: URL, language: String) async throws -> TranscriptRecognitionResult {
     let authorization = SFSpeechRecognizer.authorizationStatus()
     let resolvedAuthorization: SFSpeechRecognizerAuthorizationStatus
     if authorization == .notDetermined {
@@ -167,11 +173,31 @@ final class AudioImportCoordinator {
         guard !didResume else { return }
         if let result, result.isFinal {
           didResume = true
-          let text = result.bestTranscription.formattedString
+          let transcription = result.bestTranscription
+          let text = transcription.formattedString
           if text.isEmpty {
             continuation.resume(throwing: AudioImportError.noTranscription)
           } else {
-            continuation.resume(returning: text)
+            let fragments = transcription.segments.map { segment in
+              TranscriptFragment(
+                startTime: segment.timestamp,
+                endTime: segment.timestamp + max(0.001, segment.duration),
+                speaker: "Speaker 1",
+                text: segment.substring
+              )
+            }
+            let resolvedFragments = fragments.isEmpty
+              ? NaturalTranscriptParagraphBuilder.timedFragments(
+                text: text,
+                startTime: 0,
+                endTime: max(0.001, self.audioDuration(at: url)),
+                speaker: "Speaker 1"
+              )
+              : fragments
+            continuation.resume(returning: TranscriptRecognitionResult(
+              text: text,
+              fragments: resolvedFragments
+            ))
           }
         } else if let error {
           didResume = true
@@ -179,6 +205,13 @@ final class AudioImportCoordinator {
         }
       }
     }
+  }
+
+  private func audioDuration(at url: URL) -> TimeInterval {
+    guard let file = try? AVAudioFile(forReading: url), file.processingFormat.sampleRate > 0 else {
+      return 0.001
+    }
+    return TimeInterval(file.length) / file.processingFormat.sampleRate
   }
 
   /// 把源音频复制到 Application Support/Imports（UUID 重命名避免覆盖）。

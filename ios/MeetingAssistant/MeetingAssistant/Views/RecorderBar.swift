@@ -11,8 +11,7 @@ import SwiftData
 import SwiftUI
 
 /// 录音工具条。
-/// 导航位置：iPad 以 overlay 悬浮于三栏工作区底部；iPhone 以 safeAreaInset
-/// 固定在会议详情页底部。
+/// 导航位置：iPad 与 iPhone 均通过 safeAreaInset 固定在工作区底部。
 struct RecorderBar: View {
   // MARK: - 环境与状态
 
@@ -22,8 +21,12 @@ struct RecorderBar: View {
   @Environment(RecordingCoordinator.self) private var recorder
   /// 读取语言与自动纪要间隔。
   @Environment(AppPreferences.self) private var preferences
+  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   /// 绑定的会议。
   let meeting: MeetingRecord
+  /// iPhone 待机态隐藏次要音量信息，给底部标签栏留出稳定空间。
+  var compact = false
 
   /// 录音错误文案（alert 展示）。
   @State private var errorMessage: String?
@@ -33,7 +36,7 @@ struct RecorderBar: View {
   // MARK: - 视图内容
 
   var body: some View {
-    HStack(spacing: 14) {
+    HStack(spacing: compact ? 10 : 14) {
       // 当前会话：红点 + 计时；否则显示“准备录音”待机态。
       if isCurrentSession {
         Circle()
@@ -51,10 +54,12 @@ struct RecorderBar: View {
           .font(.subheadline.weight(.semibold))
       }
 
-      Divider()
-        .frame(height: 30)
+      if !compact {
+        Divider()
+          .frame(height: 30)
 
-      inputMeter
+        inputMeter
+      }
 
       Spacer(minLength: 0)
 
@@ -102,11 +107,19 @@ struct RecorderBar: View {
       }
     }
     .font(.subheadline)
-    .padding(.horizontal, 16)
-    .frame(minHeight: 58)
-    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 15))
+    .padding(.horizontal, compact ? 12 : 16)
+    .frame(minHeight: compact ? 50 : 58)
+    .background {
+      if reduceTransparency {
+        RoundedRectangle(cornerRadius: compact ? 14 : 15)
+          .fill(MeetingTheme.surfaceRaised)
+      } else {
+        RoundedRectangle(cornerRadius: compact ? 14 : 15)
+          .fill(.regularMaterial)
+      }
+    }
     .overlay {
-      RoundedRectangle(cornerRadius: 15)
+      RoundedRectangle(cornerRadius: compact ? 14 : 15)
         .stroke(MeetingTheme.divider)
     }
     .shadow(color: .black.opacity(0.1), radius: 14, y: 5)
@@ -197,30 +210,32 @@ struct RecorderBar: View {
     try? modelContext.save()
   }
 
-  /// 停止录音：固化音频文件名与整段实时转录并保存会议，不访问远程模型。
+  /// 停止录音：固化音频文件名与自然转录段落并保存会议，不访问远程模型。
   ///
   /// - 副作用：结束音频/识别会话；追加 TranscriptSegmentRecord；调用纪要服务
   ///   多次保存 SwiftData。最终纪要由 AI 纪要页的用户操作显式触发。
   private func stopAndFinalize() async {
-    isFinishing = true
-    // 先快照会话数据，再停止协调器（停止后临时状态会被清理）。
+    withAnimation(ContentMotion.quick) { isFinishing = true }
+    // 先快照时长/音频名；协调器会短暂等待 Speech 最后一份定稿再返回自然段落。
     let elapsed = recorder.elapsedSeconds
-    let transcript = recorder.liveTranscript
     let audioName = recorder.audioURL?.lastPathComponent
-    recorder.stop()
+    let paragraphs = await recorder.stop()
 
-    // 有实时转录时固化为一个完整片段，接续在最后一段之后。
-    if !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-      let start = meeting.orderedSegments.last?.endTime ?? 0
-      meeting.transcriptSegments.append(
-        TranscriptSegmentRecord(
-          startTime: start,
-          endTime: TimeInterval(elapsed),
-          speaker: "我",
-          text: transcript,
-          meeting: meeting
+    // 每个自然段分别固化；UUID、说话人和 Speech 时间片均沿用实时草稿。
+    withAnimation(reduceMotion ? ContentMotion.quick : ContentMotion.content) {
+      for paragraph in paragraphs where !paragraph.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        meeting.transcriptSegments.append(
+          TranscriptSegmentRecord(
+            id: paragraph.id,
+            startTime: paragraph.startTime,
+            endTime: paragraph.endTime,
+            speaker: paragraph.speaker,
+            text: paragraph.text,
+            isFinal: true,
+            meeting: meeting
+          )
         )
-      )
+      }
     }
     // 先本地落盘（时长/音频名/状态），再做最终纪要。
     meeting.duration = TimeInterval(elapsed)
@@ -229,6 +244,6 @@ struct RecorderBar: View {
     meeting.updatedAt = .now
     try? modelContext.save()
     recorder.clearCompletedSession()
-    isFinishing = false
+    withAnimation(ContentMotion.quick) { isFinishing = false }
   }
 }

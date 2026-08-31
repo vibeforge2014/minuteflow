@@ -49,6 +49,9 @@ final class RecordingCoordinator {
   private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
   /// 语音识别任务；持有以便结束时 finish()。
   private var recognitionTask: SFSpeechRecognitionTask?
+  /// stop 后短暂等待 Speech 最后一份定稿；超时也必须恢复，不能卡住录音收尾。
+  private var speechFinalizationContinuation: CheckedContinuation<Void, Never>?
+  private var speechFinalized = false
   /// 录音输出文件句柄（.caf 格式）。
   private var audioFile: AVAudioFile?
   /// 每秒走动的计时 Task（累计时长并触发自动纪要节拍）。
@@ -66,8 +69,10 @@ final class RecordingCoordinator {
   private(set) var elapsedSeconds = 0
   /// 当前麦克风输入电平（0~1，RMS 放大后截断）。
   private(set) var inputLevel: Float = 0
-  /// 实时转录的临时全文（未定稿，停止录音时固化成一段）。
+  /// 实时转录的临时全文（由自然段落拼接，供纪要上下文使用）。
   private(set) var liveTranscript = ""
+  /// 实时转录的自然段落草稿；Speech 部分结果更新时整体替换，不会重复追加。
+  private(set) var liveParagraphs: [NaturalTranscriptParagraph] = []
   /// 自动纪要节拍计数；每到达 summaryInterval 递增一次。
   private(set) var summaryTick = 0
   /// 当前录音文件 URL；停止后保留供固化 audioFilename。
@@ -76,6 +81,8 @@ final class RecordingCoordinator {
   private(set) var activeMeetingID: UUID?
   /// 面向用户的错误文案（权限、转录中断等）。
   var errorMessage: String?
+  /// Apple Speech 部分结果会反复修订；按毫秒起点复用 UUID，保持段落滚动位置稳定。
+  private var liveFragmentIDs: [Int: UUID] = [:]
 
   // MARK: - 权限
 
@@ -147,6 +154,9 @@ final class RecordingCoordinator {
 
     // 重置上一段会话的临时状态。
     liveTranscript = ""
+    liveParagraphs = []
+    liveFragmentIDs = [:]
+    speechFinalized = false
     elapsedSeconds = 0
     summaryTick = 0
     lastSummaryBoundary = 0
@@ -169,10 +179,15 @@ final class RecordingCoordinator {
       recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
         Task { @MainActor in
           if let result {
-            self?.liveTranscript = result.bestTranscription.formattedString
+            self?.updateLiveTranscription(result.bestTranscription, isFinal: result.isFinal)
+            if result.isFinal {
+              self?.speechFinalized = true
+              self?.finishSpeechFinalizationWait()
+            }
           }
           if let error {
             self?.errorMessage = "实时转录已暂停：\(error.localizedDescription)"
+            self?.finishSpeechFinalizationWait()
           }
         }
       }
@@ -231,8 +246,8 @@ final class RecordingCoordinator {
   ///
   /// - 副作用：AVAudioSession setActive(false)（notifyOthersOnDeactivation 通知
   ///   其他音频恢复）；仅结束本地录音状态，不触发远程 AI 调用。
-  func stop() {
-    guard isRecording else { return }
+  func stop() async -> [NaturalTranscriptParagraph] {
+    guard isRecording else { return liveParagraphs }
     timerTask?.cancel()
     timerTask = nil
     if audioEngine.isRunning {
@@ -241,6 +256,15 @@ final class RecordingCoordinator {
     audioEngine.inputNode.removeTap(onBus: 0)
     recognitionRequest?.endAudio()
     recognitionTask?.finish()
+    if recognitionTask != nil, !speechFinalized {
+      await withCheckedContinuation { continuation in
+        speechFinalizationContinuation = continuation
+        Task { [weak self] in
+          try? await Task.sleep(for: .milliseconds(800))
+          await MainActor.run { self?.finishSpeechFinalizationWait() }
+        }
+      }
+    }
     recognitionTask = nil
     recognitionRequest = nil
     audioFile = nil
@@ -251,6 +275,7 @@ final class RecordingCoordinator {
       false,
       options: .notifyOthersOnDeactivation
     )
+    return liveParagraphs
   }
 
   /// 返回当前秒数作为标记点；由 RecorderBar 转成文字写入笔记。
@@ -262,6 +287,8 @@ final class RecordingCoordinator {
   func clearCompletedSession() {
     guard !isRecording else { return }
     liveTranscript = ""
+    liveParagraphs = []
+    liveFragmentIDs = [:]
     activeMeetingID = nil
     audioURL = nil
     elapsedSeconds = 0
@@ -288,6 +315,41 @@ final class RecordingCoordinator {
         }
       }
     }
+  }
+
+  /// 从 Speech 的带时间片结果重建整份实时草稿；模型没有片段时退回全文标点分段。
+  private func updateLiveTranscription(_ transcription: SFTranscription, isFinal: Bool) {
+    let fragments: [TranscriptFragment]
+    if transcription.segments.isEmpty {
+      fragments = NaturalTranscriptParagraphBuilder.timedFragments(
+        text: transcription.formattedString,
+        startTime: 0,
+        endTime: max(0.001, TimeInterval(elapsedSeconds)),
+        speaker: "我",
+        isFinal: isFinal
+      )
+    } else {
+      fragments = transcription.segments.map { segment in
+        let key = Int((segment.timestamp * 1_000).rounded())
+        let id = liveFragmentIDs[key] ?? UUID()
+        liveFragmentIDs[key] = id
+        return TranscriptFragment(
+          id: id,
+          startTime: segment.timestamp,
+          endTime: segment.timestamp + max(0.001, segment.duration),
+          speaker: "我",
+          text: segment.substring,
+          isFinal: isFinal
+        )
+      }
+    }
+    liveParagraphs = NaturalTranscriptParagraphBuilder.paragraphs(from: fragments)
+    liveTranscript = liveParagraphs.map(\.text).joined(separator: "\n")
+  }
+
+  private func finishSpeechFinalizationWait() {
+    speechFinalizationContinuation?.resume()
+    speechFinalizationContinuation = nil
   }
 
   /// 返回（并按需创建）Application Support/Recordings 目录。

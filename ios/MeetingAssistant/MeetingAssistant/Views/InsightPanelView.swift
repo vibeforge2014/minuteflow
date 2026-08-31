@@ -11,6 +11,65 @@
 import SwiftData
 import SwiftUI
 
+/// 全端统一的内容动效节奏：无弹跳、短反馈；减少动态效果时只保留淡化。
+enum ContentMotion {
+  static let quick = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.16)
+  static let content = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.22)
+  static let view = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.18)
+
+  static func insertion(reduceMotion: Bool) -> AnyTransition {
+    if reduceMotion { return .opacity }
+    return .modifier(
+      active: ContentInsertionModifier(opacity: 0, offset: 6),
+      identity: ContentInsertionModifier(opacity: 1, offset: 0)
+    )
+  }
+}
+
+private struct ContentInsertionModifier: ViewModifier {
+  let opacity: Double
+  let offset: CGFloat
+
+  func body(content: Content) -> some View {
+    content.opacity(opacity).offset(y: offset)
+  }
+}
+
+/// 系统生成内容改写时用语义色轻提示，不重挂载 TextEditor 或改变焦点。
+private struct ContentUpdateFeedbackModifier: ViewModifier {
+  let revision: Date?
+  let cornerRadius: CGFloat
+  @State private var highlighted = false
+  @State private var pulseID = UUID()
+
+  func body(content: Content) -> some View {
+    content
+      .overlay {
+        RoundedRectangle(cornerRadius: cornerRadius)
+          .fill(MeetingTheme.primary.opacity(0.1))
+          .opacity(highlighted ? 1 : 0)
+          .allowsHitTesting(false)
+      }
+      .onChange(of: revision) { _, newValue in
+        guard newValue != nil else { return }
+        let token = UUID()
+        pulseID = token
+        withAnimation(ContentMotion.quick) { highlighted = true }
+        Task { @MainActor in
+          try? await Task.sleep(for: .milliseconds(360))
+          guard pulseID == token else { return }
+          withAnimation(ContentMotion.content) { highlighted = false }
+        }
+      }
+  }
+}
+
+extension View {
+  func contentUpdateFeedback(revision: Date?, cornerRadius: CGFloat = 12) -> some View {
+    modifier(ContentUpdateFeedbackModifier(revision: revision, cornerRadius: cornerRadius))
+  }
+}
+
 /// 洞察面板容器：分段选择器 + 转录/纪要面板。
 /// 导航位置：iPad NavigationSplitView 第三栏（detail）；iPhone 不整体使用。
 struct InsightPanelView: View {
@@ -18,6 +77,7 @@ struct InsightPanelView: View {
   @Environment(AppState.self) private var appState
   /// 目标会议。
   let meeting: MeetingRecord
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     @Bindable var appState = appState
@@ -37,13 +97,18 @@ struct InsightPanelView: View {
       Divider()
 
       // 按标签切换：转录面板 / AI 纪要面板。
-      switch appState.inspectorTab {
-      case .transcript:
-        TranscriptPanelView(meeting: meeting)
-      case .summary:
-        SummaryPanelView(meeting: meeting)
+      Group {
+        switch appState.inspectorTab {
+        case .transcript:
+          TranscriptPanelView(meeting: meeting)
+        case .summary:
+          SummaryPanelView(meeting: meeting)
+        }
       }
+      .id(appState.inspectorTab)
+      .transition(.opacity)
     }
+    .animation(reduceMotion ? ContentMotion.quick : ContentMotion.view, value: appState.inspectorTab)
     .background(MeetingTheme.surface)
     .navigationSplitViewColumnWidth(min: 300, ideal: 350, max: 430)
   }
@@ -56,6 +121,29 @@ struct TranscriptPanelView: View {
   @Environment(RecordingCoordinator.self) private var recorder
   /// 目标会议。
   let meeting: MeetingRecord
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  private enum DisplayRow: Identifiable {
+    case stored(TranscriptSegmentRecord)
+    case live(NaturalTranscriptParagraph)
+
+    var id: UUID {
+      switch self {
+      case .stored(let segment): segment.id
+      case .live(let paragraph): paragraph.id
+      }
+    }
+  }
+
+  /// 临时段与定稿段共用稳定 UUID；停止录音时同一行只切换状态，不整组重建。
+  private var displayRows: [DisplayRow] {
+    let stored = meeting.orderedSegments.map(DisplayRow.stored)
+    let storedIDs = Set(meeting.orderedSegments.map(\.id))
+    let live = recorder.activeMeetingID == meeting.id
+      ? recorder.liveParagraphs.filter { !storedIDs.contains($0.id) }.map(DisplayRow.live)
+      : []
+    return stored + live
+  }
 
   var body: some View {
     ScrollViewReader { proxy in
@@ -66,33 +154,32 @@ struct TranscriptPanelView: View {
               .font(.caption.weight(.semibold))
               .foregroundStyle(MeetingTheme.primary)
             Spacer()
-            Text("\(meeting.orderedSegments.count) 段")
+            Text("\(displayRows.count) 段")
               .font(.caption)
               .foregroundStyle(.secondary)
+              .contentTransition(.numericText())
           }
           .padding(.horizontal, 16)
           .padding(.vertical, 12)
 
-          ForEach(meeting.orderedSegments) { segment in
-            TranscriptSegmentRow(segment: segment)
-              .id(segment.id)
-            Divider()
-              .padding(.leading, 54)
-          }
-
-          // 录音中的临时转写行（未定稿，软底色区分）。
-          if recorder.activeMeetingID == meeting.id,
-            !recorder.liveTranscript.isEmpty
-          {
-            LiveTranscriptRow(
-              timestamp: TimeInterval(recorder.elapsedSeconds),
-              text: recorder.liveTranscript
-            )
-            .id("live-transcript")
+          ForEach(Array(displayRows.enumerated()), id: \.element.id) { index, row in
+            Group {
+              switch row {
+              case .stored(let segment):
+                TranscriptSegmentRow(segment: segment)
+              case .live(let paragraph):
+                LiveTranscriptRow(paragraph: paragraph)
+              }
+            }
+            .id(row.id)
+            .transition(ContentMotion.insertion(reduceMotion: reduceMotion))
+            if index < displayRows.count - 1 {
+              Divider().padding(.leading, 54)
+            }
           }
 
           // 空状态：既无定稿片段也无实时文本。
-          if meeting.orderedSegments.isEmpty && recorder.liveTranscript.isEmpty {
+          if displayRows.isEmpty {
             ContentUnavailableView(
               "等待转录",
               systemImage: "waveform",
@@ -103,10 +190,16 @@ struct TranscriptPanelView: View {
         }
       }
       .scrollDismissesKeyboard(.interactively)
+      .animation(ContentMotion.content, value: displayRows.map(\.id))
       // 实时文本更新时平滑滚动到最新的临时转写行。
-      .onChange(of: recorder.liveTranscript) { _, _ in
-        withAnimation(.easeOut(duration: 0.2)) {
-          proxy.scrollTo("live-transcript", anchor: .bottom)
+      .onChange(of: recorder.liveParagraphs) { _, _ in
+        guard let lastID = recorder.liveParagraphs.last?.id else { return }
+        if reduceMotion {
+          proxy.scrollTo(lastID, anchor: .bottom)
+        } else {
+          withAnimation(ContentMotion.content) {
+            proxy.scrollTo(lastID, anchor: .bottom)
+          }
         }
       }
     }
@@ -175,29 +268,30 @@ private struct TranscriptSegmentRow: View {
 
 /// 录音中的临时转写行（软底色 + 进度指示，区别于定稿片段）。
 private struct LiveTranscriptRow: View {
-  /// 当前录音秒数（展示用时间戳）。
-  let timestamp: TimeInterval
-  /// 实时识别文本。
-  let text: String
+  let paragraph: NaturalTranscriptParagraph
+  @State private var highlighted = false
+  @State private var pulseID = UUID()
 
   var body: some View {
     HStack(alignment: .top, spacing: 10) {
-      Text(MeetingFormatters.timestamp(timestamp))
+      Text(MeetingFormatters.timestamp(paragraph.startTime))
         .font(.caption.monospacedDigit())
         .foregroundStyle(.tertiary)
         .frame(width: 40, alignment: .leading)
       VStack(alignment: .leading, spacing: 6) {
         HStack(spacing: 6) {
-          Text("我")
+          Text(paragraph.speaker)
             .font(.caption.weight(.semibold))
             .foregroundStyle(MeetingTheme.primary)
           Text("临时转写中")
             .font(.caption2)
             .foregroundStyle(.secondary)
         }
-        Text(text)
+        Text(paragraph.text)
           .font(.subheadline)
           .foregroundStyle(.secondary)
+          .contentTransition(.opacity)
+          .animation(ContentMotion.quick, value: paragraph.text)
       }
       Spacer()
       ProgressView()
@@ -205,6 +299,23 @@ private struct LiveTranscriptRow: View {
     }
     .padding(14)
     .background(MeetingTheme.primarySoft)
+    .overlay {
+      Rectangle()
+        .fill(MeetingTheme.primary.opacity(0.08))
+        .opacity(highlighted ? 1 : 0)
+        .allowsHitTesting(false)
+    }
+    .onChange(of: paragraph.text) { oldValue, newValue in
+      guard NaturalContentChangeClassifier.text(previous: oldValue, next: newValue) != .unchanged else { return }
+      let token = UUID()
+      pulseID = token
+      withAnimation(ContentMotion.quick) { highlighted = true }
+      Task { @MainActor in
+        try? await Task.sleep(for: .milliseconds(260))
+        guard pulseID == token else { return }
+        withAnimation(ContentMotion.content) { highlighted = false }
+      }
+    }
   }
 }
 
@@ -229,6 +340,7 @@ struct SummaryPanelView: View {
   /// 纪要失败文案（alert 展示）。
   @State private var errorMessage: String?
   @State private var displayMode: DisplayMode = .normal
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     ScrollView {
@@ -261,26 +373,31 @@ struct SummaryPanelView: View {
         }
         .pickerStyle(.segmented)
 
-        if displayMode == .normal {
+        Group {
+          if displayMode == .normal {
           SummarySectionCard(
             title: "关键决策",
             systemImage: "checkmark.seal",
-            text: $meeting.decisionsText
+            text: $meeting.decisionsText,
+            revision: meeting.lastSummaryAt
           )
           SummarySectionCard(
             title: "未决问题",
             systemImage: "questionmark.bubble",
-            text: $meeting.openQuestionsText
+            text: $meeting.openQuestionsText,
+            revision: meeting.lastSummaryAt
           )
           SummarySectionCard(
             title: "风险",
             systemImage: "exclamationmark.triangle",
-            text: $meeting.risksText
+            text: $meeting.risksText,
+            revision: meeting.lastSummaryAt
           )
           SummarySectionCard(
             title: "下一步",
             systemImage: "arrow.right.circle",
-            text: $meeting.nextStepsText
+            text: $meeting.nextStepsText,
+            revision: meeting.lastSummaryAt
           )
 
           if meeting.summaryText.isEmpty {
@@ -291,7 +408,7 @@ struct SummaryPanelView: View {
             )
             .frame(minHeight: 180)
           }
-        } else if let visual = meeting.visualSummary {
+          } else if let visual = meeting.visualSummary {
           if visual.stale {
             Label("普通纪要已有更新，当前视觉版基于上一版本", systemImage: "exclamationmark.triangle.fill")
               .font(.caption)
@@ -305,7 +422,7 @@ struct SummaryPanelView: View {
           }
           .buttonStyle(.bordered)
           .disabled(isSummarizing || !preferences.visualSummaryIsVerified)
-        } else {
+          } else {
           ContentUnavailableView(
             preferences.visualSummaryIsVerified ? "尚未生成视觉纪要" : "当前使用普通纪要",
             systemImage: "rectangle.3.group",
@@ -323,11 +440,15 @@ struct SummaryPanelView: View {
             .buttonStyle(.borderedProminent)
             .disabled(isSummarizing)
           }
+          }
         }
+        .id(displayMode)
+        .transition(.opacity)
       }
       .padding(16)
       .padding(.bottom, 90)
     }
+    .animation(reduceMotion ? ContentMotion.quick : ContentMotion.view, value: displayMode)
     // 纪要更新失败提示。
     .alert(
       "纪要更新失败",
@@ -347,8 +468,8 @@ struct SummaryPanelView: View {
   /// 拼接定稿转录（含录音中的实时文本）与笔记生成纪要并保存。
   /// - 副作用：写回 meeting 字段、保存 SwiftData；远程模式下发起网络调用。
   private func summarize() async {
-    isSummarizing = true
-    defer { isSummarizing = false }
+    withAnimation(ContentMotion.quick) { isSummarizing = true }
+    defer { withAnimation(ContentMotion.quick) { isSummarizing = false } }
     do {
       let transcript =
         meeting.transcriptText
@@ -358,7 +479,7 @@ struct SummaryPanelView: View {
         notes: meeting.personalNotes,
         preferences: preferences
       )
-      meeting.apply(summary: draft)
+      withAnimation(ContentMotion.content) { meeting.apply(summary: draft) }
       try modelContext.save()
       if meeting.status == .completed && preferences.visualSummaryIsVerified,
         let sourceDate = meeting.lastSummaryAt
@@ -389,8 +510,8 @@ struct SummaryPanelView: View {
       errorMessage = "请先生成普通纪要"
       return
     }
-    isSummarizing = true
-    defer { isSummarizing = false }
+    withAnimation(ContentMotion.quick) { isSummarizing = true }
+    defer { withAnimation(ContentMotion.quick) { isSummarizing = false } }
     do {
       let visual = try await SummaryService().generateVisualSummary(
         title: meeting.title,
@@ -416,6 +537,7 @@ private struct SummarySectionCard: View {
   let systemImage: String
   /// 绑定的纪要字段文本。
   @Binding var text: String
+  let revision: Date?
 
   var body: some View {
     VStack(alignment: .leading, spacing: 9) {
@@ -431,6 +553,7 @@ private struct SummarySectionCard: View {
       MeetingTheme.surfaceRaised,
       in: RoundedRectangle(cornerRadius: 12)
     )
+    .contentUpdateFeedback(revision: revision)
   }
 }
 

@@ -37,6 +37,11 @@ export interface TranscriptSegment {
   confidence?: number;
 }
 
+/** 一个音频传输块内的原子识别片段；传输块本身不再等同于可见段落。 */
+export interface TranscriptionChunkResult {
+  segments: TranscriptSegment[];
+}
+
 /**
  * 行动项（会议待办）：从纪要中提炼的任务，含负责人、截止日期与完成状态。
  */
@@ -549,6 +554,8 @@ export interface ImportJob {
   chunkingVersion?: number;
   chunkDurationMs?: number;
   chunkOverlapMs?: number;
+  /** 自然段落规则版本；仅仍在处理的任务会升级，已完成会议不回写。 */
+  paragraphingVersion?: number;
   /** 最近一次滚动纪要已覆盖的音频位置与完成块数。 */
   lastSummaryThroughMs?: number;
   lastSummaryCompletedChunks?: number;
@@ -620,7 +627,7 @@ export interface MeetingAPI {
     /** 主进程推送的录音写盘失败告警（首次失败即时送达，不等停止收尾）。 */
     onWriteError(callback: (payload: { track: AudioTrackKind; message: string }) => void): () => void;
   }
-  /** 转写：把一个音频块交给所选 stt 档案处理，返回单个转录段落。 */
+  /** 转写：把一个音频传输块交给所选 stt 档案处理，返回其中的原子识别片段。 */
   transcription: {
     processChunk(payload: {
       profileId: string;
@@ -631,7 +638,7 @@ export interface MeetingAPI {
       endMs: number;
       track: AudioTrackKind;
       glossary?: string[];
-    }): Promise<TranscriptSegment>;
+    }): Promise<TranscriptionChunkResult>;
   };
   /**
    * 纪要生成：final=false 为录音中滚动增量，true 为会后最终总结；由用户手动触发的最终总结不跟随录音停止自动执行。

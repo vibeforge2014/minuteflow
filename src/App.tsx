@@ -399,6 +399,8 @@ export function App() {
                 <button
                   className={`icon-button ${meeting.favorite ? "is-active" : ""}`}
                   aria-label={meeting.favorite ? "取消收藏" : "收藏"}
+                  aria-pressed={meeting.favorite}
+                  title={meeting.favorite ? "取消收藏" : "收藏，固定在会议库顶部"}
                   onClick={() => handleMeetingChange({ ...meeting, favorite: !meeting.favorite })}
                 >
                   <Star size={18} weight={meeting.favorite ? "fill" : "regular"} />
@@ -406,19 +408,23 @@ export function App() {
               </div>
               <div className="document-header__actions">
                 <span className="save-state">
-                  {saving ? <ArrowClockwise size={16} className="spin" /> : <CloudCheck size={17} />}
-                  {saving ? "正在保存" : "已自动保存"}
+                  <span className="save-state__content content-status-enter" key={saving ? "saving" : "saved"}>
+                    {saving ? <ArrowClockwise size={16} className="spin" /> : <CloudCheck size={17} />}
+                    {saving ? "正在保存" : "已保存到本机"}
+                  </span>
                 </span>
                 {playerAvailable && (
                   <button
                     className={`button button--secondary button--small playback-trigger ${playerOpen ? "is-active" : ""}`}
+                    aria-pressed={playerOpen}
+                    title={playerOpen ? "收起录音回放" : "展开录音回放"}
                     onClick={() => setPlayerOpen((value) => !value)}
                   >
                     <PlayCircle size={16} weight={playerOpen ? "fill" : "regular"} />回放
                   </button>
                 )}
                 <div className="export-wrap">
-                  <button className="button button--primary button--small" onClick={() => {
+                  <button className="button button--primary button--small" aria-expanded={exportOpen} onClick={() => {
                     if (requirePremium("导出会议文档与完整备份")) {
                       setMoreOpen(false);
                       setExportOpen((value) => !value);
@@ -438,6 +444,8 @@ export function App() {
                   <button
                     className="icon-button"
                     aria-label="更多选项"
+                    aria-expanded={moreOpen}
+                    title="更多会议操作"
                     onClick={() => {
                       setExportOpen(false);
                       setMoreOpen((value) => !value);
@@ -484,7 +492,9 @@ export function App() {
                 </div>
                 <button
                   className={`icon-button ${rightPanelOpen ? "is-active" : ""}`}
-                  aria-label="显示或隐藏转录面板"
+                  aria-label={rightPanelOpen ? "关闭会议侧栏" : "打开会议侧栏"}
+                  aria-pressed={rightPanelOpen}
+                  title={rightPanelOpen ? "关闭逐字稿与 AI 纪要侧栏" : "打开逐字稿与 AI 纪要侧栏"}
                   onClick={() => setRightPanelOpen((value) => !value)}
                 >
                   <SidebarSimple size={19} />
@@ -585,6 +595,8 @@ export function App() {
           onTabChange={setRightPanelTab}
           onChange={handleMeetingChange}
           onClose={() => setRightPanelOpen(false)}
+          emptyActionLabel={workspaceStage === "review" ? "继续录音" : undefined}
+          onEmptyAction={workspaceStage === "review" ? () => setContinueRecordingOpen(true) : undefined}
           playbackMs={playbackMs}
           onSeek={(ms) => {
             // 没有可用音频（未录制/文件缺失）时不打开播放器，避免出现一个必然报错的空播放器。

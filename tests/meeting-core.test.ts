@@ -48,19 +48,28 @@ import {
   updateManifestUrls,
   validateUpdateManifest
 } from "../electron/services/updates.mjs";
-import { groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments } from "../src/lib/transcript";
+import { groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments, splitTimedTranscriptText } from "../src/lib/transcript";
 import { groupLibraryMeetings, splitHighlight } from "../src/lib/library";
 import { simplifyChinese, simplifySummary } from "../src/lib/chinese";
 import { derivePermissionSetupPhase, finishPermissionSetup, isMicrophonePermissionError, isScreenPermissionError, shouldOpenPermissionSetup, shouldRequestMicrophone } from "../src/lib/permissions";
 import { lockSummaryField, mergeSummaryRevision, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { normalizeImportChunkSegments } from "../electron/services/import-queue.mjs";
 import { audioContentType, parseByteRange } from "../electron/services/media.mjs";
+import { isTrustedPermissionRequest, isTrustedRendererUrl } from "../electron/services/permissions.mjs";
 import {
   needsRemoteTranscriptionNormalization,
   normalizeRemoteTranscriptionAudio
 } from "../electron/services/transcription-audio.mjs";
 import { buildRecordingReadiness, deriveWorkspaceStage, shouldAutoOpenRightPanel } from "../src/lib/workspace";
 import { isOnboardingSummaryReady, isOnboardingTranscriptionReady } from "../src/lib/onboarding";
+import {
+  buildSummaryContentMotion,
+  classifyListChanges,
+  classifyStringListChanges,
+  classifyTextChange,
+  findEnteringItemIds,
+  stringOccurrenceIdentity
+} from "../src/lib/content-motion";
 import type { RecorderPhase, WorkspaceStage } from "../src/lib/workspace";
 import type { Meeting, MeetingStatus, ModelProfile, TranscriptSegment } from "../src/types";
 
@@ -168,6 +177,50 @@ const meeting: Meeting = {
 
 afterEach(() => vi.restoreAllMocks());
 
+describe("content change motion classification", () => {
+  it("distinguishes a growing paragraph from a recognition correction", () => {
+    expect(classifyTextChange("我们先确认目标。", "我们先确认目标。接下来讨论范围。"))
+      .toEqual({ kind: "appended", prefix: "我们先确认目标。", suffix: "接下来讨论范围。" });
+    expect(classifyTextChange("周四上线。", "调整为周五上线。").kind).toBe("updated");
+    expect(classifyTextChange("", "第一段内容").kind).toBe("added");
+    expect(classifyTextChange("保持不变", "保持不变").kind).toBe("unchanged");
+  });
+
+  it("handles duplicate summary strings without marking old copies as new", () => {
+    expect(classifyListChanges(
+      ["保留", "保留"],
+      ["保留", "保留", "新增"],
+      stringOccurrenceIdentity,
+      (item) => item
+    )).toEqual(["unchanged", "unchanged", "added"]);
+    expect(classifyStringListChanges(["旧结论"], ["改写后的结论"])).toEqual(["updated"]);
+  });
+
+  it("marks only the changed summary fields and stable action ids", () => {
+    const previous = { ...meeting.summary, updatedAt: "2026-08-31T10:00:00.000Z" };
+    const next = {
+      ...previous,
+      keyPoints: [...previous.keyPoints, "补充验收指标"],
+      decisions: ["周五完成灰度发布"],
+      actionItems: [
+        { ...previous.actionItems[0], owner: "周哲" },
+        { id: "a2", title: "补充验收记录", owner: "我", dueDate: "09-02", status: "todo" as const, done: false }
+      ],
+      updatedAt: "2026-08-31T10:01:00.000Z"
+    };
+    const motion = buildSummaryContentMotion(previous, next);
+    expect(motion.lists.keyPoints).toEqual(["unchanged", "added"]);
+    expect(motion.lists.decisions).toEqual(["updated"]);
+    expect(motion.actions).toEqual({ a1: "updated", a2: "added" });
+  });
+
+  it("suppresses initial and meeting-switch animations but detects same-meeting inserts", () => {
+    expect(findEnteringItemIds("meeting-a", "meeting-b", new Set(["old"]), ["new"]).size).toBe(0);
+    expect(findEnteringItemIds("meeting-a", "meeting-a", new Set(["old"]), ["old", "new"]))
+      .toEqual(new Set(["new"]));
+  });
+});
+
 describe("phase-aware desktop workspace", () => {
   it("derives prepare, live, and review without adding persisted UI state", () => {
     const statuses: MeetingStatus[] = ["draft", "recording", "paused", "complete", "interrupted"];
@@ -224,6 +277,43 @@ describe("phase-aware desktop workspace", () => {
 });
 
 describe("microphone permission routing", () => {
+  it("allows the packaged main frame when Chromium reports an opaque file origin", () => {
+    expect(isTrustedRendererUrl("file:///Applications/MinuteFlow.app/Contents/Resources/app.asar/dist/client/index.html")).toBe(true);
+    expect(isTrustedPermissionRequest({
+      webContentsUrl: "file:///Applications/MinuteFlow.app/Contents/Resources/app.asar/dist/client/index.html",
+      requestingOrigin: "null",
+      requestingUrl: "file:///Applications/MinuteFlow.app/Contents/Resources/app.asar/dist/client/index.html",
+      isMainFrame: true
+    })).toBe(true);
+    expect(isTrustedPermissionRequest({
+      webContentsUrl: "file:///Applications/MinuteFlow.app/Contents/Resources/app.asar/dist/client/index.html",
+      requestingOrigin: "null",
+      requestingUrl: "",
+      isMainFrame: true
+    })).toBe(true);
+  });
+
+  it("allows only the configured development origin", () => {
+    const developmentServerUrl = "http://127.0.0.1:5173";
+    expect(isTrustedRendererUrl("http://127.0.0.1:5173/?preview=desktop", developmentServerUrl)).toBe(true);
+    expect(isTrustedRendererUrl("http://127.0.0.1:5174/", developmentServerUrl)).toBe(false);
+    expect(isTrustedRendererUrl("http://127.0.0.1:5173.evil.example/", developmentServerUrl)).toBe(false);
+  });
+
+  it("rejects embedded or explicitly untrusted media request frames", () => {
+    const packagedWindow = "file:///Applications/MinuteFlow.app/Contents/Resources/app.asar/dist/client/index.html";
+    expect(isTrustedPermissionRequest({
+      webContentsUrl: packagedWindow,
+      requestingUrl: "https://malicious.example/frame",
+      isMainFrame: false
+    })).toBe(false);
+    expect(isTrustedPermissionRequest({
+      webContentsUrl: packagedWindow,
+      requestingUrl: "https://malicious.example/",
+      isMainFrame: true
+    })).toBe(false);
+  });
+
   it("requests access for stale or undecided states but not for granted", () => {
     expect(shouldRequestMicrophone("unknown")).toBe(true);
     expect(shouldRequestMicrophone("not-determined")).toBe(true);
@@ -465,6 +555,52 @@ describe("transcript window merge", () => {
     expect(grouped).toHaveLength(3);
     expect(grouped[0]).toMatchObject({ id: "one", startMs: 0, endMs: 8_000, text: "先确认目标。然后评估方案。" });
     expect(grouped[1].text).toBe("今天能完成吗？");
+  });
+
+  it("merges one utterance across transport windows and breaks on a topic opener", () => {
+    const grouped = groupTranscriptSegments([
+      segment("chunk-0", 0, 8_000, "我们先确认目标，"),
+      segment("chunk-1", 8_000, 16_000, "再看执行路径。"),
+      segment("chunk-2", 16_000, 24_000, "接下来讨论风险。")
+    ]);
+    expect(grouped).toHaveLength(2);
+    expect(grouped[0]).toMatchObject({
+      id: "chunk-0",
+      startMs: 0,
+      endMs: 16_000,
+      text: "我们先确认目标，再看执行路径。"
+    });
+    expect(grouped[1].text).toBe("接下来讨论风险。");
+  });
+
+  it("breaks natural paragraphs on speaker changes, 1.5 second pauses, and hard punctuation", () => {
+    const changedSpeaker = { ...segment("speaker-2", 4_000, 6_000, "我补充一点。"), speakerId: "speaker-2" };
+    const grouped = groupTranscriptSegments([
+      segment("question", 0, 2_000, "这个方案可行吗？"),
+      segment("answer", 2_000, 3_500, "可以。"),
+      changedSpeaker,
+      { ...segment("after-pause", 7_500, 9_000, "继续。"), speakerId: "speaker-2" }
+    ]);
+    expect(grouped.map((item) => item.id)).toEqual(["question", "answer", "speaker-2", "after-pause"]);
+  });
+
+  it("uses two sentences as a soft boundary and preserves the first fragment id", () => {
+    const grouped = groupTranscriptSegments([
+      segment("first", 0, 2_000, "第一句。"),
+      segment("second", 2_000, 4_000, "第二句。"),
+      segment("third", 4_000, 6_000, "第三句。")
+    ]);
+    expect(grouped).toHaveLength(2);
+    expect(grouped[0]).toMatchObject({ id: "first", text: "第一句。第二句。" });
+    expect(grouped[1].id).toBe("third");
+  });
+
+  it("splits a flat provider response into proportional timestamped sentences", () => {
+    const fragments = splitTimedTranscriptText("先确认。然后继续！最后收尾", 10_000, 20_000);
+    expect(fragments.map((item) => item.text)).toEqual(["先确认。", "然后继续！", "最后收尾"]);
+    expect(fragments[0].startMs).toBe(10_000);
+    expect(fragments.at(-1)?.endMs).toBe(20_000);
+    expect(fragments.every((item, index) => index === 0 || item.startMs === fragments[index - 1].endMs)).toBe(true);
   });
 
   it("merges speaker labels without changing other turns", () => {

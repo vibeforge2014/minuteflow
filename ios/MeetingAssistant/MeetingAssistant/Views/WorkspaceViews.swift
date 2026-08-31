@@ -9,7 +9,7 @@
 
 import SwiftUI
 
-/// iPad 三栏工作区：侧栏会议库 + 中栏会议文档 + 详情栏洞察面板，底部悬浮录音条。
+/// iPad 三栏工作区：侧栏会议库 + 中栏会议文档 + 详情栏洞察面板，底部安全区内放置录音条。
 struct TabletWorkspaceView: View {
   @Environment(AppState.self) private var appState
   let meetings: [MeetingRecord]
@@ -23,24 +23,26 @@ struct TabletWorkspaceView: View {
     } content: {
       if let meeting = selectedMeeting {
         MeetingDocumentView(meeting: meeting, showsVisualSwitcher: true)
+          .navigationSplitViewColumnWidth(min: 420, ideal: 610, max: 760)
       } else {
         EmptyMeetingSelectionView()
       }
     } detail: {
       if let meeting = selectedMeeting {
         InsightPanelView(meeting: meeting)
+          .navigationSplitViewColumnWidth(min: 330, ideal: 390, max: 500)
       } else {
         EmptyMeetingSelectionView()
       }
     }
     .navigationSplitViewStyle(.balanced)
-    // 录音条悬浮于三栏之上，只在选中会议时出现。
-    .overlay(alignment: .bottom) {
+    // 为录音条预留真实布局空间，长文档和大字体不会被悬浮控件遮挡。
+    .safeAreaInset(edge: .bottom, spacing: 0) {
       if let meeting = selectedMeeting {
         RecorderBar(meeting: meeting)
           .frame(maxWidth: 760)
           .padding(.horizontal, 20)
-          .padding(.bottom, 12)
+          .padding(.vertical, 10)
       }
     }
   }
@@ -96,13 +98,19 @@ private struct PhoneMeetingsView: View {
   var body: some View {
     NavigationStack {
       List {
-        if !favorites.isEmpty {
-          Section("收藏") {
-            rows(favorites)
+        if filteredMeetings.isEmpty {
+          ContentUnavailableView.search(text: searchText)
+        } else {
+          if !favorites.isEmpty {
+            Section("收藏") {
+              rows(favorites)
+            }
           }
-        }
-        Section("最近会议") {
-          rows(nonFavoriteMeetings)
+          if !nonFavoriteMeetings.isEmpty {
+            Section("最近会议") {
+              rows(nonFavoriteMeetings)
+            }
+          }
         }
       }
       .searchable(text: $searchText, prompt: "搜索标题、笔记或转录")
@@ -186,6 +194,7 @@ private struct PhoneMeetingDetailView: View {
 
   let meeting: MeetingRecord
   @State private var selectedSection: Section = .document
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     VStack(spacing: 0) {
@@ -199,28 +208,27 @@ private struct PhoneMeetingDetailView: View {
       .padding(.vertical, 10)
       .background(MeetingTheme.surface)
 
-      switch selectedSection {
-      case .document:
-        MeetingDocumentView(meeting: meeting)
-      case .transcript:
-        TranscriptPanelView(meeting: meeting)
-      case .summary:
-        SummaryPanelView(meeting: meeting)
+      Group {
+        switch selectedSection {
+        case .document:
+          MeetingDocumentView(meeting: meeting)
+        case .transcript:
+          TranscriptPanelView(meeting: meeting)
+        case .summary:
+          SummaryPanelView(meeting: meeting)
+        }
       }
+      .id(selectedSection)
+      .transition(.opacity)
     }
     .navigationBarTitleDisplayMode(.inline)
-    .toolbar {
-      ToolbarItem(placement: .principal) {
-        Text(meeting.title)
-          .font(.headline)
-          .lineLimit(1)
-      }
-    }
-    .safeAreaInset(edge: .bottom, spacing: 0) {
-      RecorderBar(meeting: meeting)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
+    .animation(reduceMotion ? ContentMotion.quick : ContentMotion.view, value: selectedSection)
+    .navigationTitle(selectedSection == .document ? "会议文档" : selectedSection.rawValue)
+    .safeAreaInset(edge: .bottom, spacing: 6) {
+      RecorderBar(meeting: meeting, compact: true)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(MeetingTheme.canvas)
     }
   }
 }
@@ -228,6 +236,7 @@ private struct PhoneMeetingDetailView: View {
 /// 行动项总览（iPhone 第二标签）：聚合所有会议里未完成的行动项，按会议分组展示。
 struct ActionItemsOverviewView: View {
   let meetings: [MeetingRecord]
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     NavigationStack {
@@ -239,13 +248,17 @@ struct ActionItemsOverviewView: View {
             description: Text("会议纪要生成的行动项会集中显示在这里")
           )
         } else {
-          ForEach(activeItems, id: \.item.id) { entry in
-            Section(entry.meeting.title) {
-              ActionItemRow(item: entry.item)
+          ForEach(meetingsWithActiveItems, id: \.meeting.id) { group in
+            Section(group.meeting.title) {
+              ForEach(group.items) { item in
+                ActionItemRow(item: item)
+                  .transition(ContentMotion.insertion(reduceMotion: reduceMotion))
+              }
             }
           }
         }
       }
+      .animation(ContentMotion.content, value: activeItems.map(\.item.id))
       .navigationTitle("行动项")
     }
   }
@@ -256,6 +269,14 @@ struct ActionItemsOverviewView: View {
       meeting.orderedActionItems
         .filter { $0.status != .done }
         .map { (meeting, $0) }
+    }
+  }
+
+  /** 每场会议只显示一个分组标题，组内保留行动项原有顺序。 */
+  private var meetingsWithActiveItems: [(meeting: MeetingRecord, items: [ActionItemRecord])] {
+    meetings.compactMap { meeting in
+      let items = meeting.orderedActionItems.filter { $0.status != .done }
+      return items.isEmpty ? nil : (meeting, items)
     }
   }
 }

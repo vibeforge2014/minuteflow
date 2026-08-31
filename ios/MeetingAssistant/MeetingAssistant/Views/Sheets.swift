@@ -124,7 +124,7 @@ struct NewMeetingView: View {
 
 // MARK: - 设置
 
-/// 设置页：AI 纪要、语音转录、自动纪要、说话人说明与隐私存储分区。
+/// 设置页：AI 总结、语音转录、纪要更新、说话人说明与隐私存储分区。
 /// 导航位置：iPhone 为 TabView“设置”标签（无完成按钮）；iPad 经全局 sheet
 /// 弹出（带“完成”按钮）。
 struct SettingsView: View {
@@ -195,7 +195,7 @@ struct SettingsView: View {
           }
         }
       } header: {
-        Text("AI 纪要")
+        Text("AI 总结")
       } footer: {
         Text("本地基础纪要不会上传数据。视觉纪要需显式开启并测试；生成视觉版时只发送已保存的普通纪要和必要会议元信息。")
       }
@@ -234,14 +234,17 @@ struct SettingsView: View {
         Text("Apple Speech 是内置路径；远程 Whisper 配置用于导入音频和后续后台处理。")
       }
 
-      Section("自动纪要") {
-        Picker("更新间隔", selection: $preferences.summaryIntervalSeconds) {
+      Section {
+        Picker("滚动纪要间隔", selection: $preferences.summaryIntervalSeconds) {
           Text("2 分钟").tag(120)
           Text("5 分钟").tag(300)
           Text("10 分钟").tag(600)
         }
-        Toggle("完成录音后自动整理", isOn: .constant(true))
-          .disabled(true)
+        LabeledContent("最终 AI 纪要", value: "会后手动生成")
+      } header: {
+        Text("纪要更新")
+      } footer: {
+        Text("录音中按间隔更新滚动纪要；最终 AI 纪要需在会后由你主动生成。")
       }
 
       // 说话人策略说明：仅手动改名，不做声纹/身份识别。
@@ -264,6 +267,7 @@ struct SettingsView: View {
         }
       }
     }
+    .contentMargins(.bottom, showsDoneButton ? 20 : 84, for: .scrollContent)
     .navigationTitle("设置")
     .toolbar {
       if showsDoneButton {
@@ -395,7 +399,7 @@ struct OnboardingView: View {
   @State private var errorMessage: String?
   @State private var isRequestingPermission = false
 
-  private let pageTitles = ["欢迎", "录音权限", "语音转录", "AI 纪要"]
+  private let pageTitles = ["欢迎", "录音权限", "语音转录", "AI 总结"]
 
   var body: some View {
     VStack(spacing: 0) {
@@ -576,7 +580,7 @@ struct OnboardingView: View {
     VStack(alignment: .leading, spacing: 18) {
       onboardingSectionIntro(
         "sparkles",
-        eyebrow: "第二项 · AI 纪要",
+        eyebrow: "第二项 · AI 总结",
         title: "把文字整理成可执行纪要",
         detail: "在线模型生成更完整的终稿；不配置时会自动使用本机基础纪要。"
       )

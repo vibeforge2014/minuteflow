@@ -41,6 +41,10 @@ html.marketing-mode body {
   background: #fbfbfc;
 }
 
+html.marketing-mode body.site-menu-open {
+  overflow: hidden;
+}
+
 .site-loading {
   width: 100%;
   height: 100vh;
@@ -223,6 +227,7 @@ html.marketing-mode body {
 .site-nav__actions {
   display: flex;
   align-items: center;
+  margin-left: auto;
 }
 
 .site-button {
@@ -285,6 +290,16 @@ html.marketing-mode body {
   border: 0;
   border-radius: 10px;
   background: transparent;
+}
+
+.site-menu-scrim {
+  position: fixed;
+  z-index: 49;
+  inset: 0;
+  display: none;
+  padding: 0;
+  border: 0;
+  background: rgba(34, 28, 25, .16);
 }
 
 .hero {
@@ -2057,6 +2072,10 @@ html.marketing-mode body {
 }
 
 @media (max-width: 960px) {
+  .site-menu-scrim {
+    display: block;
+  }
+
   .site-links {
     position: absolute;
     top: 66px;
@@ -2067,11 +2086,11 @@ html.marketing-mode body {
     gap: 2px;
     visibility: hidden;
     opacity: 0;
-    background: rgba(255, 255, 255, 0.94);
+    background: #fff;
     border: 1px solid rgba(21, 26, 37, 0.08);
     border-radius: 14px;
     box-shadow: 0 18px 46px rgba(24, 30, 44, 0.13);
-    backdrop-filter: blur(22px);
+    backdrop-filter: none;
     transform: translateY(-6px) scale(0.98);
     transform-origin: top right;
     transition:
@@ -2103,7 +2122,7 @@ html.marketing-mode body {
   }
 
   .hero {
-    min-height: 940px;
+    min-height: 900px;
   }
 
   .product-stage {
@@ -2162,8 +2181,8 @@ html.marketing-mode body {
   }
 
   .hero {
-    min-height: 760px;
-    padding: 135px 18px 75px;
+    min-height: 720px;
+    padding: 118px 18px 62px;
   }
 
   .hero h1 {
@@ -2193,7 +2212,7 @@ html.marketing-mode body {
 
   .product-stage {
     width: calc(100vw - 28px);
-    margin-top: 48px;
+    margin-top: 38px;
   }
 
   .product-window {
@@ -2202,6 +2221,12 @@ html.marketing-mode body {
 
   .product-window__bar {
     height: 29px;
+  }
+
+  .product-window img {
+    width: 158%;
+    max-width: none;
+    transform: translateX(-23%);
   }
 
   .floating-note {

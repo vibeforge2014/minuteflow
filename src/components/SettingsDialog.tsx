@@ -457,15 +457,15 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
             </div>
             <div className="settings-nav__group">
               <span className="settings-nav__label">应用</span>
-              <button className={tab === "general" ? "is-active" : ""} onClick={() => setTab("general")}><GearSix size={18} />通用设置</button>
-              <button className={tab === "llm" ? "is-active" : ""} onClick={() => setTab("llm")}><Sparkle size={18} />AI 总结</button>
-              <button className={tab === "transcription" ? "is-active" : ""} onClick={() => setTab("transcription")}><Waveform size={18} />转录设置</button>
-              <button className={tab === "storage" ? "is-active" : ""} onClick={() => setTab("storage")}><ShieldCheck size={18} />存储与隐私</button>
+              <button aria-current={tab === "general" ? "page" : undefined} className={tab === "general" ? "is-active" : ""} onClick={() => setTab("general")}><GearSix size={18} />通用设置</button>
+              <button aria-current={tab === "llm" ? "page" : undefined} className={tab === "llm" ? "is-active" : ""} onClick={() => setTab("llm")}><Sparkle size={18} />AI 总结</button>
+              <button aria-current={tab === "transcription" ? "page" : undefined} className={tab === "transcription" ? "is-active" : ""} onClick={() => setTab("transcription")}><Waveform size={18} />转录设置</button>
+              <button aria-current={tab === "storage" ? "page" : undefined} className={tab === "storage" ? "is-active" : ""} onClick={() => setTab("storage")}><ShieldCheck size={18} />存储与隐私</button>
             </div>
             <div className="settings-nav__group settings-nav__group--bottom">
               <span className="settings-nav__label">关于</span>
             {showUpdateSettings && (
-              <button className={tab === "updates" ? "is-active" : ""} onClick={() => setTab("updates")}><ArrowClockwise size={18} />软件更新</button>
+              <button aria-current={tab === "updates" ? "page" : undefined} className={tab === "updates" ? "is-active" : ""} onClick={() => setTab("updates")}><ArrowClockwise size={18} />软件更新</button>
             )}
               <div className="settings-nav__privacy"><ShieldCheck size={15} weight="fill" /><span>本地优先<br /><small>你的会议数据默认留在本机</small></span></div>
             </div>

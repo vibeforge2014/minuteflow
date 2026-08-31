@@ -19,6 +19,7 @@ import { useMeetingStore } from "../store/meetingStore";
 import { formatDuration } from "../lib/format";
 import { groupLibraryMeetings, splitHighlight } from "../lib/library";
 import { BrandMark } from "./BrandMark";
+import { useEnteringItemIds } from "../hooks/useContentMotion";
 
 interface SidebarProps {
   meetings: Meeting[];
@@ -40,6 +41,8 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, impor
   // 收藏置顶 + 时间分组（搜索时退回纯时间分组），meetings/搜索状态变化时才重算。
   const groups = useMemo(() => groupLibraryMeetings(meetings, search.trim().length > 0), [meetings, search]);
   const searching = search.trim().length > 0;
+  const visibleMeetingIds = useMemo(() => groups.flatMap((group) => group.meetings.map((meeting) => meeting.id)), [groups]);
+  const enteringMeetingIds = useEnteringItemIds(`library:${search}`, visibleMeetingIds);
 
   return (
     <aside className="sidebar">
@@ -83,7 +86,7 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, impor
               {group.label}
             </h2>
             {group.meetings.map((meeting) => (
-              <div key={meeting.id} className="meeting-row-wrap">
+              <div key={meeting.id} className={`meeting-row-wrap ${enteringMeetingIds.has(meeting.id) ? "content-motion-enter" : ""}`}>
                 <button
                   className={`meeting-row ${selectedId === meeting.id ? "is-selected" : ""}`}
                   onClick={() => onSelect(meeting.id)}

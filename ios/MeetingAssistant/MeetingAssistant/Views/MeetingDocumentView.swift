@@ -24,6 +24,7 @@ struct MeetingDocumentView: View {
   @Environment(\.modelContext) private var modelContext
   /// 读取自动纪要间隔用于展示。
   @Environment(AppPreferences.self) private var preferences
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   /// 双向绑定的会议模型。
   @Bindable var meeting: MeetingRecord
   /// iPad 三栏中栏显式开启切换；不能依赖中栏自身的 size class（窄列会被系统标记为 compact）。
@@ -83,6 +84,7 @@ struct MeetingDocumentView: View {
       }
     }
     .background(MeetingTheme.canvas)
+    .animation(reduceMotion ? ContentMotion.quick : ContentMotion.view, value: documentMode)
     .navigationSplitViewColumnWidth(min: 420, ideal: 620)
     // 导出成功后弹出系统分享面板。
     .sheet(item: $shareItem) { item in
@@ -228,6 +230,7 @@ struct MeetingDocumentView: View {
         .frame(minHeight: 180)
         .padding(10)
         .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 10))
+        .contentUpdateFeedback(revision: meeting.lastSummaryAt, cornerRadius: 10)
         .accessibilityLabel("可编辑会议纪要")
     }
   }
@@ -245,6 +248,7 @@ struct MeetingDocumentView: View {
       } else {
         ForEach(meeting.orderedActionItems) { item in
           ActionItemRow(item: item)
+            .transition(ContentMotion.insertion(reduceMotion: reduceMotion))
           if item.id != meeting.orderedActionItems.last?.id {
             Divider()
           }
@@ -255,13 +259,14 @@ struct MeetingDocumentView: View {
           title: "新的行动项",
           meeting: meeting
         )
-        meeting.actionItems.append(item)
+        withAnimation(ContentMotion.content) { meeting.actionItems.append(item) }
         markUpdated()
       } label: {
         Label("添加行动项", systemImage: "plus")
       }
       .buttonStyle(.borderless)
     }
+    .animation(ContentMotion.content, value: meeting.orderedActionItems.map(\.id))
   }
 
   /// “决策、问题与风险”卡片：决策/未决/风险/下一步四个可编辑小节。
@@ -355,11 +360,14 @@ struct ActionItemRow: View {
     HStack(alignment: .top, spacing: 12) {
       // 勾选按钮：在已完成/未开始之间切换。
       Button {
-        item.status = item.status == .done ? .todo : .done
+        withAnimation(ContentMotion.quick) {
+          item.status = item.status == .done ? .todo : .done
+        }
       } label: {
         Image(systemName: item.status == .done ? "checkmark.square.fill" : "square")
           .font(.title3)
           .foregroundStyle(item.status == .done ? MeetingTheme.success : .secondary)
+          .contentTransition(.opacity)
       }
       .buttonStyle(.plain)
       .accessibilityLabel(item.status == .done ? "标记为未完成" : "标记为完成")

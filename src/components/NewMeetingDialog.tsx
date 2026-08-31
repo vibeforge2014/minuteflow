@@ -130,10 +130,10 @@ export function NewMeetingDialog({
         <div className="field">
           <span>会议模式</span>
           <div className="segmented">
-            <button type="button" className={mode === "online" ? "is-active" : ""} onClick={() => setMode("online")}>
+            <button type="button" aria-pressed={mode === "online"} className={mode === "online" ? "is-active" : ""} onClick={() => setMode("online")}>
               <Microphone size={17} />线上会议
             </button>
-            <button type="button" className={mode === "offline" ? "is-active" : ""} onClick={() => setMode("offline")}>
+            <button type="button" aria-pressed={mode === "offline"} className={mode === "offline" ? "is-active" : ""} onClick={() => setMode("offline")}>
               <Users size={17} />线下会议
             </button>
           </div>
@@ -165,10 +165,10 @@ export function NewMeetingDialog({
         )}
         {error && <p className="dialog-error" role="alert"><WarningCircle size={14} weight="fill" />{error}</p>}
         <footer>
-          <span><CalendarBlank size={16} />默认每 {formatInterval(preferences.summaryIntervalSeconds)} 更新纪要</span>
+          <span><CalendarBlank size={16} />回车仅创建会议 · 每 {formatInterval(preferences.summaryIntervalSeconds)} 更新纪要</span>
           <div>
             <button type="button" className="text-button dialog-cancel" onClick={onClose} disabled={busy}>取消</button>
-            <button type="submit" className="text-button new-meeting-create-only" disabled={busy}>仅创建，稍后录音</button>
+            <button type="submit" className="text-button new-meeting-create-only" disabled={busy}>创建会议</button>
             <button
               type="submit"
               className="button button--primary"

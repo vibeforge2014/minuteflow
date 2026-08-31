@@ -1,3 +1,70 @@
+# Design QA — MinuteFlow 跨端体验轻量优化（2026-08-31）
+
+## Evidence
+
+- Source visual truth: `/Users/zqian15/.codex/generated_images/019fb0bc-fbcb-7e43-9466-3ebdf9e5dba6/call_1Z4kzuiPHEUQd1XCaaJAnBNL.png` (1487 × 1058 px), the selected lightweight-document workspace direction recorded in `AGENTS.md`.
+- Browser-rendered desktop implementation: `/tmp/minuteflow-ux-polish/desktop-1487x1058.png` (1487 × 1058 px) at a 1487 × 1058 CSS viewport and density 1. No density or aspect-ratio normalization was needed.
+- Combined full-view comparison input: `/tmp/minuteflow-ux-polish/design-qa-combined.png` (1487 × 600 px), with source and implementation scaled equally to 50% and placed side by side.
+- Focused header/workspace comparison input: `/tmp/minuteflow-ux-polish/design-qa-focused-header.png` (1487 × 560 px), with the upper 250 px of each 1487 × 1058 artifact stacked at 1:1 scale.
+- Responsive/browser evidence: `/tmp/minuteflow-ux-polish/desktop-settings-1100x800.png`, `/tmp/minuteflow-ux-polish/marketing-390x844.png`, and `/tmp/minuteflow-ux-polish/marketing-menu-final-390x844.png`.
+- Native iPhone evidence: `/tmp/minuteflow-ux-polish/ios-iphone-library.png` and `/tmp/minuteflow-ux-polish/ios-iphone-library-light.png` (1206 × 2622 px dark/light simulator captures). iPad layout was verified by its dedicated landscape UI test rather than retained as screenshot evidence.
+- State: source is a live meeting; implementation is the same three-column information architecture in the recoverable pre-meeting state with a populated transcript. The state mismatch is intentional, so comparison judgments cover anatomy, hierarchy, density, typography, tokens, and persistent controls rather than live-only content.
+
+## Findings
+
+- No actionable P0, P1, or P2 findings remain.
+- Fonts and typography: the system/PingFang stack preserves the source's compact document hierarchy, restrained metadata, and readable transcript density. Desktop titles, state labels, settings copy, mobile menu labels, and native iOS list metadata do not clip at the tested sizes.
+- Spacing and layout rhythm: the desktop retains a stable library/document/transcript grid and a lightweight central document. Header actions now form a readable title/favorite group and a separate local-save/export/utility group. The 1100 × 800 settings workbench keeps its editor scroll area and sticky bottom actions fully inside the dialog.
+- Colors and visual tokens: the source's structural hierarchy is retained while blue product chrome is intentionally mapped to MinuteFlow's durable warm-coral system. Coral is limited to primary actions and selected product states; semantic green, amber, red, and speaker colors remain distinct.
+- Image quality and asset fidelity: no new or substitute artwork was introduced. The website continues to use the real product screenshot and existing MinuteFlow brand asset; desktop uses Phosphor and iOS uses SF Symbols. The 390 px screenshot crop enlarges the real workspace asset without stretching it.
+- Copy and content: settings/setup consistently use “AI 总结”; content results and workspace switches use “AI 纪要”. Meeting phases, local-save wording, recoverable import states, and the user-initiated final-minutes behavior are coherent across React and SwiftUI.
+- Icons and controls: icon buttons now expose selected/expanded states and explanatory labels; settings navigation exposes the current page; mobile segmented controls keep native behavior and practical touch targets.
+- Responsiveness and accessibility: no horizontal overflow was measured at 1487 × 1058 or 1100 × 800. iPhone and iPad recorder bars occupy safe-area layout space instead of covering content. Reduced-motion/transparency fallbacks, visible keyboard focus, Escape handling, menu focus restoration, and 44 px mobile menu controls remain present.
+
+## Full-view comparison evidence
+
+- The combined input confirms the same dominant three-column composition, narrow searchable meeting library, wide document canvas, transcript utility rail, compact top chrome, and high information density.
+- The implementation intentionally replaces the source's live-only toolbar and blue accent with the approved staged workflow, warm coral brand tint, local-save status, and preparation card. These are product constraints recorded in `AGENTS.md`, not unresolved fidelity drift.
+- Persistent controls remain visible without overlapping the document. The populated transcript keeps the right panel useful even while the central workspace is in preparation state.
+
+## Focused region comparison evidence
+
+- The 1:1 upper-region comparison verifies title/favorite adjacency, local-save/export grouping, panel tabs, three column boundaries, lightweight dividers, and restrained border radii at readable scale.
+- The focused input was necessary because the equal-scale full-view board makes small header labels and panel controls too small to judge reliably.
+
+## Comparison history
+
+1. First desktop pass — P2 header grouping: the editable title used a fixed viewport-relative width, which left the favorite control visually floating near the center of the header.
+   - Fix: changed the title input to content-sized layout with the existing minimum/maximum constraints and preserved narrow-window caps.
+   - Post-fix evidence: `/tmp/minuteflow-ux-polish/desktop-1487x1058.png` and `/tmp/minuteflow-ux-polish/design-qa-focused-header.png` show the star directly following the title group.
+2. First 390 px website pass — P2 mobile navigation alignment: when the main links became absolutely positioned, the menu button no longer occupied the trailing edge of the floating navigation bar.
+   - Fix: gave the navigation-actions group automatic leading margin, keeping the 44 × 44 control at x=324 inside the 366 px bar.
+   - Post-fix evidence: `/tmp/minuteflow-ux-polish/marketing-menu-final-390x844.png`; the opaque menu, dimming scrim, and trailing close control are aligned with no page scroll.
+3. Post-fix comparison found no remaining P0/P1/P2 visual, responsive, interaction, or accessibility mismatch.
+
+## Primary interactions tested
+
+- Desktop three-column panel open/close, settings navigation, stable editor scrolling, sticky save/test actions, Cmd+N, Esc, Cmd+K, initial dialog focus, and search focus.
+- Website mobile menu open, document scroll lock, Escape close, focus return to the menu button, and 390 px screenshot crop; browser console warnings/errors checked on desktop, settings, and website states: none.
+- iPhone light/dark library rendering, action/settings tabs, meeting detail, AI-minutes switch, onboarding, and safe bottom layout through UI tests; iPad three-column document/transcript/recorder coexistence through the landscape UI test.
+- TypeScript, 85 Vitest cases, Swift build, 12 Swift unit tests, 5 iPhone UI tests (1 iPad-only skip), the dedicated iPad UI test, production build, and 4 Sites worker tests pass.
+
+## Implementation checklist
+
+- [x] Cross-platform AI-summary/minutes and lifecycle wording.
+- [x] Desktop header grouping, contextual empty state, settings bottom actions, import hierarchy, and narrow-window stability.
+- [x] iPhone/iPad safe-area recorder placement, compact phone idle state, grouped action items, settings explanation, and adaptive split widths.
+- [x] Opaque mobile website menu, scroll lock, Escape/outside close, focus restoration, tighter hero rhythm, and readable real-product screenshot crop.
+- [x] Keyboard, reduced-motion/transparency, responsive, native SwiftUI, build, test, and Sites packaging validation.
+
+## Follow-up polish
+
+- P3 release smoke test: VoiceOver reading order, the largest accessibility text sizes, iPad portrait split-view contraction, and macOS/Windows native title-bar hit regions should still receive the planned human pass on release hardware; the automated and simulator checks found no blocker.
+
+final result: passed
+
+---
+
 # Design QA — macOS 权限引导完成率优化（渐进式流程）
 
 ## Evidence

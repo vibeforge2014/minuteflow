@@ -21,6 +21,7 @@ struct AppRootView: View {
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   /// SwiftData 上下文（播种、导入、纪要保存）。
   @Environment(\.modelContext) private var modelContext
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   /// 全局 UI 状态。
   @Environment(AppState.self) private var appState
   /// 录音协调器（监听自动纪要节拍）。
@@ -105,8 +106,10 @@ struct AppRootView: View {
     .overlay {
       if importCoordinator.isImporting {
         ImportProgressOverlay(text: importCoordinator.progressText)
+          .transition(ContentMotion.insertion(reduceMotion: reduceMotion))
       }
     }
+    .animation(reduceMotion ? ContentMotion.quick : ContentMotion.content, value: importCoordinator.isImporting)
     // 导入失败提示。
     .alert(
       "无法导入",
@@ -186,7 +189,7 @@ struct AppRootView: View {
         notes: meeting.personalNotes,
         preferences: preferences
       )
-      meeting.apply(summary: draft)
+      withAnimation(ContentMotion.content) { meeting.apply(summary: draft) }
       try modelContext.save()
     } catch {
       appState.toastMessage = "自动纪要稍后重试：\(error.localizedDescription)"
@@ -208,6 +211,8 @@ private struct ImportProgressOverlay: View {
           .controlSize(.large)
         Text(text)
           .font(.headline)
+          .contentTransition(.opacity)
+          .animation(ContentMotion.quick, value: text)
       }
       .padding(28)
       .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
