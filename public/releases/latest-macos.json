@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.23",
+  "version": "0.1.24",
   "platform": "darwin",
   "architectures": [
     "arm64"
   ],
-  "publishedAt": "2026-08-30T17:06:30Z",
+  "publishedAt": "2026-08-31T15:16:49Z",
   "minimumSystemVersion": "14.2",
-  "notes": "MinuteFlow 0.1.23 优化 macOS 权限引导：支持重启后恢复、系统音频验证、拖拽助手状态反馈与双显示器定位。",
+  "notes": "MinuteFlow 0.1.24 带来自然转录分段、内容更新动效与跨端体验优化，并修复已授权麦克风仍无法开始录音的问题。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.23",
-  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.23/MinuteFlow-0.1.23-macOS-arm64.dmg",
-  "sha256": "e3bd189300cc0f8cd8c29761e80c900a3aea9c906588935b89f51dd1b6ddf8b0"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.24",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.24/MinuteFlow-0.1.24-macOS-arm64.dmg",
+  "sha256": "aa71e249f54b3c8ed992d0d012c3d75f925014f30659f4c20794f3cc595ecbb2"
 }
