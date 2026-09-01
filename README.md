@@ -28,6 +28,8 @@ npm install
 npm run dev:electron
 ```
 
+开发命令已启用完整热更新：修改 `src/` 时由 Vite/React 即时热替换并尽量保留页面状态；修改 `electron/` 下的主进程、preload 或服务代码时，桌面应用会自动重启。退出 Electron 窗口或按 `Ctrl+C` 会同时关闭开发服务器。
+
 仅预览界面：
 
 ```bash
