@@ -1,0 +1,60 @@
+name: Deploy MinuteFlow site to zensoft.top
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "public/**"
+      - "index.html"
+      - "vite.config.mjs"
+      - "scripts/prepare-sites-build.mjs"
+      - ".github/workflows/deploy-site.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-site
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build site
+        run: npm run build
+
+      - name: Check deploy secrets
+        id: secrets
+        env:
+          SSH_KEY: ${{ secrets.ZENSOFT_SSH_KEY }}
+        run: |
+          if [ -z "$SSH_KEY" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::ZENSOFT_SSH_KEY 等密钥未配置，跳过部署"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy to zensoft.top
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          SSH_KEY: ${{ secrets.ZENSOFT_SSH_KEY }}
+          SSH_HOST: ${{ secrets.ZENSOFT_SSH_HOST }}
+          SSH_USER: ${{ secrets.ZENSOFT_SSH_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key" dist/client/ \
+            "$SSH_USER@$SSH_HOST:/var/www/zensoft/sites/minuteflow/"

@@ -2,7 +2,7 @@
 
 本地优先的 Electron 跨平台会议工作台，支持边录音、边转录、边记录，并以两分钟为默认节奏生成结构化滚动纪要。
 
-产品官网：[vibeforge2014.github.io/meeting-assistant-site](https://vibeforge2014.github.io/meeting-assistant-site/)
+产品官网：[zensoft.top/minuteflow](https://zensoft.top/minuteflow/)
 
 ## 已实现
 

@@ -569,7 +569,7 @@ const browserApi: MeetingAPI = {
       };
     },
     async openCheckout() {
-      window.open("https://vibeforge2014.github.io/minuteflow/pricing/", "_blank", "noopener,noreferrer");
+      window.open("https://zensoft.top/minuteflow/pricing/", "_blank", "noopener,noreferrer");
       return { opened: true as const };
     }
   },
@@ -592,7 +592,7 @@ const browserApi: MeetingAPI = {
       };
     },
     async openDownload() {
-      window.open("https://vibeforge2014.github.io/minuteflow/downloads/macos/latest/", "_blank", "noopener,noreferrer");
+      window.open("https://zensoft.top/minuteflow/downloads/macos/latest/", "_blank", "noopener,noreferrer");
       return { opened: true } as const;
     },
     onAvailable() { return () => {}; }

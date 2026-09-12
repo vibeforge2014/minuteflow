@@ -8,16 +8,17 @@
  * 副作用：网络请求。更新从不静默安装，只引导用户跳转官方下载页。
  */
 // Public update sources, tried in order, selected per desktop platform. The
-// official product site manifest is primary; the GitHub API is a resilient
-// fallback that always reflects the latest release. The legacy private
-// chatgpt.site host is no longer queried.
-// 公开更新源（按序尝试，按平台选择）：官网清单为主，GitHub API 为兜底；旧的私有宿主不再查询。
+// official product site manifest is primary; the GitHub Pages mirror and the
+// GitHub API are resilient fallbacks that always reflect the latest release.
+// 公开更新源（按序尝试，按平台选择）：官网清单为主，GitHub Pages 镜像与 GitHub API 为兜底。
 const MANIFEST_SOURCES = {
   darwin: [
+    "https://zensoft.top/minuteflow/releases/latest-macos.json",
     "https://vibeforge2014.github.io/minuteflow/releases/latest-macos.json",
     "https://api.github.com/repos/vibeforge2014/minuteflow/releases/latest"
   ],
   win32: [
+    "https://zensoft.top/minuteflow/releases/latest-windows.json",
     "https://vibeforge2014.github.io/minuteflow/releases/latest-windows.json",
     "https://api.github.com/repos/vibeforge2014/minuteflow/releases/latest"
   ]
@@ -31,6 +32,7 @@ const DEFAULT_MINIMUM_SYSTEM_VERSION = { darwin: "14.2", win32: "10.0.19045" };
 
 /** 下载/跳转地址的宿主 allow-list：任何更新链接必须落在这些 HTTPS 宿主上。 */
 const OFFICIAL_HOSTS = new Set([
+  "zensoft.top",
   "vibeforge2014.github.io",
   "github.com",
   "api.github.com"
