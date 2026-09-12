@@ -1,14 +1,17 @@
 /**
  * Vite 配置（渲染层构建）：
- * - base "./"：相对路径产物，兼容 GitHub Pages 子路径与 Electron file:// 加载。
+ * - base 默认 "./"：相对路径产物，兼容 Electron file:// 加载；部署官网时用
+ *   SITE_BASE_PATH=/minuteflow 构建出绝对子路径资源（深层路由如 /pricing/ 需要）。
  * - outDir dist/client：配合 scripts/prepare-sites-build.mjs 组装 Sites 交付物。
  * - dev server 允许 terminal.local 主机名（局域网预览），Electron 开发模式依赖此服务。
  */
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+const siteBasePath = process.env.SITE_BASE_PATH?.replace(/\/$/, "");
+
 export default defineConfig({
-  base: "./",
+  base: siteBasePath ? `${siteBasePath}/` : "./",
   build: {
     outDir: "dist/client",
   },
