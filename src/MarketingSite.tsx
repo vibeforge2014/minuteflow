@@ -960,7 +960,12 @@ function SiteFooter() {
           <GithubLogo size={16} /> GitHub
         </a>
       </div>
-      <p>© 2026 MinuteFlow · 本地优先的会议工作台</p>
+      <p>
+        © 2026 绍兴市臻书科技有限公司 · 版权所有 ·{" "}
+        <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">
+          浙ICP备2026072549号
+        </a>
+      </p>
     </footer>
   );
 }

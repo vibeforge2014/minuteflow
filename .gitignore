@@ -16,3 +16,9 @@ ios/**/*.xcresult
 ios/**/*.xcodeproj/xcuserdata/
 ios/**/*.xcworkspace/xcuserdata/
 ios/**/artifacts/
+
+# Desktop build staging
+.build/
+
+# Local design QA screenshots
+/artifacts/
