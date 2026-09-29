@@ -1169,7 +1169,6 @@ describe("desktop online updates", () => {
     });
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(new Response("missing", { status: 404 }))
-      .mockResolvedValueOnce(new Response("missing", { status: 404 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(githubRelease), { status: 200 }));
     const result = await checkForAppUpdate({
       currentVersion: "0.1.1",
@@ -1177,7 +1176,7 @@ describe("desktop online updates", () => {
       arch: "arm64",
       fetchImpl
     });
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ status: "available", update: { version: "0.2.0" } });
   });
 
@@ -1225,7 +1224,6 @@ describe("desktop online updates", () => {
       assetUrl: "https://github.com/vibeforge2014/minuteflow/releases/download/v0.2.0/MinuteFlow-Setup.exe"
     });
     const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(new Response("missing", { status: 404 }))
       .mockResolvedValueOnce(new Response("missing", { status: 404 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(githubRelease), { status: 200 }));
     const result = await checkForAppUpdate({
