@@ -878,6 +878,11 @@ export function loadJob(id) {
   return rowToJob(openDatabase().prepare("SELECT * FROM jobs WHERE id = ?").get(id));
 }
 
+/** 删除任务记录（仅队列展示用途；关联会议与归档音频由各自的删除/保留策略管理）。 */
+export function deleteJob(id) {
+  openDatabase().prepare("DELETE FROM jobs WHERE id = ?").run(id);
+}
+
 /** 按类型列出任务（默认 import），创建时间倒序，导入中心列表调用。 */
 export function listJobs(type = "import") {
   return openDatabase().prepare(`

@@ -29,8 +29,14 @@
   --motion-fast: 160ms;
   --motion-content: 220ms;
   --motion-view: 180ms;
+  --motion-dialog: 320ms;
+  --motion-panel: 300ms;
   --ease-out-ui: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out-ui: cubic-bezier(0.77, 0, 0.175, 1);
+  /* Apple 式动效词汇：emphasized 承担空间位移（面板/对话框减速进场），
+     spring 带轻微过冲，只用于小元素的形态反馈（勾选、徽标）。 */
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 * {
@@ -86,6 +92,13 @@ button {
   grid-template-columns: var(--sidebar-width) minmax(560px, 1fr);
   height: 100vh;
   background: var(--surface);
+}
+
+/* 有会议时固定三轨（第三轨可折叠为 0），让右侧面板的展开/收起表现为
+   同一个对象的形变：轨道宽度和面板一起过渡，而不是瞬间换一版布局。 */
+.app-shell--document {
+  grid-template-columns: var(--sidebar-width) minmax(560px, 1fr) 0px;
+  transition: grid-template-columns var(--motion-panel) var(--ease-emphasized);
 }
 
 .app-shell--right-open {
@@ -351,6 +364,34 @@ button {
   color: var(--accent-strong);
 }
 
+/* 行内删除：与星标同排悬浮出现，位于星标左侧，红色悬停以示危险（软删除可恢复）。 */
+.meeting-row-delete {
+  position: absolute;
+  right: 33px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  color: #a7adb5;
+  background: rgba(255, 255, 255, 0.92);
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.meeting-row-wrap:hover .meeting-row-delete,
+.meeting-row-delete:focus-visible {
+  opacity: 1;
+}
+
+.meeting-row-delete:hover {
+  color: var(--red);
+  background: rgba(229, 64, 67, 0.1);
+}
+
 /* 搜索命中片段：淡暖色底，不改变字号行高，避免行高跳动。 */
 .meeting-row__title mark {
   padding: 0 1px;
@@ -437,7 +478,7 @@ button {
 .import-progress { height: 4px; margin-top: 11px; overflow: hidden; border-radius: 99px; background: #eee9e4; }.import-progress i { display: block; height: 100%; border-radius: inherit; background: #d8664d; transition: width 250ms var(--ease-in-out-ui), background-color var(--motion-fast) ease; }
 .import-job--complete .import-progress i { background: #4d9877; }.import-job--cancelled .import-progress i { background: #a7a099; }
 .import-job .import-job__error { margin-top: 8px; color: #ad443a; white-space: normal; }
-.import-job__actions { display: flex; gap: 7px; margin-top: 9px; }.import-job__actions:empty { display: none; }.import-job__actions button { display: flex; align-items: center; gap: 4px; padding: 5px 8px; border: 0; border-radius: 7px; background: #f5f0eb; color: #625950; font-size: 10px; }
+.import-job__actions { display: flex; gap: 7px; margin-top: 9px; }.import-job__actions:empty { display: none; }.import-job__actions button { display: flex; align-items: center; gap: 4px; padding: 5px 8px; border: 0; border-radius: 7px; background: #f5f0eb; color: #625950; font-size: 10px; }.import-job__actions button.import-job__remove:hover { color: var(--red); background: rgba(229, 64, 67, 0.1); }
 @keyframes import-slide-in { from { transform: translateX(24px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .import-drawer { animation: none; }.import-job { transition: none; } }
 
@@ -938,61 +979,64 @@ button {
   font-size: 11px;
 }
 
-.summary-timeline {
+/* 关键结论：暖色文档卡内的一组结论行。结论没有先后语义，用圆点引导而不是编号，
+   卡片让纪要重心落在结论区，和“轻量文档 + 淡桃色卡片”的视觉语言一致。 */
+.summary-points {
   margin-left: 24px;
+  padding: 5px;
+  border: 1px solid #f0e2d8;
+  border-radius: 12px;
+  background: linear-gradient(150deg, #fffdfb 0%, #fdf4ee 100%);
+  box-shadow: 0 6px 22px rgba(103, 67, 47, .05);
 }
 
-.summary-timeline > div {
+.summary-point {
   position: relative;
   display: grid;
-  grid-template-columns: 43px 1fr auto auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto;
   align-items: start;
   gap: 7px;
-  min-height: 28px;
-  padding: 5px 7px 5px 0;
-  border-radius: 4px;
+  padding: 10px 10px 10px 9px;
+  border-radius: 8px;
   transition: background-color var(--motion-content) ease;
 }
 
-.summary-timeline > div.is-new {
+.summary-point.is-new {
   background: rgba(69, 172, 91, 0.1);
 }
 
-.summary-timeline > .section-empty {
-  display: block;
-  min-height: 54px;
-  padding: 16px;
+.summary-point > i {
+  width: 6px;
+  height: 6px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(231, 111, 81, 0.14);
 }
 
-.summary-timeline time {
-  padding-top: 1px;
-  color: var(--blue);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.summary-timeline textarea {
+.summary-point textarea {
   width: 100%;
-  min-height: 18px;
+  min-height: 20px;
   margin: 0;
   padding: 0;
   resize: none;
   overflow: hidden;
   border: 0;
-  border-radius: 3px;
+  border-radius: 4px;
   background: transparent;
-  color: #3d424b;
-  font-size: 12px;
-  line-height: 1.5;
+  color: #33383f;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
-.summary-timeline textarea:hover,
-.summary-timeline textarea:focus {
-  padding: 0 3px;
-  background: rgba(255, 255, 255, 0.72);
+.summary-point textarea:hover,
+.summary-point textarea:focus {
+  padding: 0 4px;
+  background: rgba(255, 255, 255, 0.78);
 }
 
-.summary-timeline span {
+.summary-point > span {
+  padding-top: 2px;
   color: var(--green);
   font-size: 10px;
   font-weight: 650;
@@ -1000,6 +1044,26 @@ button {
 
 .summary-more {
   margin: 5px 0 0 20px;
+}
+
+/* 操作因果：按压瞬间轻缩（无过渡、立即生效），松手立即回弹——
+   与触控/鼠标输入直接绑定，代替固定播放的悬停动画。 */
+.button:not(:disabled):active,
+.text-button:not(:disabled):active,
+.icon-button:active,
+.panel-tabs button:active,
+.summary-view-switch button:active,
+.note-mode-switch button:active,
+.editor-toolbar button:active,
+.settings-nav button:active,
+.model-catalog__section button:active,
+.model-catalog__custom:active,
+.new-meeting:active,
+.readiness-item ~ .preparation-start:active,
+.meeting-row-wrap:active .meeting-row:not(.is-selected),
+.summary-view-switch button:active,
+.import-subsection-heading button:active {
+  transform: scale(0.97);
 }
 
 .section-empty {
@@ -1173,8 +1237,8 @@ button {
   margin-top: 8px;
 }
 
-.summary-timeline .summary-lock {
-  margin-top: 4px;
+.summary-point .summary-lock {
+  margin-top: 3px;
 }
 
 .summary-detail > span {
@@ -1197,6 +1261,25 @@ button {
   overflow: hidden;
   background: #fbfbfc;
   border-left: 1px solid var(--line);
+}
+
+/* 面板宽度固定为最终轨道宽：展开/收起时内容不逐帧重排，
+   与轨道动画一起读作“同一块面板滑入/滑出”，而不是换一版布局。 */
+.app-shell--document .transcript-panel {
+  width: var(--panel-width);
+  animation: panel-in var(--motion-panel) var(--ease-emphasized) both;
+}
+
+.transcript-panel.is-closing {
+  animation: panel-out 240ms var(--ease-emphasized) both;
+}
+
+@keyframes panel-in {
+  from { opacity: 0; transform: translateX(36px); }
+}
+
+@keyframes panel-out {
+  to { opacity: 0; transform: translateX(36px); }
 }
 
 .transcript-panel__header {
@@ -2786,6 +2869,14 @@ html[data-surface="permission-helper"] #root {
   padding: 24px;
   background: rgba(21, 24, 30, 0.32);
   backdrop-filter: blur(3px);
+  animation: backdrop-in var(--motion-view) ease-out both;
+}
+
+/* 空间连续性：对话框不是凭空出现，而是从当前内容“上方浮出”再收回；
+   进场减速（emphasized 出口）、退场加速收回，方向与层级语义一致。 */
+.modal-backdrop.is-closing {
+  pointer-events: none;
+  animation: backdrop-out 150ms var(--ease-emphasized) both;
 }
 
 .dialog {
@@ -2797,6 +2888,41 @@ html[data-surface="permission-helper"] #root {
   border: 1px solid rgba(255, 255, 255, 0.7);
   border-radius: 12px;
   box-shadow: 0 28px 80px rgba(17, 21, 30, 0.22);
+}
+
+/* 权限墙/付费墙保留各自的 materialize 进场；关闭时统一轻收回。 */
+.dialog:not(.permission-wall):not(.paywall-dialog) {
+  animation: dialog-in var(--motion-dialog) var(--ease-emphasized) both;
+  will-change: transform;
+}
+
+.modal-backdrop.is-closing .dialog {
+  animation: dialog-out 170ms var(--ease-emphasized) both;
+}
+
+@keyframes backdrop-in {
+  from { opacity: 0; }
+}
+
+@keyframes backdrop-out {
+  to { opacity: 0; }
+}
+
+@keyframes dialog-in {
+  from { opacity: 0; transform: translateY(16px) scale(0.955); }
+}
+
+@keyframes dialog-out {
+  to { opacity: 0; transform: translateY(10px) scale(0.965); }
+}
+
+/* 设置页内容区：切换分类时轻位移淡入，表达“深入到下一层”而不是整页替换。 */
+.settings-content {
+  animation: settings-pane-in 240ms var(--ease-emphasized) both;
+}
+
+@keyframes settings-pane-in {
+  from { opacity: 0; transform: translateY(6px); }
 }
 
 .dialog > header {
@@ -2854,12 +2980,17 @@ html[data-surface="permission-helper"] #root {
   color: #31353d;
   background: white;
   font-size: 12px;
+  /* 操作因果：焦点态随输入即时生长（边框/阴影快速过渡），无悬空动画。 */
+  transition:
+    border-color var(--motion-fast) var(--ease-out-ui),
+    box-shadow var(--motion-fast) var(--ease-out-ui);
 }
 
 .field input:focus,
 .field textarea:focus,
 .field select:focus {
   border-color: #e5a18e;
+  box-shadow: 0 0 0 3px rgba(231, 111, 81, 0.1);
 }
 
 .field textarea {
@@ -3021,6 +3152,7 @@ html[data-surface="permission-helper"] #root {
   font-size: 12px;
   font-weight: 560;
   text-align: left;
+  transition: color var(--motion-fast) var(--ease-out-ui), background-color var(--motion-fast) var(--ease-out-ui);
 }
 
 .settings-nav button:hover {
@@ -3235,6 +3367,9 @@ html[data-surface="permission-helper"] #root {
   padding: 26px 32px 32px;
   overflow-y: auto;
   background: #fff;
+  /* 对象连续性：目录里切换服务时，配置面板作为同一个对象轻位移淡入，
+     读作“进入这条服务的配置”，而不是整版内容硬切。 */
+  animation: settings-pane-in 240ms var(--ease-emphasized) both;
 }
 
 .profile-editor-heading {
@@ -3617,7 +3752,18 @@ html[data-surface="permission-helper"] #root {
   border-radius: 7px;
   background: #fafbfc;
   text-align: left;
+  /* 扫描结果/下载目录到达时轻淡入，前几张错开一点时间形成序列感。 */
+  animation: content-fade-enter var(--motion-view) var(--ease-out-ui) both;
 }
+
+.local-model-list > button:nth-child(2),
+.download-model-card:nth-of-type(2) { animation-delay: 24ms; }
+
+.local-model-list > button:nth-child(3),
+.download-model-card:nth-of-type(3) { animation-delay: 48ms; }
+
+.local-model-list > button:nth-child(n + 4),
+.download-model-card:nth-of-type(n + 4) { animation-delay: 72ms; }
 
 .local-model-list > button.is-selected {
   color: var(--blue);
@@ -3815,6 +3961,12 @@ html[data-surface="permission-helper"] #root {
   cursor: pointer;
 }
 
+/* 展开高级设置：内容从摘要下方轻展开，符合“深入一层”的层级语义。 */
+.advanced-provider-options[open] > .field,
+.advanced-provider-options[open] > div {
+  animation: settings-pane-in 200ms var(--ease-emphasized) both;
+}
+
 .advanced-provider-options .field {
   margin-top: 9px;
 }
@@ -3826,11 +3978,17 @@ html[data-surface="permission-helper"] #root {
   background: #edf7f0;
   border-radius: 6px;
   font-size: 10px;
+  /* 系统反馈进场：短淡入 + 轻上移，结果“到达”而非闪现。 */
+  animation: status-slide-in 220ms var(--ease-out-ui) both;
 }
 
 .connection-status.is-error {
   color: #a63e41;
   background: #fff0f0;
+}
+
+@keyframes status-slide-in {
+  from { opacity: 0; transform: translateY(4px); }
 }
 
 .profile-actions {
@@ -4068,6 +4226,16 @@ html[data-surface="permission-helper"] #root {
 .toast-stack .toast {
   --toast-x: 0%;
   position: static;
+  /* 系统提示弹入：轻微过冲的 spring，让“有新消息”可感知但不打扰。 */
+  animation: toast-pop-in 300ms var(--ease-spring) both;
+}
+
+@keyframes toast-pop-in {
+  from { opacity: 0; transform: translate(0%, -8px) scale(0.97); }
+}
+
+.toast-stack .toast.is-closing {
+  animation: none;
 }
 
 .dialog-error {
@@ -4144,28 +4312,26 @@ html[data-surface="permission-helper"] #root {
 .meeting-document--review .document-section--notes { order: 4; }
 .meeting-document--review .document-section--goals { order: 5; }
 
-/* —— 普通纪要 / 视觉纪要：视觉版沿用轻文档密度，不复制竞品品牌样式 —— */
+/* —— 普通纪要 / 视觉纪要：收在会后整理横幅右侧与生成按钮同组，
+   样式与中央视图胶囊同语言（无描边分段控件），不再单独占一行 —— */
 .summary-view-switch {
-  order: .5;
-  align-self: center;
   display: inline-flex;
-  gap: 3px;
-  margin: 2px 0 18px;
+  gap: 2px;
   padding: 3px;
-  border: 1px solid #e7e0db;
-  border-radius: 10px;
-  background: #f6f2ef;
+  border: none;
+  border-radius: 999px;
+  background: rgba(60, 39, 29, .055);
 }
 
 .summary-view-switch button {
   position: relative;
-  min-height: 32px;
+  min-height: 28px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 0 13px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 999px;
   color: #80766f;
   background: transparent;
   font-size: 12px;
@@ -4176,10 +4342,17 @@ html[data-surface="permission-helper"] #root {
     box-shadow var(--motion-fast) var(--ease-out-ui);
 }
 
+.summary-view-switch button:not(.is-active):hover {
+  color: #6f645b;
+  background: rgba(60, 39, 29, .045);
+}
+
 .summary-view-switch button.is-active {
   color: #a54833;
   background: white;
-  box-shadow: 0 1px 5px rgba(60, 39, 29, .08);
+  box-shadow:
+    0 1px 2px rgba(60, 39, 29, .1),
+    0 2px 8px rgba(60, 39, 29, .06);
 }
 
 .summary-view-switch button > span {
@@ -4193,6 +4366,15 @@ html[data-surface="permission-helper"] #root {
 }
 
 .meeting-document--visual > .document-section { display: none; }
+
+/* 普通纪要 ↔ 视觉纪要：同一个文档对象的形态切换，轻缩放淡入表达“变换”而非换页。 */
+.meeting-document {
+  animation: document-view-in 260ms var(--ease-emphasized) both;
+}
+
+@keyframes document-view-in {
+  from { opacity: 0; transform: scale(0.992); }
+}
 
 .visual-summary-shell {
   order: 1;
@@ -4411,8 +4593,27 @@ html[data-surface="permission-helper"] #root {
 .visual-capability-setting label > span { display: grid; gap: 3px; }
 .visual-capability-setting strong { color: #423a35; font-size: 12px; }
 .visual-capability-setting small { color: #8f857e; font-size: 10px; line-height: 1.5; }
-.visual-capability-setting > span { padding: 4px 8px; border-radius: 999px; color: #8c8179; background: #f1ece8; font-size: 9px; white-space: nowrap; }
+.visual-capability-setting > span { padding: 4px 8px; border-radius: 999px; color: #8c8179; background: #f1ece8; font-size: 9px; white-space: nowrap; transition: color var(--motion-fast) var(--ease-out-ui), background-color var(--motion-fast) var(--ease-out-ui); }
 .visual-capability-setting > span.is-verified { color: #47765d; background: #eaf5ed; }
+
+/* 验证通过的徽标轻弹一下（spring 过冲只用于这类小元素形态反馈）。 */
+.visual-capability-setting > span.is-verified { animation: badge-pop 300ms var(--ease-spring) both; }
+
+@keyframes badge-pop {
+  from { opacity: 0.4; transform: scale(0.82); }
+}
+
+/* 勾选/开关类控件的按压因果反馈。 */
+.visual-capability-setting input[type="checkbox"]:active,
+.profile-editor input[type="checkbox"]:active,
+.local-model-manager input[type="checkbox"]:active {
+  transform: scale(0.88);
+}
+
+.visual-capability-setting input[type="checkbox"],
+.profile-editor input[type="checkbox"] {
+  transition: transform 90ms var(--ease-out-ui);
+}
 
 @media (max-width: 1180px) {
   .visual-card-grid { grid-template-columns: 1fr; }
@@ -4546,11 +4747,19 @@ html[data-surface="permission-helper"] #root {
 
 .review-hero.is-fresh { border-color: #d9e9de; background: #f6fbf7; }
 .review-hero .button { flex: 0 0 auto; min-height: 40px; }
+/* 会后整理右侧工具位：形态切换（普通/视觉）与生成按钮上下同组，右对齐。 */
+.review-hero__side {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
 
 .summary-lock { opacity: 0; transition: opacity 120ms ease, color 120ms ease, background 120ms ease; }
 .summary-lock.is-locked,
-.summary-timeline > div:hover .summary-lock,
-.summary-timeline > div:focus-within .summary-lock,
+.summary-point:hover .summary-lock,
+.summary-point:focus-within .summary-lock,
 .summary-detail-row:hover .summary-lock,
 .summary-detail-row:focus-within .summary-lock,
 .action-row:hover .summary-lock,
@@ -4593,6 +4802,11 @@ html[data-surface="permission-helper"] #root {
   justify-items: center;
   color: #747a84;
   text-align: center;
+}
+
+/* 空状态进场：工作区不是被“清空”，而是回到引导页。 */
+.empty-state {
+  animation: content-view-enter var(--motion-view) var(--ease-out-ui) both;
 }
 
 .empty-state > div:first-child {
@@ -4791,6 +5005,9 @@ html[data-surface="permission-helper"] #root {
   .readiness-item { min-height: 0; }
   .review-hero { align-items: flex-start; flex-direction: column; }
   .review-hero .button { width: 100%; }
+  .review-hero__side { width: 100%; align-items: stretch; }
+  .review-hero__side .summary-view-switch { width: 100%; }
+  .review-hero__side .summary-view-switch button { flex: 1; justify-content: center; }
   .document-header__title input { max-width: min(48vw, 340px); }
   .recorder-bar { min-height: 78px; flex-basis: 78px; padding-inline: 12px; }
   .transcription-status { display: none; }
@@ -4826,6 +5043,413 @@ html[data-surface="permission-helper"] #root {
   }
 }
 
+/* —— 中央工作区视图切换（AI 纪要 / 转写）与会话右栏 —— */
+
+/* 视图切换是浮在文档滚动内容上的半透明胶囊：滚动长纪要时标签始终可达（空间连续性）。
+   不用描边成形——靠「中性暖灰轨道 + 白色滑块」的填充对比（Apple 分段控件语言），
+   硬边框在暖色纸面上会显脏。 */
+.workspace-view-switch {
+  position: sticky;
+  top: 6px;
+  z-index: 6;
+  width: fit-content;
+  margin: 16px auto 14px;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(60, 39, 29, .055);
+  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  backdrop-filter: blur(14px) saturate(1.3);
+  box-shadow: 0 1px 2px rgba(60, 39, 29, .04);
+}
+
+.workspace-view-switch button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 15px;
+  border: none;
+  background: transparent;
+  border-radius: 999px;
+  color: #8c8178;
+  font-size: 12px;
+  font-weight: 650;
+  transition:
+    color var(--motion-fast) var(--ease-out-ui),
+    background-color var(--motion-fast) var(--ease-out-ui),
+    box-shadow var(--motion-fast) var(--ease-out-ui),
+    transform 120ms var(--ease-out-ui);
+}
+
+.workspace-view-switch button:not(.is-active):hover {
+  color: #6f645b;
+  background: rgba(60, 39, 29, .045);
+}
+
+.workspace-view-switch button:active {
+  transform: scale(0.97);
+}
+
+.workspace-view-switch button.is-active {
+  color: #a54833;
+  background: #fff;
+  box-shadow:
+    0 1px 2px rgba(60, 39, 29, .1),
+    0 2px 8px rgba(60, 39, 29, .06);
+}
+
+/* 中央转写视图：外层占满切换条以下的可用高度，列表内部滚动，
+   跟随/回到底部按钮与改名浮层相对该容器定位。 */
+.workspace-transcript {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(880px, calc(100% - 48px));
+  margin: 0 auto;
+  height: calc(100% - 70px);
+  padding-bottom: 24px;
+  animation: document-view-in 260ms var(--ease-emphasized) both;
+}
+
+.workspace-transcript .speaker-strip {
+  padding: 2px 0 10px;
+}
+
+.workspace-transcript .transcript-list {
+  flex: 1;
+}
+
+/* —— 右栏 AI 问答 —— */
+
+.chat-panel__header {
+  height: 68px;
+  flex: 0 0 68px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 10px 20px;
+  border-bottom: 1px solid var(--line);
+  -webkit-app-region: drag;
+}
+
+.chat-panel__header h2 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.chat-panel__header p {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #98918a;
+}
+
+.chat-panel__actions {
+  display: flex;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.chat-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 16px 10px;
+  scrollbar-width: thin;
+}
+
+.chat-empty {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  text-align: center;
+  color: var(--accent-strong);
+}
+
+.chat-empty p {
+  max-width: 230px;
+  color: #8c8178;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.chat-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  width: 100%;
+}
+
+.chat-suggestions button {
+  padding: 9px 12px;
+  border: 1px solid #e9e1db;
+  border-radius: 10px;
+  background: #fff;
+  color: #5b544e;
+  font-size: 12px;
+  text-align: left;
+  transition:
+    border-color var(--motion-fast) var(--ease-out-ui),
+    background-color var(--motion-fast) var(--ease-out-ui),
+    transform 120ms var(--ease-out-ui);
+}
+
+.chat-suggestions button:hover {
+  border-color: #e5a18e;
+  background: var(--accent-soft);
+  color: #a54833;
+}
+
+.chat-suggestions button:active {
+  transform: scale(0.97);
+}
+
+.chat-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.chat-row--user {
+  justify-content: flex-end;
+}
+
+.chat-avatar {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.chat-bubble {
+  max-width: 84%;
+  padding: 9px 12px;
+  border-radius: 14px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  animation: chat-bubble-in 220ms var(--ease-spring) both;
+}
+
+.chat-bubble--user {
+  background: var(--accent-strong);
+  color: #fff;
+  border-bottom-right-radius: 5px;
+}
+
+.chat-bubble--assistant {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-bottom-left-radius: 5px;
+  color: #3c3631;
+}
+
+/* 助手回答的 Markdown 排版：紧凑轻文档密度，宽度受气泡约束。
+   气泡外壳是 pre-wrap（用户消息纯文本），Markdown 容器重置回块级排版。 */
+.chat-bubble__content { white-space: normal; }
+.chat-bubble__content > :first-child { margin-top: 0; }
+.chat-bubble__content > :last-child { margin-bottom: 0; }
+.chat-bubble__content p { margin: 6px 0; }
+.chat-bubble__content ul,
+.chat-bubble__content ol { margin: 6px 0; padding-left: 18px; }
+.chat-bubble__content li { margin: 3px 0; }
+.chat-bubble__content li::marker { color: #c08a76; }
+.chat-bubble__content h1,
+.chat-bubble__content h2,
+.chat-bubble__content h3,
+.chat-bubble__content h4 {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #4a423b;
+}
+.chat-bubble__content strong { font-weight: 700; color: #4a423b; }
+.chat-bubble__content code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(60, 39, 29, .06);
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+}
+.chat-bubble__content pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(60, 39, 29, .05);
+  overflow-x: auto;
+  white-space: pre;
+}
+.chat-bubble__content pre code { padding: 0; background: none; }
+.chat-bubble__content blockquote {
+  margin: 6px 0;
+  padding-left: 10px;
+  border-left: 2px solid #ecd9cf;
+  color: #756a63;
+}
+.chat-bubble__content a { color: var(--accent-strong); }
+
+/* 流式输出：正文/思考的最后一个块级元素后跟一枚打字光标，回答完成后移除。 */
+.chat-bubble__content.is-streaming > :last-child::after,
+.chat-thinking__body.is-streaming::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  margin-left: 3px;
+  vertical-align: -2px;
+  border-radius: 1.5px;
+  background: var(--accent-strong);
+  animation: chat-caret-blink 0.9s steps(2, start) infinite;
+}
+
+@keyframes chat-caret-blink {
+  50% { opacity: 0; }
+}
+
+/* 思考过程（思维链）：默认收起的小披露块，位于回答上方；展开内容为静音纯文本。 */
+.chat-thinking { margin-bottom: 7px; }
+.chat-thinking__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(60, 39, 29, .05);
+  color: #857a72;
+  font-size: 11px;
+  font-weight: 650;
+  transition: background-color var(--motion-fast) var(--ease-out-ui), color var(--motion-fast) var(--ease-out-ui);
+}
+.chat-thinking__toggle:hover { background: rgba(60, 39, 29, .09); color: #6f645b; }
+.chat-thinking__toggle:active { transform: scale(0.97); }
+.chat-thinking__caret { transition: transform var(--motion-fast) var(--ease-out-ui); }
+.chat-thinking__caret.is-open { transform: rotate(180deg); }
+/* 思考流式中：开关文字带珊瑚色呼吸提示。 */
+.chat-thinking__toggle.is-streaming { color: var(--accent-strong); }
+.chat-thinking__toggle.is-streaming .chat-thinking__caret { display: none; }
+.chat-thinking__body {
+  margin: 7px 0 0;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(60, 39, 29, .04);
+  color: #756a63;
+  font-size: 11.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  animation: content-fade-enter 160ms var(--ease-out-ui) both;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.chat-bubble.is-failed {
+  background: #fdf3f0;
+  border-color: #f0cfc7;
+  color: #b3361d;
+}
+
+@keyframes chat-bubble-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+/* “正在思考”三点：纯位移微动画，Reduced Motion 下降级为静态省略号。 */
+.chat-typing {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px 0;
+}
+
+.chat-typing i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #c9c1ba;
+  animation: chat-dot 1s ease-in-out infinite;
+}
+
+.chat-typing i:nth-child(2) { animation-delay: 150ms; }
+.chat-typing i:nth-child(3) { animation-delay: 300ms; }
+
+@keyframes chat-dot {
+  0%, 60%, 100% { transform: translateY(0); opacity: .45; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+.chat-composer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 12px 14px 14px;
+  border-top: 1px solid var(--line);
+  background: #fbfbfc;
+}
+
+.chat-composer textarea {
+  flex: 1;
+  min-height: 38px;
+  max-height: 110px;
+  resize: none;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  transition: border-color var(--motion-fast) var(--ease-out-ui), box-shadow var(--motion-fast) var(--ease-out-ui);
+}
+
+.chat-composer textarea:focus {
+  outline: none;
+  border-color: #e5a18e;
+  box-shadow: 0 0 0 3px rgba(231, 111, 81, .1);
+}
+
+.chat-composer textarea:disabled {
+  opacity: .6;
+}
+
+.chat-send {
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--accent-strong);
+  color: #fff;
+  transition: background-color var(--motion-fast) var(--ease-out-ui), transform 120ms var(--ease-out-ui), opacity var(--motion-fast) var(--ease-out-ui);
+}
+
+.chat-send:hover:not(:disabled) { background: var(--accent-pressed); }
+
+.chat-send:active:not(:disabled) { transform: scale(0.92); }
+
+.chat-send:disabled { opacity: .45; cursor: not-allowed; }
+
 @media (prefers-reduced-motion: reduce) {
   .content-motion-enter,
   .content-motion-update,
@@ -4842,10 +5466,42 @@ html[data-surface="permission-helper"] #root {
     transition: opacity 140ms ease-out !important;
   }
 
+  .toast-stack .toast,
+  .toast-stack .toast.is-closing {
+    animation: none !important;
+  }
+
+  .empty-state {
+    animation: content-fade-enter 140ms ease-out both !important;
+    transform: none !important;
+  }
+
   .transcript-item,
-  .summary-timeline > div,
+  .summary-point,
   .import-progress i {
     transition-duration: 140ms !important;
+  }
+
+  .chat-bubble,
+  .chat-thinking__body,
+  .workspace-transcript {
+    animation: content-fade-enter 140ms ease-out both !important;
+    transform: none !important;
+  }
+
+  .chat-thinking__caret {
+    transition: none !important;
+  }
+
+  .chat-bubble__content.is-streaming > :last-child::after,
+  .chat-thinking__body.is-streaming::after {
+    animation: none !important;
+    opacity: .6;
+  }
+
+  .chat-typing i {
+    animation: none !important;
+    opacity: .55;
   }
 
   .panel-tabs button,
@@ -4870,6 +5526,59 @@ html[data-surface="permission-helper"] #root {
   .summary-lock {
     animation: none !important;
     transition-duration: 0.01ms !important;
+  }
+
+  /* 新的空间动效：去掉位移，只保留极短淡入淡出；栅格轨道与按压缩放同样归零/瞬时。 */
+  .dialog:not(.permission-wall):not(.paywall-dialog),
+  .modal-backdrop.is-closing .dialog {
+    animation: content-fade-enter 140ms ease-out both !important;
+    transform: none !important;
+  }
+
+  .app-shell--document {
+    transition: none !important;
+  }
+
+  .app-shell--document .transcript-panel,
+  .transcript-panel.is-closing {
+    animation: content-fade-enter 140ms ease-out both !important;
+    transform: none !important;
+  }
+
+  .settings-content {
+    animation: content-fade-enter 140ms ease-out both !important;
+    transform: none !important;
+  }
+
+  .meeting-document {
+    animation: content-fade-enter 140ms ease-out both !important;
+    transform: none !important;
+  }
+
+  /* 设置内部交互：同样只保留极短淡入，位移与过冲归零。 */
+  .profile-editor-wrap,
+  .connection-status,
+  .advanced-provider-options[open] > .field,
+  .advanced-provider-options[open] > div,
+  .visual-capability-setting > span.is-verified {
+    animation: content-fade-enter 140ms ease-out both !important;
+    transform: none !important;
+  }
+
+  .visual-capability-setting input[type="checkbox"]:active,
+  .profile-editor input[type="checkbox"]:active,
+  .local-model-manager input[type="checkbox"]:active {
+    transform: none !important;
+  }
+
+  .button:not(:disabled):active,
+  .text-button:not(:disabled):active,
+  .icon-button:active,
+  .settings-nav button:active,
+  .model-catalog__section button:active,
+  .new-meeting:active,
+  .meeting-row-wrap:active .meeting-row:not(.is-selected) {
+    transform: none !important;
   }
 }
 

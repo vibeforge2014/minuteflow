@@ -20,6 +20,7 @@ import { derivePermissionSetupPhase, isScreenPermissionError } from "../lib/perm
 import type { PermissionSetupPhase } from "../lib/permissions";
 import type { SystemPermissionStatus, SystemPermissionValue } from "../types";
 import { useDialogFocus } from "../hooks/useDialogFocus";
+import { useExitPresence } from "../hooks/useExitPresence";
 import { BrandMark } from "./BrandMark";
 
 const initialStatus: SystemPermissionStatus = {
@@ -139,7 +140,8 @@ export function SystemPermissionsDialog({
     return () => window.clearTimeout(timer);
   }, [open, phase]);
 
-  if (!open) return null;
+  const { mounted, closing } = useExitPresence(open, 170);
+  if (!mounted) return null;
 
   const requestMicrophone = async () => {
     setChecking(true);
@@ -251,7 +253,7 @@ export function SystemPermissionsDialog({
 
   const copy = phaseCopy(phase, returningUser, screenSettingsOpened);
 
-  return <div className="modal-backdrop permission-wall-backdrop">
+  return <div className={`modal-backdrop permission-wall-backdrop ${closing ? "is-closing" : ""}`}>
     <section ref={dialogRef} className={`dialog permission-wall permission-wall--${phase}`} role="dialog" aria-modal="true" aria-labelledby="permission-wall-title">
       <header className="permission-wall__header">
         <div className="permission-wall__symbol">{phase === "success" ? <CheckCircle size={27} weight="duotone" /> : <ShieldCheck size={27} weight="duotone" />}</div>

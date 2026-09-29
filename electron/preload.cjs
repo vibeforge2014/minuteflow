@@ -37,6 +37,24 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     generateVisual: (payload) => invoke("summary:generate-visual", payload),
     cancel: (meetingId) => invoke("summary:cancel", meetingId)
   },
+  chat: {
+    // 流式问答：传入 onDelta 时生成 streamId 并订阅 chat:delta 增量（按 id 过滤），
+    // invoke 结束（成功/失败）后注销监听；不传 onDelta 则保持一次性返回。
+    send: (question, history, context, onDelta) => {
+      if (typeof onDelta !== "function") {
+        return invoke("chat:send", { question, history, context });
+      }
+      const streamId = (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+        ? globalThis.crypto.randomUUID()
+        : `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const listener = (_event, payload) => {
+        if (payload?.id === streamId) onDelta({ content: payload.content, reasoning: payload.reasoning });
+      };
+      ipcRenderer.on("chat:delta", listener);
+      return invoke("chat:send", { streamId, question, history, context })
+        .finally(() => ipcRenderer.removeListener("chat:delta", listener));
+    }
+  },
   models: {
     list: () => invoke("models:list"),
     save: (profile, apiKey) => invoke("models:save", profile, apiKey),
@@ -63,6 +81,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     list: () => invoke("imports:list"),
     retry: (id) => invoke("imports:retry", id),
     cancel: (id) => invoke("imports:cancel", id),
+    remove: (id) => invoke("imports:remove", id),
     onJobUpdated: (callback) => {
       const listener = (_event, job) => callback(job);
       ipcRenderer.on("imports:job-updated", listener);

@@ -8,6 +8,7 @@ import { CalendarBlank, CaretDown, Microphone, Users, WarningCircle, X } from "@
 import type { CreateMeetingInput, MeetingMode } from "../types";
 import { useMeetingStore } from "../store/meetingStore";
 import { useDialogFocus } from "../hooks/useDialogFocus";
+import { useExitPresence } from "../hooks/useExitPresence";
 
 /** 内置会议模板：选择后预填标题与目标。 */
 const templates = {
@@ -55,10 +56,11 @@ export function NewMeetingDialog({
     initialFocus: "[data-dialog-initial-focus]",
     onEscape: handleEscape
   });
-  if (!open) return null;
+  const { mounted, closing } = useExitPresence(open, 170);
+  if (!mounted) return null;
 
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
+    <div className={`modal-backdrop ${closing ? "is-closing" : ""}`} onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
       <form
         ref={dialogRef}
         className="dialog new-meeting-dialog"

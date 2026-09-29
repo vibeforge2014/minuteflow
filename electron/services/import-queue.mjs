@@ -16,6 +16,7 @@ import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import {
   createMeeting,
+  deleteJob,
   listJobs,
   listModelProfiles,
   listVoiceprintSamples,
@@ -290,6 +291,23 @@ export function cancelImport(id) {
   activeControllers.get(id)?.abort();
   activeProcesses.get(id)?.kill("SIGTERM");
   return patchJob(id, { status: "cancelled", error: undefined });
+}
+
+/** 可删除状态：终态 + 可恢复等待态；进行中（含排队）任务必须先取消，避免与 worker 竞争。 */
+const REMOVABLE_JOB_STATUSES = ["complete", "cancelled", "failed", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"];
+
+/**
+ * 从任务队列移除一条任务记录（imports:remove 通道调用）。
+ * 只删队列展示记录，不动已创建的会议与归档音频——那些由会议库的删除/最近删除流程管理。
+ */
+export function removeImportJob(id) {
+  const job = loadJob(id);
+  if (!job) throw new Error("导入任务不存在。");
+  if (!REMOVABLE_JOB_STATUSES.includes(job.status)) {
+    throw new Error("任务正在处理中，请先取消再删除。");
+  }
+  deleteJob(id);
+  return { removed: true };
 }
 
 /**

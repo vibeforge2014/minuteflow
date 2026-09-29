@@ -30,16 +30,16 @@ import {
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
-import DOMPurify from "dompurify";
-import { marked } from "marked";
 import TurndownService from "turndown";
-import type { Meeting } from "../types";
+import type { ImportJob, Meeting } from "../types";
 import { api } from "../lib/api";
 import { lockSummaryField, toggleSummaryLock } from "../lib/summary";
 import { formatDuration, formatInterval } from "../lib/format";
+import { markdownToHtml } from "../lib/markdown";
 import { useMeetingStore } from "../store/meetingStore";
 import type { RecordingReadiness, WorkspaceStage } from "../lib/workspace";
 import { VisualSummaryView } from "./VisualSummaryView";
+import { TranscriptView } from "./TranscriptPanel";
 import type { ContentChangeKind } from "../lib/content-motion";
 import { useEnteringItemIds, useSummaryContentMotion } from "../hooks/useContentMotion";
 
@@ -50,6 +50,15 @@ interface DocumentWorkspaceProps {
   elapsed: number;
   recentlyFinalized: boolean;
   processingStatus?: string;
+  /** 导入任务（转写视图顶部的即时状态行）。 */
+  importJob?: ImportJob;
+  /** 当前播放位置（毫秒），转写视图中用于歌词式高亮。 */
+  playbackMs?: number;
+  /** 点击转写时间戳时请求播放器跳转。 */
+  onSeek?(ms: number): void;
+  /** 空逐字稿在会后提供唯一、明确的恢复动作（继续录音）。 */
+  emptyActionLabel?: string;
+  onEmptyAction?(): void;
   onChange(meeting: Meeting): void;
   onStartRecording(): Promise<void>;
   onConfigureTranscription(): void;
@@ -70,6 +79,11 @@ export function DocumentWorkspace({
   elapsed,
   recentlyFinalized,
   processingStatus,
+  importJob,
+  playbackMs = 0,
+  onSeek,
+  emptyActionLabel,
+  onEmptyAction,
   onChange,
   onStartRecording,
   onConfigureTranscription,
@@ -90,6 +104,15 @@ export function DocumentWorkspace({
     || meeting.summary.risks.length > 0
     || meeting.summary.nextSteps.length > 0;
   const [summaryView, setSummaryView] = useState<"normal" | "visual">("normal");
+  /** 中央列视图：AI 纪要文档 / 转写。会前只展示文档（还没有转写内容）。 */
+  const [workspaceView, setWorkspaceView] = useState<"document" | "transcript">(
+    stage === "live" ? "transcript" : "document"
+  );
+  // 切换会议或进入新阶段时回到该阶段的默认视图：进行中跟随转写，会前/会后先看纪要。
+  useEffect(() => {
+    setWorkspaceView(stage === "live" ? "transcript" : "document");
+  }, [meeting.id, stage]);
+  const showViewSwitch = stage !== "prepare";
   /** 笔记显示模式：富文本编辑 / Markdown 源码 / 只读预览。 */
   const [noteMode, setNoteMode] = useState<"rich" | "markdown" | "preview">("rich");
   /** 最近导入的 .md 文件名（显示导入成功提示）。 */
@@ -188,7 +211,46 @@ export function DocumentWorkspace({
 
   return (
     <div className="document-scroll">
-      <article className={`meeting-document meeting-document--${stage} ${summaryView === "visual" ? "meeting-document--visual" : ""}`}>
+      {showViewSwitch && (
+        <div className="workspace-view-switch" role="tablist" aria-label="中央工作区内容">
+          <button
+            role="tab"
+            id="summary-view-tab"
+            aria-selected={workspaceView === "document"}
+            className={workspaceView === "document" ? "is-active" : ""}
+            onClick={() => setWorkspaceView("document")}
+          >
+            <FileText size={14} />AI 纪要
+          </button>
+          <button
+            role="tab"
+            id="transcript-tab"
+            aria-selected={workspaceView === "transcript"}
+            className={workspaceView === "transcript" ? "is-active" : ""}
+            onClick={() => setWorkspaceView("transcript")}
+          >
+            <NotePencil size={14} />转写
+          </button>
+        </div>
+      )}
+      {workspaceView === "transcript" && showViewSwitch ? (
+        <div className="workspace-transcript">
+          <TranscriptView
+            meeting={meeting}
+            importJob={importJob}
+            stage={stage}
+            onChange={onChange}
+            playbackMs={playbackMs}
+            onSeek={onSeek}
+            emptyActionLabel={emptyActionLabel}
+            onEmptyAction={onEmptyAction}
+          />
+        </div>
+      ) : (
+      <article
+        key={`${meeting.id}-${summaryView}`}
+        className={`meeting-document meeting-document--${stage} ${summaryView === "visual" ? "meeting-document--visual" : ""}`}
+      >
         <div className="document-date document-date--workspace-meta">
           {formatMeetingDate(meeting.scheduledAt)}
           <span>·</span>
@@ -265,26 +327,25 @@ export function DocumentWorkspace({
                     ? `已整理 ${meeting.summary.keyPoints.length} 条结论和 ${meeting.summary.actionItems.length} 个行动项。`
                     : "录音和个人记录已保留；需要时再生成最终纪要。"}</p>
             </div>
-            {!processingStatus && (summaryBusy ? (
-              <button className="button button--secondary" onClick={onCancelSummary}><XCircle size={16} />取消生成</button>
-            ) : (
-              <button className="button button--primary" onClick={onGenerateSummary}>
-                <ArrowClockwise size={16} />{meeting.summary.stale ? "更新纪要" : hasOrdinarySummary ? "重新生成纪要" : "生成最终纪要"}
-              </button>
-            ))}
+            <div className="review-hero__side">
+              <div className="summary-view-switch" role="tablist" aria-label="纪要显示方式">
+                <button role="tab" aria-selected={summaryView === "normal"} className={summaryView === "normal" ? "is-active" : ""} onClick={() => setSummaryView("normal")}>
+                  <FileText size={15} />普通纪要
+                </button>
+                <button role="tab" aria-selected={summaryView === "visual"} className={summaryView === "visual" ? "is-active" : ""} onClick={() => setSummaryView("visual")}>
+                  <Sparkle size={15} />视觉纪要
+                  {meeting.summary.visualSummary && !meeting.summary.visualSummary.stale && <span />}
+                </button>
+              </div>
+              {!processingStatus && (summaryBusy ? (
+                <button className="button button--secondary" onClick={onCancelSummary}><XCircle size={16} />取消生成</button>
+              ) : (
+                <button className="button button--primary" onClick={onGenerateSummary}>
+                  <ArrowClockwise size={16} />{meeting.summary.stale ? "更新纪要" : hasOrdinarySummary ? "重新生成纪要" : "生成最终纪要"}
+                </button>
+              ))}
+            </div>
           </section>
-        )}
-
-        {stage === "review" && (
-          <div className="summary-view-switch" role="tablist" aria-label="纪要显示方式">
-            <button role="tab" aria-selected={summaryView === "normal"} className={summaryView === "normal" ? "is-active" : ""} onClick={() => setSummaryView("normal")}>
-              <FileText size={15} />普通纪要
-            </button>
-            <button role="tab" aria-selected={summaryView === "visual"} className={summaryView === "visual" ? "is-active" : ""} onClick={() => setSummaryView("visual")}>
-              <Sparkle size={15} />视觉纪要
-              {meeting.summary.visualSummary && !meeting.summary.visualSummary.stale && <span />}
-            </button>
-          </div>
         )}
 
         {stage === "review" && summaryView === "visual" && (
@@ -400,44 +461,46 @@ export function DocumentWorkspace({
               转录或笔记已修改，当前纪要需要更新。
             </div>
           )}
-          <div className="summary-timeline">
-            {meeting.summary.keyPoints.length ? meeting.summary.keyPoints.map((item, index) => (
-              <div
-                key={`kp-${index}`}
-                className={`${summaryMotion.lists.keyPoints[index] === "added" ? "is-new content-motion-enter" : summaryMotion.lists.keyPoints[index] === "updated" ? "content-motion-update" : ""}`}
-                style={{ animationDelay: `${Math.min(index, 3) * 30}ms` }}
-              >
-                <time>{index + 1}</time>
-                <textarea
-                  aria-label={`编辑纪要 ${index + 1}`}
-                  value={item}
-                  rows={Math.max(1, Math.ceil(item.length / 54))}
-                  onChange={(event) => setSummaryList(
-                    "keyPoints",
-                    meeting.summary.keyPoints.map((value, itemIndex) =>
-                          itemIndex === index ? event.target.value : value),
-                    index
-                  )}
-                />
-                <button
-                  className={`icon-button summary-lock ${meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "is-locked" : ""}`}
-                  aria-label={meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "解除锁定，允许 AI 更新这条要点" : "锁定这条要点，AI 重新生成时不覆盖"}
-                  title={meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "已锁定：AI 不覆盖。点击解锁。" : "未锁定。点击锁定后 AI 不覆盖这条。"}
-                  onClick={() => onChange({
-                    ...meeting,
-                    summary: toggleSummaryLock(meeting.summary, `keyPoints:${index}`)
-                  })}
+          {meeting.summary.keyPoints.length ? (
+            <div className="summary-points">
+              {meeting.summary.keyPoints.map((item, index) => (
+                <div
+                  key={`kp-${index}`}
+                  className={`summary-point ${summaryMotion.lists.keyPoints[index] === "added" ? "is-new content-motion-enter" : summaryMotion.lists.keyPoints[index] === "updated" ? "content-motion-update" : ""}`}
+                  style={{ animationDelay: `${Math.min(index, 3) * 30}ms` }}
                 >
-                  {meeting.summary.manualLocks?.includes(`keyPoints:${index}`)
-                    ? <Lock size={13} weight="fill" />
-                    : <LockOpen size={13} />}
-                </button>
-                {summaryMotion.lists.keyPoints[index] === "added" && <span className="content-status-enter">新增</span>}
-              </div>
-            )) : (
-              <div className="section-empty">转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。</div>
-            )}
-          </div>
+                  <i aria-hidden="true" />
+                  <textarea
+                    aria-label={`编辑纪要 ${index + 1}`}
+                    value={item}
+                    rows={Math.max(1, Math.ceil(item.length / 46))}
+                    onChange={(event) => setSummaryList(
+                      "keyPoints",
+                      meeting.summary.keyPoints.map((value, itemIndex) =>
+                        itemIndex === index ? event.target.value : value),
+                      index
+                    )}
+                  />
+                  <button
+                    className={`icon-button summary-lock ${meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "is-locked" : ""}`}
+                    aria-label={meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "解除锁定，允许 AI 更新这条要点" : "锁定这条要点，AI 重新生成时不覆盖"}
+                    title={meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "已锁定：AI 不覆盖。点击解锁。" : "未锁定。点击锁定后 AI 不覆盖这条。"}
+                    onClick={() => onChange({
+                      ...meeting,
+                      summary: toggleSummaryLock(meeting.summary, `keyPoints:${index}`)
+                    })}
+                  >
+                    {meeting.summary.manualLocks?.includes(`keyPoints:${index}`)
+                      ? <Lock size={13} weight="fill" />
+                      : <LockOpen size={13} />}
+                  </button>
+                  {summaryMotion.lists.keyPoints[index] === "added" && <span className="content-status-enter">新增</span>}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="section-empty">转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。</div>
+          )}
         </DocumentSection>
 
         <DocumentSection kind="actions" icon={<CheckSquare size={20} weight="duotone" />} title="行动项">
@@ -533,6 +596,7 @@ export function DocumentWorkspace({
           </div>
         </DocumentSection>
       </article>
+      )}
     </div>
   );
 }
@@ -700,13 +764,7 @@ function meetingMarkdown(meeting: Meeting) {
 }
 
 /** Markdown → 安全 HTML：marked 渲染后必须过 DOMPurify（禁 style/iframe 等），再进 dangerouslySetInnerHTML/编辑器。 */
-function markdownToHtml(markdown: string) {
-  const rendered = marked.parse(markdown || "", { async: false, gfm: true });
-  return DOMPurify.sanitize(String(rendered), {
-    USE_PROFILES: { html: true },
-    FORBID_TAGS: ["style", "iframe", "object", "embed"]
-  }) || "<p></p>";
-}
+// 实现抽取到 src/lib/markdown.ts，与 AI 问答气泡共用同一渲染管线。
 
 /** HTML → Markdown（编辑器内容落盘）。 */
 function htmlToMarkdown(html: string) {

@@ -53,6 +53,7 @@ import {
 } from "./database.mjs";
 import { deleteSecret, flushSecrets, readSecret, storeSecret, warmSecretCache } from "./services/secrets.mjs";
 import {
+  chatWithMeetingContext,
   generateVisualSummaryWithOpenAICompatible,
   isVisualSummaryProfileVerified,
   summarizeLocally,
@@ -95,6 +96,7 @@ import {
   describeImportFiles,
   enqueueImports,
   listImportJobs,
+  removeImportJob,
   retryImport,
   wakeImportQueue
 } from "./services/import-queue.mjs";
@@ -940,6 +942,54 @@ function registerIpc() {
     }
   });
 
+  // chat:send — 右栏「AI 问答」：围绕当前会议的纪要与转写向在线大模型提问（付费功能）。
+  // 复用 AI 总结启用的 LLM 档案；只传文本上下文，不上传音频；失败原样抛给气泡展示。
+  trustedHandle("chat:send", async (_event, payload) => {
+    await requireLicense();
+    const question = typeof payload?.question === "string" ? payload.question.trim() : "";
+    if (!question) throw new Error("请输入要问的问题。");
+    if (question.length > 2000) throw new Error("问题过长（最多 2000 字），请精简后再问。");
+    // 历史只保留最近 8 轮问答，且逐条限长，避免长会话把上下文窗口挤爆。
+    const history = Array.isArray(payload?.history)
+      ? payload.history
+        .filter((item) => item && (item.role === "user" || item.role === "assistant")
+          && typeof item.text === "string" && item.text.trim())
+        .slice(-8)
+        .map((item) => ({ role: item.role, text: item.text.slice(0, 4000) }))
+      : [];
+    const raw = payload?.context ?? {};
+    const context = {
+      title: String(raw.title ?? ""),
+      participants: Array.isArray(raw.participants) ? raw.participants.map((item) => String(item)) : [],
+      goals: Array.isArray(raw.goals) ? raw.goals.map((item) => String(item)) : [],
+      notes: Array.isArray(raw.notes) ? raw.notes.map((item) => String(item)) : [],
+      summary: raw.summary && typeof raw.summary === "object" ? raw.summary : {},
+      transcriptText: typeof raw.transcriptText === "string" ? raw.transcriptText.slice(0, 60_000) : ""
+    };
+    const profiles = listModelProfiles();
+    const profile = (typeof payload?.profileId === "string"
+      ? profiles.find((item) => item.id === payload.profileId && item.kind === "llm")
+      : undefined) ?? profiles.find((item) => item.kind === "llm" && item.enabled);
+    if (!profile || profile.transport === "local-summary") {
+      throw new Error("AI 问答需要一个在线大模型服务。请先在「设置 → AI 总结」中添加并启用，再回到这里提问。");
+    }
+    // 流式回答：渲染层传入 streamId 时，增量经 chat:delta 推送，最终结果仍由 invoke 返回。
+    const streamId = typeof payload?.streamId === "string" ? payload.streamId.slice(0, 64) : null;
+    const pushDelta = streamId
+      ? (delta) => {
+          try { event.sender.send("chat:delta", { id: streamId, ...delta }); } catch { /* 窗口可能已销毁 */ }
+        }
+      : null;
+    const result = await chatWithMeetingContext(profile, readSecret(profile.secretId), { question, history, context }, pushDelta);
+    if (!result.content) throw new Error("问答模型没有返回内容。");
+    // 思考过程一并回传（无则省略）；截断上限防止异常网关塞爆会话内存。
+    return {
+      answer: result.content,
+      reasoning: result.reasoning ? result.reasoning.slice(0, 20_000) : undefined,
+      profileName: profile.name
+    };
+  });
+
   // summary:generate-visual — 仅用已保存的普通纪要重试视觉版，不读取或上传完整转录。
   trustedHandle("summary:generate-visual", async (_event, payload) => {
     await requireLicense();
@@ -1103,6 +1153,8 @@ function registerIpc() {
   trustedHandle("imports:retry", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return retryImport(id); });
   // imports:cancel — 取消进行中/排队的导入任务（付费功能）：中止 AbortController 并杀掉子进程。
   trustedHandle("imports:cancel", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return cancelImport(id); });
+  // imports:remove — 从队列移除终态/等待态任务记录（付费功能）；进行中任务需先取消。
+  trustedHandle("imports:remove", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return removeImportJob(id); });
   // exports:save — 导出会议为 md/txt/json/srt/vtt/docx/pdf/zip（付费功能），导出菜单调用。
   trustedHandle("exports:save", async (_event, meeting, format) => {
     await requireLicense();

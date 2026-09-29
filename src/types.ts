@@ -674,6 +674,30 @@ export interface MeetingAPI {
     /** 取消一场会议进行中的总结请求（中止主进程侧的 AbortController）。 */
     cancel(meetingId: string): Promise<{ ok: true }>;
   };
+  /** AI 问答：围绕当前会议的纪要与转写向启用的在线大模型提问（右栏对话框）。 */
+  chat: {
+    send(
+      question: string,
+      history: Array<{ role: "user" | "assistant"; text: string }>,
+      context: {
+        title: string;
+        participants: string[];
+        goals: string[];
+        notes: string[];
+        summary: MeetingSummary;
+        /** 「[mm:ss] 发言人：文本」行，由渲染层截断到最近片段。 */
+        transcriptText: string;
+      },
+      /** 流式增量回调：content/reasoning 为可直接渲染的追加片段（思考过程先于正文）。 */
+      onDelta?: (delta: { content?: string; reasoning?: string }) => void
+    ): Promise<{
+      /** Markdown 回答正文（渲染层用安全管线渲染）。 */
+      answer: string;
+      /** 模型返回的思维链/思考过程（reasoning_content / thinking 块 / thought 片段 / 内联 <think>），无则省略。 */
+      reasoning?: string;
+      profileName?: string;
+    }>;
+  };
   models: {
     list(): Promise<ModelProfile[]>;
     save(profile: ModelProfile, apiKey?: string): Promise<ModelProfile>;
@@ -709,6 +733,8 @@ export interface MeetingAPI {
     list(): Promise<ImportJob[]>;
     retry(id: string): Promise<ImportJob>;
     cancel(id: string): Promise<ImportJob>;
+    /** 从队列移除终态/等待态任务记录（进行中任务需先取消；不影响已创建的会议）。 */
+    remove(id: string): Promise<{ removed: true }>;
     onJobUpdated(callback: (job: ImportJob) => void): () => void;
     /** 导入队列每完成一个音频分段后推送最新会议快照。 */
     onMeetingUpdated(callback: (meeting: Meeting) => void): () => void;

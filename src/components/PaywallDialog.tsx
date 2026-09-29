@@ -7,6 +7,7 @@
 import { useEffect, useState } from "react";
 import { ArrowClockwise, Check, Key, LockKey, ShieldCheck, Sparkle, X } from "@phosphor-icons/react";
 import { api } from "../lib/api";
+import { useExitPresence } from "../hooks/useExitPresence";
 import type { LicenseStatus } from "../types";
 
 export function PaywallDialog({ open, reason, status, onStatusChange, onClose }: {
@@ -24,7 +25,8 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
 
   // 每次打开清掉上次的错误提示。
   useEffect(() => { if (open) setError(null); }, [open]);
-  if (!open) return null;
+  const { mounted, closing } = useExitPresence(open, 170);
+  if (!mounted) return null;
 
   /** 强制向验证服务刷新授权（刷新成功且已授权则自动关闭付费墙）。 */
   const refresh = async () => {
@@ -48,7 +50,7 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
     finally { setBusy(false); }
   };
 
-  return <div className="modal-backdrop paywall-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+  return <div className={`modal-backdrop paywall-backdrop ${closing ? "is-closing" : ""}`} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="dialog paywall-dialog" role="dialog" aria-modal="true" aria-labelledby="paywall-title">
       <button className="icon-button paywall-close" aria-label="关闭" onClick={onClose}><X size={18} /></button>
       <div className="paywall-hero">

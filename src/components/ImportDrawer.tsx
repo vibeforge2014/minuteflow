@@ -22,6 +22,8 @@ interface Props {
   onEnqueue(items: ImportCandidate[], options: { language: string; sttProfileId?: string; llmProfileId?: string; diarizationEnabled: boolean; autoSummarize: boolean }): Promise<void>;
   onRetry(id: string): void;
   onCancel(id: string): void;
+  /** 从队列移除终态/等待态任务记录（不影响已创建的会议）。 */
+  onRemove(id: string): void;
   onOpenMeeting(id: string): void;
   onConfigure(): void;
 }
@@ -117,6 +119,7 @@ export function ImportDrawer(props: Props) {
               {["failed", "cancelled"].includes(job.status) && <button onClick={() => props.onRetry(job.id)}><ArrowClockwise size={14} />重试当前阶段</button>}
               {["waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(job.status) && <button onClick={props.onConfigure}><GearSix size={14} />配置</button>}
               {!['complete', 'cancelled', 'failed'].includes(job.status) && <button onClick={() => props.onCancel(job.id)}>取消</button>}
+              {["complete", "cancelled", "failed", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(job.status) && <button className="import-job__remove" onClick={() => props.onRemove(job.id)}><Trash size={14} />删除</button>}
             </div>
           </article>
         ))}

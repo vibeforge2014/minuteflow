@@ -21,7 +21,7 @@ import {
 } from "@phosphor-icons/react";
 import { Sidebar } from "./components/Sidebar";
 import { DocumentWorkspace } from "./components/DocumentWorkspace";
-import { TranscriptPanel } from "./components/TranscriptPanel";
+import { ChatPanel } from "./components/ChatPanel";
 import { RecorderBar } from "./components/RecorderBar";
 import { NewMeetingDialog } from "./components/NewMeetingDialog";
 import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
@@ -36,6 +36,7 @@ import { ImportDrawer } from "./components/ImportDrawer";
 import { MeetingPlayer } from "./components/MeetingPlayer";
 import { useMeetingStore } from "./store/meetingStore";
 import { useMeetingRecorder } from "./hooks/useMeetingRecorder";
+import { useExitPresence } from "./hooks/useExitPresence";
 import { api } from "./lib/api";
 import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Meeting } from "./types";
 import { BrandMark } from "./components/BrandMark";
@@ -76,7 +77,6 @@ export function App() {
   const [paywallReason, setPaywallReason] = useState<string>();
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
-  const [rightPanelTab, setRightPanelTab] = useState<"transcript" | "summary">("transcript");
   const [exportOpen, setExportOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   /** 成功提示：可附带一个直达动作（更新提示 → 打开软件更新）。 */
@@ -169,6 +169,10 @@ export function App() {
     () => meetings.find((item) => item.id === selectedId),
     [meetings, selectedId]
   );
+  // 右侧面板退场保持：关闭后保留 240ms 播放收回动画（与 CSS panel-out 时长一致）。
+  const panelPresence = useExitPresence(Boolean(rightPanelOpen && meeting), 240);
+  // “继续录音”确认弹窗的退场保持，与其它对话框一致。
+  const continuePresence = useExitPresence(Boolean(meeting && continueRecordingOpen), 170);
   // 搜索词与清除入口：区分「没有任何会议」和「搜索无结果」两种空状态。
   const search = useMeetingStore((state) => state.search);
   const setSearch = useMeetingStore((state) => state.setSearch);
@@ -234,9 +238,6 @@ export function App() {
       transcriptCount: meeting.transcript.length,
       hasProcessingStatus: Boolean(importProcessingStatus)
     }));
-    if (workspaceStage !== "prepare") {
-      setRightPanelTab("transcript");
-    }
     previousWorkspaceRef.current = { meetingId: meeting.id, stage: workspaceStage };
     autoLayoutKeyRef.current = key;
   }, [importProcessingStatus, meeting?.id, workspaceStage]);
@@ -353,6 +354,16 @@ export function App() {
     void updateMeeting(id, (current) => ({ ...current, favorite: !current.favorite }));
   }, [updateMeeting]);
 
+  // 侧栏行内删除：软删除移入最近删除，可在「最近删除」中恢复。
+  const handleDeleteMeeting = useCallback(async (id: string) => {
+    try {
+      await deleteMeeting(id);
+      notify("会议已移到最近删除，可在最近删除中恢复。");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "删除会议失败，请稍后重试。");
+    }
+  }, [deleteMeeting, notify]);
+
   // 首次加载且尚无可选会议时展示全屏 loading，避免闪烁空状态。
   if (loading && !meeting) {
     return (
@@ -363,9 +374,11 @@ export function App() {
     );
   }
 
+  // 无会议时逐字稿侧栏不可能渲染，也不预留它的栅格列——否则右侧留出的空白列
+  // 会让空状态引导在视觉上偏离居中。
   return (
-    <div
-      className={`app-shell ${rightPanelOpen ? "app-shell--right-open" : ""}`}
+      <div
+        className={`app-shell ${meeting ? "app-shell--document" : ""} ${rightPanelOpen && meeting ? "app-shell--right-open" : ""}`}
       onDragOver={(event) => event.preventDefault()}
       onDrop={handleDrop}
     >
@@ -377,6 +390,7 @@ export function App() {
         onImport={handleImport}
         importCount={importJobs.filter((job) => !["complete", "cancelled", "failed"].includes(job.status)).length}
         onToggleFavorite={handleToggleFavorite}
+        onDeleteMeeting={handleDeleteMeeting}
         onTrash={() => setTrashOpen(true)}
         onSettings={() => openSettings()}
       />
@@ -480,11 +494,10 @@ export function App() {
                           <PlayCircle size={16} />继续录音
                         </button>
                       )}
-                      <button className="is-danger" onClick={async () => {
-                        await deleteMeeting(meeting.id);
-                        setMoreOpen(false);
-                        notify("会议已移到最近删除，可在会议库中恢复。");
-                      }}>
+                        <button className="is-danger" onClick={() => {
+                          setMoreOpen(false);
+                          void handleDeleteMeeting(meeting.id);
+                        }}>
                         <Trash size={16} />移到最近删除
                       </button>
                     </div>
@@ -492,9 +505,9 @@ export function App() {
                 </div>
                 <button
                   className={`icon-button ${rightPanelOpen ? "is-active" : ""}`}
-                  aria-label={rightPanelOpen ? "关闭会议侧栏" : "打开会议侧栏"}
+                  aria-label={rightPanelOpen ? "关闭 AI 问答侧栏" : "打开 AI 问答侧栏"}
                   aria-pressed={rightPanelOpen}
-                  title={rightPanelOpen ? "关闭逐字稿与 AI 纪要侧栏" : "打开逐字稿与 AI 纪要侧栏"}
+                  title={rightPanelOpen ? "关闭 AI 问答侧栏" : "围绕这场会议向 AI 提问"}
                   onClick={() => setRightPanelOpen((value) => !value)}
                 >
                   <SidebarSimple size={19} />
@@ -508,7 +521,11 @@ export function App() {
               durationSeconds={meeting.durationSeconds}
               seekToMs={seekToMs}
               open={playerOpen}
-              onClose={() => setPlayerOpen(false)}
+              onClose={() => {
+                // 收起播放器时同步清除回放高亮位置，转写视图不再指向已停止的播放点。
+                setPlayerOpen(false);
+                setPlaybackMs(0);
+              }}
               onAvailabilityChange={setPlayerAvailable}
               onTimeChange={setPlaybackMs}
               onError={notify}
@@ -521,6 +538,20 @@ export function App() {
               elapsed={recorder.elapsed}
               recentlyFinalized={recentlyFinalizedId === meeting.id}
               processingStatus={importProcessingStatus}
+              importJob={meetingImportJob}
+              playbackMs={playbackMs}
+              onSeek={(ms) => {
+                // 没有可用音频（未录制/文件缺失）时不打开播放器，避免出现一个必然报错的空播放器。
+                if (!playerAvailable) {
+                  notify("这场会议没有可回放的音频文件；转录时间戳仍可作为内容定位使用。");
+                  return;
+                }
+                setPlayerOpen(true);
+                setSeekToMs(null);
+                requestAnimationFrame(() => setSeekToMs(ms));
+              }}
+              emptyActionLabel={workspaceStage === "review" ? "继续录音" : undefined}
+              onEmptyAction={workspaceStage === "review" ? () => setContinueRecordingOpen(true) : undefined}
               onChange={handleMeetingChange}
               onStartRecording={async () => {
                 if (requirePremium("录音、实时转写与自动纪要")) await recorder.start();
@@ -586,28 +617,11 @@ export function App() {
         />
       )}
 
-      {meeting && rightPanelOpen && (
-        <TranscriptPanel
+      {meeting && panelPresence.mounted && (
+        <ChatPanel
           meeting={meeting}
-          importJob={meetingImportJob}
-          stage={workspaceStage!}
-          tab={rightPanelTab}
-          onTabChange={setRightPanelTab}
-          onChange={handleMeetingChange}
+          closing={panelPresence.closing}
           onClose={() => setRightPanelOpen(false)}
-          emptyActionLabel={workspaceStage === "review" ? "继续录音" : undefined}
-          onEmptyAction={workspaceStage === "review" ? () => setContinueRecordingOpen(true) : undefined}
-          playbackMs={playbackMs}
-          onSeek={(ms) => {
-            // 没有可用音频（未录制/文件缺失）时不打开播放器，避免出现一个必然报错的空播放器。
-            if (!playerAvailable) {
-              notify("这场会议没有可回放的音频文件；转录时间戳仍可作为内容定位使用。");
-              return;
-            }
-            setPlayerOpen(true);
-            setSeekToMs(null);
-            requestAnimationFrame(() => setSeekToMs(ms));
-          }}
         />
       )}
 
@@ -654,8 +668,8 @@ export function App() {
           notify("已跳过授权。首次开始录音时会再引导你完成麦克风授权。");
         }}
       />
-      {meeting && continueRecordingOpen && (
-        <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setContinueRecordingOpen(false)}>
+      {continuePresence.mounted && (
+        <div className={`modal-backdrop ${continuePresence.closing ? "is-closing" : ""}`} onMouseDown={(event) => event.target === event.currentTarget && setContinueRecordingOpen(false)}>
           <section className="dialog continue-recording-dialog" role="dialog" aria-modal="true" aria-labelledby="continue-recording-title">
             <header>
               <div>
@@ -701,12 +715,19 @@ export function App() {
           await refreshMeetings();
           if (jobs[0]?.meetingId) selectMeeting(jobs[0].meetingId);
           setImportOpen(false);
-          setRightPanelOpen(true);
-          setRightPanelTab("transcript");
+          // 转写进度现在在中央列「转写」视图：选中会议后按 live 阶段默认展示，无需再动右栏。
           notify(`${jobs.length} 个录音已归档并加入后台队列。`);
         }}
         onRetry={(id) => void api.imports.retry(id)}
         onCancel={(id) => void api.imports.cancel(id)}
+        onRemove={async (id) => {
+          try {
+            await api.imports.remove(id);
+            setImportJobs((current) => current.filter((job) => job.id !== id));
+          } catch (error) {
+            notify(error instanceof Error ? error.message : "删除任务失败，请稍后重试。");
+          }
+        }}
         onOpenMeeting={(id) => { selectMeeting(id); setImportOpen(false); }}
         onConfigure={() => { setImportOpen(false); openSettings(); }}
       />

@@ -25,6 +25,7 @@ import {
 } from "../lib/onboarding";
 import type { SettingsTab } from "./SettingsDialog";
 import { useDialogFocus } from "../hooks/useDialogFocus";
+import { useExitPresence } from "../hooks/useExitPresence";
 
 export function OnboardingDialog({
   open,
@@ -49,12 +50,13 @@ export function OnboardingDialog({
   const dialogRef = useDialogFocus<HTMLElement>(open, {
     initialFocus: ".onboarding-wizard__footer .button--primary"
   });
+  const { mounted, closing } = useExitPresence(open, 170);
 
-  if (!open) return null;
+  if (!mounted) return null;
   const steps = ["欢迎", "语音转录", "AI 纪要", "完成"];
 
   return (
-    <div className="modal-backdrop onboarding-backdrop">
+    <div className={`modal-backdrop onboarding-backdrop ${closing ? "is-closing" : ""}`}>
       <section ref={dialogRef} className="dialog onboarding-dialog onboarding-wizard" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
         <header className="onboarding-wizard__header">
           <div>

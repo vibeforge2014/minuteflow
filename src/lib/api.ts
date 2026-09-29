@@ -356,6 +356,32 @@ const browserApi: MeetingAPI = {
       return { ok: true };
     }
   },
+  chat: {
+    // 浏览器预览没有真实模型：从传入的纪要上下文拼一个占位回答（含示例思考过程），
+    // 并按小块模拟流式输出（先思考、后正文），让对话框可演示真实节奏。
+    async send(question, _history, context, onDelta) {
+      const points = context.summary.keyPoints.slice(0, 3);
+      const lines = ["**（浏览器预览模式，未调用真实模型）**", "", `关于「${question}」：`];
+      if (points.length) {
+        lines.push(...points.map((point) => `- ${point}`));
+      } else {
+        lines.push("- 这场会议还没有生成纪要，先在中央文档生成后再提问效果更好。");
+      }
+      lines.push(`- 会议共有 ${context.participants.length} 位参与者，转写 ${context.transcriptText ? "已就绪" : "暂无"}。`);
+      const answer = lines.join("\n");
+      const reasoning = `（示例思考过程）用户问的是“${question}”。先查会议纪要的结论与行动项，再核对转写里有没有对应发言，最后用简短的列表组织答案，会议中没有提到的信息要说明。`;
+      const stream = async (text: string, field: "content" | "reasoning", size: number, gapMs: number) => {
+        for (let index = 0; index < text.length; index += size) {
+          const chunk = text.slice(index, index + size);
+          onDelta?.(field === "reasoning" ? { reasoning: chunk } : { content: chunk });
+          await new Promise((resolve) => setTimeout(resolve, gapMs));
+        }
+      };
+      await stream(reasoning, "reasoning", 9, 26);
+      await stream(answer, "content", 5, 30);
+      return { answer, reasoning, profileName: "浏览器预览" };
+    }
+  },
   models: {
     // 档案读写同样落在 localStorage；test 仅模拟 500ms 后返回成功。
     async list() {
@@ -477,6 +503,15 @@ const browserApi: MeetingAPI = {
       const job = { ...current, status: "cancelled" as const, updatedAt: new Date().toISOString() };
       saveBrowserImportJob(job);
       return job;
+    },
+    async remove(id) {
+      const current = loadBrowserImportJobs().find((job) => job.id === id);
+      if (!current) throw new Error("导入任务不存在。");
+      if (!["complete", "cancelled", "failed", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(current.status)) {
+        throw new Error("任务正在处理中，请先取消再删除。");
+      }
+      localStorage.setItem(importJobsKey, JSON.stringify(loadBrowserImportJobs().filter((job) => job.id !== id)));
+      return { removed: true as const };
     },
     onJobUpdated(callback) {
       importListeners.add(callback);

@@ -58,7 +58,10 @@ const visualCardSchema = z.object({
 
 const visualSectionSchema = z.object({
   id: z.string().trim().min(1).max(48),
-  number: z.number().int().min(1).max(5),
+  // MiniMax 等兼容网关的模型常把序号序列化成字符串（"1"/"01"）；序号只是模型自报的
+  // 展示顺序提示，校验后一律按数组顺序重排（见 validateVisualSummary），所以宽松接受，
+  // 无法解析时兜底为 1，不为这种无害偏差拒绝整个视觉纪要。
+  number: z.coerce.number().int().min(1).max(5).catch(1),
   title: plainVisualText(80),
   tone: z.enum(["coral", "amber", "violet", "green"]),
   layout: z.enum(["table", "cards", "callout"]),
@@ -84,7 +87,8 @@ const visualSectionSchema = z.object({
 });
 
 const visualSummarySchema = z.object({
-  schemaVersion: z.literal(1).default(1),
+  // schemaVersion 同样容忍字符串形态的 "1"；真正的版本错配（如 2）仍然拒绝。
+  schemaVersion: z.coerce.number().pipe(z.literal(1)).default(1),
   title: plainVisualText(100),
   subtitle: plainVisualText(180),
   sections: z.array(visualSectionSchema).min(1).max(5)
@@ -184,8 +188,9 @@ function requestSignal(signal, timeoutMs) {
     : AbortSignal.timeout(timeoutMs);
 }
 
-/** 调用 Anthropic Messages API（x-api-key 头 + anthropic-version），副作用：网络请求。 */
-async function requestAnthropic(profile, apiKey, prompt, maxTokens = 8_192, signal) {
+/** 调用 Anthropic Messages API（x-api-key 头 + anthropic-version），副作用：网络请求。
+    extraBody.stream=true 时返回原始 Response（SSE 流），由调用方逐行读取。 */
+async function requestAnthropic(profile, apiKey, prompt, maxTokens = 8_192, signal, extraBody = {}, label = "总结模型请求失败") {
   const response = await fetch(nativeProviderEndpoint(profile, "v1/messages", profile.options?.chatEndpoint), {
     method: "POST",
     headers: {
@@ -199,18 +204,21 @@ async function requestAnthropic(profile, apiKey, prompt, maxTokens = 8_192, sign
       max_tokens: maxTokens,
       temperature: 0.2,
       system: "只输出可解析的 JSON。",
-      messages: [{ role: "user", content: prompt }]
+      messages: [{ role: "user", content: prompt }],
+      ...extraBody
     }),
-    signal: requestSignal(signal, profile.options?.timeoutMs ?? 60_000)
+    signal: requestSignal(signal, profile.options?.timeoutMs ?? (extraBody.stream ? 300_000 : 60_000))
   });
-  if (!response.ok) throw new Error(`总结模型请求失败：${response.status} ${await response.text()}`);
-  return response.json();
+  if (!response.ok) throw new Error(`${label}：${response.status} ${await response.text()}`);
+  return extraBody.stream ? response : response.json();
 }
 
-/** 调用 Gemini generateContent API（x-goog-api-key 头，强制 JSON MIME 输出），副作用：网络请求。 */
-async function requestGemini(profile, apiKey, prompt, maxTokens = 8_192, signal) {
+/** 调用 Gemini generateContent API（x-goog-api-key 头，强制 JSON MIME 输出），副作用：网络请求。
+    extraBody.stream=true 时改走 streamGenerateContent?alt=sse 并返回原始 Response。 */
+async function requestGemini(profile, apiKey, prompt, maxTokens = 8_192, signal, extraBody = {}, label = "总结模型请求失败") {
   const model = encodeURIComponent(profile.model);
-  const response = await fetch(nativeProviderEndpoint(profile, `v1beta/models/${model}:generateContent`, profile.options?.chatEndpoint), {
+  const action = extraBody.stream ? "streamGenerateContent?alt=sse" : "generateContent";
+  const response = await fetch(nativeProviderEndpoint(profile, `v1beta/models/${model}:${action}`, profile.options?.chatEndpoint), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -226,10 +234,10 @@ async function requestGemini(profile, apiKey, prompt, maxTokens = 8_192, signal)
         responseMimeType: "application/json"
       }
     }),
-    signal: requestSignal(signal, profile.options?.timeoutMs ?? 60_000)
+    signal: requestSignal(signal, profile.options?.timeoutMs ?? (extraBody.stream ? 300_000 : 60_000))
   });
-  if (!response.ok) throw new Error(`总结模型请求失败：${response.status} ${await response.text()}`);
-  return response.json();
+  if (!response.ok) throw new Error(`${label}：${response.status} ${await response.text()}`);
+  return extraBody.stream ? response : response.json();
 }
 
 /**
@@ -359,6 +367,140 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
     }
   }
   throw lastError;
+}
+
+/**
+ * AI 问答的系统提示词：把会议元信息、纪要与转写压成上下文。
+ * 转写文本由渲染层负责截断（只保留最近片段），这里不再二次裁剪。
+ */
+export function buildChatSystemPrompt(context) {
+  return [
+    "你是 MinuteFlow 的会议问答助手，根据下方会议材料回答用户关于这场会议的问题。",
+    "要求：使用简体中文；优先依据会议内容作答，条目简短；引用发言时注明发言人；",
+    "会议材料中没有的信息要明确说明“会议中没有提到”，不要编造。",
+    "回答会按 Markdown 渲染：可用简短列表、加粗和小标题组织内容，不要输出表格、HTML 或长代码块。",
+    `会议标题：${String(context.title ?? "")}`,
+    `参与者：${Array.isArray(context.participants) ? context.participants.join("、") : ""}`,
+    `会议目标：${Array.isArray(context.goals) ? context.goals.join("；") || "（未填写）" : ""}`,
+    `个人笔记：${Array.isArray(context.notes) ? context.notes.join("\n") || "（无）" : ""}`,
+    `当前会议纪要（JSON）：${JSON.stringify(context.summary ?? {})}`,
+    "转写记录：",
+    String(context.transcriptText ?? "")
+  ].join("\n");
+}
+
+/**
+ * AI 问答（chat:send 调用）：带最近几轮历史向模型提问，流式返回 { content, reasoning }。
+ * onDelta 收到的是「可立即渲染」的增量片段（见 createChatStreamAccumulator）：
+ * 正文增量已剔除内联 <think> 与半截标签，reasoning 增量覆盖 reasoning_content /
+ * thinking_delta / thought 片段三种思维链形态。网关不支持 stream 时整包 JSON
+ * 会作为一次增量下发，前端表现退化为一次性显示。
+ * 与总结路径的关键差异：不做 JSON 解析、不带 response_format；
+ * anthropic / gemini 原生协议没有多轮转发通道，把历史压成单条提示词文本。
+ */
+export async function chatWithMeetingContext(profile, apiKey, { question, history = [], context }, onDelta, signal) {
+  const systemPrompt = buildChatSystemPrompt(context);
+  const accumulator = createChatStreamAccumulator();
+  const emit = (delta) => {
+    if (!onDelta) return;
+    const next = accumulator.push(delta);
+    if (next.content || next.reasoning) onDelta(next);
+  };
+  // 流式问答给长思考模型更宽的窗口（默认 5 分钟），非流式路径维持 120 秒。
+  const streamTimeoutMs = profile.options?.timeoutMs ?? 300_000;
+  const finishOrThrow = () => {
+    const result = accumulator.finish();
+    if (!result.content) throw new Error("问答模型没有返回内容。");
+    return result;
+  };
+
+  if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
+    const prompt = [
+      systemPrompt,
+      ...history.map((item) => `${item.role === "user" ? "用户" : "助手"}：${item.text}`),
+      `用户：${question}`,
+      "请直接回答最后一条用户问题。"
+    ].join("\n\n");
+    const isAnthropic = profile.options.apiFlavor === "anthropic";
+    const response = isAnthropic
+      ? await requestAnthropic(profile, apiKey, prompt, 2_048, signal, { stream: true }, "问答模型请求失败")
+      : await requestGemini(profile, apiKey, prompt, 2_048, signal, { stream: true }, "问答模型请求失败");
+    const contentType = response.headers.get("content-type") ?? "";
+    const emitGeminiChunk = (chunk) => {
+      for (const part of (chunk?.candidates ?? []).flatMap((candidate) => candidate?.content?.parts ?? [])) {
+        if (typeof part?.text !== "string" || !part.text) continue;
+        emit(part.thought === true ? { reasoning: part.text } : { content: part.text });
+      }
+    };
+    if (contentType.includes("text/event-stream")) {
+      for await (const data of sseDataLines(response)) {
+        if (!data || data === "[DONE]") continue;
+        let payload;
+        try { payload = JSON.parse(data); } catch { continue; }
+        if (isAnthropic) {
+          if (payload?.type !== "content_block_delta") continue;
+          const delta = payload.delta ?? {};
+          if (delta.type === "text_delta" && typeof delta.text === "string") emit({ content: delta.text });
+          else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") emit({ reasoning: delta.thinking });
+        } else {
+          emitGeminiChunk(payload);
+        }
+      }
+    } else {
+      let payload;
+      try { payload = await response.json(); } catch { payload = null; }
+      if (Array.isArray(payload)) {
+        for (const chunk of payload) emitGeminiChunk(chunk);
+      } else {
+        const result = extractChatResponse(payload);
+        emit({ content: result.content, reasoning: result.reasoning });
+      }
+    }
+    return finishOrThrow();
+  }
+
+  const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authorizationHeaders(profile, apiKey),
+      ...(profile.options?.headers ?? {})
+    },
+    body: JSON.stringify({
+      model: profile.model,
+      temperature: 0.3,
+      stream: true,
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...history.map((item) => ({ role: item.role, content: item.text })),
+        { role: "user", content: question }
+      ]
+    }),
+    signal: requestSignal(signal, streamTimeoutMs)
+  });
+  if (!response.ok) {
+    throw new Error(`问答模型请求失败：${response.status} ${await response.text()}`);
+  }
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("text/event-stream")) {
+    for await (const data of sseDataLines(response)) {
+      if (!data || data === "[DONE]") continue;
+      let payload;
+      try { payload = JSON.parse(data); } catch { continue; }
+      const delta = payload?.choices?.[0]?.delta;
+      if (!delta) continue;
+      const reasoning = delta.reasoning_content ?? delta.reasoning;
+      if (typeof reasoning === "string" && reasoning) emit({ reasoning });
+      if (typeof delta.content === "string" && delta.content) emit({ content: delta.content });
+    }
+  } else {
+    // 网关忽略 stream 参数时整包返回 JSON：作为一次增量下发，前端退化为一次性显示。
+    const payload = await response.json();
+    const result = extractChatResponse(payload);
+    emit({ content: result.content, reasoning: result.reasoning });
+  }
+  return finishOrThrow();
 }
 
 /** 第二阶段视觉纪要提示词：只消费普通纪要和会议元信息，不重复上传转录或音频。 */
@@ -1083,6 +1225,150 @@ function extractMessageContent(payload, depth = 0) {
       .join("");
   }
   return "";
+}
+
+/** 剥掉 New API 等网关常见的 {data}/{result} 包装（与 extractMessageContent 同规则）。 */
+function unwrapPayload(payload, depth = 0) {
+  if (depth > 8) return payload ?? {};
+  if (payload?.data && payload.data !== payload) return unwrapPayload(payload.data, depth + 1);
+  if (payload?.result && payload.result !== payload) return unwrapPayload(payload.result, depth + 1);
+  return payload ?? {};
+}
+
+/**
+ * 把内联 <think>…</think>（vLLM/Qwen 系网关拼在 content 里）从正文中拆出；
+ * 未闭合的 <think> 把其后全部内容视为思考过程，避免把思维链当答案渲染。
+ */
+function splitInlineThinking(text, thoughts) {
+  return String(text ?? "").replace(/<think>([\s\S]*?)(<\/think>|$)/gi, (_, inner) => {
+    thoughts.push(inner);
+    return "";
+  });
+}
+
+/**
+ * 流式增量累积器：把逐段到达的 content/reasoning 增量整理为「可立即安全渲染」的增量。
+ * - 每次push后对全文重新做 <think> 拆分，天然容忍标签被拆到多个分块的情况；
+ * - 尾部疑似未闭合的标签片段（如 "<th"）先扣住不发，标签成形或流结束后再释放；
+ * - reasoning 字段增量与内联思考按先后拼接，保证已发出的增量只增不减。
+ */
+export function createChatStreamAccumulator() {
+  let raw = "";
+  let fieldReasoning = "";
+  let visibleLength = 0;
+  let reasoningLength = 0;
+
+  const parse = () => {
+    const thoughts = [];
+    const visible = splitInlineThinking(raw, thoughts);
+    const inline = thoughts.map((part) => part.trim()).filter(Boolean).join("\n\n");
+    const reasoning = [fieldReasoning.trim(), inline].filter(Boolean).join("\n\n");
+    return { visible, reasoning };
+  };
+
+  const holdbackLength = (text) => {
+    const match = text.match(/<\/?[a-z]{0,8}$/i);
+    return match ? match[0].length : 0;
+  };
+
+  return {
+    /** @returns {{ content?: string, reasoning?: string }} 本次需要下发给 UI 的增量（可为空对象）。 */
+    push(delta) {
+      if (typeof delta?.reasoning === "string" && delta.reasoning) fieldReasoning += delta.reasoning;
+      if (typeof delta?.content === "string" && delta.content) raw += delta.content;
+      const { visible, reasoning } = parse();
+      const emit = {};
+      const visibleCut = visible.length - holdbackLength(visible);
+      if (visibleCut > visibleLength) {
+        emit.content = visible.slice(visibleLength, visibleCut);
+        visibleLength = visibleCut;
+      }
+      // 思考同样扣住尾部半截标签（如未闭合的 “</th”），标签成形或流结束后再释放。
+      const reasoningCut = reasoning.length - holdbackLength(reasoning);
+      if (reasoningCut > reasoningLength) {
+        emit.reasoning = reasoning.slice(reasoningLength, reasoningCut);
+        reasoningLength = reasoningCut;
+      }
+      return emit;
+    },
+    /** 流结束后的最终结果（正文与思考都去除首尾空白，思考为空时省略）。 */
+    finish() {
+      const { visible, reasoning } = parse();
+      return { content: visible.trim(), reasoning: reasoning || undefined };
+    }
+  };
+}
+
+/** 逐行读取 SSE data: 载荷（忽略 event:/注释行），三种协议的流式响应共用。 */
+async function* sseDataLines(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let newlineAt;
+    while ((newlineAt = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newlineAt).replace(/\r$/, "");
+      buffer = buffer.slice(newlineAt + 1);
+      if (line.startsWith("data:")) yield line.slice(5).trim();
+    }
+  }
+  buffer += decoder.decode();
+  const tail = buffer.trim();
+  if (tail.startsWith("data:")) yield tail.slice(5).trim();
+}
+
+/**
+ * 从问答响应中拆出回答正文与思维链/思考过程。兼容常见形态：
+ * - OpenAI 兼容：choices[0].message.reasoning_content / reasoning（DeepSeek、New API 系）
+ * - Anthropic 原生：content 数组中 type:"thinking" 块（文本在 thinking 字段）
+ * - Gemini 原生：candidates parts 中 thought:true 的片段
+ * - 内联 <think>…</think> 标签
+ * @returns {{ content: string, reasoning?: string }}
+ */
+export function extractChatResponse(payload) {
+  const thoughts = [];
+  const finish = (content) => {
+    const text = splitInlineThinking(content, thoughts).trim();
+    const reasoning = thoughts.map((part) => String(part).trim()).filter(Boolean).join("\n\n");
+    return { content: text, reasoning: reasoning || undefined };
+  };
+  const body = unwrapPayload(payload);
+  // Anthropic Messages：text 块拼正文，thinking 块进思考。
+  if (Array.isArray(body.content) && !body.choices) {
+    const texts = [];
+    for (const block of body.content) {
+      if (block?.type === "thinking" && typeof block.thinking === "string") thoughts.push(block.thinking);
+      else if (typeof block?.text === "string") texts.push(block.text);
+    }
+    return finish(texts.join(""));
+  }
+  // Gemini generateContent：thought:true 的片段是思考，其余拼正文。
+  if (Array.isArray(body.candidates)) {
+    const texts = [];
+    for (const part of body.candidates.flatMap((candidate) => candidate?.content?.parts ?? [])) {
+      if (part?.thought === true) {
+        if (typeof part.text === "string") thoughts.push(part.text);
+      } else if (typeof part?.text === "string") {
+        texts.push(part.text);
+      }
+    }
+    return finish(texts.join(""));
+  }
+  // OpenAI 兼容 / Responses：reasoning_content（DeepSeek）或 reasoning（部分网关）。
+  const message = body.choices?.[0]?.message;
+  if (message) {
+    const raw = message.reasoning_content ?? message.reasoning;
+    if (typeof raw === "string" && raw.trim()) thoughts.push(raw);
+    else if (Array.isArray(raw)) thoughts.push(raw.map((item) => item?.text ?? "").join(""));
+    let content = "";
+    if (typeof message.content === "string") content = message.content;
+    else if (Array.isArray(message.content)) content = message.content.map((item) => item?.text ?? item?.content ?? "").join("");
+    return finish(content);
+  }
+  return finish(body.output_text ?? extractMessageContent(payload));
 }
 
 /**

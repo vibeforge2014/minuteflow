@@ -7,7 +7,8 @@
 import type {
   MeetingMode,
   MeetingStatus,
-  SystemPermissionValue
+  SystemPermissionValue,
+  TranscriptSegment
 } from "../types";
 
 export type RecorderPhase = "idle" | "starting" | "recording" | "paused" | "stopping";
@@ -39,6 +40,37 @@ export function shouldAutoOpenRightPanel(input: {
   if (input.stage === "prepare") return false;
   if (input.stage === "live") return true;
   return input.transcriptCount > 0 || Boolean(input.hasProcessingStatus);
+}
+
+/**
+ * 回放位置 → 正在播放的转写段落（歌词式同步的定位核心）。
+ *
+ * 二分找最后一个 startMs ≤ 播放位置的段落；段落区间内的间隙（沉默）
+ * 保留上一段高亮直到下一段开始，避免高亮在段落之间闪烁消失。
+ * 播放位置早于首段或转写为空时返回 null。
+ */
+export function findPlayingSegment(
+  segments: TranscriptSegment[],
+  playbackMs: number
+): TranscriptSegment | null {
+  if (playbackMs <= 0 || segments.length === 0) return null;
+  let low = 0;
+  let high = segments.length - 1;
+  let index = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (segments[mid].startMs <= playbackMs) {
+      index = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  if (index < 0) return null;
+  const candidate = segments[index];
+  if (playbackMs < candidate.endMs) return candidate;
+  const next = segments[index + 1];
+  return !next || playbackMs < next.startMs ? candidate : null;
 }
 
 /**

@@ -17,6 +17,9 @@ import {
   extractJson,
   isVisualSummaryProfileVerified,
   resolveProviderEndpoint,
+  buildChatSystemPrompt,
+  createChatStreamAccumulator,
+  extractChatResponse,
   generateVisualSummaryWithOpenAICompatible,
   summarizeWithOpenAICompatible,
   summarizeLocally,
@@ -60,7 +63,7 @@ import {
   needsRemoteTranscriptionNormalization,
   normalizeRemoteTranscriptionAudio
 } from "../electron/services/transcription-audio.mjs";
-import { buildRecordingReadiness, deriveWorkspaceStage, shouldAutoOpenRightPanel } from "../src/lib/workspace";
+import { buildRecordingReadiness, deriveWorkspaceStage, findPlayingSegment, shouldAutoOpenRightPanel } from "../src/lib/workspace";
 import { isOnboardingSummaryReady, isOnboardingTranscriptionReady } from "../src/lib/onboarding";
 import {
   buildSummaryContentMotion,
@@ -1288,6 +1291,29 @@ describe("visual summary schema and capability gates", () => {
     expect(simplifyChinese("聚焦核心任务與核心結論")).toBe("聚焦核心任务与核心结论");
   });
 
+  it("tolerates string-serialized section numbers and schemaVersion from compatible gateways", () => {
+    const result = validateVisualSummary({
+      ...visualPayload,
+      schemaVersion: "1",
+      sections: [
+        { ...visualPayload.sections[0], number: "1" },
+        { ...visualPayload.sections[1], number: "02" }
+      ]
+    });
+    expect(result.sections.map((section) => section.number)).toEqual([1, 2]);
+  });
+
+  it("falls back gracefully when the model reports an unparsable section number", () => {
+    const result = validateVisualSummary({
+      ...visualPayload,
+      sections: [
+        { ...visualPayload.sections[0], number: "一" },
+        { ...visualPayload.sections[1], number: null }
+      ]
+    });
+    expect(result.sections.map((section) => section.number)).toEqual([1, 2]);
+  });
+
   it("rejects markup, URLs, oversized tables, and mismatched row widths", () => {
     expect(() => validateVisualSummary({
       ...visualPayload,
@@ -1500,5 +1526,146 @@ describe("database transcript diff persistence", () => {
     expect(listVoiceprintPeople()).toContainEqual(expect.objectContaining({ name, sampleCount: 1 }));
     expect(deleteVoiceprintPerson(name)).toEqual({ deleted: 1 });
     expect(listVoiceprintPeople().some((person) => person.name === name)).toBe(false);
+  });
+});
+
+describe("chat system prompt", () => {
+  it("packs meeting context and groundedness rules into the prompt", () => {
+    const prompt = buildChatSystemPrompt({
+      title: "季度复盘",
+      participants: ["小林", "小周"],
+      goals: ["对齐下季度目标"],
+      notes: [],
+      summary: { topics: [], keyPoints: ["Q3 增长 12%"], decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: [], stale: false },
+      transcriptText: "[00:10] 小林：Q3 增长 12%。"
+    });
+    expect(prompt).toContain("季度复盘");
+    expect(prompt).toContain("小林、小周");
+    expect(prompt).toContain("对齐下季度目标");
+    expect(prompt).toContain("Q3 增长 12%");
+    expect(prompt).toContain("[00:10] 小林：Q3 增长 12%。");
+    // 不编造 + 纯文本回答是问答路径的核心约束，必须写进系统提示。
+    expect(prompt).toContain("不要编造");
+    expect(prompt).not.toContain("只输出");
+  });
+
+  it("tolerates missing context fields without crashing", () => {
+    const prompt = buildChatSystemPrompt({});
+    expect(prompt).toContain("会议标题：");
+    expect(prompt).toContain("转写记录：");
+    expect(prompt).not.toContain("undefined");
+  });
+});
+
+describe("findPlayingSegment", () => {
+  const seg = (id: string, startMs: number, endMs: number) => ({ id, startMs, endMs, speakerId: "s", speakerName: "S", text: id, status: "final" as const });
+
+  it("定位播放位置所在的段落", () => {
+    const segments = [seg("a", 0, 5_000), seg("b", 5_000, 9_000), seg("c", 12_000, 20_000)];
+    expect(findPlayingSegment(segments, 1)?.id).toBe("a");
+    expect(findPlayingSegment(segments, 4_999)?.id).toBe("a");
+    expect(findPlayingSegment(segments, 5_000)?.id).toBe("b");
+    expect(findPlayingSegment(segments, 19_999)?.id).toBe("c");
+  });
+
+  it("段落间隙（沉默）保留上一段高亮，直到下一段开始", () => {
+    const segments = [seg("a", 0, 5_000), seg("b", 12_000, 20_000)];
+    expect(findPlayingSegment(segments, 9_000)?.id).toBe("a");
+    expect(findPlayingSegment(segments, 11_999)?.id).toBe("a");
+    expect(findPlayingSegment(segments, 12_000)?.id).toBe("b");
+  });
+
+  it("末段结束后的间隙仍指向末段，转写之外与播放前返回 null", () => {
+    const segments = [seg("a", 0, 5_000), seg("b", 6_000, 9_000)];
+    expect(findPlayingSegment(segments, 60_000)?.id).toBe("b");
+    expect(findPlayingSegment(segments, -3)).toBeNull();
+    expect(findPlayingSegment([], 1_000)).toBeNull();
+    expect(findPlayingSegment(segments, 0)).toBeNull();
+  });
+});
+
+describe("extractChatResponse", () => {
+  it("拆出 OpenAI 兼容响应里的 reasoning_content，正文保持独立", () => {
+    const result = extractChatResponse({
+      choices: [{ message: { content: "**结论**如下", reasoning_content: "先查纪要再核对转写" } }]
+    });
+    expect(result.content).toBe("**结论**如下");
+    expect(result.reasoning).toBe("先查纪要再核对转写");
+  });
+
+  it("把内联 <think> 标签拆为思考过程，未闭合时其后全部视为思考", () => {
+    const closed = extractChatResponse({
+      choices: [{ message: { content: "<think>推理 A</think>答案是列表页延迟" } }]
+    });
+    expect(closed.content).toBe("答案是列表页延迟");
+    expect(closed.reasoning).toBe("推理 A");
+    const unclosed = extractChatResponse({
+      choices: [{ message: { content: "答案前半<think>还没想完的推理" } }]
+    });
+    expect(unclosed.content).toBe("答案前半");
+    expect(unclosed.reasoning).toBe("还没想完的推理");
+  });
+
+  it("Anthropic thinking 块进思考、text 块拼正文；Gemini thought 片段同理", () => {
+    const anthropic = extractChatResponse({
+      content: [
+        { type: "thinking", thinking: "先定位行动项" },
+        { type: "text", text: "共 3 个行动项" }
+      ]
+    });
+    expect(anthropic.content).toBe("共 3 个行动项");
+    expect(anthropic.reasoning).toBe("先定位行动项");
+    const gemini = extractChatResponse({
+      candidates: [{ content: { parts: [
+        { text: "思考片段", thought: true },
+        { text: "最终回答" }
+      ] } }]
+    });
+    expect(gemini.content).toBe("最终回答");
+    expect(gemini.reasoning).toBe("思考片段");
+  });
+
+  it("无思考过程的普通响应只返回 content，不产生 reasoning", () => {
+    const plain = extractChatResponse({ choices: [{ message: { content: "普通回答" } }] });
+    expect(plain.content).toBe("普通回答");
+    expect(plain.reasoning).toBeUndefined();
+    const wrapped = extractChatResponse({ data: { choices: [{ message: { content: "网关包装", reasoning: "r" } }] } });
+    expect(wrapped.content).toBe("网关包装");
+    expect(wrapped.reasoning).toBe("r");
+  });
+});
+
+describe("createChatStreamAccumulator", () => {
+  it("跨块拆开的 <think> 标签不会把半截标签漏进正文增量", () => {
+    const acc = createChatStreamAccumulator();
+    const emissions = [
+      acc.push({ content: "答案前" }),
+      acc.push({ content: "<th" }),
+      acc.push({ content: "ink>推理" }),
+      acc.push({ content: "过程</th" }),
+      acc.push({ content: "ink>可见回答" })
+    ];
+    const streamedContent = emissions.map((e) => e.content ?? "").join("");
+    const streamedReasoning = emissions.map((e) => e.reasoning ?? "").join("");
+    expect(streamedContent).not.toContain("<");
+    expect(streamedContent).toBe("答案前可见回答");
+    expect(streamedReasoning).toBe("推理过程");
+    expect(acc.finish()).toEqual({ content: "答案前可见回答", reasoning: "推理过程" });
+  });
+
+  it("reasoning 字段增量单调累积，finish 去除首尾空白", () => {
+    const acc = createChatStreamAccumulator();
+    acc.push({ reasoning: "先查纪要 " });
+    acc.push({ reasoning: "再核对转写 " });
+    acc.push({ content: " 回答正文 " });
+    expect(acc.finish()).toEqual({ content: "回答正文", reasoning: "先查纪要 再核对转写" });
+  });
+
+  it("空增量与无效载荷返回空对象，不影响已输出内容", () => {
+    const acc = createChatStreamAccumulator();
+    expect(acc.push({})).toEqual({});
+    expect(acc.push({ content: "abc" }).content).toBe("abc");
+    expect(acc.push({})).toEqual({});
+    expect(acc.finish().content).toBe("abc");
   });
 });

@@ -32,6 +32,7 @@ import {
 import { api, isElectronRuntime } from "../lib/api";
 import { useMeetingStore } from "../store/meetingStore";
 import { useDialogFocus } from "../hooks/useDialogFocus";
+import { useExitPresence } from "../hooks/useExitPresence";
 import type {
   DownloadableModel,
   LocalModelFile,
@@ -263,6 +264,7 @@ export type SettingsTab = "llm" | "transcription" | "general" | "storage" | "upd
 
 export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; initialTab?: SettingsTab; onClose(): void }) {
   const profiles = useMeetingStore((state) => state.profiles);
+  const setProfiles = useMeetingStore((state) => state.setProfiles);
   const preferences = useMeetingStore((state) => state.preferences);
   const loadProfiles = useMeetingStore((state) => state.loadProfiles);
   const updatePreferences = useMeetingStore((state) => state.updatePreferences);
@@ -275,12 +277,16 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
   /** 测试/保存的结果反馈。 */
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 配置面板“世代”：目录里切换选中服务（预设/已保存/自定义）时 +1，
+   *  驱动编辑器面板重放进场过渡；字段编辑不递增，打字不会打断输入。 */
+  const [editorGeneration, setEditorGeneration] = useState(0);
   const [updateState, setUpdateState] = useState<AppUpdateCheckResult | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const dialogRef = useDialogFocus<HTMLDivElement>(open, {
     initialFocus: ".settings-nav button.is-active",
     onEscape: onClose
   });
+  const { mounted, closing } = useExitPresence(open, 170);
   // 正式桌面端支持 macOS / Windows；开发环境额外显示，便于用 ?preview=desktop 做浏览器视觉验收。
   const showUpdateSettings = api.system.platform === "darwin"
     || api.system.platform === "win32"
@@ -290,6 +296,11 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
   useEffect(() => {
     if (open) loadProfiles();
   }, [loadProfiles, open]);
+
+  // 重新打开时清掉上一次会话的测试/保存反馈，避免陈旧状态误导。
+  useEffect(() => {
+    if (open) setStatus(null);
+  }, [open]);
 
   // 指定初始页时（如更新提示 Toast 直达「软件更新」），打开瞬间切到该页。
   useEffect(() => {
@@ -327,7 +338,7 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
       });
     });
   }, [open, tab]);
-  if (!open) return null;
+  if (!mounted) return null;
 
   /** 从预设开始编辑：套用预设字段并清空密钥/状态。 */
   const startPreset = (key: keyof typeof providerPresets) => {
@@ -339,6 +350,7 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
     });
     setApiKey("");
     setStatus(null);
+    setEditorGeneration((value) => value + 1);
   };
 
   /** 新建自定义服务档案（OpenAI 兼容协议，按当前页决定 stt/llm）。 */
@@ -353,19 +365,32 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
     });
     setApiKey("");
     setStatus(null);
+    setEditorGeneration((value) => value + 1);
   };
 
-  /** 保存档案：密钥随请求送到主进程安全存储，渲染层不再持有明文。 */
+  /** 保存后就地合并档案列表：用后端返回值同步目录，避免整表 loadProfiles
+   *  与 setEditing 分成两帧渲染，造成保存瞬间表单与目录连跳（闪烁）。 */
+  const mergeSavedProfile = (saved: ModelProfile) => {
+    setProfiles(
+      profiles.some((profile) => profile.id === saved.id)
+        ? profiles.map((profile) => profile.id === saved.id ? saved : profile)
+        : [...profiles, saved]
+    );
+    return saved;
+  };
+
+  /** 保存档案：密钥随请求送到主进程安全存储，渲染层不再持有明文。
+   *  保存成功即关闭弹窗——收回动画就是“已保存”的反馈；失败留在弹窗内展示原因。 */
   const saveProfile = async () => {
     if (!editing) return;
     setBusy(true);
     setStatus(null);
     try {
-      const saved = await api.models.save(editing, apiKey || undefined);
-      await loadProfiles();
+      const saved = mergeSavedProfile(await api.models.save(editing, apiKey || undefined));
       setEditing(saved);
       setApiKey("");
       setStatus("配置已安全保存。");
+      onClose();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "保存失败");
     } finally {
@@ -389,10 +414,9 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
             visualSummaryVerifiedFingerprint: result.visualSummaryVerifiedFingerprint
           }
         };
-        const saved = await api.models.save(verified, apiKey || undefined);
+        const saved = mergeSavedProfile(await api.models.save(verified, apiKey || undefined));
         setEditing(saved);
         setApiKey("");
-        await loadProfiles();
       }
       setStatus(result.message);
     } catch (error) {
@@ -447,7 +471,7 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
   const activePresetKey = matchedPresetKey === "pythonWhisper" ? "whisper" : matchedPresetKey;
 
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div className={`modal-backdrop ${closing ? "is-closing" : ""}`} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div ref={dialogRef} className="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="设置分类">
@@ -475,7 +499,7 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
               <div className="settings-breadcrumb"><span>设置</span><CaretRight size={14} /><strong>{tab === "llm" ? "AI 总结" : tab === "transcription" ? "转录设置" : tab === "general" ? "通用设置" : tab === "storage" ? "存储与隐私" : "软件更新"}</strong></div>
               <button className="icon-button" onClick={onClose} aria-label="关闭设置"><X size={18} /></button>
             </header>
-          <div className={`settings-content ${(tab === "llm" || tab === "transcription") ? "settings-content--models" : `settings-content--${tab}`}`}>
+          <div key={tab} className={`settings-content ${(tab === "llm" || tab === "transcription") ? "settings-content--models" : `settings-content--${tab}`}`}>
             {(tab === "llm" || tab === "transcription") && (
               <div className="model-settings">
                 <aside className="model-catalog">
@@ -503,12 +527,12 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                       <button className={editing?.name === "New API 语音转录" ? "is-selected" : ""} onClick={() => startPreset("newApiWhisper")}><span className="profile-icon"><CloudArrowDown size={18} /></span><span><strong>New API</strong><small>OpenAI 音频接口兼容</small></span>{editing?.name === "New API 语音转录" && <CheckCircle size={16} weight="fill" />}</button>
                     </></div>}
                   {!!profiles.length && <div className="model-catalog__section"><span>已保存</span>{profiles.filter((profile) => profile.kind === (tab === "llm" ? "llm" : "stt")).map((profile) => (
-                    <button key={profile.id} className={editing?.id === profile.id ? "is-selected" : ""} onClick={() => { setEditing(normalizeLegacyProviderProfile(profile)); setApiKey(""); setStatus(null); }}><span className="profile-icon">{profile.kind === "stt" ? "STT" : profile.kind === "llm" ? "LLM" : "SPK"}</span><span><strong>{profile.name}</strong><small>{profile.model || "尚未选择模型"}</small></span>{profile.enabled && <CheckCircle size={16} weight="fill" />}</button>
+                    <button key={profile.id} className={editing?.id === profile.id ? "is-selected" : ""} onClick={() => { setEditing(normalizeLegacyProviderProfile(profile)); setApiKey(""); setStatus(null); setEditorGeneration((value) => value + 1); }}><span className="profile-icon">{profile.kind === "stt" ? "STT" : profile.kind === "llm" ? "LLM" : "SPK"}</span><span><strong>{profile.name}</strong><small>{profile.model || "尚未选择模型"}</small></span>{profile.enabled && <CheckCircle size={16} weight="fill" />}</button>
                   ))}</div>}
                   <button className="model-catalog__custom" onClick={startCustomProfile}><Plus size={15} />自定义服务</button>
                 </aside>
                 {editing && (
-                  <div className="profile-editor-wrap">
+                  <div key={editorGeneration} className="profile-editor-wrap">
                     <div className="profile-editor-heading">
                       <span className="profile-editor-heading__icon">{editing.kind === "stt" ? <Waveform size={24} /> : <Sparkle size={24} />}</span>
                       <div><h2>{editing.name}</h2><p>{editing.kind === "stt" ? "将会议音频转换为可编辑的中文与多语言文本。" : "用于会议总结、行动项提取与内容整理。"}</p></div>

@@ -1,9 +1,9 @@
 /**
- * 右侧面板（工作区右栏）：「转录」与「AI 纪要」两个标签页。
- * 转录页：发言人色点与改名/合并管理、可编辑的转写段落（textarea 直接改写文本并标记纪要过期）、
+ * 转写视图（中央工作区「转写」标签页的内容，也可嵌入其他容器）：
+ * 发言人色点与改名/合并管理、可编辑的转写段落（textarea 直接改写文本并标记纪要过期）、
  * 时间戳点击跳转播放器、播放进度驱动的歌词式高亮（is-playing）、
  * 长会议按 200 条增量加载 + 跟随尾部自动滚动。
- * AI 纪要页：主题/决策/未决问题/下一步的只读列表（编辑在中央文档区）。
+ * 视图自身不带外壳与滚动容器：外层（如中央文档列）负责提供 .workspace-transcript。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -11,8 +11,6 @@ import {
   ArrowsMerge,
   CheckCircle,
   FingerprintSimple,
-  Lock,
-  LockOpen,
   MagicWand,
   PencilSimple,
   Trash,
@@ -20,20 +18,17 @@ import {
 } from "@phosphor-icons/react";
 import type { ImportJob, Meeting, VoiceprintPerson } from "../types";
 import { api } from "../lib/api";
+import { findPlayingSegment } from "../lib/workspace";
 import { mergeSpeakerLabels } from "../lib/transcript";
-import { toggleSummaryLock } from "../lib/summary";
-import { classifyTextChange, type ContentChangeKind, type SummaryListField } from "../lib/content-motion";
-import { useEnteringItemIds, useSummaryContentMotion } from "../hooks/useContentMotion";
+import { classifyTextChange } from "../lib/content-motion";
+import { useEnteringItemIds } from "../hooks/useContentMotion";
 import type { WorkspaceStage } from "../lib/workspace";
 
-interface TranscriptPanelProps {
+interface TranscriptViewProps {
   meeting: Meeting;
   importJob?: ImportJob;
   stage: WorkspaceStage;
-  tab: "transcript" | "summary";
-  onTabChange(tab: "transcript" | "summary"): void;
   onChange(meeting: Meeting): void;
-  onClose(): void;
   /** 当前播放位置（毫秒），用于高亮同步段落。 */
   playbackMs?: number;
   /** 点击时间戳时请求播放器跳转。 */
@@ -43,7 +38,7 @@ interface TranscriptPanelProps {
   onEmptyAction?(): void;
 }
 
-export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, onChange, onClose, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction }: TranscriptPanelProps) {
+export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction }: TranscriptViewProps) {
   /** 正在重命名的说话人 id（显示浮层输入框）。 */
   const [speakerEditor, setSpeakerEditor] = useState<string | null>(null);
   const [managerOpen, setManagerOpen] = useState(false);
@@ -64,7 +59,6 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
   const visibleSegments = meeting.transcript.slice(-visibleCount);
   const visibleSegmentIds = useMemo(() => visibleSegments.map((segment) => segment.id), [visibleSegments]);
   const enteringSegmentIds = useEnteringItemIds(meeting.id, visibleSegmentIds);
-  const summaryMotion = useSummaryContentMotion(meeting.id, meeting.summary);
   const tailSegment = meeting.transcript.at(-1);
   const tailSignature = tailSegment ? `${tailSegment.id}:${tailSegment.text.length}:${tailSegment.status}` : "";
 
@@ -80,22 +74,63 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
     refreshVoiceprints();
   }, [meeting.id, refreshVoiceprints]);
 
+  /** 回放位置对应的段落（间隙保留上一段高亮，见 findPlayingSegment）。 */
+  const playingSegment = useMemo(
+    () => findPlayingSegment(meeting.transcript, playbackMs),
+    [meeting.transcript, playbackMs]
+  );
+
+  /** 跟随滚动自身触发的 scroll 事件在该时间戳之前不参与“是否脱离跟随”判定。 */
+  const followGuardUntil = useRef(0);
+
   // Auto-scroll to keep the newest transcript in view during a live meeting.
   // Only sticks when the user is already near the bottom so reading older
   // segments is not interrupted — a standard "follow tail" behavior.
+  // 回放进行中改由下方的“跟随回放”效果接管，两条跟随互斥。
   useEffect(() => {
     const list = listRef.current;
-    if (!list || !autoScroll || meeting.transcript.length === 0) return;
+    if (!list || !autoScroll || playingSegment || meeting.transcript.length === 0) return;
     list.scrollTo({
       top: list.scrollHeight,
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
     });
-  }, [tailSignature, autoScroll, visibleCount]);
+  }, [tailSignature, autoScroll, visibleCount, playingSegment]);
 
-  /** 用户向上阅读时暂停跟随；回到底部或点击恢复后重新跟随最新内容。 */
+  // 回放跟随（歌词式）：播放进入新段落时把该段滚到列表上部约 1/3 处；
+  // 段落已在可视上中部时不重复滚动，减少无谓位移。正在播放的段落落在
+  // 窗口化渲染之外时先扩窗，扩窗重渲染后本效果再次运行并完成定位。
+  useEffect(() => {
+    const list = listRef.current;
+    if (!playingSegment || !autoScroll || !list) return;
+    const el = list.querySelector<HTMLElement>(`[data-segment-id="${playingSegment.id}"]`);
+    if (!el) {
+      const index = meeting.transcript.findIndex((segment) => segment.id === playingSegment.id);
+      if (index >= 0) setVisibleCount((count) => Math.max(count, meeting.transcript.length - index + 20));
+      return;
+    }
+    const top = el.getBoundingClientRect().top - list.getBoundingClientRect().top;
+    if (top >= list.clientHeight * 0.1 && top <= list.clientHeight * 0.5) return;
+    followGuardUntil.current = performance.now() + 450;
+    list.scrollTo({
+      top: Math.max(0, list.scrollTop + top - list.clientHeight / 3),
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+    });
+  }, [playingSegment?.id, autoScroll, visibleCount, meeting.transcript]);
+
+  /** 用户向上阅读时暂停跟随；回到底部或点击恢复后重新跟随最新内容。
+      回放中改用“正在播放的段落是否仍在可视区”判定，跟随滚动自身触发的事件被忽略。 */
   const handleTranscriptScroll = () => {
     const list = listRef.current;
     if (!list) return;
+    if (performance.now() < followGuardUntil.current) return;
+    if (playingSegment) {
+      const el = list.querySelector<HTMLElement>(`[data-segment-id="${playingSegment.id}"]`);
+      if (el) {
+        const top = el.getBoundingClientRect().top - list.getBoundingClientRect().top;
+        setAutoScroll(top > -el.offsetHeight && top < list.clientHeight);
+        return;
+      }
+    }
     const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
     setAutoScroll(distanceFromBottom < 64);
   };
@@ -153,276 +188,222 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
   });
 
   return (
-    <aside className="transcript-panel" aria-label={stage === "live" ? "实时会议侧栏" : "会议整理侧栏"}>
-      <header className="transcript-panel__header">
-        <div className="panel-tabs" role="tablist" aria-label="会议侧栏内容">
-          <button
-            id="transcript-tab"
-            role="tab"
-            aria-selected={tab === "transcript"}
-            aria-controls="transcript-content"
-            className={tab === "transcript" ? "is-active" : ""}
-            onClick={() => onTabChange("transcript")}
-          >
-            {stage === "live" ? "实时转写" : "逐字稿"}
-          </button>
-          <button
-            id="summary-tab"
-            role="tab"
-            aria-selected={tab === "summary"}
-            aria-controls="summary-content"
-            className={tab === "summary" ? "is-active" : ""}
-            onClick={() => onTabChange("summary")}
-          >
-            {stage === "live" ? "阶段要点" : "AI 纪要"} <small>Beta</small>
-          </button>
-        </div>
-        <button className="icon-button" onClick={onClose} aria-label="关闭侧栏"><X size={18} /></button>
-      </header>
-
-      {tab === "transcript" ? (
-        <>
-          <div className="speaker-strip">
-            {speakers.slice(0, 3).map(([id, name]) => (
-              <button key={id} onClick={() => setSpeakerEditor(id)}>
-                <span className={`speaker-dot speaker-dot--${speakerColor(id)}`} />{name}
-                {voiceprints.some((person) => person.name === name) && (
-                  <FingerprintSimple size={12} weight="fill" aria-label="已保存在本地声纹簿" />
-                )}
-              </button>
-            ))}
-            {speakers.length > 3 && (
-              // 超出前 3 个的说话人以 +N 收纳：点开管理面板即可查看/改名全部。
-              <button className="speaker-more" onClick={() => setManagerOpen(true)}>
-                +{speakers.length - 3}
-              </button>
+    <>
+      <div className="speaker-strip">
+        {speakers.slice(0, 3).map(([id, name]) => (
+          <button key={id} onClick={() => setSpeakerEditor(id)}>
+            <span className={`speaker-dot speaker-dot--${speakerColor(id)}`} />{name}
+            {voiceprints.some((person) => person.name === name) && (
+              <FingerprintSimple size={12} weight="fill" aria-label="已保存在本地声纹簿" />
             )}
-            <button className="speaker-merge" onClick={() => setManagerOpen((value) => !value)}>
-              <ArrowsMerge size={14} />管理
+          </button>
+        ))}
+        {speakers.length > 3 && (
+          // 超出前 3 个的说话人以 +N 收纳：点开管理面板即可查看/改名全部。
+          <button className="speaker-more" onClick={() => setManagerOpen(true)}>
+            +{speakers.length - 3}
+          </button>
+        )}
+        <button className="speaker-merge" onClick={() => setManagerOpen((value) => !value)}>
+          <ArrowsMerge size={14} />管理
+        </button>
+      </div>
+      {managerOpen && (
+        <section className="speaker-manager">
+          <header>
+            <div>
+              <strong>发言人管理</strong>
+              <small>改名会从本地音频学习声纹；低置信度时仍保留匿名标签</small>
+            </div>
+            <button className="icon-button" onClick={() => setManagerOpen(false)} aria-label="关闭发言人管理">
+              <X size={15} />
             </button>
+          </header>
+          <div className="speaker-manager__names">
+            {speakers.map(([id, name]) => (
+              <label key={id}>
+                <span className={`speaker-dot speaker-dot--${speakerColor(id)}`} />
+                <input
+                  aria-label={`重命名 ${name}`}
+                  defaultValue={name}
+                  disabled={learningSpeakerId === id}
+                  // 与气泡改名保持一致：Enter 立即应用（另保留失焦提交通道）。
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") return;
+                    event.preventDefault();
+                    const next = event.currentTarget.value.trim();
+                    if (next && next !== name) {
+                      event.currentTarget.dataset.committed = "true";
+                      renameSpeaker(id, next);
+                    }
+                    event.currentTarget.blur();
+                  }}
+                  onBlur={(event) => {
+                    if (event.currentTarget.dataset.committed === "true") {
+                      delete event.currentTarget.dataset.committed;
+                      return;
+                    }
+                    const next = event.currentTarget.value.trim();
+                    if (next && next !== name) renameSpeaker(id, next);
+                  }}
+                />
+              </label>
+            ))}
           </div>
-          {managerOpen && (
-            <section className="speaker-manager">
-              <header>
-                <div>
-                  <strong>发言人管理</strong>
-                  <small>改名会从本地音频学习声纹；低置信度时仍保留匿名标签</small>
-                </div>
-                <button className="icon-button" onClick={() => setManagerOpen(false)} aria-label="关闭发言人管理">
-                  <X size={15} />
-                </button>
-              </header>
-              <div className="speaker-manager__names">
-                {speakers.map(([id, name]) => (
-                  <label key={id}>
-                    <span className={`speaker-dot speaker-dot--${speakerColor(id)}`} />
-                    <input
-                      aria-label={`重命名 ${name}`}
-                      defaultValue={name}
-                      disabled={learningSpeakerId === id}
-                      // 与气泡改名保持一致：Enter 立即应用（另保留失焦提交通道）。
-                      onKeyDown={(event) => {
-                        if (event.key !== "Enter") return;
-                        event.preventDefault();
-                        const next = event.currentTarget.value.trim();
-                        if (next && next !== name) {
-                          event.currentTarget.dataset.committed = "true";
-                          renameSpeaker(id, next);
-                        }
-                        event.currentTarget.blur();
-                      }}
-                      onBlur={(event) => {
-                        if (event.currentTarget.dataset.committed === "true") {
-                          delete event.currentTarget.dataset.committed;
-                          return;
-                        }
-                        const next = event.currentTarget.value.trim();
-                        if (next && next !== name) renameSpeaker(id, next);
-                      }}
-                    />
-                  </label>
+          {speakers.length > 1 && (
+            <div className="speaker-manager__merge">
+              <select value={mergeSource} onChange={(event) => setMergeSource(event.target.value)}>
+                <option value="">选择待合并标签</option>
+                {speakers.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+              </select>
+              <span>合并到</span>
+              <select value={mergeTarget} onChange={(event) => setMergeTarget(event.target.value)}>
+                <option value="">选择目标发言人</option>
+                {speakers.filter(([id]) => id !== mergeSource).map(([id, name]) => (
+                  <option key={id} value={id}>{name}</option>
+                ))}
+              </select>
+              <button
+                className="button button--secondary button--small"
+                disabled={!mergeSource || !mergeTarget}
+                onClick={mergeSpeakers}
+              >
+                合并
+              </button>
+            </div>
+          )}
+          <div className="voiceprint-book">
+            <div className="voiceprint-book__title">
+              <FingerprintSimple size={15} weight="duotone" />
+              <span>本地声纹簿</span>
+              <small>{voiceprints.length ? `${voiceprints.length} 人` : "尚未学习"}</small>
+            </div>
+            {voiceprints.length > 0 && (
+              <div className="voiceprint-book__people">
+                {voiceprints.map((person) => (
+                  <span key={person.name}>
+                    {person.name}<small>{person.sampleCount} 份</small>
+                    <button
+                      type="button"
+                      aria-label={`忘记 ${person.name} 的声纹`}
+                      title="只删除本地声纹，不修改历史会议"
+                      onClick={() => void forgetVoiceprint(person.name)}
+                    >
+                      <Trash size={12} />
+                    </button>
+                  </span>
                 ))}
               </div>
-              {speakers.length > 1 && (
-                <div className="speaker-manager__merge">
-                  <select value={mergeSource} onChange={(event) => setMergeSource(event.target.value)}>
-                    <option value="">选择待合并标签</option>
-                    {speakers.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
-                  </select>
-                  <span>合并到</span>
-                  <select value={mergeTarget} onChange={(event) => setMergeTarget(event.target.value)}>
-                    <option value="">选择目标发言人</option>
-                    {speakers.filter(([id]) => id !== mergeSource).map(([id, name]) => (
-                      <option key={id} value={id}>{name}</option>
-                    ))}
-                  </select>
-                  <button
-                    className="button button--secondary button--small"
-                    disabled={!mergeSource || !mergeTarget}
-                    onClick={mergeSpeakers}
-                  >
-                    合并
-                  </button>
-                </div>
-              )}
-              <div className="voiceprint-book">
-                <div className="voiceprint-book__title">
-                  <FingerprintSimple size={15} weight="duotone" />
-                  <span>本地声纹簿</span>
-                  <small>{voiceprints.length ? `${voiceprints.length} 人` : "尚未学习"}</small>
-                </div>
-                {voiceprints.length > 0 && (
-                  <div className="voiceprint-book__people">
-                    {voiceprints.map((person) => (
-                      <span key={person.name}>
-                        {person.name}<small>{person.sampleCount} 份</small>
-                        <button
-                          type="button"
-                          aria-label={`忘记 ${person.name} 的声纹`}
-                          title="只删除本地声纹，不修改历史会议"
-                          onClick={() => void forgetVoiceprint(person.name)}
-                        >
-                          <Trash size={12} />
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </section>
-          )}
-          {voiceprintMessage && <p className="voiceprint-message" aria-live="polite">{voiceprintMessage}</p>}
-          {meeting.transcript.length > 0 && (
-            <p className="transcript-hint">{importTranscriptStatus(importJob, meeting.transcript.length)}</p>
-          )}
-          <div
-            className="transcript-list"
-            id="transcript-content"
-            role="tabpanel"
-            aria-labelledby="transcript-tab"
-            ref={listRef}
-            onScroll={handleTranscriptScroll}
-          >
-            {meeting.transcript.length > visibleCount && (
-              <button className="load-earlier" onClick={() => setVisibleCount((value) => value + 200)}>
-                加载更早的 {Math.min(200, meeting.transcript.length - visibleCount)} 条
-              </button>
-            )}
-            {meeting.transcript.length ? visibleSegments.map((segment) => (
-              // is-playing：当前播放位置落在该段落时间区间内时整行高亮（歌词式同步）。
-              <article className={`transcript-item transcript-item--${segment.status} ${playbackMs >= segment.startMs && playbackMs < segment.endMs ? "is-playing" : ""} ${enteringSegmentIds.has(segment.id) ? "content-motion-enter" : ""}`} key={segment.id}>
-                <button className="transcript-time" onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
-                <div>
-                  <button className={`speaker-name speaker-name--${speakerColor(segment.speakerId)}`} onClick={() => setSpeakerEditor(segment.speakerId)}>
-                    {segment.speakerName}
-                    {voiceprints.some((person) => person.name === segment.speakerName) && (
-                      <FingerprintSimple size={11} weight="fill" aria-label="已保存在本地声纹簿" />
-                    )}
-                  </button>
-                  {editingSegmentId === segment.id ? (
-                    <textarea
-                      autoFocus
-                      className="transcript-editor"
-                      value={segment.text}
-                      rows={Math.max(2, Math.ceil(segment.text.length / 24))}
-                      onChange={(event) => updateSegmentText(segment.id, event.target.value)}
-                      onBlur={() => setEditingSegmentId(null)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Escape") {
-                          event.preventDefault();
-                          setEditingSegmentId(null);
-                        }
-                        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                          event.preventDefault();
-                          setEditingSegmentId(null);
-                        }
-                      }}
-                    />
-                  ) : (
-                    <AnimatedTranscriptCopy text={segment.text} animate={!enteringSegmentIds.has(segment.id)} />
-                  )}
-                  {segment.status === "provisional" && <span className="provisional content-status-enter">临时转写中…</span>}
-                </div>
-                <div className="transcript-item__actions">
-                  {segment.status !== "provisional" && (
-                    <button
-                      className="transcript-edit"
-                      aria-label={`编辑 ${formatTranscriptTime(segment.startMs)} 的转写`}
-                      onClick={() => setEditingSegmentId(segment.id)}
-                    >
-                      <PencilSimple size={14} />
-                    </button>
-                  )}
-                  <CheckCircle size={16} className="transcript-check" weight="duotone" />
-                </div>
-              </article>
-            )) : (
-              <div className="panel-empty">
-                <MagicWand size={24} weight="duotone" />
-                <p>{importJob
-                  ? importTranscriptStatus(importJob, 0)
-                  : stage === "review"
-                    ? "这场会议暂无可用逐字稿。笔记和已生成的纪要仍会保留。"
-                    : "开始录音后，转录会出现在这里。"}</p>
-                {!importJob && stage === "review" && emptyActionLabel && onEmptyAction && (
-                  <button className="button button--secondary button--small" onClick={onEmptyAction}>
-                    {emptyActionLabel}
-                  </button>
-                )}
-              </div>
             )}
           </div>
-          {meeting.transcript.length > 0 && <button
-            className={`follow-control ${autoScroll ? "is-active" : ""}`}
-            aria-pressed={autoScroll}
-            onClick={() => {
-              const list = listRef.current;
-              if (list) list.scrollTo({
-                top: list.scrollHeight,
-                behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
-              });
-              setAutoScroll(true);
-            }}
-          >
-            {autoScroll ? <CheckCircle size={14} weight="fill" /> : <ArrowDown size={14} weight="bold" />}
-            {autoScroll ? "正在跟随" : "恢复跟随"}
-          </button>}
-        </>
-      ) : (
-        <div className="ai-panel content-view-enter" id="summary-content" role="tabpanel" aria-labelledby="summary-tab">
-          <section>
-            <h3>
-              当前议题
-              <button
-                className={`icon-button summary-lock ${meeting.summary.manualLocks?.includes("topics") ? "is-locked" : ""}`}
-                aria-label={meeting.summary.manualLocks?.includes("topics") ? "解除主题锁定" : "锁定主题，AI 不整体改写"}
-                title={meeting.summary.manualLocks?.includes("topics") ? "已锁定：AI 重新生成时保留当前主题。点击解锁。" : "未锁定。点击锁定后 AI 不改写主题列表。"}
-                onClick={() => onChange({
-                  ...meeting,
-                  summary: toggleSummaryLock(meeting.summary, "topics")
-                })}
-              >
-                {meeting.summary.manualLocks?.includes("topics")
-                  ? <Lock size={13} weight="fill" />
-                  : <LockOpen size={13} />}
-              </button>
-            </h3>
-            <AnimatedSummaryList field="topics" values={meeting.summary.topics} kinds={summaryMotion.lists.topics} />
-          </section>
-          <section>
-            <h3>已确认决策</h3>
-            <AnimatedSummaryList field="decisions" values={meeting.summary.decisions} kinds={summaryMotion.lists.decisions} />
-          </section>
-          <section>
-            <h3>未决问题</h3>
-            <AnimatedSummaryList field="openQuestions" values={meeting.summary.openQuestions} kinds={summaryMotion.lists.openQuestions} />
-          </section>
-          <section>
-            <h3>下一步</h3>
-            <AnimatedSummaryList field="nextSteps" values={meeting.summary.nextSteps} kinds={summaryMotion.lists.nextSteps} />
-          </section>
-        </div>
+        </section>
       )}
+      {voiceprintMessage && <p className="voiceprint-message" aria-live="polite">{voiceprintMessage}</p>}
+      {meeting.transcript.length > 0 && (
+        <p className="transcript-hint">{importTranscriptStatus(importJob, meeting.transcript.length)}</p>
+      )}
+      <div
+        className="transcript-list"
+        id="transcript-content"
+        role="tabpanel"
+        aria-labelledby="transcript-tab"
+        ref={listRef}
+        onScroll={handleTranscriptScroll}
+      >
+        {meeting.transcript.length > visibleCount && (
+          <button className="load-earlier" onClick={() => setVisibleCount((value) => value + 200)}>
+            加载更早的 {Math.min(200, meeting.transcript.length - visibleCount)} 条
+          </button>
+        )}
+        {meeting.transcript.length ? visibleSegments.map((segment) => (
+          // is-playing：当前播放位置命中的段落整行高亮；data-segment-id 供回放跟随定位。
+          <article
+            className={`transcript-item transcript-item--${segment.status} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${enteringSegmentIds.has(segment.id) ? "content-motion-enter" : ""}`}
+            data-segment-id={segment.id}
+            key={segment.id}
+          >
+            <button className="transcript-time" onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
+            <div>
+              <button className={`speaker-name speaker-name--${speakerColor(segment.speakerId)}`} onClick={() => setSpeakerEditor(segment.speakerId)}>
+                {segment.speakerName}
+                {voiceprints.some((person) => person.name === segment.speakerName) && (
+                  <FingerprintSimple size={11} weight="fill" aria-label="已保存在本地声纹簿" />
+                )}
+              </button>
+              {editingSegmentId === segment.id ? (
+                <textarea
+                  autoFocus
+                  className="transcript-editor"
+                  value={segment.text}
+                  rows={Math.max(2, Math.ceil(segment.text.length / 24))}
+                  onChange={(event) => updateSegmentText(segment.id, event.target.value)}
+                  onBlur={() => setEditingSegmentId(null)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      setEditingSegmentId(null);
+                    }
+                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                      event.preventDefault();
+                      setEditingSegmentId(null);
+                    }
+                  }}
+                />
+              ) : (
+                <AnimatedTranscriptCopy text={segment.text} animate={!enteringSegmentIds.has(segment.id)} />
+              )}
+              {segment.status === "provisional" && <span className="provisional content-status-enter">临时转写中…</span>}
+            </div>
+            <div className="transcript-item__actions">
+              {segment.status !== "provisional" && (
+                <button
+                  className="transcript-edit"
+                  aria-label={`编辑 ${formatTranscriptTime(segment.startMs)} 的转写`}
+                  onClick={() => setEditingSegmentId(segment.id)}
+                >
+                  <PencilSimple size={14} />
+                </button>
+              )}
+              <CheckCircle size={16} className="transcript-check" weight="duotone" />
+            </div>
+          </article>
+        )) : (
+          <div className="panel-empty">
+            <MagicWand size={24} weight="duotone" />
+            <p>{importJob
+              ? importTranscriptStatus(importJob, 0)
+              : stage === "review"
+                ? "这场会议暂无可用逐字稿。笔记和已生成的纪要仍会保留。"
+                : "开始录音后，转录会出现在这里。"}</p>
+            {!importJob && stage === "review" && emptyActionLabel && onEmptyAction && (
+              <button className="button button--secondary button--small" onClick={onEmptyAction}>
+                {emptyActionLabel}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      {meeting.transcript.length > 0 && <button
+        className={`follow-control ${autoScroll ? "is-active" : ""}`}
+        aria-pressed={autoScroll}
+        onClick={() => {
+          const list = listRef.current;
+          if (!list) return;
+          setAutoScroll(true);
+          const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" as const : "smooth" as const;
+          const el = playingSegment ? list.querySelector<HTMLElement>(`[data-segment-id="${playingSegment.id}"]`) : null;
+          followGuardUntil.current = performance.now() + 450;
+          if (el) {
+            const top = el.getBoundingClientRect().top - list.getBoundingClientRect().top;
+            list.scrollTo({ top: Math.max(0, list.scrollTop + top - list.clientHeight / 3), behavior });
+          } else {
+            list.scrollTo({ top: list.scrollHeight, behavior });
+          }
+        }}
+      >
+        {autoScroll ? <CheckCircle size={14} weight="fill" /> : <ArrowDown size={14} weight="bold" />}
+        {autoScroll ? (playingSegment ? "跟随回放" : "正在跟随") : "恢复跟随"}
+      </button>}
 
       {speakerEditor && (
         <div className="speaker-popover">
@@ -438,7 +419,7 @@ export function TranscriptPanel({ meeting, importJob, stage, tab, onTabChange, o
           <small>回车应用到该发言人的全部片段</small>
         </div>
       )}
-    </aside>
+    </>
   );
 }
 
@@ -460,31 +441,7 @@ function AnimatedTranscriptCopy({ text, animate }: { text: string; animate: bool
   return <p className={`transcript-copy ${change.kind === "updated" ? "content-motion-update" : ""}`}>{text}</p>;
 }
 
-function AnimatedSummaryList({
-  field,
-  values,
-  kinds
-}: {
-  field: SummaryListField;
-  values: string[];
-  kinds: ContentChangeKind[];
-}) {
-  return (
-    <ul>{values.map((item, index) => (
-      <li
-        key={`${field}:${item}:${values.slice(0, index + 1).filter((value) => value === item).length}`}
-        className={contentMotionClass(kinds[index])}
-        style={{ animationDelay: `${Math.min(index, 3) * 30}ms` }}
-      >{item}</li>
-    ))}</ul>
-  );
-}
-
-function contentMotionClass(kind?: ContentChangeKind) {
-  return kind === "added" ? "content-motion-enter" : kind === "updated" ? "content-motion-update" : "";
-}
-
-/** 导入任务阶段 → 右栏即时状态；已有文本时仍保留状态行，不替换转录内容。 */
+/** 导入任务阶段 → 即时状态；已有文本时仍保留状态行，不替换转录内容。 */
 function importTranscriptStatus(job: ImportJob | undefined, segmentCount: number) {
   if (!job) return segmentCount ? "转录内容已按时间轴排列" : "AI 实时转写中，临时内容仅供参考";
   if (job.status === "queued" && job.stage === "copying") return "等待归档录音…";
