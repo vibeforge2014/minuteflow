@@ -464,6 +464,8 @@ export async function chatWithMeetingContext(profile, apiKey, { question, histor
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      // 部分网关依据 Accept 头决定是否走 SSE；显式声明避免被当普通 JSON 整包返回。
+      "Accept": "text/event-stream",
       ...authorizationHeaders(profile, apiKey),
       ...(profile.options?.headers ?? {})
     },

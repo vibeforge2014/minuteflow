@@ -90,9 +90,13 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
     });
   }, [messages]);
 
+  /** 当前会议 id 的镜像：发送进行中用户切换会议时，只写会话存储不覆盖正在看的列表。 */
+  const meetingIdRef = useRef(meeting.id);
+  meetingIdRef.current = meeting.id;
+
   const commitMessages = (next: ChatMessage[]) => {
     chatSessions.set(meeting.id, next);
-    setMessages(next);
+    if (meetingIdRef.current === meeting.id) setMessages(next);
   };
 
   const send = async (question: string) => {
@@ -107,6 +111,36 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
       { id: newMessageId(), role: "user", text: trimmed },
       { id: pendingId, role: "assistant", text: "", pending: true }
     ]);
+    // 打字机平滑队列：传输层增量（可能整段蹦出或被网关缓冲）先入缓冲，
+    // 定时器按“每 tick 吐出剩余量的 1/16、至少 1 字”的节奏渐进出字，
+    // 与 ChatGPT 相同的观感——后端到达节奏不影响展示节奏。
+    const buffer = { content: "", reasoning: "" };
+    let drainTimer: number | null = null;
+    const patchPending = (patch: (message: ChatMessage) => ChatMessage) => {
+      commitMessages((chatSessions.get(meeting.id) ?? messages).map((message) =>
+        message.id === pendingId ? patch(message) : message));
+    };
+    const startDrain = () => {
+      if (drainTimer !== null) return;
+      drainTimer = window.setInterval(() => {
+        const takeContent = buffer.content ? Math.max(1, Math.ceil(buffer.content.length / 16)) : 0;
+        const takeReasoning = buffer.reasoning ? Math.max(1, Math.ceil(buffer.reasoning.length / 16)) : 0;
+        const contentChunk = buffer.content.slice(0, takeContent);
+        const reasoningChunk = buffer.reasoning.slice(0, takeReasoning);
+        if (!contentChunk && !reasoningChunk) return;
+        buffer.content = buffer.content.slice(contentChunk.length);
+        buffer.reasoning = buffer.reasoning.slice(reasoningChunk.length);
+        patchPending((message) => {
+          const text = message.text + contentChunk;
+          const reasoning = (message.reasoning ?? "") + reasoningChunk;
+          return { ...message, text, reasoning: reasoning || undefined };
+        });
+        if (!buffer.content && !buffer.reasoning && drainTimer !== null) {
+          window.clearInterval(drainTimer);
+          drainTimer = null;
+        }
+      }, 24);
+    };
     try {
       const result = await api.chat.send(trimmed, history, {
         title: meeting.title,
@@ -116,24 +150,25 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
         summary: meeting.summary,
         transcriptText: transcriptToContextText(meeting)
       }, (delta) => {
-        // 流式增量：追加到 pending 气泡里渐进渲染；最终结果由 invoke 返回时整体校正。
-        commitMessages((chatSessions.get(meeting.id) ?? messages).map((message) => {
-          if (message.id !== pendingId) return message;
-          const text = message.text + (delta.content ?? "");
-          const reasoning = (message.reasoning ?? "") + (delta.reasoning ?? "");
-          return { ...message, text, reasoning: reasoning || undefined };
-        }));
+        buffer.reasoning += delta.reasoning ?? "";
+        buffer.content += delta.content ?? "";
+        startDrain();
       });
-      commitMessages((chatSessions.get(meeting.id) ?? messages).map((message) =>
-        message.id === pendingId
-          ? { ...message, text: result.answer, reasoning: result.reasoning || undefined, pending: false, failed: false }
-          : message));
+      // 流结束后等平滑队列吐完再落最终结果，避免结尾突兀地整段校正。
+      await new Promise<void>((resolve) => {
+        const check = () => {
+          if (!buffer.content && !buffer.reasoning && drainTimer === null) resolve();
+          else window.setTimeout(check, 30);
+        };
+        check();
+      });
+      patchPending((message) =>
+        ({ ...message, text: result.answer, reasoning: result.reasoning || undefined, pending: false, failed: false }));
     } catch (error) {
+      if (drainTimer !== null) window.clearInterval(drainTimer);
       const reason = error instanceof Error ? error.message : String(error);
-      commitMessages((chatSessions.get(meeting.id) ?? messages).map((message) =>
-        message.id === pendingId
-          ? { ...message, text: reason.replace(/^Error invoking remote method '[^']+':\s*/, ""), pending: false, failed: true }
-          : message));
+      patchPending((message) =>
+        ({ ...message, text: reason.replace(/^Error invoking remote method '[^']+':\s*/, ""), pending: false, failed: true }));
     } finally {
       setBusy(false);
     }
