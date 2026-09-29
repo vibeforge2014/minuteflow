@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.24",
+  "version": "0.1.25",
   "platform": "darwin",
   "architectures": [
     "arm64"
   ],
-  "publishedAt": "2026-08-31T15:16:49Z",
+  "publishedAt": "2026-09-29T12:10:46.405Z",
   "minimumSystemVersion": "14.2",
-  "notes": "MinuteFlow 0.1.24 带来自然转录分段、内容更新动效与跨端体验优化，并修复已授权麦克风仍无法开始录音的问题。",
+  "notes": "MinuteFlow 0.1.25 已发布。包含最新的功能改进、兼容性优化与问题修复。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.24",
-  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.24/MinuteFlow-0.1.24-macOS-arm64.dmg",
-  "sha256": "aa71e249f54b3c8ed992d0d012c3d75f925014f30659f4c20794f3cc595ecbb2"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.25",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.25/MinuteFlow-0.1.25-macOS-arm64.dmg",
+  "sha256": "abe0d1ffd2a7831c22b0e7548ca1b17b866baee5a290365182c75ed5660b7efe"
 }

@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.24",
+  "version": "0.1.25",
   "platform": "win32",
   "architectures": [
     "x64"
   ],
-  "publishedAt": "2026-08-31T15:16:49Z",
+  "publishedAt": "2026-09-29T13:34:47.011Z",
   "minimumSystemVersion": "10.0.19045",
-  "notes": "MinuteFlow 0.1.24 带来自然转录分段、内容更新动效与跨端体验优化，并修复已授权麦克风仍无法开始录音的问题。",
+  "notes": "MinuteFlow 0.1.25 已发布。包含最新的功能改进、兼容性优化与问题修复。",
   "downloadUrl": "../downloads/windows/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.24",
-  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.24/MinuteFlow-Setup-0.1.24-Windows-x64.exe",
-  "sha256": "005bca752f4a7ac28c8cb8346f87b9633019a0426d9419d0be76261c6840664f"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.25",
+  "assetUrl": "https://github.com/vibeforge2014/minuteflow/releases/download/v0.1.25/MinuteFlow-Setup-0.1.25-Windows-x64.exe",
+  "sha256": "157d8b061d0319c7c9d465be9e022bf2b057872a7a4ce4935be508ebbd936750"
 }

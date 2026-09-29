@@ -8,7 +8,10 @@
  * 用法：
  *   node scripts/write-release-manifest.mjs --version 0.2.0 --dmg out/MinuteFlow.dmg
  *   node scripts/write-release-manifest.mjs --version 0.2.0 --setup out/MinuteFlow-Setup.exe
- *   （可选 --published-at ISO；--arch 仅 macOS 支持，默认 arm64）
+ *   （可选 --published-at ISO；--arch 仅 macOS 支持，默认 arm64；
+ *    可选 --sha256 64 位十六进制——安装包已在别处算好校验和（如 CI 附加资产
+ *    工作流）且本地网络拉不动大文件时，直接传入而不读取 --setup 文件本体，
+ *    此时路径仅用于推导资产文件名。）
  */
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -36,7 +39,12 @@ if (Boolean(dmgPath) === Boolean(setupPath)) {
 const platform = dmgPath ? "darwin" : "win32";
 const packagePath = path.resolve(root, dmgPath || setupPath);
 const fileName = path.basename(packagePath);
-const sha256 = createHash("sha256").update(readFileSync(packagePath)).digest("hex");
+const sha256Override = String(args.get("--sha256") || "").toLowerCase();
+if (sha256Override && !/^[0-9a-f]{64}$/.test(sha256Override)) {
+  throw new Error("--sha256 must be a 64-character hex digest");
+}
+const sha256 = sha256Override
+  || createHash("sha256").update(readFileSync(packagePath)).digest("hex");
 const tag = `v${version}`;
 const assetUrl = `https://github.com/vibeforge2014/minuteflow/releases/download/${tag}/${encodeURIComponent(fileName)}`;
 const manifest = {
