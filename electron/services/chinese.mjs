@@ -3,6 +3,7 @@
  * 也能正确处理“管不著→管不着”等上下文词组。仅供转录和 AI 纪要使用；
  * 标题、个人笔记、术语表与说话人姓名不应传入这里。
  */
+import { randomUUID } from "node:crypto";
 import { Converter } from "opencc-js";
 
 const toSimplified = Converter({ from: "twp", to: "cn" });
@@ -60,7 +61,13 @@ export function simplifySummary(summary = {}) {
     keyPoints: list(summary.keyPoints),
     decisions: list(summary.decisions),
     actionItems: Array.isArray(summary.actionItems)
-      ? summary.actionItems.map((item) => ({ ...item, title: simplifyChinese(String(item.title ?? "")) }))
+      ? summary.actionItems.map((item) => ({
+          ...item,
+          // 提示词不要求模型返回 id（schema 里也是可选），缺失时必须兜底生成唯一 id：
+          // 否则所有行动项 id 同为 undefined，文档区勾选任意一行会命中全部行。
+          id: typeof item.id === "string" && item.id ? item.id : randomUUID(),
+          title: simplifyChinese(String(item.title ?? ""))
+        }))
       : [],
     openQuestions: list(summary.openQuestions),
     risks: list(summary.risks),

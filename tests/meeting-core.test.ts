@@ -678,6 +678,20 @@ describe("structured meeting summary", () => {
     expect(() => validateSummary({ topics: "not-an-array" })).toThrow();
   });
 
+  it("backfills unique ids for AI action items that omit them", () => {
+    const summary = validateSummary({
+      topics: ["上线准备"],
+      actionItems: [
+        { title: "输出发布清单", owner: "刘婷", dueDate: "周五", status: "todo", done: false },
+        { title: "回归核心链路", owner: "周哲", dueDate: "周四", status: "todo", done: false },
+        { id: "keep-me", title: "通知客服团队", owner: "王敏", dueDate: "周四", status: "done", done: true }
+      ]
+    });
+    expect(summary.actionItems.map((item) => item.id)).toEqual(
+      [expect.any(String), expect.any(String), "keep-me"]);
+    expect(summary.actionItems[0].id).not.toBe(summary.actionItems[1].id);
+  });
+
   it("preserves manually locked summary blocks across AI revisions", () => {
     const current = lockSummaryField({
       ...meeting.summary,

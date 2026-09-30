@@ -44,7 +44,12 @@ export function simplifySummary(summary: MeetingSummary): MeetingSummary {
     topics: list(summary.topics),
     keyPoints: list(summary.keyPoints),
     decisions: list(summary.decisions),
-    actionItems: (summary.actionItems ?? []).map((item) => ({ ...item, title: simplifyChinese(item.title) })),
+    actionItems: (summary.actionItems ?? []).map((item) => ({
+      ...item,
+      // 兜底唯一 id：AI 纪要可能不带 id，缺 id 的行动项会在文档区互相串勾选。
+      id: typeof item.id === "string" && item.id ? item.id : crypto.randomUUID(),
+      title: simplifyChinese(item.title)
+    })),
     openQuestions: list(summary.openQuestions),
     risks: list(summary.risks),
     nextSteps: list(summary.nextSteps),
