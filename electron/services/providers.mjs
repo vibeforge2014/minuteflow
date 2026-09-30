@@ -1033,27 +1033,6 @@ export async function testModelProfile(profile, apiKey) {
   if (profile.transport === "local-summary") {
     return { ok: true, message: "本机基础纪要已就绪，完全离线运行，无需联网或密钥。" };
   }
-  if (profile.transport === "sherpa-onnx") {
-    // 声纹识别就绪检查：内置 sherpa-onnx 引擎可加载 + 两个模型文件都在。
-    const segmentation = profile.options?.segmentationModelPath;
-    const embedding = profile.options?.embeddingModelPath;
-    const missing = [
-      !segmentation && "说话人分离模型",
-      !embedding && "声纹识别模型"
-    ].filter(Boolean);
-    if (missing.length) throw new Error(`${missing.join("和")}尚未就绪，点击对应按钮下载或检测本机。`);
-    try {
-      await Promise.all([access(segmentation), access(embedding)]);
-    } catch {
-      throw new Error("模型文件不存在或已被移动，请重新下载或检测本机。");
-    }
-    try {
-      require("sherpa-onnx-node");
-    } catch {
-      throw new Error("内置声纹引擎无法加载，请重新安装应用。");
-    }
-    return { ok: true, message: "声纹识别已就绪：内置引擎与两个模型均已加载。" };
-  }
   if (profile.transport === "whisper-cpp") {
     if (!profile.options?.modelPath) {
       throw new Error("本地模型尚未就绪，请先下载一个模型。");
@@ -1104,30 +1083,35 @@ export async function testModelProfile(profile, apiKey) {
   }
   if (profile.transport === "sherpa-onnx") {
     // 实际运行时是进程内 sherpa-onnx-node npm 包（diarization.mjs），不存在外部可执行文件：
-    // 测试 = npm 包可加载且两个模型文件真实存在，与运行路径完全一致。
+    // 测试 = npm 包可加载且两个模型文件真实存在，与运行路径完全一致。文案与零路径设置页一致，
+    // 不出现“配置路径”字样。
     if (!profile.options?.segmentationModelPath || !profile.options?.embeddingModelPath) {
-      throw new Error("请配置 Pyannote segmentation 与 3D-Speaker embedding 模型路径。");
+      const missing = [
+        !profile.options?.segmentationModelPath && "说话人分离模型",
+        !profile.options?.embeddingModelPath && "声纹识别模型"
+      ].filter(Boolean);
+      throw new Error(`${missing.join("和")}尚未就绪，请在声纹识别页下载或检测本机。`);
     }
     let sherpaOnnx;
     try {
       sherpaOnnx = require("sherpa-onnx-node");
     } catch {
-      throw new Error("未安装 sherpa-onnx 离线组件，请重新安装应用。");
+      throw new Error("内置声纹引擎无法加载，请重新安装应用。");
     }
     if (!sherpaOnnx.OfflineSpeakerDiarization || !sherpaOnnx.readWave) {
-      throw new Error("sherpa-onnx 组件不完整，请重新安装应用。");
+      throw new Error("内置声纹引擎组件不完整，请重新安装应用。");
     }
     for (const [label, filePath] of [
-      ["segmentation 模型", profile.options.segmentationModelPath],
-      ["embedding 模型", profile.options.embeddingModelPath]
+      ["说话人分离模型", profile.options.segmentationModelPath],
+      ["声纹识别模型", profile.options.embeddingModelPath]
     ]) {
       try {
         await access(filePath);
       } catch {
-        throw new Error(`找不到${label}文件：${filePath}`);
+        throw new Error(`${label}文件不存在或已被移动，请重新下载或检测本机。`);
       }
     }
-    return { ok: true, message: "说话人分离组件与模型文件已就绪。" };
+    return { ok: true, message: "声纹识别已就绪：内置引擎与两个模型均已加载。" };
   }
   if (profile.transport === "openai-audio") {
     await transcribeRemote(profile, apiKey, createTranscriptionTestWave(), "minuteflow-connection-test.wav", "");
