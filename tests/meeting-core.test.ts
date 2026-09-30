@@ -18,6 +18,7 @@ import {
   isVisualSummaryProfileVerified,
   resolveProviderEndpoint,
   buildChatSystemPrompt,
+  chatWithMeetingContext,
   createChatStreamAccumulator,
   extractChatResponse,
   generateVisualSummaryWithOpenAICompatible,
@@ -1667,5 +1668,73 @@ describe("createChatStreamAccumulator", () => {
     expect(acc.push({ content: "abc" }).content).toBe("abc");
     expect(acc.push({})).toEqual({});
     expect(acc.finish().content).toBe("abc");
+  });
+});
+
+describe("chat 流式请求默认值", () => {
+  const sseResponse = (events: string[]) => new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const event of events) controller.enqueue(new TextEncoder().encode(event));
+        controller.close();
+      }
+    }),
+    { status: 200, headers: { "Content-Type": "text/event-stream" } }
+  );
+  const chatProfile = {
+    name: "问答模型",
+    kind: "llm",
+    transport: "openai-chat",
+    baseUrl: "https://api.example.com/v1",
+    model: "qwen-plus",
+    options: {},
+    enabled: true
+  } as const;
+
+  it("OpenAI 兼容问答默认发出流式请求（stream:true + SSE Accept 头）并逐段回调", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(sseResponse([
+      `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "先查纪要" } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: "第一点，" } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: "增长 12%。" } }] })}\n\n`,
+      "data: [DONE]\n\n"
+    ]));
+    const deltas: Array<{ content?: string; reasoning?: string }> = [];
+    const result = await chatWithMeetingContext(
+      chatProfile,
+      "sk-test",
+      { question: "Q3 表现如何？", context: {} },
+      (delta) => deltas.push(delta)
+    );
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("https://api.example.com/v1/chat/completions");
+    expect(init?.headers).toMatchObject({ Accept: "text/event-stream" });
+    expect(JSON.parse(String(init?.body)).stream).toBe(true);
+    expect(deltas.length).toBeGreaterThanOrEqual(3);
+    expect(deltas.map((delta) => delta.content ?? "").join("")).toBe("第一点，增长 12%。");
+    expect(deltas.some((delta) => delta.reasoning === "先查纪要")).toBe(true);
+    expect(result.content).toBe("第一点，增长 12%。");
+    expect(result.reasoning).toBe("先查纪要");
+    fetchMock.mockRestore();
+  });
+
+  it("Anthropic 原生问答同样默认 stream:true，thinking/text 增量分流入对应字段", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(sseResponse([
+      `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "thinking_delta", thinking: "先定位行动项" } })}\n\n`,
+      `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: "共 2 个行动项。" } })}\n\n`
+    ]));
+    const deltas: Array<{ content?: string; reasoning?: string }> = [];
+    const result = await chatWithMeetingContext(
+      { ...chatProfile, transport: "anthropic", baseUrl: "https://anthropic.example.com", options: { apiFlavor: "anthropic" } },
+      "sk-ant-test",
+      { question: "行动项有哪些？", context: {} },
+      (delta) => deltas.push(delta)
+    );
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("https://anthropic.example.com/v1/messages");
+    expect(JSON.parse(String(init?.body)).stream).toBe(true);
+    expect(deltas.map((delta) => delta.content ?? "").join("")).toBe("共 2 个行动项。");
+    expect(result.content).toBe("共 2 个行动项。");
+    expect(result.reasoning).toBe("先定位行动项");
+    fetchMock.mockRestore();
   });
 });

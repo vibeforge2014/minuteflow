@@ -111,9 +111,9 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
       { id: newMessageId(), role: "user", text: trimmed },
       { id: pendingId, role: "assistant", text: "", pending: true }
     ]);
-    // 打字机平滑队列：传输层增量（可能整段蹦出或被网关缓冲）先入缓冲，
-    // 定时器按“每 tick 吐出剩余量的 1/16、至少 1 字”的节奏渐进出字，
-    // 与 ChatGPT 相同的观感——后端到达节奏不影响展示节奏。
+    // 打字机平滑队列（Codex 观感）：传输层增量先入缓冲，定时器按
+    // “缓冲的 14%、至少 2 字、至多 22 字”出字——小增量一两拍内透出、紧跟生成节奏，
+    // 被网关缓冲的大段在 ~1 秒内快速铺开，保底步长让结尾干脆不爬行。
     const buffer = { content: "", reasoning: "" };
     let drainTimer: number | null = null;
     const patchPending = (patch: (message: ChatMessage) => ChatMessage) => {
@@ -123,8 +123,10 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
     const startDrain = () => {
       if (drainTimer !== null) return;
       drainTimer = window.setInterval(() => {
-        const takeContent = buffer.content ? Math.max(1, Math.ceil(buffer.content.length / 16)) : 0;
-        const takeReasoning = buffer.reasoning ? Math.max(1, Math.ceil(buffer.reasoning.length / 16)) : 0;
+        const takeOf = (pending: string) =>
+          pending ? Math.min(22, Math.max(2, Math.ceil(pending.length * 0.14))) : 0;
+        const takeContent = takeOf(buffer.content);
+        const takeReasoning = takeOf(buffer.reasoning);
         const contentChunk = buffer.content.slice(0, takeContent);
         const reasoningChunk = buffer.reasoning.slice(0, takeReasoning);
         if (!contentChunk && !reasoningChunk) return;
@@ -139,7 +141,7 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
           window.clearInterval(drainTimer);
           drainTimer = null;
         }
-      }, 24);
+      }, 26);
     };
     try {
       const result = await api.chat.send(trimmed, history, {
