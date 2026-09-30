@@ -975,12 +975,22 @@ function registerIpc() {
     }
     // 流式回答：渲染层传入 streamId 时，增量经 chat:delta 推送，最终结果仍由 invoke 返回。
     const streamId = typeof payload?.streamId === "string" ? payload.streamId.slice(0, 64) : null;
+    const startedAt = Date.now();
+    let deltaCount = 0;
+    let deltaChars = 0;
+    let firstDeltaMs = 0;
     const pushDelta = streamId
       ? (delta) => {
+          deltaCount += 1;
+          deltaChars += (delta.content?.length ?? 0) + (delta.reasoning?.length ?? 0);
+          if (deltaCount === 1) firstDeltaMs = Date.now() - startedAt;
           try { event.sender.send("chat:delta", { id: streamId, ...delta }); } catch { /* 窗口可能已销毁 */ }
         }
       : null;
     const result = await chatWithMeetingContext(profile, readSecret(profile.secretId), { question, history, context }, pushDelta);
+    // 诊断日志（stdout）：streamId 缺失=preload 没带回调；deltas=1 且 chars 巨大=网关忽略 stream 整包返回；
+    // firstDelta 很晚=网关缓冲 SSE。渲染层是否收到取决于 chat:delta 推送是否抛错。
+    console.log(`[chat] ${profile.name} streamId=${streamId ? "yes" : "NO"} deltas=${deltaCount} chars=${deltaChars} firstDelta=+${firstDeltaMs}ms answer=${result.content.length}字 总耗时=${Date.now() - startedAt}ms`);
     if (!result.content) throw new Error("问答模型没有返回内容。");
     // 思考过程一并回传（无则省略）；截断上限防止异常网关塞爆会话内存。
     return {
