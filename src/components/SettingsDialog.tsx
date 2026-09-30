@@ -35,6 +35,7 @@ import { useMeetingStore } from "../store/meetingStore";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useExitPresence } from "../hooks/useExitPresence";
 import type {
+  DiarizationScanResult,
   DownloadableModel,
   LocalModelFile,
   LocalModelScanResult,
@@ -582,10 +583,8 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                       <LocalModelManager profile={editing} onChange={setEditing} />
                     ) : editing.transport === "sherpa-onnx" ? (
                       <>
-                        <div className="field"><span>说明</span><div className="readonly-control">分离引擎为应用内置的 sherpa-onnx 组件，无需配置可执行文件。两个模型文件可从 <a href="https://github.com/k2-fsa/sherpa-onnx/releases" target="_blank" rel="noreferrer">sherpa-onnx 官方发布页</a> 下载（pyannote segmentation 与 3D-Speaker embedding）。</div></div>
-                        <label className="field"><span>Pyannote segmentation ONNX</span><input value={editing.options.segmentationModelPath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, segmentationModelPath: event.target.value } })} /></label>
-                        <label className="field"><span>3D-Speaker embedding ONNX</span><input value={editing.options.embeddingModelPath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, embeddingModelPath: event.target.value } })} /></label>
-                        <label className="field"><span>聚类阈值</span><input type="number" min="0.1" max="0.9" step="0.01" value={editing.options.clusteringThreshold ?? 0.5} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, clusteringThreshold: Number(event.target.value) } })} /></label>
+                        <div className="field"><span>说明</span><div className="readonly-control">引擎应用内置、无需安装。下载两个模型后，多人会议会自动区分发言人；在转写里给「发言人N」改名会自动记住 TA 的声纹。</div></div>
+                        <DiarizationSetup profile={editing} onChange={setEditing} />
                         <VoiceprintBookCard />
                       </>
                     ) : (
@@ -741,7 +740,8 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
 }
 
 /** 在线模型库的分组标题：多语言推荐 / 轻量量化 / 英文专用。 */
-const MODEL_GROUP_LABELS: Record<DownloadableModel["group"], string> = {
+// 只列 Whisper 目录分组；diarization 组在声纹设置页单独渲染，不进这份标签。
+const MODEL_GROUP_LABELS: Partial<Record<DownloadableModel["group"], string>> = {
   multilingual: "多语言 · 推荐",
   quantized: "轻量量化",
   english: "英文专用"
@@ -842,6 +842,194 @@ function VoiceprintBookCard() {
           会自动从本场音频学习 TA 的声纹；之后多人会议会自动标注 TA 的名字，认不准时仍用「发言人N」占位。
         </p>
       )}
+    </section>
+  );
+}
+
+/**
+ * 声纹识别零路径配置（与本地 Whisper 同一套体验）：
+ * 引擎（sherpa-onnx）应用内置、无需安装；两个模型各提供「应用内下载（推荐）/ 检测本机 /
+ * 选择文件」三条路径，就绪即自动写入档案并启用——全程没有路径输入框。
+ * 手动路径与聚类阈值收进折叠的高级区（故障排除兜底）。
+ */
+function DiarizationSetup({
+  profile,
+  onChange
+}: {
+  profile: ModelProfile;
+  onChange(profile: ModelProfile): void;
+}) {
+  const [catalog, setCatalog] = useState<DownloadableModel[]>([]);
+  const [scan, setScan] = useState<DiarizationScanResult | null>(null);
+  const [progress, setProgress] = useState<ModelDownloadProgress | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const loadProfiles = useMeetingStore((state) => state.loadProfiles);
+
+  const slotOf = (modelId: string) => modelId.includes("segmentation") ? "segmentation" : "embedding";
+
+  useEffect(() => {
+    let active = true;
+    api.models.catalog()
+      .then((items) => active && setCatalog(items.filter((item) => item.group === "diarization")))
+      .catch(() => {});
+    const unsubscribe = api.models.onDownloadProgress((next) => setProgress(next));
+    return () => { active = false; unsubscribe(); };
+  }, []);
+
+  /** 把一个模型文件就位到对应槽位：写入档案、启用，两个槽位都齐时提示就绪。 */
+  const applySlot = async (slot: "segmentation" | "embedding", file: { path: string; name: string }) => {
+    const key = slot === "segmentation" ? "segmentationModelPath" : "embeddingModelPath";
+    const saved = await api.models.save({
+      ...profile,
+      kind: "diarization",
+      transport: "sherpa-onnx",
+      enabled: true,
+      options: { ...profile.options, [key]: file.path }
+    });
+    onChange(saved);
+    await loadProfiles();
+    setMessage(saved.options.segmentationModelPath && saved.options.embeddingModelPath
+      ? "声纹识别已就绪：之后多人会议会自动区分发言人并记住名字。"
+      : `「${file.name}」已就绪，还差另一个模型。`);
+  };
+
+  /** 检测本机已有的分离/声纹模型；每个槽位自动套用最优先命中（托管目录优先）。 */
+  const detectModels = async (silent = false) => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const found = await api.models.scanDiarization();
+      setScan(found);
+      const catalogNow = catalog.length ? catalog : await api.models.catalog();
+      const apply: Array<Promise<void>> = [];
+      for (const slot of ["segmentation", "embedding"] as const) {
+        const key = slot === "segmentation" ? "segmentationModelPath" : "embeddingModelPath";
+        if (profile.options[key]) continue;
+        const managed = catalogNow.find((item) => item.group === "diarization" && item.installed && item.localPath && slotOf(item.id) === slot);
+        const hit = managed?.localPath
+          ? { path: managed.localPath, name: managed.fileName }
+          : found[slot][0];
+        if (hit) apply.push(applySlot(slot, hit));
+      }
+      await Promise.all(apply);
+      if (!apply.length && !silent) setMessage("本机没有找到可用的分离/声纹模型，建议直接下载（约 70MB）。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "检测失败。");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 手动选择 .onnx 文件（高级兜底）：按文件名判断槽位。 */
+  const chooseModel = async () => {
+    setMessage(null);
+    try {
+      const model = await api.models.chooseLocal("diarization");
+      if (!model) return;
+      const slot = /seg|pyannote/i.test(model.name ?? "") ? "segmentation" : "embedding";
+      await applySlot(slot, { path: model.path, name: model.name });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法打开模型文件。");
+    }
+  };
+
+  /** 应用内下载模型：校验摘要后自动就位到对应槽位。 */
+  const downloadSlot = async (modelId: string) => {
+    setBusy(true);
+    setMessage(null);
+    setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "preparing", message: "正在准备下载…" });
+    try {
+      const model = await api.models.download(modelId);
+      await applySlot(slotOf(modelId), { path: model.path, name: model.name });
+      setCatalog(await api.models.catalog());
+    } catch (error) {
+      setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "error", message: "下载中断，可重试。" });
+      setMessage(error instanceof Error ? error.message : "模型下载失败，可重试。");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const renderSlotCard = (model: DownloadableModel) => {
+    const slot = slotOf(model.id);
+    const activePath = slot === "segmentation" ? profile.options.segmentationModelPath : profile.options.embeddingModelPath;
+    const currentProgress = progress?.modelId === model.id ? progress : null;
+    const percent = currentProgress?.totalBytes
+      ? Math.min(100, Math.round(currentProgress.downloadedBytes / currentProgress.totalBytes * 100))
+      : 0;
+    return (
+      <div className="download-model-card" key={model.id}>
+        <div>
+          <strong>{model.name}</strong>
+          <small>{model.description}</small>
+          <span>{model.format} · {formatBytes(model.sizeBytes)} · {model.license}</span>
+        </div>
+        {activePath ? (
+          <button className="button button--small" disabled><CheckCircle size={15} weight="fill" />已就绪</button>
+        ) : model.installed && model.localPath ? (
+          <button className="button button--small" disabled={busy} onClick={() => void applySlot(slot, { path: model.localPath!, name: model.fileName })}>已下载 · 使用</button>
+        ) : (
+          <button className="button button--small" disabled={busy} onClick={() => void downloadSlot(model.id)}>
+            <CloudArrowDown size={15} />
+            {currentProgress
+              ? currentProgress.status === "downloading" ? `${percent}%`
+              : currentProgress.status === "verifying" ? "校验中"
+              : currentProgress.status === "ready" ? "启用中"
+              : currentProgress.status === "error" ? "重试" : "准备中"
+              : "下载"}
+          </button>
+        )}
+        {currentProgress && <>
+          <progress max="100" value={currentProgress.status === "ready" ? 100 : percent} aria-label={`${model.name} 下载进度`} />
+          {currentProgress.message && <small>{currentProgress.message}</small>}
+        </>}
+      </div>
+    );
+  };
+
+  return (
+    <section className="local-model-manager diarization-setup">
+      <div className="local-model-manager__heading">
+        <div>
+          <strong>声纹引擎已内置</strong>
+          <small>sherpa-onnx 随应用安装，无需额外配置；补齐两个模型即可开始。</small>
+        </div>
+        <div className="local-model-actions">
+          <button className="button button--small" disabled={busy} onClick={() => void detectModels()}><MagnifyingGlass size={15} />检测本机</button>
+          <button className="button button--small" disabled={busy} onClick={() => void chooseModel()}><FolderOpen size={15} />选择文件</button>
+        </div>
+      </div>
+      {message && <p className="settings-hint" role="status">{message}</p>}
+      {scan && (scan.segmentation.length > 0 || scan.embedding.length > 0) && (
+        <div className="local-model-list">
+          {[...scan.segmentation.map((file) => ({ ...file, slot: "segmentation" as const })),
+            ...scan.embedding.map((file) => ({ ...file, slot: "embedding" as const }))].map((file) => (
+            <button
+              key={file.path}
+              disabled={busy}
+              onClick={() => void applySlot(file.slot, file)}
+            >
+              <FingerprintSimple size={18} weight="duotone" />
+              <span><strong>{file.name}</strong><small>{file.slot === "segmentation" ? "分离模型" : "声纹模型"} · {formatBytes(file.sizeBytes)}</small></span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="local-model-library-heading">
+        <strong>推荐模型（共两个，都需下载）</strong>
+        <small>下载后自动校验并启用，官方源连不上会自动换镜像</small>
+      </div>
+      <div className="recommended-model-list">
+        {catalog.map((model) => renderSlotCard(model))}
+      </div>
+      <details className="advanced-provider-options">
+        <summary>高级与故障排除</summary>
+        <div className="field"><span>说明</span><div className="readonly-control">模型损坏或需要使用特殊版本时，可在此手动指定文件路径；聚类阈值控制「切成几个说话人」的灵敏度，默认 0.5 适合大多数会议。</div></div>
+        <label className="field"><span>分离模型路径</span><input value={profile.options.segmentationModelPath || ""} onChange={(event) => onChange({ ...profile, options: { ...profile.options, segmentationModelPath: event.target.value } })} spellCheck={false} /></label>
+        <label className="field"><span>声纹模型路径</span><input value={profile.options.embeddingModelPath || ""} onChange={(event) => onChange({ ...profile, options: { ...profile.options, embeddingModelPath: event.target.value } })} spellCheck={false} /></label>
+        <label className="field"><span>聚类阈值</span><input type="number" min="0.1" max="0.9" step="0.01" value={profile.options.clusteringThreshold ?? 0.5} onChange={(event) => onChange({ ...profile, options: { ...profile.options, clusteringThreshold: Number(event.target.value) } })} /></label>
+      </details>
     </section>
   );
 }
@@ -1024,7 +1212,7 @@ function LocalModelManager({
           <button className="button button--small" disabled={busy} onClick={async () => {
             const discovery = scan ?? await api.models.scanLocal();
             setScan(discovery);
-            await applyModel({ path: model.localPath!, name: model.fileName, format: model.format, engine: model.engine, sizeBytes: model.sizeBytes }, discovery.runtimes);
+            await applyModel({ path: model.localPath!, name: model.fileName, format: model.format, engine: model.engine as LocalModelFile["engine"], sizeBytes: model.sizeBytes }, discovery.runtimes);
           }}>{profile.options.modelPath === model.localPath ? "使用中" : "已下载 · 使用"}</button>
         ) : (
           <button className="button button--small" disabled={busy} onClick={() => downloadModel(model.id)}><CloudArrowDown size={15} />{currentProgress ? (currentProgress.status === "downloading" ? `${percent}%` : currentProgress.status === "verifying" ? "校验中" : currentProgress.status === "ready" ? "已就绪" : currentProgress.status === "error" ? "重试" : "准备中") : "下载"}</button>
@@ -1070,7 +1258,7 @@ function LocalModelManager({
       </div>
       <details className="local-model-catalog-details">
         <summary>
-          <span><strong>浏览全部模型与下载选项</strong><small>{catalog.length} 款官方模型、量化版、英文专用与自定义直链</small></span>
+          <span><strong>浏览全部模型与下载选项</strong><small>{catalog.filter((item) => item.group !== "diarization").length} 款官方模型、量化版、英文专用与自定义直链</small></span>
           <CaretDown size={16} />
         </summary>
         <div className="local-model-catalog-details__body">

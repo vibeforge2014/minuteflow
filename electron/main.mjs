@@ -80,7 +80,8 @@ import {
   downloadModel,
   listDownloadableModels,
   managedFfmpegPath,
-  resolveLocalModelProfile
+  resolveLocalModelProfile,
+  scanDiarizationModels
 } from "./services/local-models.mjs";
 import {
   checkForAppUpdate,
@@ -1133,23 +1134,43 @@ function registerIpc() {
     ]
   }));
   // models:choose-local — 打开文件选择器手动指定模型文件（.pt/.bin/.gguf），
-  // 手动路径兜底入口（默认流程优先自动发现与下载）。
-  trustedHandle("models:choose-local", async () => {
+  // 手动路径兜底入口（默认流程优先自动发现与下载）。kind 为 "diarization" 时
+  // 选择说话人分离/声纹 .onnx 模型文件。
+  trustedHandle("models:choose-local", async (_event, kind) => {
+    const isDiarization = kind === "diarization";
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: "选择本地 Whisper 模型",
+      title: isDiarization ? "选择说话人分离或声纹模型" : "选择本地 Whisper 模型",
       properties: ["openFile"],
-      filters: [
-        { name: "Whisper 模型", extensions: ["pt", "bin", "gguf"] },
-        { name: "所有文件", extensions: ["*"] }
-      ]
+      filters: isDiarization
+        ? [
+            { name: "ONNX 模型", extensions: ["onnx"] },
+            { name: "所有文件", extensions: ["*"] }
+          ]
+        : [
+            { name: "Whisper 模型", extensions: ["pt", "bin", "gguf"] },
+            { name: "所有文件", extensions: ["*"] }
+          ]
     });
     if (result.canceled || !result.filePaths[0]) return null;
     const filePath = result.filePaths[0];
     const fileStat = await stat(filePath);
+    if (isDiarization) {
+      return { path: filePath, name: path.basename(filePath), format: "ONNX", engine: "diarization", sizeBytes: fileStat.size };
+    }
     const model = describeLocalModel(filePath, fileStat.size);
     if (!model) throw new Error("暂不支持该模型格式，请选择 .pt、.bin 或 .gguf 文件。");
     return model;
   });
+  // models:scan-diarization — 扫描常见目录发现已有的说话人分离/声纹 ONNX 模型，
+  // 声纹识别设置的「检测本机」入口调用（与 Whisper 扫描同一批根目录）。
+  trustedHandle("models:scan-diarization", () => scanDiarizationModels({
+    modelDirectory: localModelDirectory(),
+    roots: [
+      app.getPath("downloads"),
+      path.join(homedir(), "Downloads"),
+      path.join(homedir(), ".cache", "sherpa-onnx")
+    ]
+  }));
   // models:catalog — 列出可下载模型目录及其本机安装状态，设置页下载列表调用。
   trustedHandle("models:catalog", () => listDownloadableModels(localModelDirectory()));
   // models:download — 下载模型到应用托管目录，进度经 models:download-progress 事件推送回渲染层。

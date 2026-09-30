@@ -41,6 +41,22 @@ export const MODEL_DOWNLOAD_SOURCES = {
  * 完整性校验用 sha256，摘要逐一取自 HuggingFace LFS 元数据（与仓库内文件一一对应），
  * 防止下载损坏或被篡改的模型进入托管目录；换下载源不影响摘要校验。
  */
+/**
+ * 说话人分离/声纹模型（group "diarization"，与 Whisper 目录共用下载设施）。
+ * 摘要来源：官方 release 的 checksum.txt（eres2netv2），以及与官方 tar 包逐字节
+ * 比对过的维护者 HF 镜像（pyannote segmentation int8）。分离模型走 HF 官方+镜像双源；
+ * 嵌入模型官方源是 GitHub Release（无同文件 HF 镜像），mirror 源不适用时自动跳过。
+ */
+const DIARIZATION_URLS = {
+  segmentation: {
+    official: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx?download=true",
+    mirror: "https://hf-mirror.com/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx?download=true"
+  },
+  embedding: {
+    official: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx"
+  }
+};
+
 const catalog = [
   {
     id: "ggml-tiny",
@@ -266,6 +282,37 @@ const catalog = [
     digest: "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865fa8f6da4356",
     source: "ggerganov/whisper.cpp",
     license: "MIT"
+  },
+  {
+    id: "diarization-pyannote-segmentation",
+    name: "说话人分离模型（Pyannote）",
+    description: "划分「谁在什么时间说话」，仅 1.5MB，与声纹模型搭配使用。",
+    engine: "diarization",
+    format: "ONNX",
+    group: "diarization",
+    sizeBytes: 1_540_506,
+    fileName: "sherpa-onnx-pyannote-segmentation-3-0-int8.onnx",
+    remoteFileName: "model.int8.onnx",
+    digestAlgorithm: "sha256",
+    digest: "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d",
+    source: "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0",
+    license: "MIT",
+    urlsBySource: DIARIZATION_URLS.segmentation
+  },
+  {
+    id: "diarization-eres2netv2-zh",
+    name: "声纹识别模型（3D-Speaker 中文）",
+    description: "记住并区分中文说话人，约 68MB，与分离模型搭配使用。",
+    engine: "diarization",
+    format: "ONNX",
+    group: "diarization",
+    sizeBytes: 71_441_526,
+    fileName: "3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx",
+    digestAlgorithm: "sha256",
+    digest: "bf1a75b9930474cf3389ef415e6e5d38ca96fea4a3a00f7e301d080a58ee2239",
+    source: "k2-fsa/sherpa-onnx speaker-recongition-models",
+    license: "Apache-2.0",
+    urlsBySource: DIARIZATION_URLS.embedding
   }
 ];
 
@@ -570,9 +617,52 @@ export async function resolveLocalModelProfile(profile, { roots, modelDirectory 
   };
 }
 
+/** 声纹/分离模型的文件名识别模式：分离与声纹两个槽位各匹配一组常见命名。 */
+const DIARIZATION_FILE_PATTERNS = {
+  segmentation: /(?:pyannote|segmentation)[\w.-]*\.onnx$/i,
+  embedding: /(?:3dspeaker|eres2net|campplus|wespeaker)[\w.-]*\.onnx$/i
+};
+
+/**
+ * 扫描本机已有的说话人分离/声纹模型（models:scan-diarization 通道调用）。
+ * 只认文件名模式、不做内容校验：用户此前从 sherpa-onnx 发布页或 HF 手动下载的
+ * 文件可直接复用；两个槽位各自返回命中的文件（含托管目录内已下载的目录模型）。
+ */
+export async function scanDiarizationModels({ roots, modelDirectory }) {
+  const found = { segmentation: [], embedding: [] };
+  const seen = new Set();
+  const walk = async (directory, depth) => {
+    if (depth > 2 || seen.has(directory)) return;
+    seen.add(directory);
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath, depth + 1);
+        continue;
+      }
+      const slot = Object.keys(DIARIZATION_FILE_PATTERNS).find((key) => DIARIZATION_FILE_PATTERNS[key].test(entry.name));
+      if (!slot) continue;
+      const fileStat = await stat(fullPath).catch(() => null);
+      if (!fileStat?.size) continue;
+      found[slot].push({ path: fullPath, name: entry.name, sizeBytes: fileStat.size });
+    }
+  };
+  for (const root of Array.from(new Set([...roots, modelDirectory]))) await walk(root, 0);
+  for (const slot of Object.keys(found)) {
+    found[slot].sort((left, right) => right.sizeBytes - left.sizeBytes);
+  }
+  return found;
+}
+
 /** 列出可下载模型目录并标注每项是否已安装在本机（models:catalog 通道调用）。 */
 export async function listDownloadableModels(modelDirectory) {
-  return Promise.all(catalog.map(async ({ repo: _repo, digest: _digest, ...item }) => {
+  return Promise.all(catalog.map(async ({ repo: _repo, ...item }) => {
     const localPath = path.join(modelDirectory, item.fileName);
     const fileStat = await stat(localPath).catch(() => null);
     return {
@@ -593,11 +683,25 @@ export async function listDownloadableModels(modelDirectory) {
 export function buildModelDownloadUrl(item, base) {
   const trimmed = String(base ?? "").trim();
   if (!trimmed) return null;
+  // 下载到本地的文件名与远端文件名可以不同（如 pyannote 镜像的 model.int8.onnx）。
+  const remoteName = item.remoteFileName ?? item.fileName;
   if (trimmed.includes("{fileName}")) {
-    return trimmed.replaceAll("{fileName}", item.fileName);
+    return trimmed.replaceAll("{fileName}", remoteName);
   }
   const repo = item.repo ?? "ggerganov/whisper.cpp";
-  return `${trimmed.replace(/\/+$/, "")}/${repo}/resolve/main/${item.fileName}?download=true`;
+  return `${trimmed.replace(/\/+$/, "")}/${repo}/resolve/main/${remoteName}?download=true`;
+}
+
+/**
+ * 解析一次下载尝试的实际 URL：目录项可声明 urlsBySource 直链（diarization 模型
+ * 官方源在 GitHub Release，不适用 HuggingFace 拼接规则）；custom 源始终走
+ * {fileName} 模板/HF 兼容规则，让用户自建镜像可服务任何模型。
+ * 该源不提供此模型时返回 null（跳过而不是拼出错误地址）。
+ */
+function modelUrlForAttempt(item, attempt) {
+  if (attempt.kind === "custom") return buildModelDownloadUrl(item, attempt.base);
+  if (item.urlsBySource) return item.urlsBySource[attempt.kind] ?? null;
+  return buildModelDownloadUrl(item, attempt.base);
 }
 
 /**
@@ -664,13 +768,15 @@ async function doDownloadModel(modelId, modelDirectory, onProgress = () => {}, s
   const item = catalog.find((candidate) => candidate.id === modelId);
   if (!item) throw new Error("未找到可下载的模型。");
   onProgress({ modelId, downloadedBytes: 0, totalBytes: item.sizeBytes, status: "preparing", message: "正在准备本地转写组件…" });
-  await ensureManagedLocalRuntime();
+  // whisper 模型下载前确保托管转写运行时就绪；diarization 模型的运行时是内置
+  // sherpa-onnx 组件，不依赖 whisper.node/FFmpeg 探测。
+  if (item.engine !== "diarization") await ensureManagedLocalRuntime();
   await mkdir(modelDirectory, { recursive: true });
   const attempts = resolveSourceAttempts(sourceOptions);
   const failures = [];
   for (let index = 0; index < attempts.length; index += 1) {
     const attempt = attempts[index];
-    const url = buildModelDownloadUrl(item, attempt.base);
+    const url = modelUrlForAttempt(item, attempt);
     if (!url) {
       failures.push(`${attempt.label}：源地址无效`);
       continue;
@@ -688,7 +794,12 @@ async function doDownloadModel(modelId, modelDirectory, onProgress = () => {}, s
         downloadingMessage: `正在从${attempt.label}下载模型…`
       });
       onProgress({ modelId, downloadedBytes: sizeBytes, totalBytes: sizeBytes, status: "ready", message: "模型与转写组件已就绪。" });
-      return describeModel(path.join(modelDirectory, item.fileName), sizeBytes);
+      // describeModel 只认 Whisper 扩展名（.pt/.bin/.gguf，避免 .onnx 混入 Whisper 扫描），
+      // diarization 目录项在这里直接构造 ONNX 描述符。
+      return describeModel(path.join(modelDirectory, item.fileName), sizeBytes)
+        ?? (item.engine === "diarization"
+          ? { path: path.join(modelDirectory, item.fileName), name: item.fileName, format: item.format, engine: "diarization", sizeBytes }
+          : null);
     } catch (error) {
       failures.push(`${attempt.label}：${describeDownloadError(error)}`);
     }

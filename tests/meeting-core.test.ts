@@ -984,9 +984,13 @@ describe("model provider compatibility", () => {
       "ggml-tiny.en",
       "ggml-base.en",
       "ggml-small.en",
-      "ggml-medium.en"
+      "ggml-medium.en",
+      "diarization-pyannote-segmentation",
+      "diarization-eres2netv2-zh"
     ]);
-    expect(catalog.every((model) => model.engine === "whisper-cpp" && model.installed === false)).toBe(true);
+    // Whisper 项全部走 whisper-cpp；声纹项单独成组。
+    expect(catalog.filter((model) => model.group !== "diarization")
+      .every((model) => model.engine === "whisper-cpp" && model.installed === false)).toBe(true);
     // 摘要算法必须是 sha256（体积与 HuggingFace 官方仓库逐一核对）。
     expect(catalog.every((model) => model.digestAlgorithm === "sha256")).toBe(true);
     // 三组展示：多语言推荐 7 款 + 轻量量化 4 款 + 英文专用 4 款。
@@ -997,6 +1001,29 @@ describe("model provider compatibility", () => {
     expect(catalog.find((model) => model.id === "ggml-large-v3")?.sizeBytes).toBe(3_095_033_483);
     expect(catalog.find((model) => model.id === "ggml-medium-q5_0")?.sizeBytes).toBe(539_212_467);
     expect(catalog.find((model) => model.id === "ggml-medium.en")?.sizeBytes).toBe(1_533_774_781);
+  });
+
+  it("offers verified diarization models with per-source direct URLs", async () => {
+    const catalog = await listDownloadableModels("/nonexistent/minuteflow-model-catalog");
+    const segmentation = catalog.find((model) => model.id === "diarization-pyannote-segmentation");
+    const embedding = catalog.find((model) => model.id === "diarization-eres2netv2-zh");
+    expect(segmentation).toMatchObject({
+      group: "diarization",
+      engine: "diarization",
+      format: "ONNX",
+      sizeBytes: 1_540_506,
+      digest: "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d"
+    });
+    expect(embedding).toMatchObject({
+      group: "diarization",
+      sizeBytes: 71_441_526,
+      // 摘要与 sherpa-onnx 官方 release checksum.txt 一致。
+      digest: "bf1a75b9930474cf3389ef415e6e5d38ca96fea4a3a00f7e301d080a58ee2239"
+    });
+    // 分离模型远端文件名（model.int8.onnx）与本地存储名不同：模板替换必须用远端名。
+    expect(buildModelDownloadUrl(segmentation!, "https://cdn.example.com/{fileName}")).toBe(
+      "https://cdn.example.com/model.int8.onnx"
+    );
   });
 
   it("builds download URLs from mirror hosts and {fileName} templates", () => {

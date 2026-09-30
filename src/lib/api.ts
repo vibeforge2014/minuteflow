@@ -432,6 +432,9 @@ const browserApi: MeetingAPI = {
     async scanLocal() {
       return { models: [], runtimes: {} };
     },
+    async scanDiarization() {
+      return { segmentation: [], embedding: [] };
+    },
     async chooseLocal() {
       return null;
     },

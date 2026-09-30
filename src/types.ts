@@ -481,18 +481,25 @@ export interface DownloadableModel {
   id: string;
   name: string;
   description: string;
-  engine: "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper";
+  engine: "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper" | "diarization";
   format: string;
-  /** 展示分组：多语言推荐 / 轻量量化 / 英文专用。 */
-  group: "multilingual" | "quantized" | "english";
+  /** 展示分组：多语言推荐 / 轻量量化 / 英文专用 / 说话人分离（仅声纹设置页使用）。 */
+  group: "multilingual" | "quantized" | "english" | "diarization";
   sizeBytes: number;
   fileName: string;
   source: string;
   license: string;
   installed: boolean;
   localPath?: string;
-  /** 下载完整性校验算法（当前为 sha256）。 */
+  /** 下载完整性校验算法（当前为 sha256）与官方摘要。 */
   digestAlgorithm?: "sha256" | "sha1";
+  digest?: string;
+}
+
+/** 声纹/分离模型本机扫描结果：两个槽位各自命中的文件列表。 */
+export interface DiarizationScanResult {
+  segmentation: Array<{ path: string; name: string; sizeBytes: number }>;
+  embedding: Array<{ path: string; name: string; sizeBytes: number }>;
 }
 
 /**
@@ -711,7 +718,9 @@ export interface MeetingAPI {
     }>;
     deleteSecret(secretId: string): Promise<void>;
     scanLocal(): Promise<LocalModelScanResult>;
-    chooseLocal(): Promise<LocalModelFile | null>;
+    /** 扫描本机已有的说话人分离/声纹 ONNX 模型（声纹设置「检测本机」入口）。 */
+    scanDiarization(): Promise<DiarizationScanResult>;
+    chooseLocal(kind?: "diarization"): Promise<LocalModelFile | null>;
     catalog(): Promise<DownloadableModel[]>;
     download(modelId: string): Promise<LocalModelFile>;
     /** 从自定义直链下载模型（.pt/.bin/.gguf；无官方摘要，跳过完整性校验）。 */

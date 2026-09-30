@@ -1033,6 +1033,27 @@ export async function testModelProfile(profile, apiKey) {
   if (profile.transport === "local-summary") {
     return { ok: true, message: "本机基础纪要已就绪，完全离线运行，无需联网或密钥。" };
   }
+  if (profile.transport === "sherpa-onnx") {
+    // 声纹识别就绪检查：内置 sherpa-onnx 引擎可加载 + 两个模型文件都在。
+    const segmentation = profile.options?.segmentationModelPath;
+    const embedding = profile.options?.embeddingModelPath;
+    const missing = [
+      !segmentation && "说话人分离模型",
+      !embedding && "声纹识别模型"
+    ].filter(Boolean);
+    if (missing.length) throw new Error(`${missing.join("和")}尚未就绪，点击对应按钮下载或检测本机。`);
+    try {
+      await Promise.all([access(segmentation), access(embedding)]);
+    } catch {
+      throw new Error("模型文件不存在或已被移动，请重新下载或检测本机。");
+    }
+    try {
+      require("sherpa-onnx-node");
+    } catch {
+      throw new Error("内置声纹引擎无法加载，请重新安装应用。");
+    }
+    return { ok: true, message: "声纹识别已就绪：内置引擎与两个模型均已加载。" };
+  }
   if (profile.transport === "whisper-cpp") {
     if (!profile.options?.modelPath) {
       throw new Error("本地模型尚未就绪，请先下载一个模型。");
