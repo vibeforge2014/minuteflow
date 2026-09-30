@@ -5304,9 +5304,8 @@ html[data-surface="permission-helper"] #root {
 }
 .chat-bubble__content a { color: var(--accent-strong); }
 
-/* 流式输出：正文/思考的最后一个块级元素后跟一枚打字光标，回答完成后移除。 */
-.chat-bubble__content.is-streaming > :last-child::after,
-.chat-thinking__body.is-streaming::after {
+/* 流式输出：回答正文的最后一个块级元素后跟一枚打字光标，回答完成后移除。 */
+.chat-bubble__content.is-streaming > :last-child::after {
   content: "";
   display: inline-block;
   width: 7px;
@@ -5320,44 +5319,6 @@ html[data-surface="permission-helper"] #root {
 
 @keyframes chat-caret-blink {
   50% { opacity: 0; }
-}
-
-/* 思考过程（思维链）：默认收起的小披露块，位于回答上方；展开内容为静音纯文本。 */
-.chat-thinking { margin-bottom: 7px; }
-.chat-thinking__toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 24px;
-  padding: 0 9px;
-  border: none;
-  border-radius: 999px;
-  background: rgba(60, 39, 29, .05);
-  color: #857a72;
-  font-size: 11px;
-  font-weight: 650;
-  transition: background-color var(--motion-fast) var(--ease-out-ui), color var(--motion-fast) var(--ease-out-ui);
-}
-.chat-thinking__toggle:hover { background: rgba(60, 39, 29, .09); color: #6f645b; }
-.chat-thinking__toggle:active { transform: scale(0.97); }
-.chat-thinking__caret { transition: transform var(--motion-fast) var(--ease-out-ui); }
-.chat-thinking__caret.is-open { transform: rotate(180deg); }
-/* 思考流式中：开关文字带珊瑚色呼吸提示。 */
-.chat-thinking__toggle.is-streaming { color: var(--accent-strong); }
-.chat-thinking__toggle.is-streaming .chat-thinking__caret { display: none; }
-.chat-thinking__body {
-  margin: 7px 0 0;
-  padding: 8px 10px;
-  border-radius: 9px;
-  background: rgba(60, 39, 29, .04);
-  color: #756a63;
-  font-size: 11.5px;
-  line-height: 1.7;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  animation: content-fade-enter 160ms var(--ease-out-ui) both;
-  max-height: 240px;
-  overflow-y: auto;
 }
 
 .chat-bubble.is-failed {
@@ -5483,18 +5444,12 @@ html[data-surface="permission-helper"] #root {
   }
 
   .chat-bubble,
-  .chat-thinking__body,
   .workspace-transcript {
     animation: content-fade-enter 140ms ease-out both !important;
     transform: none !important;
   }
 
-  .chat-thinking__caret {
-    transition: none !important;
-  }
-
-  .chat-bubble__content.is-streaming > :last-child::after,
-  .chat-thinking__body.is-streaming::after {
+  .chat-bubble__content.is-streaming > :last-child::after {
     animation: none !important;
     opacity: .6;
   }

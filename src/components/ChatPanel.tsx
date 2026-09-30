@@ -3,11 +3,11 @@
  * - 会话按 meeting.id 存在模块级 Map 里：切换会议/收起面板不丢当次对话（不落盘，刷新即清）。
  * - 空状态展示「猜你想问」：从当前纪要内容推导的建议问题，点按即发送。
  * - 请求走主进程 chat:send（需已配置在线总结服务并已激活）；失败在气泡内以错误样式呈现，可重试。
- * - 回答按 Markdown 安全渲染（与个人笔记同一管线）；模型返回的思维链/思考过程
- *   以可折叠的「思考过程」块展示在回答上方，默认收起。
+ * - 回答按 Markdown 安全渲染（与个人笔记同一管线）；思维链在传输层仍被拆分
+ *   （防止内联 <think> 泄入正文），但不再提供「思考过程」展示入口。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Brain, CaretDown, ChatTeardropText, Eraser, PaperPlaneRight, X } from "@phosphor-icons/react";
+import { ChatTeardropText, Eraser, PaperPlaneRight, X } from "@phosphor-icons/react";
 import type { Meeting } from "../types";
 import { api } from "../lib/api";
 import { markdownToHtml } from "../lib/markdown";
@@ -241,33 +241,18 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
                 <span className="chat-avatar" aria-hidden="true"><ChatTeardropText size={15} weight="fill" /></span>
               )}
               <div className={`chat-bubble chat-bubble--${message.role} ${message.failed ? "is-failed" : ""}`}>
-                {message.pending && !message.text && !message.reasoning ? (
-                  <span className="chat-typing" aria-label="正在思考" role="status">
-                    <i /><i /><i />
-                  </span>
-                ) : message.role === "assistant" ? (
-                  <>
-                    {/* 思考过程流式期间自动展开实时跟随；正文开始输出后自动收起（用户手动点过则不干预）。 */}
-                    {message.reasoning && (
-                      <ThinkingBlock
-                        text={message.reasoning}
-                        streaming={Boolean(message.pending) && !message.text}
-                      />
-                    )}
-                    {message.text ? (
-                      <>
-                        {/* 回答按 Markdown 安全渲染（marked + DOMPurify，见 lib/markdown），流式期间带打字光标。 */}
-                        <div
-                          className={`chat-bubble__content ${message.pending ? "is-streaming" : ""}`}
-                          dangerouslySetInnerHTML={{ __html: markdownToHtml(message.text) }}
-                        />
-                      </>
-                    ) : message.pending ? (
-                      <span className="chat-typing" aria-label="正在思考" role="status">
-                        <i /><i /><i />
-                      </span>
-                    ) : null}
-                  </>
+                {message.role === "assistant" ? (
+                  message.text ? (
+                    // 回答按 Markdown 安全渲染（marked + DOMPurify，见 lib/markdown），流式期间带打字光标。
+                    <div
+                      className={`chat-bubble__content ${message.pending ? "is-streaming" : ""}`}
+                      dangerouslySetInnerHTML={{ __html: markdownToHtml(message.text) }}
+                    />
+                  ) : message.pending ? (
+                    <span className="chat-typing" aria-label="正在思考" role="status">
+                      <i /><i /><i />
+                    </span>
+                  ) : null
                 ) : message.text}
               </div>
             </div>
@@ -300,40 +285,5 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
         </button>
       </footer>
     </aside>
-  );
-}
-
-/**
- * 可折叠的思考过程块：流式期间（streaming=true）自动展开并标记“正在思考…”，
- * 转为正文输出或回答完成后自动收起为“思考过程”；用户手动点过开关后不再自动干预。
- * 内容按纯文本（pre-wrap）呈现，不参与追问历史。
- */
-function ThinkingBlock({ text, streaming = false }: { text: string; streaming?: boolean }) {
-  const [open, setOpen] = useState(streaming);
-  const touchedRef = useRef(false);
-  useEffect(() => {
-    if (!touchedRef.current) setOpen(streaming);
-  }, [streaming]);
-  return (
-    <div className="chat-thinking">
-      <button
-        type="button"
-        className={`chat-thinking__toggle ${streaming ? "is-streaming" : ""}`}
-        aria-expanded={open}
-        onClick={() => {
-          touchedRef.current = true;
-          setOpen((value) => !value);
-        }}
-      >
-        <Brain size={13} weight="fill" />
-        {streaming ? "正在思考…" : "思考过程"}
-        <CaretDown size={12} weight="bold" className={`chat-thinking__caret ${open ? "is-open" : ""}`} />
-      </button>
-      {open && (
-        <p className={`chat-thinking__body ${streaming ? "is-streaming" : ""}`}>
-          {text}
-        </p>
-      )}
-    </div>
   );
 }
