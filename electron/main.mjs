@@ -944,7 +944,7 @@ function registerIpc() {
 
   // chat:send — 右栏「AI 问答」：围绕当前会议的纪要与转写向在线大模型提问（付费功能）。
   // 复用 AI 总结启用的 LLM 档案；只传文本上下文，不上传音频；失败原样抛给气泡展示。
-  trustedHandle("chat:send", async (_event, payload) => {
+  trustedHandle("chat:send", async (event, payload) => {
     await requireLicense();
     const question = typeof payload?.question === "string" ? payload.question.trim() : "";
     if (!question) throw new Error("请输入要问的问题。");
@@ -979,18 +979,19 @@ function registerIpc() {
     let deltaCount = 0;
     let deltaChars = 0;
     let firstDeltaMs = 0;
+    let sendErrors = 0;
     const pushDelta = streamId
       ? (delta) => {
           deltaCount += 1;
           deltaChars += (delta.content?.length ?? 0) + (delta.reasoning?.length ?? 0);
           if (deltaCount === 1) firstDeltaMs = Date.now() - startedAt;
-          try { event.sender.send("chat:delta", { id: streamId, ...delta }); } catch { /* 窗口可能已销毁 */ }
+          try { event.sender.send("chat:delta", { id: streamId, ...delta }); } catch (error) { sendErrors += 1; if (sendErrors === 1) console.log(`[chat] send error: ${error?.message ?? error}`); }
         }
       : null;
     const result = await chatWithMeetingContext(profile, readSecret(profile.secretId), { question, history, context }, pushDelta);
     // 诊断日志（stdout）：streamId 缺失=preload 没带回调；deltas=1 且 chars 巨大=网关忽略 stream 整包返回；
     // firstDelta 很晚=网关缓冲 SSE。渲染层是否收到取决于 chat:delta 推送是否抛错。
-    console.log(`[chat] ${profile.name} streamId=${streamId ? "yes" : "NO"} deltas=${deltaCount} chars=${deltaChars} firstDelta=+${firstDeltaMs}ms answer=${result.content.length}字 总耗时=${Date.now() - startedAt}ms`);
+    console.log(`[chat] ${profile.name} id=${streamId ?? "-"} deltas=${deltaCount} chars=${deltaChars} sendErrors=${sendErrors} firstDelta=+${firstDeltaMs}ms answer=${result.content.length}字 总耗时=${Date.now() - startedAt}ms`);
     if (!result.content) throw new Error("问答模型没有返回内容。");
     // 思考过程一并回传（无则省略）；截断上限防止异常网关塞爆会话内存。
     return {

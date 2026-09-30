@@ -76,7 +76,11 @@ async function waitForDevelopmentServer(timeoutMs = 30_000) {
 function startElectron() {
   if (shuttingDown) return;
   log("启动 Electron；修改 src/ 会热替换，修改 electron/ 会自动重启应用。");
-  const child = run(electronExecutable, [projectDirectory], {
+  // 调试端口（MF_CDP_PORT=9222 npm run dev:electron）：供 CDP 连接渲染进程做自动化诊断。
+  const debugArgs = process.env.MF_CDP_PORT
+    ? [`--remote-debugging-port=${process.env.MF_CDP_PORT}`]
+    : [];
+  const child = run(electronExecutable, [...debugArgs, projectDirectory], {
     ...process.env,
     VITE_DEV_SERVER_URL: developmentServerUrl
   });
