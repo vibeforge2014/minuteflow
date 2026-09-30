@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
   voiceprints: {
     list: () => invoke("voiceprints:list"),
     enroll: (payload) => invoke("voiceprints:enroll", payload),
+    rename: (fromName, toName) => invoke("voiceprints:rename", fromName, toName),
     forget: (name) => invoke("voiceprints:forget", name)
   },
   recordings: {

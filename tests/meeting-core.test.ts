@@ -622,7 +622,8 @@ describe("transcript window merge", () => {
       segment("first", 500, 2_500, "第一位发言"),
       segment("second", 5_000, 7_000, "第二位发言")
     ], turns);
-    expect(result.map((item) => item.speakerName)).toEqual(["Speaker 1", "Speaker 2"]);
+    // 未匹配声纹库的聚类用「发言人N」占位，等用户在转写里改名注册声纹。
+    expect(result.map((item) => item.speakerName)).toEqual(["发言人1", "发言人2"]);
   });
 
   it("applies a confidently identified voiceprint name without changing the speaker id", () => {

@@ -16,6 +16,7 @@ import {
   Database,
   GearSix,
   DownloadSimple,
+  FingerprintSimple,
   FolderOpen,
   HardDrives,
   Info,
@@ -39,7 +40,8 @@ import type {
   LocalModelScanResult,
   ModelDownloadProgress,
   ModelProfile,
-  AppUpdateCheckResult
+  AppUpdateCheckResult,
+  VoiceprintPerson
 } from "../types";
 
 /** 四种本地 Whisper 运行时（whisper.cpp GGML/GGUF、Python .pt、CT2、MLX）统一呈现为一个「本地 Whisper」。 */
@@ -309,10 +311,12 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
 
   // 切到 AI 总结/转录页时，为编辑器选一个初始档案：
   // 优先取该用途已保存的第一个档案，否则落回默认预设（OpenAI / 本地 Whisper）。
+  // 转录页还承载说话人分离档案（diarization），已在编辑时不要用 stt 档案把它顶掉。
   useEffect(() => {
     if (!open || (tab !== "llm" && tab !== "transcription")) return;
     const targetKind: ModelProfile["kind"] = tab === "llm" ? "llm" : "stt";
-    if (editing?.kind === targetKind) return;
+    const acceptedKinds = tab === "llm" ? ["llm"] : ["stt", "diarization"];
+    if (editing && acceptedKinds.includes(editing.kind)) return;
     const saved = profiles.find((profile) => profile.kind === targetKind);
     if (saved) {
       setEditing(normalizeLegacyProviderProfile(saved));
@@ -522,11 +526,16 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                         return <button key={provider.key} className={selected ? "is-selected" : ""} onClick={() => startPreset(provider.key)}><span className="profile-icon">{provider.icon}</span><span><strong>{provider.name}</strong><small>{provider.description}</small></span>{selected && <CheckCircle size={16} weight="fill" />}</button>;
                       })}
                     </div>
-                  )) : <div className="model-catalog__section"><span>在线服务</span><>
+                  )) : (<>
+                    <div className="model-catalog__section"><span>在线服务</span>
                       <button className={editing?.name === "OpenAI Whisper" ? "is-selected" : ""} onClick={() => startPreset("openaiWhisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>OpenAI Whisper</strong><small>无需下载本地模型</small></span>{editing?.name === "OpenAI Whisper" && <CheckCircle size={16} weight="fill" />}</button>
                       <button className={editing?.name === "New API 语音转录" ? "is-selected" : ""} onClick={() => startPreset("newApiWhisper")}><span className="profile-icon"><CloudArrowDown size={18} /></span><span><strong>New API</strong><small>OpenAI 音频接口兼容</small></span>{editing?.name === "New API 语音转录" && <CheckCircle size={16} weight="fill" />}</button>
-                    </></div>}
-                  {!!profiles.length && <div className="model-catalog__section"><span>已保存</span>{profiles.filter((profile) => profile.kind === (tab === "llm" ? "llm" : "stt")).map((profile) => (
+                    </div>
+                    <div className="model-catalog__section"><span>说话人分离</span>
+                      <button className={editing?.transport === "sherpa-onnx" ? "is-selected" : ""} onClick={() => startPreset("sherpa")}><span className="profile-icon"><FingerprintSimple size={18} /></span><span><strong>本地声纹识别</strong><small>多人会议区分发言人 · 数据不出本机</small></span>{editing?.transport === "sherpa-onnx" && <CheckCircle size={16} weight="fill" />}</button>
+                    </div>
+                  </>)}
+                  {!!profiles.length && <div className="model-catalog__section"><span>已保存</span>{profiles.filter((profile) => profile.kind === (tab === "llm" ? "llm" : "stt") || (tab === "transcription" && profile.kind === "diarization")).map((profile) => (
                     <button key={profile.id} className={editing?.id === profile.id ? "is-selected" : ""} onClick={() => { setEditing(normalizeLegacyProviderProfile(profile)); setApiKey(""); setStatus(null); setEditorGeneration((value) => value + 1); }}><span className="profile-icon">{profile.kind === "stt" ? "STT" : profile.kind === "llm" ? "LLM" : "SPK"}</span><span><strong>{profile.name}</strong><small>{profile.model || "尚未选择模型"}</small></span>{profile.enabled && <CheckCircle size={16} weight="fill" />}</button>
                   ))}</div>}
                   <button className="model-catalog__custom" onClick={startCustomProfile}><Plus size={15} />自定义服务</button>
@@ -534,8 +543,8 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                 {editing && (
                   <div key={editorGeneration} className="profile-editor-wrap">
                     <div className="profile-editor-heading">
-                      <span className="profile-editor-heading__icon">{editing.kind === "stt" ? <Waveform size={24} /> : <Sparkle size={24} />}</span>
-                      <div><h2>{editing.name}</h2><p>{editing.kind === "stt" ? "将会议音频转换为可编辑的中文与多语言文本。" : "用于会议总结、行动项提取与内容整理。"}</p></div>
+                      <span className="profile-editor-heading__icon">{editing.kind === "stt" ? <Waveform size={24} /> : editing.kind === "diarization" ? <FingerprintSimple size={24} /> : <Sparkle size={24} />}</span>
+                      <div><h2>{editing.name}</h2><p>{editing.kind === "stt" ? "将会议音频转换为可编辑的中文与多语言文本。" : editing.kind === "diarization" ? "在多人会议中区分不同发言人，并按声纹簿自动套用姓名。" : "用于会议总结、行动项提取与内容整理。"}</p></div>
                     </div>
                     <div className="profile-editor-divider" />
                   <div className="profile-editor">
@@ -558,13 +567,14 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                             <option value="whisper">本地 Whisper（自动适配）</option>
                             <option value="openaiWhisper">OpenAI Whisper</option>
                             <option value="newApiWhisper">New API</option>
+                            <option value="sherpa">本地声纹识别（说话人分离）</option>
                           </>)}
                         </select>
                       </label>
-                      <label className="field"><span>名称</span><input value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></label>
-                      <div className="field"><span>用于</span><div className="readonly-control">{tab === "llm" ? "会议总结与行动项" : "会议语音转文字"}</div></div>
-                      <div className="field"><span>连接方式</span><div className="readonly-control">{editing.transport === "local-summary" ? "本机离线规则引擎" : isLocalWhisperTransport(editing.transport) ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
-                      {!isLocalWhisperTransport(editing.transport) && editing.transport !== "local-summary" && <label className="field"><span>模型</span><input value={editing.model} onChange={(event) => setEditing({ ...editing, model: event.target.value, options: invalidateVisualVerification(editing.options) })} placeholder={tab === "llm" ? "例如 gpt-4.1-mini" : "例如 whisper-1"} /></label>}
+                          <label className="field"><span>名称</span><input value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></label>
+                          <div className="field"><span>用于</span><div className="readonly-control">{editing.kind === "diarization" ? "多人会议中区分发言人" : tab === "llm" ? "会议总结与行动项" : "会议语音转文字"}</div></div>
+                          <div className="field"><span>连接方式</span><div className="readonly-control">{editing.transport === "sherpa-onnx" ? "本机声纹引擎（离线）" : editing.transport === "local-summary" ? "本机离线规则引擎" : isLocalWhisperTransport(editing.transport) ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
+                      {!isLocalWhisperTransport(editing.transport) && editing.transport !== "local-summary" && editing.transport !== "sherpa-onnx" && <label className="field"><span>模型</span><input value={editing.model} onChange={(event) => setEditing({ ...editing, model: event.target.value, options: invalidateVisualVerification(editing.options) })} placeholder={tab === "llm" ? "例如 gpt-4.1-mini" : "例如 whisper-1"} /></label>}
                     </div>
                     {editing.transport === "local-summary" ? (
                       <div className="field"><span>说明</span><div className="readonly-control">完全离线的规则纪要：从转录中提取要点、决策、行动项与风险，不发起任何网络请求，适合无网环境或隐私优先场景；追求更高质量可另配在线总结服务。</div></div>
@@ -576,6 +586,7 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                         <label className="field"><span>Pyannote segmentation ONNX</span><input value={editing.options.segmentationModelPath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, segmentationModelPath: event.target.value } })} /></label>
                         <label className="field"><span>3D-Speaker embedding ONNX</span><input value={editing.options.embeddingModelPath || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, embeddingModelPath: event.target.value } })} /></label>
                         <label className="field"><span>聚类阈值</span><input type="number" min="0.1" max="0.9" step="0.01" value={editing.options.clusteringThreshold ?? 0.5} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, clusteringThreshold: Number(event.target.value) } })} /></label>
+                        <VoiceprintBookCard />
                       </>
                     ) : (
                       <>
@@ -742,6 +753,98 @@ const RECOMMENDED_LOCAL_MODELS = [
   { id: "ggml-small", badge: "日常推荐", guidance: "中文与中英混合会议的均衡选择。" },
   { id: "ggml-large-v3-turbo-q5_0", badge: "准确优先", guidance: "更高准确率，仍保持较合理的体积。" }
 ] as const;
+
+/**
+ * 声纹簿管理（本地说话人识别名单）：列出已记住的发言人，支持簿内改名与忘记。
+ * 声纹向量只存在主进程数据库，这里只展示姓名与样本份数；
+ * 在会议转写里给「发言人N」改名会自动从本场音频学习并加入这里。
+ * 改名/忘记都只影响后续会议的自动命名，历史转写保持原样。
+ */
+function VoiceprintBookCard() {
+  const [people, setPeople] = useState<VoiceprintPerson[]>([]);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [message, setMessage] = useState("");
+
+  const refresh = () => api.voiceprints.list()
+    .then(setPeople)
+    .catch(() => setPeople([]));
+
+  useEffect(() => { void refresh(); }, []);
+
+  const renamePerson = async (from: string, to: string) => {
+    const target = to.trim();
+    if (!target || target === from) { setRenaming(null); return; }
+    try {
+      const result = await api.voiceprints.rename(from, target);
+      setMessage(`已改名为“${target}”（${result.sampleCount} 份声纹），之后会议将按新名字自动识别。`);
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "改名失败。");
+    } finally {
+      setRenaming(null);
+    }
+  };
+
+  const forgetPerson = async (name: string) => {
+    if (!window.confirm(`要让 MinuteFlow 忘记“${name}”的本地声纹吗？历史会议中的姓名不会改变。`)) return;
+    try {
+      await api.voiceprints.forget(name);
+      setMessage(`已忘记“${name}”的声纹。`);
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "删除失败。");
+    }
+  };
+
+  return (
+    <section className="settings-card settings-card--stacked">
+      <div className="settings-card__title">
+        <FingerprintSimple size={19} />
+        <div>
+          <strong>声纹簿</strong>
+          <small>记住的发言人 · 全部保存在本机</small>
+        </div>
+      </div>
+      {message && <p className="settings-hint" role="status">{message}</p>}
+      {people.length ? people.map((person) => (
+        <div className="settings-card__action" key={person.name}>
+          {renaming === person.name ? (
+            <FingerprintSimple size={15} weight="fill" />
+          ) : (
+            <FingerprintSimple size={15} />
+          )}
+          {renaming === person.name ? (
+            <input
+              autoFocus
+              className="voiceprint-rename-input"
+              defaultValue={person.name}
+              aria-label={`为 ${person.name} 输入新名字`}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void renamePerson(person.name, event.currentTarget.value);
+                if (event.key === "Escape") setRenaming(null);
+              }}
+              onBlur={(event) => void renamePerson(person.name, event.target.value)}
+            />
+          ) : (
+            <span className="voiceprint-person">
+              <strong>{person.name}</strong>
+              <small>{person.sampleCount} 份声纹样本</small>
+            </span>
+          )}
+          <span className="voiceprint-person-actions">
+            <button className="text-button" onClick={() => { setRenaming(person.name); setMessage(""); }}>改名</button>
+            <button className="text-button" onClick={() => void forgetPerson(person.name)}>忘记</button>
+          </span>
+        </div>
+      )) : (
+        <p className="settings-hint">
+          还没有记住任何人。开启说话人分离后，在会议转写里点击「发言人N」改名，MinuteFlow
+          会自动从本场音频学习 TA 的声纹；之后多人会议会自动标注 TA 的名字，认不准时仍用「发言人N」占位。
+        </p>
+      )}
+    </section>
+  );
+}
 
 /**
  * 本地 Whisper 模型管理器（零路径配置）：搜索本机 / 选择文件 / 应用内下载三条路径。

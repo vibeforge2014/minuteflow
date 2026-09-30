@@ -595,7 +595,7 @@ export interface MeetingAPI {
     delete(id: string): Promise<boolean>;
     restore(id: string): Promise<Meeting>;
   };
-  /** 本地声纹簿：列摘要、从一场已分离会议学习姓名，以及主动忘记某人。 */
+  /** 本地声纹簿：列摘要、从一场已分离会议学习姓名、簿内改名，以及主动忘记某人。 */
   voiceprints: {
     list(): Promise<VoiceprintPerson[]>;
     enroll(payload: {
@@ -603,6 +603,8 @@ export interface MeetingAPI {
       speakerId: string;
       name: string;
     }): Promise<{ learned: true; name: string; sampleCount: number }>;
+    /** 只影响后续会议的自动命名，历史会议转写保持原样。 */
+    rename(fromName: string, toName: string): Promise<{ renamed: number; sampleCount: number }>;
     forget(name: string): Promise<{ deleted: number }>;
   };
   /** 录音会话：主进程侧建会话、按序号追加音频块、停止（等落盘后返回产出文件）、中止、打开录音目录与列出播放资产。 */

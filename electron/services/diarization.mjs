@@ -68,7 +68,7 @@ function voiceprintCentroids(samples, dimension) {
 
 /**
  * 给一个未知向量找最可靠的历史姓名。除了最低相似度，还要求领先第二名足够多；
- * 不满足时返回 null，让 UI 保持“Speaker N”而不是冒险误认。
+ * 不满足时返回 null，让 UI 保持“发言人 N”而不是冒险误认。
  */
 export function matchVoiceprint(embedding, samples, options = {}) {
   if (!embedding?.length) return null;
@@ -286,7 +286,8 @@ export function applyDiarization(transcript, turns) {
     return {
       ...segment,
       speakerId: turn.speakerId,
-      speakerName: turn.speakerName || `Speaker ${speakerNumber}`
+      // 未匹配声纹库的聚类用「发言人N」占位，用户在转写里改名即注册声纹。
+      speakerName: turn.speakerName || `发言人${speakerNumber}`
     };
   });
 }

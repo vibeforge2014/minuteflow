@@ -40,11 +40,14 @@ import {
   listMeetingAudioPaths,
   listModelProfiles,
   listVoiceprintPeople,
+  listVoiceprintSamples,
   loadMeeting,
   loadAudioAsset,
   markRunningJobsInterrupted,
   markInterruptedRecordings,
+  renameVoiceprintPerson,
   restoreMeeting,
+  saveAudioAsset,
   saveMeeting,
   saveModelProfile,
   saveVoiceprintSample,
@@ -100,8 +103,13 @@ import {
   retryImport,
   wakeImportQueue
 } from "./services/import-queue.mjs";
-import { extractVoiceprintEmbedding, voiceprintModelKey } from "./services/diarization.mjs";
-import { splitTimedTranscriptText } from "./services/transcript-grouping.mjs";
+import {
+  applyDiarization,
+  diarizeWithSherpa,
+  extractVoiceprintEmbedding,
+  voiceprintModelKey
+} from "./services/diarization.mjs";
+import { groupTranscriptSegments, splitTimedTranscriptText } from "./services/transcript-grouping.mjs";
 
 // 当前文件所在目录：用于定位 preload.cjs 与打包后的前端产物。
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -547,6 +555,15 @@ function registerIpc() {
     if (!normalized || normalized.length > 80) throw new Error("声纹姓名格式无效。");
     return deleteVoiceprintPerson(normalized);
   });
+  // 声纹簿内改名：只影响后续会议的自动命名，历史会议转写保持原样。
+  trustedHandle("voiceprints:rename", (_event, fromName, toName) => {
+    const from = typeof fromName === "string" ? fromName.trim() : "";
+    const to = typeof toName === "string" ? toName.trim() : "";
+    if (!from || !to || from === to || to.length > 80) throw new Error("声纹姓名格式无效。");
+    const result = renameVoiceprintPerson(from, to);
+    if (!result.renamed) throw new Error(`声纹簿中没有“${from}”。`);
+    return result;
+  });
   trustedHandle("voiceprints:enroll", async (_event, payload) => {
     await requireLicense();
     assertUuid(payload?.meetingId, "会议 ID");
@@ -590,6 +607,37 @@ function registerIpc() {
       sampleCount: listVoiceprintPeople().find((person) => person.name === name)?.sampleCount ?? 1
     };
   });
+
+
+  /**
+   * 录音结束后的本地说话人分离（线下多人会议）：整段麦克风音频过分离模型，
+   * 高置信聚类按声纹簿套真实姓名，其余标「发言人N」，用户在转写里改名即注册声纹。
+   * 全程本地、后台执行，不阻塞 recordings:stop 返回；失败只记日志，录音本身不受影响。
+   * 单聚类（全场只有一人说话）保留原「我」标签，不给独白换占位名。
+   */
+  async function runPostRecordingDiarization(meetingId, microphonePath) {
+    try {
+      const meeting = loadMeeting(meetingId);
+      if (!meeting?.transcript?.length) return;
+      const profile = listModelProfiles().find((candidate) => candidate.kind === "diarization" && candidate.enabled);
+      if (!profile) return; // 未配置分离模型：保留按轨标签，不额外打扰。
+      const turns = await diarizeWithSherpa(profile, microphonePath, {
+        expectedSpeakers: -1,
+        voiceprints: listVoiceprintSamples()
+      });
+      if (new Set(turns.map((turn) => turn.speakerId)).size <= 1) return;
+      const updated = saveMeeting({
+        ...meeting,
+        transcript: groupTranscriptSegments(applyDiarization(meeting.transcript, turns))
+      });
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("imports:meeting-updated", updated);
+      }
+      console.log(`[diarization] 会议 ${meetingId} 录音后分离完成：${new Set(turns.map((turn) => turn.speakerId)).size} 位说话人。`);
+    } catch (error) {
+      console.log(`[diarization] 会议 ${meetingId} 录音后分离跳过：${error?.message ?? error}`);
+    }
+  }
 
   // recordings:start — 开始录音（付费功能）：校验授权后为麦克风/系统双轨各建一个
   // .partial 文件与串行写队列；渲染层录音工具栏调用。
@@ -715,6 +763,20 @@ function registerIpc() {
       if (fileStat?.size) {
         await rename(record.filePath, target);
         finalizeAudioPath(payload.sessionId, track, target);
+        // 注册为音频资产：录音会议才有「回放」，改名说话人时才有可提取声纹的本地音频。
+        // id 用 会话:轨道 保证重试/重放 stop 时幂等更新而不是堆叠重复资产。
+        saveAudioAsset({
+          id: `${payload.sessionId}:${track}`,
+          meetingId: payload.meetingId,
+          path: target,
+          playbackPath: target,
+          track,
+          sourceType: "recording",
+          originalName: track === "microphone" ? "现场麦克风录音" : "系统声音录音",
+          mimeType: record.mimeType,
+          byteLength: fileStat.size,
+          durationMs: Math.round((Number(payload.durationSeconds) || 0) * 1000)
+        });
         output[track] = target;
       } else {
         await unlink(record.filePath).catch(() => {});
@@ -735,6 +797,11 @@ function registerIpc() {
       });
       if (hasError) {
         throw new Error(`录音文件写入未完成：${errors.join("；")}`);
+      }
+      // 线下多人会议：录音安全落盘后，后台跑本地说话人分离并按声纹簿命名。
+      // 线上会议保持按轨「我/远端」标签——双轨已天然区分本机与远端，再分离反而容易误标。
+      if (meeting.mode === "offline" && output.microphone) {
+        void runPostRecordingDiarization(payload.meetingId, output.microphone);
       }
     }
     return output;

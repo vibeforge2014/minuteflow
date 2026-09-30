@@ -291,6 +291,19 @@ const browserApi: MeetingAPI = {
       ]));
       return { learned: true, name: learned.name, sampleCount: learned.sampleCount };
     },
+    async rename(fromName, toName) {
+      const people = JSON.parse(localStorage.getItem(voiceprintsKey) || "[]") as Array<{
+        name: string; sampleCount: number; updatedAt: string;
+      }>;
+      const renamed = people.find((person) => person.name === fromName);
+      if (!renamed) return { renamed: 0, sampleCount: 0 };
+      const merged = people.filter((person) => person.name !== fromName && person.name !== toName);
+      const sampleCount = renamed.sampleCount
+        + (people.find((person) => person.name === toName)?.sampleCount ?? 0);
+      merged.unshift({ name: toName, sampleCount, updatedAt: new Date().toISOString() });
+      localStorage.setItem(voiceprintsKey, JSON.stringify(merged));
+      return { renamed: 1, sampleCount };
+    },
     async forget(name) {
       const people = JSON.parse(localStorage.getItem(voiceprintsKey) || "[]") as Array<{ name: string }>;
       const next = people.filter((person) => person.name !== name);

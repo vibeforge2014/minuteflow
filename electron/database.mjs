@@ -818,6 +818,30 @@ export function deleteVoiceprintPerson(name) {
   return { deleted: Number(openDatabase().prepare("DELETE FROM voiceprint_samples WHERE name = ?").run(name).changes) };
 }
 
+/**
+ * 声纹簿内改名：只影响后续会议的自动命名，不回写历史会议转写（与“忘记”语义一致）。
+ * 目标姓名已有样本时先并入（合并两人）；同一 (会议,发言人,模型) 在两边都有样本时
+ * 保留改名方，避免撞 UNIQUE(source_meeting_id, source_speaker_id, model_key)。
+ */
+export function renameVoiceprintPerson(fromName, toName) {
+  const db = openDatabase();
+  db.prepare(`
+    DELETE FROM voiceprint_samples WHERE name = ? AND EXISTS (
+      SELECT 1 FROM voiceprint_samples AS s
+      WHERE s.name = ?
+        AND s.source_meeting_id = voiceprint_samples.source_meeting_id
+        AND s.source_speaker_id = voiceprint_samples.source_speaker_id
+        AND s.model_key = voiceprint_samples.model_key
+    )
+  `).run(toName, fromName);
+  const result = db.prepare("UPDATE voiceprint_samples SET name = ?, updated_at = ? WHERE name = ?")
+    .run(toName, nowIso(), fromName);
+  return {
+    renamed: Number(result.changes),
+    sampleCount: Number(db.prepare("SELECT COUNT(*) AS count FROM voiceprint_samples WHERE name = ?").all(toName)[0]?.count ?? 0)
+  };
+}
+
 function listMeetingAudioAssetsByRows(rows) {
   return rows.map((row) => ({
     id: row.id, meetingId: row.meeting_id, track: row.track, sourceType: row.source_type,

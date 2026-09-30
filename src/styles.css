@@ -4102,6 +4102,65 @@ html[data-surface="permission-helper"] #root {
   font-size: 8px;
 }
 
+/* 声纹簿卡片（设置 → 转录设置 → 本地声纹识别）。 */
+.settings-hint {
+  margin: 0;
+  padding: 6px 18px 0;
+  color: #a29b96;
+  font-size: 9.5px;
+  line-height: 1.7;
+}
+
+.voiceprint-person {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.voiceprint-person strong {
+  color: #463f3c;
+  font-size: 11px;
+}
+
+.voiceprint-person small,
+.voiceprint-person-actions {
+  color: #a29b96;
+  font-size: 8.5px;
+}
+
+.voiceprint-person-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.voiceprint-rename-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 9px;
+  border: 1px solid rgba(231, 111, 81, 0.45);
+  border-radius: 7px;
+  background: #fff;
+  color: #463f3c;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.voiceprint-rename-input:focus {
+  outline: none;
+  border-color: #e76f51;
+  box-shadow: 0 0 0 3px rgba(231, 111, 81, 0.14);
+}
+
+.settings-card__action > svg {
+  color: #e76f51;
+  flex-shrink: 0;
+}
+
+
 .settings-card__action {
   min-height: 72px;
   display: flex;
