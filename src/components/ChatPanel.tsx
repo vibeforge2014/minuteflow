@@ -112,8 +112,8 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
       { id: pendingId, role: "assistant", text: "", pending: true }
     ]);
     // 打字机平滑队列（Codex 观感）：传输层增量先入缓冲，定时器按
-    // “缓冲的 14%、至少 2 字、至多 22 字”出字——小增量一两拍内透出、紧跟生成节奏，
-    // 被网关缓冲的大段在 ~1 秒内快速铺开，保底步长让结尾干脆不爬行。
+    // 「每拍吐出缓冲的 1/46（≈1.2 秒内匀速铺完一段突发）、至少 2 字、至多 24 字」出字——
+    // 匀速逐字、不前置喷一大坨；小增量一两拍内透出紧跟生成节奏，大段缓冲也有界铺完。
     const buffer = { content: "", reasoning: "" };
     let drainTimer: number | null = null;
     const patchPending = (patch: (message: ChatMessage) => ChatMessage) => {
@@ -124,7 +124,7 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
       if (drainTimer !== null) return;
       drainTimer = window.setInterval(() => {
         const takeOf = (pending: string) =>
-          pending ? Math.min(22, Math.max(2, Math.ceil(pending.length * 0.14))) : 0;
+          pending ? Math.min(24, Math.max(2, Math.ceil(pending.length / 46))) : 0;
         const takeContent = takeOf(buffer.content);
         const takeReasoning = takeOf(buffer.reasoning);
         const contentChunk = buffer.content.slice(0, takeContent);
