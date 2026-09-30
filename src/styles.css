@@ -5137,13 +5137,15 @@ html[data-surface="permission-helper"] #root {
 }
 
 .chat-panel__header h2 {
+  /* 重置 UA 默认外边距：标题块高度超出 header 内容区时，flex-end 会把整块顶出上边界。 */
+  margin: 0;
   font-size: 15px;
   font-weight: 700;
   color: var(--ink);
 }
 
 .chat-panel__header p {
-  margin-top: 2px;
+  margin: 2px 0 0;
   font-size: 11px;
   color: #98918a;
 }
