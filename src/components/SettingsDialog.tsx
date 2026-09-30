@@ -407,7 +407,9 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
   const testProfile = async () => {
     if (!editing) return;
     setBusy(true);
-    setStatus(null);
+    // 立即给出"已在测试"的反馈：远程接口的测试可能要数秒到 20 秒，
+    // 只禁用按钮没有任何文字变化，用户会以为点击没生效。
+    setStatus("正在测试连接…");
     try {
       const result = await api.models.test(editing, apiKey || undefined);
       if (result.visualSummaryVerifiedAt && result.visualSummaryVerifiedFingerprint) {

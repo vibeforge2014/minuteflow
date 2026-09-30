@@ -1114,7 +1114,28 @@ export async function testModelProfile(profile, apiKey) {
     return { ok: true, message: "声纹识别已就绪：内置引擎与两个模型均已加载。" };
   }
   if (profile.transport === "openai-audio") {
-    await transcribeRemote(profile, apiKey, createTranscriptionTestWave(), "minuteflow-connection-test.wav", "");
+    // 连接测试必须快速失败：正式转录沿用 330 秒超时，但设置页点一下「测试连接」
+    // 等五分半毫无反馈，等于"没反应"。20 秒内端点没返回就明确报超时。
+    try {
+      await transcribeRemote(
+        profile,
+        apiKey,
+        createTranscriptionTestWave(),
+        "minuteflow-connection-test.wav",
+        "",
+        [],
+        AbortSignal.timeout(20_000)
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/abort|timeout|TIMEOUT/i.test(message)) {
+        throw new Error("连接测试超时（20 秒）：请检查 Base URL 是否可达、密钥是否有效，或网络/代理设置。");
+      }
+      if (/fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN/i.test(message)) {
+        throw new Error("无法连接到该 Base URL：请检查地址是否正确、服务是否在线，以及网络/代理设置。");
+      }
+      throw error;
+    }
     return { ok: true, message: "测试音频转录成功，接口可用。" };
   }
   if (profile.kind === "llm") {
