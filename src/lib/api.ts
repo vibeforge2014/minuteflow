@@ -377,8 +377,9 @@ const browserApi: MeetingAPI = {
           await new Promise((resolve) => setTimeout(resolve, gapMs));
         }
       };
-      await stream(reasoning, "reasoning", 9, 26);
-      await stream(answer, "content", 5, 30);
+      // 到达节奏对标真实 API（约 50 字/秒）：先思考、后正文，演示观感与真实使用一致。
+      await stream(reasoning, "reasoning", 4, 70);
+      await stream(answer, "content", 3, 65);
       return { answer, reasoning, profileName: "浏览器预览" };
     }
   },

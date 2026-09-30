@@ -111,11 +111,12 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
       { id: newMessageId(), role: "user", text: trimmed },
       { id: pendingId, role: "assistant", text: "", pending: true }
     ]);
-    // 打字机平滑队列（Codex 观感）：传输层增量先入缓冲，定时器按
-    // 「每拍吐出缓冲的 1/46（≈1.2 秒内匀速铺完一段突发）、至少 2 字、至多 24 字」出字——
-    // 匀速逐字、不前置喷一大坨；小增量一两拍内透出紧跟生成节奏，大段缓冲也有界铺完。
+    // 打字机平滑队列（Codex 观感）：传输层增量先入缓冲，按真实模型的生成速度出字——
+    // 约 40 字/秒起步、随缓冲增大提速（160 字/秒封顶），130 字回答约 3-4 秒铺完；
+    // 出字在标点处断句并小停（句号 ~120ms、逗号 ~40ms），带自然呼吸而不是机械节拍器。
     const buffer = { content: "", reasoning: "" };
     let drainTimer: number | null = null;
+    let pauseTicks = 0;
     const patchPending = (patch: (message: ChatMessage) => ChatMessage) => {
       commitMessages((chatSessions.get(meeting.id) ?? messages).map((message) =>
         message.id === pendingId ? patch(message) : message));
@@ -123,12 +124,29 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
     const startDrain = () => {
       if (drainTimer !== null) return;
       drainTimer = window.setInterval(() => {
-        const takeOf = (pending: string) =>
-          pending ? Math.min(24, Math.max(2, Math.ceil(pending.length / 46))) : 0;
-        const takeContent = takeOf(buffer.content);
-        const takeReasoning = takeOf(buffer.reasoning);
-        const contentChunk = buffer.content.slice(0, takeContent);
-        const reasoningChunk = buffer.reasoning.slice(0, takeReasoning);
+        if (pauseTicks > 0) { pauseTicks -= 1; return; }
+        // 本拍计划出多少字：目标速率（字/秒）× 拍长（40ms）。
+        const takeOf = (pending: string) => {
+          if (!pending) return 0;
+          const cps = Math.min(160, Math.max(40, pending.length * 0.35));
+          return Math.max(1, Math.round((cps * 40) / 1000));
+        };
+        // 短语节奏：缓冲头部若即将越过标点，就切在标点处，随后小停一拍/三拍。
+        const cutAtPunctuation = (chunk: string) => {
+          const strong = chunk.search(/[。！？；]/);
+          if (strong >= 1) return { text: chunk.slice(0, strong + 1), pause: 3 };
+          const soft = chunk.search(/[，、：]/);
+          if (soft >= 1) return { text: chunk.slice(0, soft + 1), pause: 1 };
+          return null;
+        };
+        const drain = (pending: string) => {
+          const planned = pending.slice(0, takeOf(pending));
+          const cut = cutAtPunctuation(planned);
+          if (cut) { pauseTicks = Math.max(pauseTicks, cut.pause); return cut.text; }
+          return planned;
+        };
+        const contentChunk = buffer.content ? drain(buffer.content) : "";
+        const reasoningChunk = buffer.reasoning ? drain(buffer.reasoning) : "";
         if (!contentChunk && !reasoningChunk) return;
         buffer.content = buffer.content.slice(contentChunk.length);
         buffer.reasoning = buffer.reasoning.slice(reasoningChunk.length);
@@ -141,7 +159,7 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
           window.clearInterval(drainTimer);
           drainTimer = null;
         }
-      }, 26);
+      }, 40);
     };
     try {
       const result = await api.chat.send(trimmed, history, {
