@@ -978,6 +978,49 @@ describe("structured meeting summary", () => {
     expect(parseEvidenceTimeMs("12:99")).toBeNull();
   });
 
+  it("coerces object-wrapped list items and localized action-item fields", () => {
+    const summary = validateSummary({
+      topics: [{ title: "经营体系" }, null, "预算"],
+      keyPoints: [],
+      decisions: [{ text: "先定框架再填内容" }, { content: "统计口径区分对内对外" }],
+      actionItems: [
+        { task: "重设计分析模板", 负责人: "研发负责人", 期限: "本周", state: "进行中" },
+        { title: "三段式汇报", status: "已完成" },
+        { no_title_field: true }
+      ],
+      openQuestions: [{ summary: "算力投入多少" }],
+      risks: [null, { description: "口径不一致导致重复统计" }],
+      nextSteps: [{ item: "按四维度拆解" }]
+    });
+    expect(summary.topics).toEqual(["经营体系", "预算"]);
+    expect(summary.decisions).toEqual(["先定框架再填内容", "统计口径区分对内对外"]);
+    expect(summary.openQuestions).toEqual(["算力投入多少"]);
+    expect(summary.risks).toEqual(["口径不一致导致重复统计"]);
+    expect(summary.nextSteps).toEqual(["按四维度拆解"]);
+    // 无标题的行动项被丢弃；中英文状态/负责人/期限别名归一到枚举与默认值。
+    expect(summary.actionItems).toHaveLength(2);
+    expect(summary.actionItems[0]).toMatchObject({ title: "重设计分析模板", owner: "研发负责人", dueDate: "本周", status: "in_progress" });
+    expect(summary.actionItems[1]).toMatchObject({ title: "三段式汇报", status: "done" });
+  });
+
+  it("rejects schema-valid but all-empty online summaries", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ topics: [], keyPoints: [], decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: [] }) } }]
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+      const pending = summarizeWithOpenAICompatible({
+        baseUrl: "https://gateway.example/v1", model: "m", options: { responseFormat: undefined }
+      }, "secret", { title: "t", goals: [], notes: [], participants: [], transcript: [], previousSummary: {} }, true);
+      pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(pending).rejects.toThrow(/空纪要/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("heals and aligns key-point headlines on the read path", () => {
     const healed = simplifySummary({
       topics: [],
@@ -1176,7 +1219,7 @@ describe("model provider compatibility", () => {
     previousSummary: meeting.summary
   };
   const validSummaryPayload = JSON.stringify({
-    topics: [], keyPoints: [], decisions: [], actionItems: [],
+    topics: [], keyPoints: ["最小可用的关键结论"], decisions: [], actionItems: [],
     openQuestions: [], risks: [], nextSteps: []
   });
 

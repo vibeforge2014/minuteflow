@@ -160,6 +160,8 @@ async function maybeUpdateRollingSummary(job, meeting, profiles, signal) {
       generationMode = "online";
     } catch (error) {
       if (signal.aborted) throw error;
+      // 滚动纪要失败静默降级为本机基础版是设计内的，但必须留下失败原因供诊断。
+      console.error(`[import] 会议 ${job.meetingId} 在线滚动纪要失败，改用本机基础纪要：${error instanceof Error ? error.message : error}`);
       summary = summarizeLocally(input);
     }
   } else {
@@ -632,6 +634,8 @@ async function processJob(initial) {
           generationMode = "online";
         } catch (error) {
           if (controller.signal.aborted) throw error;
+          // 终稿失败降级为「本机基础纪要」是设计内行为（界面会标注），此处记录原因供诊断。
+          console.error(`[import] 会议 ${job.meetingId} 在线终稿纪要失败，改用本机基础纪要：${error instanceof Error ? error.message : error}`);
           summary = summarizeLocally(input);
         }
       } else {

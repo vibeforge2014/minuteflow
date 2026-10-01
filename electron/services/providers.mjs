@@ -305,8 +305,63 @@ function normalizeKeyPointDrafts(drafts) {
   return { texts, times, headlines };
 }
 
+/** 模型偶尔把字符串列表项包成对象（{text|content|title|summary|description}）或塞 null：schema 校验前先归一成字符串数组。 */
+function coerceStringList(value) {
+  if (!Array.isArray(value)) return value;
+  return value
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") {
+        const text = item.text ?? item.content ?? item.title ?? item.summary ?? item.description ?? item.item;
+        if (typeof text === "string") return text;
+      }
+      return null;
+    })
+    .filter((item) => typeof item === "string" && item.trim());
+}
+
+/** 行动项常见变体归一：标题别名、负责人别名、中文/英文状态值；无法辨认的字段落默认值。 */
+function coerceActionItems(value) {
+  if (!Array.isArray(value)) return value;
+  const pickString = (item, keys) => {
+    for (const key of keys) {
+      const text = item?.[key];
+      if (typeof text === "string" && text.trim()) return text.trim();
+    }
+    return null;
+  };
+  const statusMap = [
+    [/^(done|finished|completed|已完成|完成)$/i, "done"],
+    [/^(in_progress|doing|ongoing|进行中|办理中)$/i, "in_progress"]
+  ];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const title = pickString(item, ["title", "text", "content", "task", "action", "item"]);
+      if (!title) return null;
+      const rawStatus = pickString(item, ["status", "state"]);
+      const status = statusMap.find(([pattern]) => pattern.test(rawStatus ?? ""))?.[1] ?? "todo";
+      return {
+        ...item,
+        title,
+        owner: pickString(item, ["owner", "assignee", "person", "负责人"]) ?? "待确认",
+        dueDate: pickString(item, ["dueDate", "due", "deadline", "期限", "时间"]) ?? "待确认",
+        status
+      };
+    })
+    .filter(Boolean);
+}
+
 export function validateSummary(value) {
-  const result = summarySchema.safeParse(value);
+  const result = summarySchema.safeParse({
+    ...value,
+    topics: coerceStringList(value?.topics),
+    decisions: coerceStringList(value?.decisions),
+    openQuestions: coerceStringList(value?.openQuestions),
+    risks: coerceStringList(value?.risks),
+    nextSteps: coerceStringList(value?.nextSteps),
+    actionItems: coerceActionItems(value?.actionItems)
+  });
   if (!result.success) {
     const issues = result.error.issues.slice(0, 3)
       .map((issue) => `${issue.path.join(".") || "根对象"} ${issue.message}`)
@@ -333,6 +388,22 @@ export function validateSummary(value) {
   // 本机归纳没有标题层：全空时不写数组，行渲染保持单行形态。
   const summaryExtras = keyPointHeadlines.some(Boolean) ? { keyPointHeadlines } : {};
   return simplifySummary({ ...result.data, keyPoints: texts, keyPointTimes, ...summaryExtras });
+}
+
+/**
+ * 在线纪要的最小内容下限：结构合法但所有条目为空视为模型没有完成任务，
+ * 抛错走本机兜底，绝不用空结果清掉已有纪要。
+ */
+function validateOnlineSummary(value) {
+  const summary = validateSummary(value);
+  const hasContent = ["keyPoints", "decisions", "actionItems", "openQuestions", "nextSteps", "risks"]
+    .some((key) => (summary[key] ?? []).length > 0);
+  if (!hasContent) {
+    const snippet = String(JSON.stringify(value)).slice(0, 100);
+    console.error(`[summary] 模型返回了全空纪要，原始片段：${String(JSON.stringify(value)).slice(0, 300)}`);
+    throw new Error(`总结模型返回了空纪要（所有条目为空），模型输出开头：${snippet}`);
+  }
+  return summary;
 }
 
 /** 提示词中转录部分的最大字符量：更早的内容已并入上一版纪要，超长时只保留最近窗口。 */
@@ -403,9 +474,14 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
       : await requestGemini(profile, apiKey, prompt, 8_192, signal);
     const content = extractMessageContent(payload);
     if (!content) throw new Error("总结模型没有返回内容。");
-    return validateSummary(JSON.parse(extractJson(content)));
+    return validateOnlineSummary(JSON.parse(extractJson(content)));
   }
   const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
+  // 终稿总结要等模型输出完整 JSON（非流式），长会议 60 秒不够：比照转录 330 秒
+  // 下限的做法，final 请求运行时抬升旧档案存的较短超时。
+  const timeoutMs = final
+    ? Math.max(profile.options?.timeoutMs ?? 0, 180_000)
+    : (profile.options?.timeoutMs ?? 60_000);
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -427,7 +503,7 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
           ...(profile.options?.headers ?? {})
         },
         body: JSON.stringify(body),
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(profile.options?.timeoutMs ?? 60_000)]) : AbortSignal.timeout(profile.options?.timeoutMs ?? 60_000)
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
       });
       if (!response.ok) {
         const error = new Error(`总结模型请求失败：${response.status} ${await response.text()}`);
@@ -440,7 +516,7 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
       const payload = await response.json();
       const content = extractMessageContent(payload);
       if (!content) throw new Error("总结模型没有返回内容。");
-      return validateSummary(JSON.parse(extractJson(content)));
+      return validateOnlineSummary(JSON.parse(extractJson(content)));
     } catch (error) {
       if (signal?.aborted) throw error;
       if (!error.retriableWithoutResponseFormat) throw error;
@@ -632,7 +708,8 @@ export async function generateVisualSummaryWithOpenAICompatible(profile, apiKey,
             ...(profile.options?.headers ?? {})
           },
           body: JSON.stringify(body),
-          signal: requestSignal(signal, profile.options?.timeoutMs ?? 60_000)
+          // 与终稿总结同节奏：等完整 JSON 输出，运行时抬升旧档案存的较短超时。
+          signal: requestSignal(signal, Math.max(profile.options?.timeoutMs ?? 0, 180_000))
         });
         if (!response.ok) {
           const bodyText = await response.text();
