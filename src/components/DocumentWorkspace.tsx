@@ -24,6 +24,7 @@ import {
   Plus,
   Sparkle,
   Target,
+  Trash,
   WarningCircle,
   XCircle
 } from "@phosphor-icons/react";
@@ -33,13 +34,13 @@ import Placeholder from "@tiptap/extension-placeholder";
 import TurndownService from "turndown";
 import type { ImportJob, Meeting } from "../types";
 import { api } from "../lib/api";
-import { lockSummaryField, toggleSummaryLock } from "../lib/summary";
+import { lockSummaryField, removeSummaryListItem, toggleSummaryLock } from "../lib/summary";
 import { formatDuration, formatInterval } from "../lib/format";
 import { markdownToHtml } from "../lib/markdown";
 import { useMeetingStore } from "../store/meetingStore";
 import type { RecordingReadiness, WorkspaceStage } from "../lib/workspace";
 import { VisualSummaryView } from "./VisualSummaryView";
-import { TranscriptView } from "./TranscriptPanel";
+import { TranscriptView, formatTranscriptTime } from "./TranscriptPanel";
 import type { ContentChangeKind } from "../lib/content-motion";
 import { useEnteringItemIds, useSummaryContentMotion } from "../hooks/useContentMotion";
 
@@ -182,6 +183,16 @@ export function DocumentWorkspace({
   const setStringList = (key: "goals", values: string[]) =>
     onChange({ ...meeting, [key]: values });
 
+  /** 关键结论折叠阈值：超过后收起为前 5 条 +「展开全部」；会议进行中始终全量展示。 */
+  const [keyPointsExpanded, setKeyPointsExpanded] = useState(false);
+  /** 关键结论回链目标（切到转写视图并定位到该时刻的段落）。 */
+  const [transcriptJump, setTranscriptJump] = useState<{ ms: number; nonce: number } | null>(null);
+  /** 刚通过「添加结论」插入的行索引：聚焦输入，失焦仍为空则自动移除。 */
+  const [addingKeyPointIndex, setAddingKeyPointIndex] = useState<number | null>(null);
+  /** Escape 回退用的行内旧值：记录 {index, value}，只回退当前聚焦行，
+   *  避免其它行（如刚添加的空行）的瞬时 focus 污染回退值。 */
+  const keyPointDraftRef = useRef<{ index: number; value: string } | null>(null);
+
   /**
    * 修改纪要的一个列表字段（要点/决策/未决问题/风险/下一步）。
    * 手动改动会把被编辑的那条加入 manualLocks（lockSummaryField），AI 下次生成不覆盖它。
@@ -197,6 +208,36 @@ export function DocumentWorkspace({
       `${key}:${lockedIndex}`
     )
   });
+
+  /** 添加一条空的关键结论：立即锁定 + 聚焦，失焦仍为空时由行内 onBlur 自动移除。
+   *  折叠时先展开，保证新行可见并拿到焦点（否则它落在折叠区外，既看不到也聚不了焦）。 */
+  const addKeyPoint = () => {
+    const index = meeting.summary.keyPoints.length;
+    setKeyPointsExpanded(true);
+    onChange({
+      ...meeting,
+      summary: lockSummaryField({
+        ...meeting.summary,
+        keyPoints: [...meeting.summary.keyPoints, ""],
+        ...(meeting.summary.keyPointTimes
+          ? { keyPointTimes: [...meeting.summary.keyPointTimes, null] }
+          : {}),
+        stale: false
+      }, `keyPoints:${index}`)
+    });
+    setAddingKeyPointIndex(index);
+  };
+
+  /** 删除一条关键结论（含锁重排与证据时间切片，见 removeSummaryListItem）。 */
+  const removeKeyPoint = (index: number) =>
+    onChange({ ...meeting, summary: removeSummaryListItem(meeting.summary, "keyPoints", index) });
+
+  /** 关键结论回链：切到转写视图、定位并短暂高亮目标段落；有音频时同时请求播放器跳转。 */
+  const jumpToTranscript = (ms: number) => {
+    setWorkspaceView("transcript");
+    setTranscriptJump({ ms, nonce: Date.now() });
+    onSeek?.(ms);
+  };
 
   /** 更新单个行动项字段；手动改动即锁定该行动项（`action:<id>`），防止 AI 重算时丢失。 */
   const updateAction = (id: string, patch: Partial<Meeting["summary"]["actionItems"][number]>) =>
@@ -242,6 +283,7 @@ export function DocumentWorkspace({
             onChange={onChange}
             playbackMs={playbackMs}
             onSeek={onSeek}
+            jumpTarget={transcriptJump}
             emptyActionLabel={emptyActionLabel}
             onEmptyAction={onEmptyAction}
           />
@@ -462,42 +504,119 @@ export function DocumentWorkspace({
             </div>
           )}
           {meeting.summary.keyPoints.length ? (
-            <div className="summary-points">
-              {meeting.summary.keyPoints.map((item, index) => (
-                <div
-                  key={`kp-${index}`}
-                  className={`summary-point ${summaryMotion.lists.keyPoints[index] === "added" ? "is-new content-motion-enter" : summaryMotion.lists.keyPoints[index] === "updated" ? "content-motion-update" : ""}`}
-                  style={{ animationDelay: `${Math.min(index, 3) * 30}ms` }}
-                >
-                  <i aria-hidden="true" />
-                  <textarea
-                    aria-label={`编辑纪要 ${index + 1}`}
-                    value={item}
-                    rows={Math.max(1, Math.ceil(item.length / 46))}
-                    onChange={(event) => setSummaryList(
-                      "keyPoints",
-                      meeting.summary.keyPoints.map((value, itemIndex) =>
-                        itemIndex === index ? event.target.value : value),
-                      index
-                    )}
-                  />
-                  <button
-                    className={`icon-button summary-lock ${meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "is-locked" : ""}`}
-                    aria-label={meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "解除锁定，允许 AI 更新这条要点" : "锁定这条要点，AI 重新生成时不覆盖"}
-                    title={meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ? "已锁定：AI 不覆盖。点击解锁。" : "未锁定。点击锁定后 AI 不覆盖这条。"}
-                    onClick={() => onChange({
-                      ...meeting,
-                      summary: toggleSummaryLock(meeting.summary, `keyPoints:${index}`)
-                    })}
-                  >
-                    {meeting.summary.manualLocks?.includes(`keyPoints:${index}`)
-                      ? <Lock size={13} weight="fill" />
-                      : <LockOpen size={13} />}
+            (() => {
+              const KEY_POINT_FOLD_LIMIT = 5;
+              const folded = stage !== "live" && !keyPointsExpanded
+                && meeting.summary.keyPoints.length > KEY_POINT_FOLD_LIMIT;
+              const visibleKeyPoints = folded
+                ? meeting.summary.keyPoints.slice(0, KEY_POINT_FOLD_LIMIT)
+                : meeting.summary.keyPoints;
+              return (
+                <div className="summary-points">
+                  {visibleKeyPoints.map((item, index) => {
+                    const locked = meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ?? false;
+                    const timeMs = meeting.summary.keyPointTimes?.[index];
+                    const isAddingRow = index === addingKeyPointIndex;
+                    return (
+                      <div
+                        key={`kp-${index}`}
+                        className={`summary-point ${summaryMotion.lists.keyPoints[index] === "added" ? "is-new content-motion-enter" : summaryMotion.lists.keyPoints[index] === "updated" ? "content-motion-update" : ""}`}
+                        style={{ animationDelay: `${Math.min(index, 3) * 30}ms` }}
+                      >
+                        <i aria-hidden="true" />
+                        <textarea
+                          aria-label={`编辑纪要 ${index + 1}`}
+                          value={item}
+                          rows={Math.max(1, Math.ceil(item.length / 40))}
+                          autoFocus={isAddingRow}
+                          // autoFocus 在部分挂载时序下不生效（如折叠展开同帧挂载），
+                          // 用 ref 回调兜底保证新行稳定拿到焦点。
+                          ref={isAddingRow ? (el) => el?.focus() : undefined}
+                          onFocus={(event) => { keyPointDraftRef.current = { index, value: event.target.value }; }}
+                          onBlur={() => {
+                            if (!isAddingRow) return;
+                            setAddingKeyPointIndex(null);
+                            if (!item.trim()) removeKeyPoint(index);
+                          }}
+                          onKeyDown={(event) => {
+                            // 一条结论一行：Enter 提交收起，Shift+Enter 保留手动换行；
+                            // Escape 恢复聚焦时的旧值再收起。
+                            if (event.key === "Enter" && !event.shiftKey) {
+                              event.preventDefault();
+                              event.currentTarget.blur();
+                            }
+                            if (event.key === "Escape") {
+                              event.preventDefault();
+                              const draft = keyPointDraftRef.current;
+                              if (draft && draft.index === index && draft.value !== item) {
+                                setSummaryList(
+                                  "keyPoints",
+                                  meeting.summary.keyPoints.map((value, itemIndex) =>
+                                    itemIndex === index ? draft.value : value),
+                                  index
+                                );
+                              }
+                              event.currentTarget.blur();
+                            }
+                          }}
+                          onChange={(event) => setSummaryList(
+                            "keyPoints",
+                            meeting.summary.keyPoints.map((value, itemIndex) =>
+                              itemIndex === index ? event.target.value : value),
+                            index
+                          )}
+                        />
+                        {typeof timeMs === "number" && (
+                          <button
+                            className="summary-point__time"
+                            title="跳到转写中的对应位置"
+                            onClick={() => jumpToTranscript(timeMs)}
+                          >
+                            {formatTranscriptTime(timeMs)}
+                          </button>
+                        )}
+                        <div className="summary-point__actions">
+                          <button
+                            className={`icon-button summary-lock ${locked ? "is-locked" : ""}`}
+                            aria-label={locked ? "解除锁定，允许 AI 更新这条要点" : "锁定这条要点，AI 重新生成时不覆盖"}
+                            title={locked ? "已锁定：AI 不覆盖。点击解锁。" : "未锁定。点击锁定后 AI 不覆盖这条。"}
+                            onClick={() => onChange({
+                              ...meeting,
+                              summary: toggleSummaryLock(meeting.summary, `keyPoints:${index}`)
+                            })}
+                          >
+                            {locked
+                              ? <Lock size={13} weight="fill" />
+                              : <LockOpen size={13} />}
+                          </button>
+                          <button
+                            className="icon-button summary-remove"
+                            aria-label="删除这条结论"
+                            title="删除这条结论"
+                            onClick={() => removeKeyPoint(index)}
+                          >
+                            <Trash size={13} />
+                          </button>
+                        </div>
+                        {summaryMotion.lists.keyPoints[index] === "added" && <span className="content-status-enter">新增</span>}
+                      </div>
+                    );
+                  })}
+                  <button className="summary-point-add" onClick={addKeyPoint}>
+                    <Plus size={13} />添加结论
                   </button>
-                  {summaryMotion.lists.keyPoints[index] === "added" && <span className="content-status-enter">新增</span>}
+                  {meeting.summary.keyPoints.length > KEY_POINT_FOLD_LIMIT && stage !== "live" && (
+                    <button
+                      className="summary-points__toggle"
+                      aria-expanded={keyPointsExpanded}
+                      onClick={() => setKeyPointsExpanded((value) => !value)}
+                    >
+                      {keyPointsExpanded ? "收起" : `展开全部 ${meeting.summary.keyPoints.length} 条`}
+                    </button>
+                  )}
                 </div>
-              ))}
-            </div>
+              );
+            })()
           ) : (
             <div className="section-empty">转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。</div>
           )}

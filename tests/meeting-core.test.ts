@@ -24,7 +24,9 @@ import {
   generateVisualSummaryWithOpenAICompatible,
   summarizeWithOpenAICompatible,
   summarizeLocally,
+  parseEvidenceTimeMs,
   testModelProfile,
+  nextTranscriptionResumeDelayMs,
   transcribeRemote,
   validateSummary,
   validateVisualSummary,
@@ -57,7 +59,8 @@ import { groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments, s
 import { groupLibraryMeetings, splitHighlight } from "../src/lib/library";
 import { simplifyChinese, simplifySummary } from "../src/lib/chinese";
 import { derivePermissionSetupPhase, finishPermissionSetup, isMicrophonePermissionError, isScreenPermissionError, shouldOpenPermissionSetup, shouldRequestMicrophone } from "../src/lib/permissions";
-import { lockSummaryField, mergeSummaryRevision, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
+import { lockSummaryField, mergeSummaryRevision, removeSummaryListItem, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
+import { buildBasicKeyPoints, KEY_POINT_MAX_CHARS } from "../electron/services/chinese.mjs";
 import { normalizeImportChunkSegments } from "../electron/services/import-queue.mjs";
 import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "../electron/services/chunk-planning.mjs";
 import { plannedCharacters, punctuationCut, typewriterStep } from "../src/lib/typewriter";
@@ -874,6 +877,12 @@ describe("structured meeting summary", () => {
     // 不再携带「会议决定/讨论重点」这类会在卡片里反复出现的前缀小标题。
     expect(summary.keyPoints.length).toBeGreaterThan(0);
     expect(summary.keyPoints.every((item) => /^(会议决定|后续安排|风险提示|讨论重点)：/.test(item) === false)).toBe(true);
+    // 行长纪律：一条结论一行、单分句，绝不「；」拼接，截断后不超过上限加省略号。
+    expect(summary.keyPoints.every((item) => !item.includes("；"))).toBe(true);
+    expect(summary.keyPoints.every((item) => item.replace(/…$/, "").length <= KEY_POINT_MAX_CHARS)).toBe(true);
+    // 证据时间与文本逐位对齐，可回链到转写原文。
+    expect(summary.keyPointTimes?.length).toBe(summary.keyPoints.length);
+    expect(summary.keyPointTimes?.every((time) => typeof time === "number")).toBe(true);
   });
 
   it("rejects structurally invalid responses", () => {
@@ -887,6 +896,88 @@ describe("structured meeting summary", () => {
       decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
     });
     expect(healed.keyPoints).toEqual(["旧版本烤进文本的标签", "也是标签", "干净的结论不需要处理"]);
+  });
+
+  it("heals markdown bullets and realigns key-point evidence times on the read path", () => {
+    const healed = simplifySummary({
+      topics: [],
+      keyPoints: ["- 讨论重点：带符号的标签", "2. 编号列表符号", "• 圆点列表", "干净的结论"],
+      // 比 keyPoints 长（截断）、含 NaN/负数（归 null）。
+      keyPointTimes: [12_000, Number.NaN, -5, 34_000, 56_000],
+      decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
+    });
+    expect(healed.keyPoints).toEqual(["带符号的标签", "编号列表符号", "圆点列表", "干净的结论"]);
+    expect(healed.keyPointTimes).toEqual([12_000, null, null, 34_000]);
+  });
+
+  it("keeps key-point times absent for legacy summaries without them", () => {
+    const healed = simplifySummary({
+      topics: [], keyPoints: ["旧数据结论"], decisions: [], actionItems: [],
+      openQuestions: [], risks: [], nextSteps: []
+    });
+    expect(healed.keyPointTimes).toBeUndefined();
+  });
+
+  it("emits one clause per key point with its source time", () => {
+    const drafts = buildBasicKeyPoints([
+      segment("s1", 0, 6_000, "我们先对齐整体节奏，本季度完成核心功能交付并且启动灰度验证。"),
+      segment("s2", 8_000, 14_000, "确认预算维持不变。")
+    ]);
+    expect(drafts.length).toBeGreaterThan(0);
+    for (const draft of drafts) {
+      expect(draft.text.includes("；")).toBe(false);
+      expect(draft.text.includes("，")).toBe(false);
+      expect(draft.text.replace(/…$/, "").length).toBeLessThanOrEqual(KEY_POINT_MAX_CHARS);
+    }
+    // 证据时间指向来源段落的开始时刻。
+    expect(drafts.every((draft) => draft.timeMs === 0 || draft.timeMs === 8_000)).toBe(true);
+  });
+
+  it("accepts mixed key-point shapes and parses evidenceTime", () => {
+    const summary = validateSummary({
+      topics: [],
+      keyPoints: [
+        "纯字符串要点",
+        { text: "带时间戳证据的结论", evidenceTime: "12:34" },
+        { text: "带毫秒证据的结论", timeMs: 90_000 },
+        { text: "证据格式非法的结论", evidenceTime: "oops" }
+      ],
+      decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
+    });
+    expect(summary.keyPoints).toEqual(["纯字符串要点", "带时间戳证据的结论", "带毫秒证据的结论", "证据格式非法的结论"]);
+    expect(summary.keyPointTimes).toEqual([null, 754_000, 90_000, null]);
+    expect(parseEvidenceTimeMs("1:02:03")).toBe(3_723_000);
+    expect(parseEvidenceTimeMs("61:00")).toBeNull();
+    expect(parseEvidenceTimeMs("12:99")).toBeNull();
+  });
+
+  it("removes a key point and reindexes its locks and evidence times", () => {
+    const summary = removeSummaryListItem(lockSummaryField(lockSummaryField(lockSummaryField({
+      topics: [],
+      keyPoints: ["结论一", "结论二", "结论三"],
+      keyPointTimes: [1_000, 2_000, 3_000],
+      manualLocks: ["action:keep", "keyPoints:0"],
+      decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
+    }, "keyPoints:2"), "keyPoints:2"), "keyPoints:1"), "keyPoints", 1);
+    expect(summary.keyPoints).toEqual(["结论一", "结论三"]);
+    expect(summary.keyPointTimes).toEqual([1_000, 3_000]);
+    // 删掉的行锁消失，其后索引左移；跨字段锁不受影响。
+    expect(summary.manualLocks).toEqual(["action:keep", "keyPoints:0", "keyPoints:1"]);
+  });
+
+  it("merges key-point evidence times in parallel with locked rows", () => {
+    const current = lockSummaryField({
+      topics: [], keyPoints: ["人工锁定的结论", "旧的第二条"], keyPointTimes: [111_000, 222_000],
+      decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
+    }, "keyPoints:0");
+    const incoming = {
+      topics: [], keyPoints: ["AI 新结论", "AI 第二条"], keyPointTimes: [333_000, null],
+      decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
+    };
+    const merged = mergeSummaryRevision(current, incoming);
+    expect(merged.keyPoints).toEqual(["人工锁定的结论", "AI 第二条"]);
+    // 锁定行沿用 current 的证据时间，其余行取 incoming。
+    expect(merged.keyPointTimes).toEqual([111_000, null]);
   });
 
   it("backfills unique ids for AI action items that omit them", () => {

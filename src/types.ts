@@ -113,6 +113,8 @@ export interface MeetingSummary {
   topics: string[];
   /** 关键要点列表。 */
   keyPoints: string[];
+  /** 关键要点的证据时间（毫秒），与 keyPoints 逐位对齐；null/缺省表示该行无回链。 */
+  keyPointTimes?: (number | null)[];
   /** 已达成的决定列表。 */
   decisions: string[];
   /** 行动项列表。 */

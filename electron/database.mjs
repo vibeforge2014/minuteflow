@@ -501,7 +501,9 @@ function migrateAiTextToSimplified(db) {
         const transcriptTexts = new Set(transcript.map((segment) => simplifyChinese(segment.text).trim()));
         const legacyCopied = summary.keyPoints.some((point) => point.length > 120 || transcriptTexts.has(point.trim()));
         if (legacyCopied) {
-          summary.keyPoints = buildBasicKeyPoints(transcript);
+          const keyDrafts = buildBasicKeyPoints(transcript);
+          summary.keyPoints = keyDrafts.map((draft) => draft.text);
+          summary.keyPointTimes = keyDrafts.map((draft) => draft.timeMs ?? null);
           summary.generationMode = "local";
           summary.sourceThroughMs = db.prepare("SELECT MAX(end_ms) AS value FROM transcript_segments WHERE meeting_id = ?").get(row.id)?.value ?? 0;
           summary.stale = false;

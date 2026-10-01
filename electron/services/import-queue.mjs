@@ -93,6 +93,18 @@ function mergeSummaryPreservingLocks(current = {}, incoming = {}) {
     });
     merged[key] = next;
   }
+  // keyPointTimes 与 keyPoints 平行重建：锁定的行沿用 current 的证据时间，其余取 incoming。
+  if (incoming.keyPointTimes || current.keyPointTimes) {
+    const nextTimes = (incoming.keyPointTimes ?? []).map((value) =>
+      typeof value === "number" && Number.isFinite(value) ? value : null);
+    (current.keyPointTimes ?? []).forEach((value, index) => {
+      if (!locks.has(`keyPoints:${index}`)) return;
+      const time = typeof value === "number" && Number.isFinite(value) ? value : null;
+      if (index < nextTimes.length) nextTimes[index] = time;
+      else nextTimes.push(time);
+    });
+    merged.keyPointTimes = nextTimes;
+  }
   const lockedActions = (current.actionItems ?? []).filter((item) => locks.has(`action:${item.id}`));
   const lockedById = new Map(lockedActions.map((item) => [item.id, item]));
   merged.actionItems = [

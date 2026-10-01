@@ -14,6 +14,12 @@ export function simplifyTranscriptSegment(segment: TranscriptSegment): Transcrip
 
 export function simplifySummary(summary: MeetingSummary): MeetingSummary {
   const list = (values: string[] = []) => values.map(simplifyChinese);
+  // 读路径自愈：剥掉关键结论行首的类别标签前缀与 Markdown 列表符号（与主进程 twin 同步）。
+  const stripKeyPoint = (item: string) => item
+    .replace(/^\s*(?:[-*•·]|\d{1,2}[.、)])\s+/, "")
+    .replace(/^(会议决定|后续安排|风险提示|讨论重点)：/, "")
+    .trim();
+  const keyPoints = list(summary.keyPoints).map(stripKeyPoint);
   const visualSummary = summary.visualSummary
     ? {
         ...summary.visualSummary,
@@ -42,8 +48,14 @@ export function simplifySummary(summary: MeetingSummary): MeetingSummary {
   return {
     ...summary,
     topics: list(summary.topics),
-    // 读路径自愈：剥掉旧版本本机纪要烤进文本的「会议决定/讨论重点」等前缀标签。
-    keyPoints: list(summary.keyPoints).map((item) => item.replace(/^(会议决定|后续安排|风险提示|讨论重点)：/, "")),
+    keyPoints,
+    // 证据时间与自愈后的文本逐位对齐；旧数据没有时间数组时不写入全 null。
+    keyPointTimes: Array.isArray(summary.keyPointTimes)
+      ? keyPoints.map((_, index) => {
+        const value = summary.keyPointTimes?.[index];
+        return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+      })
+      : summary.keyPointTimes,
     decisions: list(summary.decisions),
     actionItems: (summary.actionItems ?? []).map((item) => ({
       ...item,

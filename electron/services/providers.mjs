@@ -28,7 +28,16 @@ const require = createRequire(import.meta.url);
 /** 会议纪要 JSON 的 zod 校验 schema：模型输出先经它归一化（缺省字段补默认值）再进库。 */
 const summarySchema = z.object({
   topics: z.array(z.string()).default([]),
-  keyPoints: z.array(z.string()).default([]),
+  // 关键结论兼容三种形态：纯字符串 / {text} / {text, evidenceTime|timeMs}；
+  // validateSummary 里统一归一为字符串数组 + 平行的 keyPointTimes 数组。
+  keyPoints: z.array(z.union([
+    z.string(),
+    z.object({
+      text: z.string(),
+      evidenceTime: z.string().optional(),
+      timeMs: z.number().optional()
+    })
+  ])).default([]),
   decisions: z.array(z.string()).default([]),
   actionItems: z.array(z.object({
     id: z.string().optional(),
@@ -244,6 +253,38 @@ async function requestGemini(profile, apiKey, prompt, maxTokens = 8_192, signal,
  * 用 zod schema 校验并归一化纪要 JSON，字段缺失补默认值，格式不符抛出用户可读的错误
  * （原始 ZodError 是结构化对象，直接透传会得到一坨无法阅读的 JSON）。
  */
+/** "12:34" / "1:02:03" 证据时间（转录行开头的时间戳）→ 毫秒；解析不了返回 null。 */
+export function parseEvidenceTimeMs(value) {
+  if (typeof value !== "string") return null;
+  const parts = value.trim().split(":");
+  if (parts.length < 2 || parts.length > 3) return null;
+  const numbers = parts.map(Number);
+  if (numbers.some((part) => !Number.isInteger(part) || part < 0)) return null;
+  const [hours, minutes, seconds] = parts.length === 3 ? numbers : [0, ...numbers];
+  if (minutes > 59 || seconds > 59) return null;
+  return ((hours * 60 + minutes) * 60 + seconds) * 1000;
+}
+
+/** 把模型返回的混合形态关键结论归一为 { texts, times }（times 与 texts 逐位对齐，无证据为 null）。 */
+function normalizeKeyPointDrafts(drafts) {
+  const texts = [];
+  const times = [];
+  for (const draft of drafts) {
+    if (typeof draft === "string") {
+      texts.push(draft);
+      times.push(null);
+      continue;
+    }
+    if (draft && typeof draft === "object" && typeof draft.text === "string") {
+      texts.push(draft.text);
+      times.push(typeof draft.timeMs === "number" && draft.timeMs >= 0
+        ? draft.timeMs
+        : parseEvidenceTimeMs(draft.evidenceTime));
+    }
+  }
+  return { texts, times };
+}
+
 export function validateSummary(value) {
   const result = summarySchema.safeParse(value);
   if (!result.success) {
@@ -252,7 +293,17 @@ export function validateSummary(value) {
       .join("；");
     throw new Error(`模型返回的纪要结构不合法（${issues}），请重试或换用兼容性更好的模型。`);
   }
-  return simplifySummary(result.data);
+  // 本机归纳（summarizeLocally）已经在输入里带好 keyPointTimes；zod 会剥掉未知字段，
+  // 所以从原始输入取回，预置时间优先，模型 evidenceTime 只补空位。
+  const presetTimes = Array.isArray(value?.keyPointTimes) ? value.keyPointTimes : null;
+  const { texts, times } = normalizeKeyPointDrafts(result.data.keyPoints);
+  const keyPointTimes = texts.map((_, index) => {
+    if (presetTimes && typeof presetTimes[index] === "number" && presetTimes[index] >= 0) {
+      return presetTimes[index];
+    }
+    return times[index];
+  });
+  return simplifySummary({ ...result.data, keyPoints: texts, keyPointTimes });
 }
 
 /** 提示词中转录部分的最大字符量：更早的内容已并入上一版纪要，超长时只保留最近窗口。 */
@@ -295,6 +346,8 @@ export function buildSummaryPrompt(input, final = false) {
       : "请只根据新增内容更新滚动纪要，不要删除已经确认的人工内容。",
     "必须返回 JSON，不要使用 Markdown 代码块。",
     "结构：topics, keyPoints, decisions, actionItems, openQuestions, risks, nextSteps。",
+    "keyPoints 格式纪律：每条是一个完整短句（约 15–45 字），一行只表达一条结论，不要用分号或逗号拼接多个要点，不要以「讨论重点」「会议决定」等类别标签开头，不要 Markdown 列表符号或编号。",
+    "keyPoints 每项可以是字符串，也可以是 {\"text\": 结论, \"evidenceTime\": \"mm:ss\"} 对象；evidenceTime 引用转录行开头的时间戳，仅当该结论确实对应会议中某个时刻时提供。",
     "actionItems 每项包含 title, owner, dueDate, status, done, evidenceSegmentIds。",
     `会议标题：${input.title}`,
     `会议目标：${input.goals.join("；") || "未提供"}`,
@@ -608,13 +661,14 @@ export function summarizeLocally(input) {
     }))
   );
 
-  const keyPoints = buildBasicKeyPoints(recent);
+  const keyDrafts = buildBasicKeyPoints(recent);
 
   return validateSummary({
     topics: input.previousSummary?.topics?.length
       ? input.previousSummary.topics
       : input.goals.slice(0, 3),
-    keyPoints: Array.from(new Set(keyPoints)).slice(-8),
+    keyPoints: keyDrafts.map((draft) => draft.text).slice(-8),
+    keyPointTimes: keyDrafts.map((draft) => draft.timeMs ?? null).slice(-8),
     decisions: Array.from(new Set([
       ...(input.previousSummary?.decisions ?? []),
       ...sentences.filter((unit) => decisionPattern.test(unit.text)).map((unit) => unit.text)

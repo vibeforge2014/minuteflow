@@ -24,6 +24,29 @@ export function simplifyTranscriptResult(result = {}) {
   };
 }
 
+/** 关键结论单行字数上限：一条结论只表达一件事，超长截断加省略号。 */
+export const KEY_POINT_MAX_CHARS = 48;
+
+/** 剥掉关键结论行首的类别标签前缀与 Markdown 列表符号（模型输出防抖、旧数据自愈共用）。 */
+function stripKeyPointDecoration(value) {
+  return value
+    .replace(/^\s*(?:[-*•·]|\d{1,2}[.、)])\s+/, "")
+    .replace(/^(会议决定|后续安排|风险提示|讨论重点)：/, "")
+    .trim();
+}
+
+/**
+ * keyPointTimes 与 keyPoints 逐位对齐：长度不符时截断/补 null，非数字归 null。
+ * 输入不是数组时返回 undefined，未生成过时间的旧会议不写入全 null 数组。
+ */
+function normalizeKeyPointTimes(times, length) {
+  if (!Array.isArray(times)) return undefined;
+  return Array.from({ length }, (_, index) => {
+    const value = times[index];
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  });
+}
+
 export function simplifySummary(summary = {}) {
   const list = (value) => Array.isArray(value) ? value.map((item) => simplifyChinese(String(item))) : [];
   const visualSummary = summary.visualSummary && typeof summary.visualSummary === "object"
@@ -55,12 +78,13 @@ export function simplifySummary(summary = {}) {
           : []
       }
     : undefined;
+  const keyPoints = list(summary.keyPoints).map(stripKeyPointDecoration);
   return {
     ...summary,
     topics: list(summary.topics),
-    // 读路径自愈：剥掉旧版本本机纪要烤进文本的「会议决定/讨论重点」等前缀标签，
-    // 让已保存会议的关键结论卡片不再反复出现同一个小标题。
-    keyPoints: list(summary.keyPoints).map((item) => item.replace(/^(会议决定|后续安排|风险提示|讨论重点)：/, "")),
+    keyPoints,
+    // 读路径自愈：剥掉旧版本烤进文本的标签/列表符号后，证据时间与文本逐位重新对齐。
+    keyPointTimes: normalizeKeyPointTimes(summary.keyPointTimes, keyPoints.length),
     decisions: list(summary.decisions),
     actionItems: Array.isArray(summary.actionItems)
       ? summary.actionItems.map((item) => ({
@@ -89,18 +113,25 @@ export function simplifyMeetingAiText(meeting) {
 }
 
 /**
- * 无总结模型时生成压缩后的关键要点。它按句/分句评分，提取最有信息量的 1–2 个分句，
- * 避免把长转录原样搬进文档。关键结论行不再携带「会议决定/讨论重点」这类前缀标签：
- * 类别已经由纪要 schema 的 decisions/risks/actionItems 等独立字段承载，行内重复
- * 标签会让关键结论卡片里同一个小标题反复出现。
+ * 无总结模型时生成压缩后的关键要点。按句/分句评分，每条只取信息密度最高的一个分句
+ * （行长纪律：一条结论一行，绝不「；」拼接多个要点），截到 KEY_POINT_MAX_CHARS，
+ * 并把来源段落的开始时间带回，供关键结论卡片做「跳到原文」回链。
+ * 输入段可缺 startMs（如数据库迁移只喂 text/status），此时 timeMs 为 undefined。
+ * @returns {Array<{text: string, timeMs?: number}>}
  */
 export function buildBasicKeyPoints(transcript = []) {
   const informationPattern = /(确认|决定|结论|完成|进展|方案|目标|问题|原因|数据|结果|计划|建议|需要|风险|负责|下一步)/g;
   const fillerPattern = /^(嗯+|啊+|呃+|然后|就是|那个|这个|所以说|对对对|好的)[，,。.!！\s]*/;
+  let unitIndex = 0;
   const units = transcript
     .filter((segment) => segment.status === "final")
-    .flatMap((segment) => String(segment.text || "").split(/(?<=[。！？!?…])\s*/))
-    .map((text, index) => ({ text: simplifyChinese(text).replace(fillerPattern, "").replace(/\s+/g, " ").trim(), index }))
+    .flatMap((segment) => String(segment.text || "")
+      .split(/(?<=[。！？!?…])\s*/)
+      .map((text) => ({
+        text,
+        startMs: typeof segment.startMs === "number" ? segment.startMs : undefined
+      })))
+    .map((unit) => ({ ...unit, text: simplifyChinese(unit.text).replace(fillerPattern, "").replace(/\s+/g, " ").trim(), index: unitIndex++ }))
     .filter((unit) => unit.text.length >= 8 && !/[？?]$/.test(unit.text))
     .map((unit) => ({
       ...unit,
@@ -113,17 +144,17 @@ export function buildBasicKeyPoints(transcript = []) {
   const points = [];
   for (const unit of units) {
     const clauses = unit.text.split(/[，,；;。]/).map((value) => value.trim()).filter((value) => value.length >= 6);
-    const selected = clauses
-      .map((text, index) => ({ text, index, score: (text.match(informationPattern)?.length ?? 0) * 3 + text.length / 40 }))
-      .sort((left, right) => right.score - left.score)
-      .slice(0, 2)
-      .sort((left, right) => left.index - right.index)
-      .map((item) => item.text);
-    const core = (selected.length ? selected.join("；") : unit.text).slice(0, 96).replace(/[，,；;：:]$/, "");
+    // 只取信息密度最高的一个分句：关键结论一行只表达一件事。
+    const best = clauses.length
+      ? clauses
+        .map((text, index) => ({ text, index, score: (text.match(informationPattern)?.length ?? 0) * 3 + text.length / 40 }))
+        .sort((left, right) => right.score - left.score)[0].text
+      : unit.text;
+    const core = best.slice(0, KEY_POINT_MAX_CHARS).replace(/[，,；;：:]$/, "");
     const normalized = core.replace(/[\s，。！？、,.!?;；:：'"“”‘’]/g, "");
     if (!normalized || [...seen].some((value) => value.includes(normalized) || normalized.includes(value))) continue;
     seen.add(normalized);
-    points.push(`${core}${core.length < unit.text.length ? "…" : ""}`);
+    points.push({ text: `${core}${best.length > core.length ? "…" : ""}`, ...(unit.startMs !== undefined ? { timeMs: unit.startMs } : {}) });
     if (points.length >= 6) break;
   }
   return points;

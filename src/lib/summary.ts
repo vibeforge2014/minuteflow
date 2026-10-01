@@ -8,6 +8,7 @@ import type { MeetingSummary } from "../types";
 
 // 支持逐条锁定（manualLocks 以 `${key}:${index}` 寻址）的列表型字段。
 const listKeys = ["keyPoints", "decisions", "openQuestions", "risks", "nextSteps"] as const;
+export type SummaryListKey = typeof listKeys[number];
 
 /** 把某个纪要字段加入手动锁定集合（Set 去重），锁定后 AI 重算不会覆盖它。 */
 export function lockSummaryField(summary: MeetingSummary, key: string) {
@@ -30,6 +31,33 @@ export function toggleSummaryLock(summary: MeetingSummary, key: string) {
   return (summary.manualLocks ?? []).includes(key)
     ? unlockSummaryField(summary, key)
     : lockSummaryField(summary, key);
+}
+
+/**
+ * 删除列表型字段的一行（如手动移除一条关键结论）：
+ * - 该行的锁随之移除，其后同字段的锁索引左移一位，避免锁落到错误的行上；
+ * - keyPoints 的证据时间数组同步切掉同位元素，保持与文本逐位对齐。
+ */
+export function removeSummaryListItem(summary: MeetingSummary, key: SummaryListKey, removeIndex: number): MeetingSummary {
+  const prefix = `${key}:`;
+  const manualLocks = (summary.manualLocks ?? []).flatMap((lock) => {
+    if (!lock.startsWith(prefix)) return [lock];
+    const index = Number(lock.slice(prefix.length));
+    if (!Number.isInteger(index)) return [lock];
+    if (index === removeIndex) return [];
+    if (index > removeIndex) return [`${prefix}${index - 1}`];
+    return [lock];
+  });
+  const next: MeetingSummary = {
+    ...summary,
+    [key]: summary[key].filter((_, index) => index !== removeIndex),
+    manualLocks,
+    stale: false
+  };
+  if (key === "keyPoints" && Array.isArray(summary.keyPointTimes)) {
+    next.keyPointTimes = summary.keyPointTimes.filter((_, index) => index !== removeIndex);
+  }
+  return next;
 }
 
 /**
@@ -69,6 +97,20 @@ export function mergeSummaryRevision(
       else next.push(value);
     });
     merged[key] = next;
+  }
+
+  // keyPointTimes 与 keyPoints 平行重建：锁定的行沿用 current 的证据时间，其余取 incoming；
+  // 两边都没有时间数组（旧数据）时不写入，避免全 null 噪音。
+  if (incoming.keyPointTimes || current.keyPointTimes) {
+    const nextTimes: (number | null)[] = (incoming.keyPointTimes ?? []).map((value) =>
+      typeof value === "number" && Number.isFinite(value) ? value : null);
+    (current.keyPointTimes ?? []).forEach((value, index) => {
+      if (!locks.has(`keyPoints:${index}`)) return;
+      const time = typeof value === "number" && Number.isFinite(value) ? value : null;
+      if (index < nextTimes.length) nextTimes[index] = time;
+      else nextTimes.push(time);
+    });
+    merged.keyPointTimes = nextTimes;
   }
 
   const lockedActions = current.actionItems.filter((item) => locks.has(`action:${item.id}`));

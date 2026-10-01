@@ -38,9 +38,11 @@ interface TranscriptViewProps {
   /** 空逐字稿在会后提供唯一、明确的恢复动作。 */
   emptyActionLabel?: string;
   onEmptyAction?(): void;
+  /** 关键结论回链：跳到该时刻所在段落并短暂高亮（nonce 变化触发一次性定位）。 */
+  jumpTarget?: { ms: number; nonce: number } | null;
 }
 
-export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction }: TranscriptViewProps) {
+export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction, jumpTarget }: TranscriptViewProps) {
   /** 正在重命名的说话人 id（显示浮层输入框）。 */
   const [speakerEditor, setSpeakerEditor] = useState<string | null>(null);
   const [managerOpen, setManagerOpen] = useState(false);
@@ -53,6 +55,8 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   const [voiceprints, setVoiceprints] = useState<VoiceprintPerson[]>([]);
   const [learningSpeakerId, setLearningSpeakerId] = useState<string | null>(null);
   const [voiceprintMessage, setVoiceprintMessage] = useState("");
+  /** 关键结论回链定位到的段落 id（短暂高亮后清除）。 */
+  const [jumpHighlightId, setJumpHighlightId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   // 从转写中提取去重后的说话人 (id → name) 列表。
   const speakers = useMemo(() => Array.from(new Map(
@@ -101,6 +105,8 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   useEffect(() => {
     const list = listRef.current;
     if (!list || !autoScroll || playingSegment || meeting.transcript.length === 0) return;
+    // 刚发生回链/回放定位的程序性滚动短时间内不参与“跟随尾部”，避免两股滚动互相拉扯。
+    if (performance.now() < followGuardUntil.current) return;
     list.scrollTo({
       top: list.scrollHeight,
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
@@ -127,6 +133,35 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
     });
   }, [playingSegment?.id, autoScroll, visibleCount, meeting.transcript]);
+
+  // 关键结论回链定位：扩窗到目标段、把该段滚到列表约 1/3 处并短暂高亮 2 秒。
+  // 一次性动作只由 nonce 驱动；双 rAF 等待扩窗重渲染完成后再定位。
+  useEffect(() => {
+    if (!jumpTarget) return;
+    const target = findPlayingSegment(meeting.transcript, jumpTarget.ms);
+    if (!target) return;
+    const index = meeting.transcript.findIndex((segment) => segment.id === target.id);
+    if (index >= 0 && index < meeting.transcript.length - visibleCount) {
+      setVisibleCount((count) => Math.max(count, meeting.transcript.length - index + 20));
+    }
+    followGuardUntil.current = performance.now() + 450;
+    const list = listRef.current;
+    const frame = requestAnimationFrame(() => requestAnimationFrame(() => {
+      const el = list?.querySelector<HTMLElement>(`[data-segment-id="${target.id}"]`);
+      if (!el || !list) return;
+      const top = el.getBoundingClientRect().top - list.getBoundingClientRect().top;
+      list.scrollTo({
+        top: Math.max(0, list.scrollTop + top - list.clientHeight / 3),
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+      });
+    }));
+    setJumpHighlightId(target.id);
+    const timer = window.setTimeout(() => setJumpHighlightId(null), 2000);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, [jumpTarget?.nonce]);
 
   /** 用户向上阅读时暂停跟随；回到底部或点击恢复后重新跟随最新内容。
       回放中改用“正在播放的段落是否仍在可视区”判定，跟随滚动自身触发的事件被忽略。 */
@@ -334,7 +369,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           return (
             // is-playing：当前播放位置命中的段落整行高亮；data-segment-id 供回放跟随定位。
             <article
-              className={`transcript-item transcript-item--${segment.status} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${enteringIndex >= 0 ? "content-motion-enter" : ""}`}
+              className={`transcript-item transcript-item--${segment.status} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${jumpHighlightId === segment.id ? "is-jump-highlight" : ""} ${enteringIndex >= 0 ? "content-motion-enter" : ""}`}
               data-segment-id={segment.id}
               key={segment.id}
               style={enteringIndex >= 0 ? { animationDelay: `${Math.min(enteringIndex, 2) * 40}ms` } : undefined}
@@ -487,7 +522,7 @@ function importTranscriptStatus(job: ImportJob | undefined, segmentCount: number
 }
 
 /** 转写时间戳 → HH:MM:SS / MM:SS（相对录音起点，与播放器时间轴对齐）。 */
-function formatTranscriptTime(ms: number) {
+export function formatTranscriptTime(ms: number) {
   // Relative to recording start (00:00:00), with seconds. startMs is measured
   // from when recording began, so this aligns with the audio timeline.
   const total = Math.max(0, Math.floor(ms / 1000));

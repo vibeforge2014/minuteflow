@@ -431,6 +431,8 @@ button {
 .meeting-player__error { margin: 4px 0 0; color: #b24735; font-size: 11px; text-align: center; }
 .playback-trigger.is-active { color: #a74431; border-color: #e8b8aa; background: #fff1eb; }
 .transcript-time { align-self: start; padding: 2px 0; border: 0; background: none; color: #9b9188; font: inherit; font-size: 11px; cursor: pointer; }.transcript-time:hover { color: #c3523d; }.transcript-item.is-playing { background: #fff2ec; box-shadow: inset 3px 0 #dc6b52; }
+/* 关键结论回链落点：短暂暖色高亮后随背景过渡淡出（2 秒，见 TranscriptView）。 */
+.transcript-item.is-jump-highlight { background: #fff2ec; box-shadow: inset 3px 0 var(--accent); }
 
 .import-drawer { position: fixed; z-index: 70; inset: 0 0 0 auto; width: min(440px, calc(100vw - 24px)); display: flex; flex-direction: column; background: #fffdf9; border-left: 1px solid #e9e4de; box-shadow: -24px 0 64px rgba(75, 54, 42, .12); animation: import-slide-in .24s cubic-bezier(.2,.8,.2,1); }
 .import-drawer__header { min-height: 84px; padding: 20px 20px 16px 24px; display: flex; align-items: flex-start; justify-content: space-between; border-bottom: 1px solid #eee8e1; }
@@ -980,10 +982,14 @@ button {
 }
 
 /* 关键结论：暖色文档卡内的一组结论行。结论没有先后语义，用圆点引导而不是编号，
-   卡片让纪要重心落在结论区，和“轻量文档 + 淡桃色卡片”的视觉语言一致。 */
+   卡片让纪要重心落在结论区，和“轻量文档 + 淡桃色卡片”的视觉语言一致。
+   行内可加锁/删行；有证据时间的行尾带时间片，点击回链到转写原文。 */
 .summary-points {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   margin-left: 24px;
-  padding: 5px;
+  padding: 7px;
   border: 1px solid #f0e2d8;
   border-radius: 12px;
   background: linear-gradient(150deg, #fffdfb 0%, #fdf4ee 100%);
@@ -993,12 +999,21 @@ button {
 .summary-point {
   position: relative;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto auto;
   align-items: start;
   gap: 7px;
-  padding: 10px 10px 10px 9px;
+  padding: 10px 12px 10px 9px;
   border-radius: 8px;
-  transition: background-color var(--motion-content) ease;
+  transition: background-color var(--motion-fast) ease;
+}
+
+/* 整行 hover/focus 反馈：一行是一个可编辑对象，文字本身不再单独跳 padding。 */
+.summary-point:hover {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.summary-point:focus-within {
+  background: rgba(255, 255, 255, 0.8);
 }
 
 .summary-point.is-new {
@@ -1006,17 +1021,18 @@ button {
 }
 
 .summary-point > i {
-  width: 6px;
-  height: 6px;
-  margin-top: 7px;
+  width: 7px;
+  height: 7px;
+  margin-top: 8px;
   border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 0 0 3px rgba(231, 111, 81, 0.14);
 }
 
+/* 结论是纪要文档的重心：字号比正文大一档并加粗，与普通列表文字拉开层级。 */
 .summary-point textarea {
   width: 100%;
-  min-height: 20px;
+  min-height: 22px;
   margin: 0;
   padding: 0;
   resize: none;
@@ -1024,15 +1040,34 @@ button {
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: #33383f;
-  font-size: 13px;
-  line-height: 1.55;
+  color: #2f343b;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.6;
 }
 
-.summary-point textarea:hover,
-.summary-point textarea:focus {
-  padding: 0 4px;
-  background: rgba(255, 255, 255, 0.78);
+/* 证据时间片：与转写区时间戳同一交互语言，点击跳到转写对应段落。 */
+.summary-point__time {
+  margin-top: 3px;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(231, 111, 81, 0.08);
+  color: var(--accent);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) ease;
+}
+
+.summary-point__time:hover {
+  background: rgba(231, 111, 81, 0.16);
+}
+
+.summary-point__actions {
+  display: flex;
+  gap: 2px;
+  margin-top: 1px;
 }
 
 .summary-point > span {
@@ -1040,6 +1075,51 @@ button {
   color: var(--green);
   font-size: 10px;
   font-weight: 650;
+}
+
+/* 「添加结论」ghost 按钮：卡片 hover/聚焦时浮现，与行锁同一透明度语言。 */
+.summary-point-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 2px 2px 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #8f959d;
+  font-size: 12.5px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-fast) ease, background-color var(--motion-fast) ease, color var(--motion-fast) ease;
+}
+
+.summary-points:hover .summary-point-add,
+.summary-points:focus-within .summary-point-add,
+.summary-point-add:focus-visible {
+  opacity: 1;
+}
+
+.summary-point-add:hover {
+  background: rgba(231, 111, 81, 0.08);
+  color: var(--accent);
+}
+
+/* 长列表折叠：默认展示前 5 条，其余收进「展开全部」。 */
+.summary-points__toggle {
+  align-self: flex-start;
+  margin: 4px 2px 0;
+  padding: 4px 6px;
+  border: 0;
+  background: transparent;
+  color: #8f959d;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color var(--motion-fast) ease;
+}
+
+.summary-points__toggle:hover {
+  color: var(--accent);
 }
 
 .summary-more {
@@ -1237,9 +1317,7 @@ button {
   margin-top: 8px;
 }
 
-.summary-point .summary-lock {
-  margin-top: 3px;
-}
+/* 关键结论行内的锁在 .summary-point__actions 容器中对齐，不再单独偏移。 */
 
 .summary-detail > span {
   color: #a1a6ae;
@@ -4830,6 +4908,13 @@ html[data-surface="permission-helper"] #root {
 .action-row:hover .summary-lock,
 .action-row:focus-within .summary-lock,
 .summary-lock:focus-visible { opacity: 1; }
+
+/* 删行按钮与行锁同一浮现语言：hover 行时才出现，避免常驻噪音。 */
+.summary-remove { opacity: 0; transition: opacity 120ms ease, color 120ms ease, background 120ms ease; }
+.summary-point:hover .summary-remove,
+.summary-point:focus-within .summary-remove,
+.summary-remove:focus-visible { opacity: 1; }
+.summary-remove:hover { color: #d64545; }
 
 .meeting-details-toggle {
   width: calc(100% - 48px);
