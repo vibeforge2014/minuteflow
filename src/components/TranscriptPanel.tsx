@@ -22,6 +22,7 @@ import { findPlayingSegment } from "../lib/workspace";
 import { mergeSpeakerLabels } from "../lib/transcript";
 import { classifyTextChange } from "../lib/content-motion";
 import { useEnteringItemIds } from "../hooks/useContentMotion";
+import { useExitPresence } from "../hooks/useExitPresence";
 import type { WorkspaceStage } from "../lib/workspace";
 
 interface TranscriptViewProps {
@@ -59,6 +60,11 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   const visibleSegments = meeting.transcript.slice(-visibleCount);
   const visibleSegmentIds = useMemo(() => visibleSegments.map((segment) => segment.id), [visibleSegments]);
   const enteringSegmentIds = useEnteringItemIds(meeting.id, visibleSegmentIds);
+  // 同一批新入场的段落按 0/40/80ms 级联出现，避免整块转录结果齐刷刷闪现。
+  const enteringSequence = useMemo(
+    () => visibleSegments.filter((segment) => enteringSegmentIds.has(segment.id)).map((segment) => segment.id),
+    [visibleSegments, enteringSegmentIds]
+  );
   const tailSegment = meeting.transcript.at(-1);
   const tailSignature = tailSegment ? `${tailSegment.id}:${tailSegment.text.length}:${tailSegment.status}` : "";
 
@@ -187,6 +193,9 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     summary: { ...meeting.summary, stale: true }
   });
 
+  // 导入阶段/块计数变化时文本随之更新：以文本为 key 重挂，播放一次 160ms 微淡入。
+  const transcriptStatus = importTranscriptStatus(importJob, meeting.transcript.length);
+
   return (
     <>
       <div className="speaker-strip">
@@ -300,7 +309,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
       )}
       {voiceprintMessage && <p className="voiceprint-message" aria-live="polite">{voiceprintMessage}</p>}
       {meeting.transcript.length > 0 && (
-        <p className="transcript-hint">{importTranscriptStatus(importJob, meeting.transcript.length)}</p>
+        <p className="transcript-hint content-status-enter" key={transcriptStatus}>{transcriptStatus}</p>
       )}
       <div
         className="transcript-list"
@@ -315,13 +324,16 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
             加载更早的 {Math.min(200, meeting.transcript.length - visibleCount)} 条
           </button>
         )}
-        {meeting.transcript.length ? visibleSegments.map((segment) => (
-          // is-playing：当前播放位置命中的段落整行高亮；data-segment-id 供回放跟随定位。
-          <article
-            className={`transcript-item transcript-item--${segment.status} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${enteringSegmentIds.has(segment.id) ? "content-motion-enter" : ""}`}
-            data-segment-id={segment.id}
-            key={segment.id}
-          >
+        {meeting.transcript.length ? visibleSegments.map((segment) => {
+          const enteringIndex = enteringSequence.indexOf(segment.id);
+          return (
+            // is-playing：当前播放位置命中的段落整行高亮；data-segment-id 供回放跟随定位。
+            <article
+              className={`transcript-item transcript-item--${segment.status} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${enteringIndex >= 0 ? "content-motion-enter" : ""}`}
+              data-segment-id={segment.id}
+              key={segment.id}
+              style={enteringIndex >= 0 ? { animationDelay: `${Math.min(enteringIndex, 2) * 40}ms` } : undefined}
+            >
             <button className="transcript-time" onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
             <div>
               <button className={`speaker-name speaker-name--${speakerColor(segment.speakerId)}`} onClick={() => setSpeakerEditor(segment.speakerId)}>
@@ -352,7 +364,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
               ) : (
                 <AnimatedTranscriptCopy text={segment.text} animate={!enteringSegmentIds.has(segment.id)} />
               )}
-              {segment.status === "provisional" && <span className="provisional content-status-enter">临时转写中…</span>}
+              <ProvisionalBadge visible={segment.status === "provisional"} />
             </div>
             <div className="transcript-item__actions">
               {segment.status !== "provisional" && (
@@ -366,8 +378,9 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
               )}
               <CheckCircle size={16} className="transcript-check" weight="duotone" />
             </div>
-          </article>
-        )) : (
+            </article>
+          );
+        }) : (
           <div className="panel-empty">
             <MagicWand size={24} weight="duotone" />
             <p>{importJob
@@ -421,6 +434,13 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
       )}
     </>
   );
+}
+
+/** 「临时转写中…」定稿时保留 140ms 播放与入场对称的淡出，避免瞬间消失。 */
+function ProvisionalBadge({ visible }: { visible: boolean }) {
+  const { mounted, closing } = useExitPresence(visible, 140);
+  if (!mounted) return null;
+  return <span className={`provisional content-status-enter${closing ? " is-closing" : ""}`}>临时转写中…</span>;
 }
 
 /** 同一自然段续写时只让新增尾文出现；识别修正只给当前文字一次轻强调。 */

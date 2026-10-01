@@ -1530,6 +1530,7 @@ button {
   font-size: 12px;
   line-height: 1.65;
   white-space: pre-wrap;
+  transition: color var(--motion-content) var(--ease-out-ui);
 }
 
 .transcript-copy__tail {
@@ -1546,6 +1547,11 @@ button {
   margin-top: 4px;
   color: #9ca1a9;
   font-size: 9px;
+}
+
+/* 定稿瞬间与入场对称地收回：保留挂载 140ms 播放纯透明度退场（见 useExitPresence）。 */
+.provisional.is-closing {
+  animation: content-status-exit 140ms var(--ease-out-ui) both;
 }
 
 .transcript-item__actions {
@@ -4941,14 +4947,19 @@ html[data-surface="permission-helper"] #root {
   to { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes content-status-exit {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
 @keyframes content-view-enter {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes content-tail-enter {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from { opacity: 0; filter: blur(2px); }
+  to { opacity: 1; filter: blur(0); }
 }
 
 @keyframes content-fade-enter {
