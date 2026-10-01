@@ -3691,6 +3691,42 @@ html[data-surface="permission-helper"] #root {
   color: #8a8480;
 }
 
+/* 服务商下拉下方的一行说明：厂商描述 + 协议（目录聚合进表单后厂商信息集中在此）。 */
+.preset-describe {
+  margin-top: 5px;
+  font-size: 9px;
+  line-height: 1.5;
+  color: #8a8480;
+}
+
+/* 粘贴 Base URL 命中已知厂商时的套用建议（不自动切换，用户确认后应用）。 */
+.url-recognize {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: #fff4ec;
+  border: 1px solid #f2ddcd;
+  font-size: 9px;
+  color: #8a5a3f;
+  animation: url-recognize-in var(--motion-fast, .18s ease);
+}
+
+.url-recognize .text-button {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 600;
+  color: #c4573b;
+}
+
+@keyframes url-recognize-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 .model-catalog__custom {
   flex: 0 0 auto;
   min-height: 38px;
@@ -5936,7 +5972,8 @@ html[data-surface="permission-helper"] #root {
   .advanced-provider-options[open] > .field,
   .advanced-provider-options[open] > div,
   .visual-capability-setting > span.is-verified,
-  .model-picker__menu {
+  .model-picker__menu,
+  .url-recognize {
     animation: content-fade-enter 140ms ease-out both !important;
     transform: none !important;
   }

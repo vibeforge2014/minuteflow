@@ -260,6 +260,47 @@ const llmProviderGroups = [
   }
 ] as const;
 
+/** 预设的一句话说明（目录聚合进表单后，厂商信息集中展示在下拉下方）。 */
+const presetDescribe: Record<string, { text: string; protocol?: string }> = {
+  localSummary: { text: "完全离线的规则纪要，不发起任何网络请求", protocol: "本机" },
+  ollama: { text: "数据留在本机 · 需要已安装 Ollama 服务", protocol: "本机" },
+  whisper: { text: "自动适配 GGML/GGUF、.pt、CT2 与 MLX", protocol: "本机" },
+  openaiWhisper: { text: "OpenAI 官方音频接口，无需下载本地模型", protocol: "OpenAI 兼容" },
+  newApiWhisper: { text: "自建或中转的 OpenAI 音频兼容接口（New API 等）", protocol: "OpenAI 兼容" },
+  sherpa: { text: "多人会议区分发言人 · 数据不出本机", protocol: "内置引擎" },
+  azure: { text: "企业 Azure 部署 · 密钥走 api-key 头", protocol: "OpenAI 兼容" },
+  newApiLlm: { text: "自建或聚合的大模型服务（New API / one-api 等）", protocol: "OpenAI 兼容" }
+};
+
+/** 取预设的说明行：厂商预设沿用 llmProviderGroups 的描述，协议按 apiFlavor 推导。 */
+const describePreset = (key: string): { text: string; protocol: string } | null => {
+  if (!key) return null;
+  const preset = providerPresets[key as keyof typeof providerPresets];
+  if (!preset) return null;
+  if (presetDescribe[key]) return presetDescribe[key] as { text: string; protocol: string };
+  const groupProvider = llmProviderGroups
+    .flatMap((group) => group.providers as readonly { key: string; description: string }[])
+    .find((provider) => provider.key === key);
+  const flavor = preset.options?.apiFlavor;
+  return {
+    text: groupProvider?.description ?? "",
+    protocol: flavor === "anthropic" ? "Anthropic 原生" : flavor === "gemini" ? "Gemini 原生" : "OpenAI 兼容"
+  };
+};
+
+/** 端点域名 → 预设键索引：粘贴 Base URL 时识别厂商并建议套用预设。 */
+const presetHostIndex: Map<string, string> = new Map(
+  Object.entries(providerPresets)
+    .flatMap(([key, preset]) => {
+      if (!preset.baseUrl) return [];
+      try {
+        return [[new URL(preset.baseUrl).host.toLowerCase(), key] as const];
+      } catch {
+        return [];
+      }
+    })
+);
+
 /** 旧版曾把 New API 误当成协议；编辑/保存时自动迁移为 OpenAI 兼容格式。 */
 const normalizeLegacyProviderProfile = (profile: ModelProfile): ModelProfile => profile.options?.apiFlavor === "new-api"
   ? { ...profile, options: { ...profile.options, apiFlavor: "openai" } }
@@ -406,6 +447,39 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
       total: modelList?.length ?? 0
     };
   }, [activePresetKey, editing?.model, modelList]);
+
+  /** 粘贴的 Base URL 命中已知厂商域名时建议套用预设（不自动切换，避免覆盖用户输入）。 */
+  const [urlPresetSuggestion, setUrlPresetSuggestion] = useState<string | null>(null);
+  const editingBaseUrl = editing?.baseUrl ?? "";
+  useEffect(() => {
+    const value = editingBaseUrl.trim();
+    if (!value) {
+      setUrlPresetSuggestion(null);
+      return;
+    }
+    let host: string;
+    try {
+      host = new URL(value).host.toLowerCase();
+    } catch {
+      setUrlPresetSuggestion(null);
+      return;
+    }
+    const matchedKey = presetHostIndex.get(host);
+    setUrlPresetSuggestion(matchedKey && matchedKey !== activePresetKey ? matchedKey : null);
+  }, [editingBaseUrl, activePresetKey]);
+
+  /** 套用识别出的预设字段，但保留用户刚粘贴的 Base URL。 */
+  const applyUrlPreset = (key: string) => {
+    const preset = providerPresets[key as keyof typeof providerPresets];
+    if (!preset || !editing) return;
+    setEditing({
+      ...editing,
+      ...preset,
+      baseUrl: editing.baseUrl,
+      options: { ...emptyProfile.options, ...(preset.options ?? {}) }
+    });
+    setUrlPresetSuggestion(null);
+  };
 
   if (!mounted) return null;
 
@@ -644,18 +718,19 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                       <button className={isLocalWhisperTransport(editing?.transport) ? "is-selected" : ""} onClick={() => startPreset("whisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>本地 Whisper</strong><small>自动适配 GGML/GGUF、.pt、CT2 与 MLX</small></span>{isLocalWhisperTransport(editing?.transport) && <CheckCircle size={16} weight="fill" />}</button>
                     )}
                   </div>
-                  {tab === "llm" ? llmProviderGroups.map((group) => (
-                    <div className="model-catalog__section" key={group.label}><span>{group.label}</span>
-                      {group.providers.map((provider) => {
-                        const preset = providerPresets[provider.key];
-                        const selected = editing?.name === preset.name && editing?.transport === preset.transport;
-                        return <button key={provider.key} className={selected ? "is-selected" : ""} onClick={() => startPreset(provider.key)}><span className="profile-icon">{provider.icon}</span><span><strong>{provider.name}</strong><small>{provider.description}</small></span>{selected && <CheckCircle size={16} weight="fill" />}</button>;
-                      })}
-                    </div>
-                  )) : (<>
+                  {tab === "llm" ? (
                     <div className="model-catalog__section"><span>在线服务</span>
-                      <button className={editing?.name === "OpenAI Whisper" ? "is-selected" : ""} onClick={() => startPreset("openaiWhisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>OpenAI Whisper</strong><small>无需下载本地模型</small></span>{editing?.name === "OpenAI Whisper" && <CheckCircle size={16} weight="fill" />}</button>
-                      <button className={editing?.name === "New API 语音转录" ? "is-selected" : ""} onClick={() => startPreset("newApiWhisper")}><span className="profile-icon"><CloudArrowDown size={18} /></span><span><strong>New API</strong><small>OpenAI 音频接口兼容</small></span>{editing?.name === "New API 语音转录" && <CheckCircle size={16} weight="fill" />}</button>
+                      <button
+                        className={editing && editing.kind === "llm" && editing.transport !== "local-summary" && editing.transport !== "ollama" ? "is-selected" : ""}
+                        onClick={() => startPreset("openai")}
+                      ><span className="profile-icon">AI</span><span><strong>在线大模型服务</strong><small>智谱、DeepSeek、Kimi、MiniMax、OpenAI 等 12+ 厂商</small></span>{editing && editing.kind === "llm" && editing.transport !== "local-summary" && editing.transport !== "ollama" && <CheckCircle size={16} weight="fill" />}</button>
+                    </div>
+                  ) : (<>
+                    <div className="model-catalog__section"><span>在线服务</span>
+                      <button
+                        className={editing?.transport === "openai-audio" ? "is-selected" : ""}
+                        onClick={() => startPreset("openaiWhisper")}
+                      ><span className="profile-icon"><CloudArrowDown size={18} /></span><span><strong>在线语音转录</strong><small>OpenAI 兼容音频接口 · 无需下载模型</small></span>{editing?.transport === "openai-audio" && <CheckCircle size={16} weight="fill" />}</button>
                     </div>
                     <div className="model-catalog__section"><span>说话人分离</span>
                       <button className={editing?.transport === "sherpa-onnx" ? "is-selected" : ""} onClick={() => startPreset("sherpa")}><span className="profile-icon"><FingerprintSimple size={18} /></span><span><strong>本地声纹识别</strong><small>多人会议区分发言人 · 数据不出本机</small></span>{editing?.transport === "sherpa-onnx" && <CheckCircle size={16} weight="fill" />}</button>
@@ -686,7 +761,6 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                       </div>
                     );
                   })}</div>}
-                  <button className="model-catalog__custom" onClick={startCustomProfile}><Plus size={15} />自定义服务</button>
                 </aside>
                 {editing && (
                   <div key={editorGeneration} className="profile-editor-wrap">
@@ -697,9 +771,13 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                     <div className="profile-editor-divider" />
                   <div className="profile-editor">
                     <div className="form-grid">
-                      <label className="field"><span>服务商预设</span>
+                      <label className="field"><span>服务商</span>
                         <select value={activePresetKey} onChange={(event) => {
-                          const preset = providerPresets[event.target.value];
+                          if (!event.target.value) {
+                            startCustomProfile();
+                            return;
+                          }
+                          const preset = providerPresets[event.target.value as keyof typeof providerPresets];
                           if (preset) setEditing({
                             ...editing,
                             ...preset,
@@ -718,6 +796,11 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                             <option value="sherpa">本地声纹识别（说话人分离）</option>
                           </>)}
                         </select>
+                        {(() => {
+                          const describe = describePreset(activePresetKey);
+                          if (!describe) return <small className="preset-describe">自由填写端点与密钥的 OpenAI 兼容服务</small>;
+                          return <small className="preset-describe">{describe.text}{describe.protocol ? ` · ${describe.protocol}` : ""}</small>;
+                        })()}
                       </label>
                           <label className="field"><span>名称</span><input value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></label>
                           <div className="field"><span>用于</span><div className="readonly-control">{editing.kind === "diarization" ? "多人会议中区分发言人" : tab === "llm" ? "会议总结与行动项" : "会议语音转文字"}</div></div>
@@ -789,7 +872,13 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                             </select>
                           </label>
                         )}
-                        <label className="field"><span>Base URL</span><input value={editing.baseUrl} onChange={(event) => setEditing({ ...editing, baseUrl: event.target.value, options: invalidateVisualVerification(editing.options) })} placeholder={editing.transport === "openai-audio" ? "https://example.com/v1，也可粘贴完整转录端点" : undefined} /></label>
+                        <label className="field"><span>Base URL</span><input value={editing.baseUrl} onChange={(event) => setEditing({ ...editing, baseUrl: event.target.value, options: invalidateVisualVerification(editing.options) })} placeholder={editing.transport === "openai-audio" ? "https://example.com/v1，也可粘贴完整转录端点" : "https://example.com/v1"} /></label>
+                        {urlPresetSuggestion && (
+                          <div className="url-recognize">
+                            <span>已识别为 {providerPresets[urlPresetSuggestion as keyof typeof providerPresets].name} 端点</span>
+                            <button type="button" className="text-button" onClick={() => applyUrlPreset(urlPresetSuggestion)}>套用预设</button>
+                          </div>
+                        )}
                         {editing.transport !== "ollama" && <label className="field"><span>API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={editing.secretId ? "已安全保存；留空保持不变" : "sk-…"} /></label>}
                         {editing.transport === "openai-audio" && (
                           <label className="field"><span>返回格式</span>
