@@ -933,22 +933,63 @@ describe("structured meeting summary", () => {
     expect(drafts.every((draft) => draft.timeMs === 0 || draft.timeMs === 8_000)).toBe(true);
   });
 
-  it("accepts mixed key-point shapes and parses evidenceTime", () => {
+  it("accepts mixed key-point shapes and parses evidenceTime and headlines", () => {
     const summary = validateSummary({
       topics: [],
       keyPoints: [
-        "纯字符串要点",
-        { text: "带时间戳证据的结论", evidenceTime: "12:34" },
+        "框架先行｜纯字符串里的标题正文约定",
+        { text: "显式字段｜带时间戳证据的结论", headline: "证据可回链", evidenceTime: "12:34" },
+        "无竖线纯字符串要点",
         { text: "带毫秒证据的结论", timeMs: 90_000 },
-        { text: "证据格式非法的结论", evidenceTime: "oops" }
+        { text: "证据格式非法的结论", evidenceTime: "oops" },
+        { text: "标题与正文重复的结论", headline: "标题与正文重复的结论" },
+        { text: "超长标题的结论", headline: "这一段标题远远超过二十四个字符的合理上限应当被截断处理掉" },
+        "这一段标题远远超过二十四个字符的合理上限还有很多字｜竖线前超长则不拆分"
       ],
       decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
     });
-    expect(summary.keyPoints).toEqual(["纯字符串要点", "带时间戳证据的结论", "带毫秒证据的结论", "证据格式非法的结论"]);
-    expect(summary.keyPointTimes).toEqual([null, 754_000, 90_000, null]);
+    expect(summary.keyPoints).toEqual([
+      "纯字符串里的标题正文约定",
+      "带时间戳证据的结论",
+      "无竖线纯字符串要点",
+      "带毫秒证据的结论",
+      "证据格式非法的结论",
+      "标题与正文重复的结论",
+      "超长标题的结论",
+      "这一段标题远远超过二十四个字符的合理上限还有很多字｜竖线前超长则不拆分"
+    ]);
+    expect(summary.keyPointTimes).toEqual([null, 754_000, null, 90_000, null, null, null, null]);
+    // 标题层：「标题｜正文」约定拆分、显式 headline 字段优先（且截到 24 字）、重复丢弃。
+    expect(summary.keyPointHeadlines).toEqual([
+      "框架先行", "证据可回链", null, null, null, null,
+      "这一段标题远远超过二十四个字符的合理上限应当被截", null
+    ]);
     expect(parseEvidenceTimeMs("1:02:03")).toBe(3_723_000);
     expect(parseEvidenceTimeMs("61:00")).toBeNull();
     expect(parseEvidenceTimeMs("12:99")).toBeNull();
+  });
+
+  it("heals and aligns key-point headlines on the read path", () => {
+    const healed = simplifySummary({
+      topics: [],
+      keyPoints: ["结论一", "结论二", "结论三"],
+      keyPointHeadlines: ["重点甲", "  ", "重点乙", "多余"],
+      decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
+    });
+    expect(healed.keyPoints).toEqual(["结论一", "结论二", "结论三"]);
+    // 空白归 null、长度截齐、多余丢弃。
+    expect(healed.keyPointHeadlines).toEqual(["重点甲", null, "重点乙"]);
+  });
+
+  it("local basic summaries carry no headline layer", () => {
+    const summary = summarizeLocally({
+      title: "本地",
+      goals: [],
+      notes: [],
+      previousSummary: { topics: [], keyPoints: [], decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: [] },
+      transcript: [segment("d", 0, 2_000, "决定采用 A 方案并确认时间。")]
+    });
+    expect(summary.keyPointHeadlines).toBeUndefined();
   });
 
   it("removes a key point and reindexes its locks and evidence times", () => {
@@ -956,28 +997,33 @@ describe("structured meeting summary", () => {
       topics: [],
       keyPoints: ["结论一", "结论二", "结论三"],
       keyPointTimes: [1_000, 2_000, 3_000],
+      keyPointHeadlines: ["标题一", null, "标题三"],
       manualLocks: ["action:keep", "keyPoints:0"],
       decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
     }, "keyPoints:2"), "keyPoints:2"), "keyPoints:1"), "keyPoints", 1);
     expect(summary.keyPoints).toEqual(["结论一", "结论三"]);
     expect(summary.keyPointTimes).toEqual([1_000, 3_000]);
+    expect(summary.keyPointHeadlines).toEqual(["标题一", "标题三"]);
     // 删掉的行锁消失，其后索引左移；跨字段锁不受影响。
     expect(summary.manualLocks).toEqual(["action:keep", "keyPoints:0", "keyPoints:1"]);
   });
 
-  it("merges key-point evidence times in parallel with locked rows", () => {
+  it("merges key-point evidence times and headlines in parallel with locked rows", () => {
     const current = lockSummaryField({
       topics: [], keyPoints: ["人工锁定的结论", "旧的第二条"], keyPointTimes: [111_000, 222_000],
+      keyPointHeadlines: ["人工标题", "旧标题"],
       decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
     }, "keyPoints:0");
     const incoming = {
       topics: [], keyPoints: ["AI 新结论", "AI 第二条"], keyPointTimes: [333_000, null],
+      keyPointHeadlines: ["AI 标题", null],
       decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
     };
     const merged = mergeSummaryRevision(current, incoming);
     expect(merged.keyPoints).toEqual(["人工锁定的结论", "AI 第二条"]);
-    // 锁定行沿用 current 的证据时间，其余行取 incoming。
+    // 锁定行沿用 current 的证据时间与标题，其余行取 incoming。
     expect(merged.keyPointTimes).toEqual([111_000, null]);
+    expect(merged.keyPointHeadlines).toEqual(["人工标题", null]);
   });
 
   it("backfills unique ids for AI action items that omit them", () => {

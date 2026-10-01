@@ -47,6 +47,15 @@ function normalizeKeyPointTimes(times, length) {
   });
 }
 
+/** keyPointHeadlines 同样逐位对齐：空串/非字符串归 null，超长截到 24 字。 */
+function normalizeKeyPointHeadlines(headlines, length) {
+  if (!Array.isArray(headlines)) return undefined;
+  return Array.from({ length }, (_, index) => {
+    const value = headlines[index];
+    return typeof value === "string" && value.trim() ? value.trim().slice(0, 24) : null;
+  });
+}
+
 export function simplifySummary(summary = {}) {
   const list = (value) => Array.isArray(value) ? value.map((item) => simplifyChinese(String(item))) : [];
   const visualSummary = summary.visualSummary && typeof summary.visualSummary === "object"
@@ -85,6 +94,7 @@ export function simplifySummary(summary = {}) {
     keyPoints,
     // 读路径自愈：剥掉旧版本烤进文本的标签/列表符号后，证据时间与文本逐位重新对齐。
     keyPointTimes: normalizeKeyPointTimes(summary.keyPointTimes, keyPoints.length),
+    keyPointHeadlines: normalizeKeyPointHeadlines(summary.keyPointHeadlines, keyPoints.length),
     decisions: list(summary.decisions),
     actionItems: Array.isArray(summary.actionItems)
       ? summary.actionItems.map((item) => ({

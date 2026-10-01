@@ -56,6 +56,13 @@ export function simplifySummary(summary: MeetingSummary): MeetingSummary {
         return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
       })
       : summary.keyPointTimes,
+    // 要点标题同样逐位对齐：空串/非字符串归 null，超长截到 24 字。
+    keyPointHeadlines: Array.isArray(summary.keyPointHeadlines)
+      ? keyPoints.map((_, index) => {
+        const value = summary.keyPointHeadlines?.[index];
+        return typeof value === "string" && value.trim() ? value.trim().slice(0, 24) : null;
+      })
+      : summary.keyPointHeadlines,
     decisions: list(summary.decisions),
     actionItems: (summary.actionItems ?? []).map((item) => ({
       ...item,

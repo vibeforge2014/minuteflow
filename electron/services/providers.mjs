@@ -28,12 +28,13 @@ const require = createRequire(import.meta.url);
 /** 会议纪要 JSON 的 zod 校验 schema：模型输出先经它归一化（缺省字段补默认值）再进库。 */
 const summarySchema = z.object({
   topics: z.array(z.string()).default([]),
-  // 关键结论兼容三种形态：纯字符串 / {text} / {text, evidenceTime|timeMs}；
-  // validateSummary 里统一归一为字符串数组 + 平行的 keyPointTimes 数组。
+  // 关键结论兼容三种形态：纯字符串 / {text} / {text, headline?, evidenceTime|timeMs}；
+  // validateSummary 里统一归一为字符串数组 + 平行的 keyPointTimes / keyPointHeadlines。
   keyPoints: z.array(z.union([
     z.string(),
     z.object({
       text: z.string(),
+      headline: z.string().optional(),
       evidenceTime: z.string().optional(),
       timeMs: z.number().optional()
     })
@@ -265,24 +266,43 @@ export function parseEvidenceTimeMs(value) {
   return ((hours * 60 + minutes) * 60 + seconds) * 1000;
 }
 
-/** 把模型返回的混合形态关键结论归一为 { texts, times }（times 与 texts 逐位对齐，无证据为 null）。 */
+/** 把「要点标题｜结论正文」的行内约定拆成 { headline, text }：
+ *  没有竖线、标题为空/超长（>24 字）或正文为空时原样返回（headline 为 null）。 */
+export function splitKeyPointHeadline(text) {
+  const bar = text.indexOf("｜");
+  if (bar < 0) return { headline: null, text };
+  const headline = text.slice(0, bar).trim();
+  const rest = text.slice(bar + 1).trim();
+  if (!headline || !rest || headline.length > 24) return { headline: null, text };
+  return { headline, text: rest };
+}
+
+/** 把模型返回的混合形态关键结论归一为 { texts, times, headlines }
+ *  （times/headlines 与 texts 逐位对齐，无对应值时为 null；显式 headline 字段优先，
+ *  否则解析 text 里的「标题｜正文」约定）。 */
 function normalizeKeyPointDrafts(drafts) {
   const texts = [];
   const times = [];
+  const headlines = [];
+  const push = (rawText, explicitHeadline, timeMs, evidenceTime) => {
+    const split = splitKeyPointHeadline(rawText);
+    const headline = explicitHeadline?.trim() || split.headline || "";
+    texts.push(split.text);
+    times.push(timeMs ?? evidenceTime ?? null);
+    headlines.push(headline && headline !== split.text.trim() ? headline.slice(0, 24) : null);
+  };
   for (const draft of drafts) {
     if (typeof draft === "string") {
-      texts.push(draft);
-      times.push(null);
+      push(draft, null, null, null);
       continue;
     }
     if (draft && typeof draft === "object" && typeof draft.text === "string") {
-      texts.push(draft.text);
-      times.push(typeof draft.timeMs === "number" && draft.timeMs >= 0
-        ? draft.timeMs
-        : parseEvidenceTimeMs(draft.evidenceTime));
+      push(draft.text, typeof draft.headline === "string" ? draft.headline : null,
+        typeof draft.timeMs === "number" && draft.timeMs >= 0 ? draft.timeMs : null,
+        parseEvidenceTimeMs(draft.evidenceTime));
     }
   }
-  return { texts, times };
+  return { texts, times, headlines };
 }
 
 export function validateSummary(value) {
@@ -293,17 +313,26 @@ export function validateSummary(value) {
       .join("；");
     throw new Error(`模型返回的纪要结构不合法（${issues}），请重试或换用兼容性更好的模型。`);
   }
-  // 本机归纳（summarizeLocally）已经在输入里带好 keyPointTimes；zod 会剥掉未知字段，
-  // 所以从原始输入取回，预置时间优先，模型 evidenceTime 只补空位。
+  // 本机归纳（summarizeLocally）已经在输入里带好平行的 keyPointTimes / keyPointHeadlines；
+  // zod 会剥掉未知字段，所以从原始输入取回，预置值优先，模型返回只补空位。
   const presetTimes = Array.isArray(value?.keyPointTimes) ? value.keyPointTimes : null;
-  const { texts, times } = normalizeKeyPointDrafts(result.data.keyPoints);
+  const presetHeadlines = Array.isArray(value?.keyPointHeadlines) ? value.keyPointHeadlines : null;
+  const { texts, times, headlines } = normalizeKeyPointDrafts(result.data.keyPoints);
   const keyPointTimes = texts.map((_, index) => {
     if (presetTimes && typeof presetTimes[index] === "number" && presetTimes[index] >= 0) {
       return presetTimes[index];
     }
     return times[index];
   });
-  return simplifySummary({ ...result.data, keyPoints: texts, keyPointTimes });
+  const keyPointHeadlines = texts.map((_, index) => {
+    if (presetHeadlines && typeof presetHeadlines[index] === "string" && presetHeadlines[index].trim()) {
+      return String(presetHeadlines[index]).trim().slice(0, 24);
+    }
+    return headlines[index];
+  });
+  // 本机归纳没有标题层：全空时不写数组，行渲染保持单行形态。
+  const summaryExtras = keyPointHeadlines.some(Boolean) ? { keyPointHeadlines } : {};
+  return simplifySummary({ ...result.data, keyPoints: texts, keyPointTimes, ...summaryExtras });
 }
 
 /** 提示词中转录部分的最大字符量：更早的内容已并入上一版纪要，超长时只保留最近窗口。 */
@@ -346,8 +375,7 @@ export function buildSummaryPrompt(input, final = false) {
       : "请只根据新增内容更新滚动纪要，不要删除已经确认的人工内容。",
     "必须返回 JSON，不要使用 Markdown 代码块。",
     "结构：topics, keyPoints, decisions, actionItems, openQuestions, risks, nextSteps。",
-    "keyPoints 格式纪律：每条是一个完整短句（约 15–45 字），一行只表达一条结论，不要用分号或逗号拼接多个要点，不要以「讨论重点」「会议决定」等类别标签开头，不要 Markdown 列表符号或编号。",
-    "keyPoints 每项可以是字符串，也可以是 {\"text\": 结论, \"evidenceTime\": \"mm:ss\"} 对象；evidenceTime 引用转录行开头的时间戳，仅当该结论确实对应会议中某个时刻时提供。",
+    "keyPoints 每项是 {\"text\": \"要点标题｜一句完整结论\", \"evidenceTime\": \"mm:ss\"}：text 内用全角竖线「｜」分隔，竖线前是 6–14 字的要点标题（这条结论的核心，读者扫标题即可抓住重点，不要写成「讨论重点」这类类别名），竖线后是提炼后的完整结论（约 15–45 字，不要照抄原话），一行只表达一条结论，不要类别标签开头，不要 Markdown 符号；evidenceTime 引用转录行开头的时间戳，仅当结论对应某个明确时刻时提供。",
     "actionItems 每项包含 title, owner, dueDate, status, done, evidenceSegmentIds。",
     `会议标题：${input.title}`,
     `会议目标：${input.goals.join("；") || "未提供"}`,

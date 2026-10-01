@@ -1046,6 +1046,59 @@ button {
   line-height: 1.6;
 }
 
+.summary-point__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* 要点标题：加粗墨色的浓缩结论行，是扫读时的“重点”层。
+   空标题收起为 0 高；行 hover/聚焦时展开露出输入框，可手动补标题。 */
+.summary-point__headline {
+  max-height: 20px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #1f242b;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  opacity: 1;
+  transition: max-height var(--motion-fast) var(--ease-out-ui), opacity var(--motion-fast) ease;
+}
+
+.summary-point__headline:placeholder-shown {
+  max-height: 0;
+  opacity: 0;
+}
+
+.summary-point:hover .summary-point__headline:placeholder-shown,
+.summary-point:focus-within .summary-point__headline:placeholder-shown {
+  max-height: 20px;
+  opacity: 0.5;
+}
+
+.summary-point__headline:focus {
+  opacity: 1;
+}
+
+/* 有标题的行：正文退为次级（小一号、常规字重、灰一档），标题才是重点。 */
+.summary-point:has(.summary-point__headline:not(:placeholder-shown)) textarea {
+  color: #565b63;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.55;
+}
+
+.summary-point:has(.summary-point__headline:not(:placeholder-shown)) > i {
+  margin-top: 7px;
+}
+
 /* 证据时间片：与转写区时间戳同一交互语言，点击跳到转写对应段落。 */
 .summary-point__time {
   margin-top: 3px;
@@ -5596,6 +5649,7 @@ html[data-surface="permission-helper"] #root {
 
   .transcript-item,
   .summary-point,
+  .summary-point__headline,
   .import-progress i {
     transition-duration: 140ms !important;
   }

@@ -10,6 +10,27 @@ import type { MeetingSummary } from "../types";
 const listKeys = ["keyPoints", "decisions", "openQuestions", "risks", "nextSteps"] as const;
 export type SummaryListKey = typeof listKeys[number];
 
+/**
+ * 与 keyPoints 平行的附属数组（证据时间/要点标题）按同一套锁定语义重建：
+ * 基底取 incoming，锁定的行沿用 current 的对应值（越界补到尾部）；
+ * 两边都没有该数组时返回 undefined，不写入空数组。
+ */
+function mirrorKeyPointField<T>(
+  current: readonly (T | null)[] | undefined,
+  incoming: readonly (T | null)[] | undefined,
+  locks: Set<string>
+): (T | null)[] | undefined {
+  if (!current && !incoming) return undefined;
+  const next: (T | null)[] = (incoming ?? []).map((value) => value ?? null);
+  (current ?? []).forEach((value, index) => {
+    if (!locks.has(`keyPoints:${index}`)) return;
+    const kept = value ?? null;
+    if (index < next.length) next[index] = kept;
+    else next.push(kept);
+  });
+  return next;
+}
+
 /** 把某个纪要字段加入手动锁定集合（Set 去重），锁定后 AI 重算不会覆盖它。 */
 export function lockSummaryField(summary: MeetingSummary, key: string) {
   return {
@@ -54,8 +75,13 @@ export function removeSummaryListItem(summary: MeetingSummary, key: SummaryListK
     manualLocks,
     stale: false
   };
-  if (key === "keyPoints" && Array.isArray(summary.keyPointTimes)) {
-    next.keyPointTimes = summary.keyPointTimes.filter((_, index) => index !== removeIndex);
+  if (key === "keyPoints") {
+    if (Array.isArray(summary.keyPointTimes)) {
+      next.keyPointTimes = summary.keyPointTimes.filter((_, index) => index !== removeIndex);
+    }
+    if (Array.isArray(summary.keyPointHeadlines)) {
+      next.keyPointHeadlines = summary.keyPointHeadlines.filter((_, index) => index !== removeIndex);
+    }
   }
   return next;
 }
@@ -99,19 +125,12 @@ export function mergeSummaryRevision(
     merged[key] = next;
   }
 
-  // keyPointTimes 与 keyPoints 平行重建：锁定的行沿用 current 的证据时间，其余取 incoming；
-  // 两边都没有时间数组（旧数据）时不写入，避免全 null 噪音。
-  if (incoming.keyPointTimes || current.keyPointTimes) {
-    const nextTimes: (number | null)[] = (incoming.keyPointTimes ?? []).map((value) =>
-      typeof value === "number" && Number.isFinite(value) ? value : null);
-    (current.keyPointTimes ?? []).forEach((value, index) => {
-      if (!locks.has(`keyPoints:${index}`)) return;
-      const time = typeof value === "number" && Number.isFinite(value) ? value : null;
-      if (index < nextTimes.length) nextTimes[index] = time;
-      else nextTimes.push(time);
-    });
-    merged.keyPointTimes = nextTimes;
-  }
+  // keyPointTimes / keyPointHeadlines 与 keyPoints 平行重建：锁定的行沿用 current
+  // 的附属值，其余取 incoming；两边都没有（旧数据）时不写入，避免全 null 噪音。
+  const mirroredTimes = mirrorKeyPointField(current.keyPointTimes, incoming.keyPointTimes, locks);
+  if (mirroredTimes) merged.keyPointTimes = mirroredTimes;
+  const mirroredHeadlines = mirrorKeyPointField(current.keyPointHeadlines, incoming.keyPointHeadlines, locks);
+  if (mirroredHeadlines) merged.keyPointHeadlines = mirroredHeadlines;
 
   const lockedActions = current.actionItems.filter((item) => locks.has(`action:${item.id}`));
   // 行动项合并：incoming 的骨架顺序保留，其中被锁定的 id 用用户版本原位替换；

@@ -115,6 +115,8 @@ export interface MeetingSummary {
   keyPoints: string[];
   /** 关键要点的证据时间（毫秒），与 keyPoints 逐位对齐；null/缺省表示该行无回链。 */
   keyPointTimes?: (number | null)[];
+  /** 关键要点的浓缩标题（6–14 字），与 keyPoints 逐位对齐；null/缺省表示单行结论。 */
+  keyPointHeadlines?: (string | null)[];
   /** 已达成的决定列表。 */
   decisions: string[];
   /** 行动项列表。 */

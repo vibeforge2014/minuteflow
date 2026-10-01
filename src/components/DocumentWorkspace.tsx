@@ -222,10 +222,28 @@ export function DocumentWorkspace({
         ...(meeting.summary.keyPointTimes
           ? { keyPointTimes: [...meeting.summary.keyPointTimes, null] }
           : {}),
+        ...(meeting.summary.keyPointHeadlines
+          ? { keyPointHeadlines: [...meeting.summary.keyPointHeadlines, null] }
+          : {}),
         stale: false
       }, `keyPoints:${index}`)
     });
     setAddingKeyPointIndex(index);
+  };
+
+  /** 编辑某条结论的要点标题（可空的平行数组；清空即回到单行形态）。 */
+  const setKeyPointHeadline = (index: number, value: string) => {
+    const headlines = meeting.summary.keyPointHeadlines
+      ?? meeting.summary.keyPoints.map(() => null);
+    onChange({
+      ...meeting,
+      summary: lockSummaryField({
+        ...meeting.summary,
+        keyPointHeadlines: headlines.map((item, itemIndex) =>
+          itemIndex === index ? (value.trim() ? value.slice(0, 24) : null) : item),
+        stale: false
+      }, `keyPoints:${index}`)
+    });
   };
 
   /** 删除一条关键结论（含锁重排与证据时间切片，见 removeSummaryListItem）。 */
@@ -516,6 +534,7 @@ export function DocumentWorkspace({
                   {visibleKeyPoints.map((item, index) => {
                     const locked = meeting.summary.manualLocks?.includes(`keyPoints:${index}`) ?? false;
                     const timeMs = meeting.summary.keyPointTimes?.[index];
+                    const headline = meeting.summary.keyPointHeadlines?.[index] ?? null;
                     const isAddingRow = index === addingKeyPointIndex;
                     return (
                       <div
@@ -524,10 +543,25 @@ export function DocumentWorkspace({
                         style={{ animationDelay: `${Math.min(index, 3) * 30}ms` }}
                       >
                         <i aria-hidden="true" />
-                        <textarea
+                        <div className="summary-point__body">
+                          <input
+                            className="summary-point__headline"
+                            type="text"
+                            aria-label={`纪要要点标题 ${index + 1}`}
+                            placeholder="要点标题"
+                            value={headline ?? ""}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === "Escape") {
+                                event.preventDefault();
+                                event.currentTarget.blur();
+                              }
+                            }}
+                            onChange={(event) => setKeyPointHeadline(index, event.target.value)}
+                          />
+                          <textarea
                           aria-label={`编辑纪要 ${index + 1}`}
                           value={item}
-                          rows={Math.max(1, Math.ceil(item.length / 40))}
+                          rows={Math.max(1, Math.ceil(item.length / (headline ? 46 : 40)))}
                           autoFocus={isAddingRow}
                           // autoFocus 在部分挂载时序下不生效（如折叠展开同帧挂载），
                           // 用 ref 回调兜底保证新行稳定拿到焦点。
@@ -566,6 +600,7 @@ export function DocumentWorkspace({
                             index
                           )}
                         />
+                        </div>
                         {typeof timeMs === "number" && (
                           <button
                             className="summary-point__time"

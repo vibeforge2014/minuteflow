@@ -93,18 +93,22 @@ function mergeSummaryPreservingLocks(current = {}, incoming = {}) {
     });
     merged[key] = next;
   }
-  // keyPointTimes 与 keyPoints 平行重建：锁定的行沿用 current 的证据时间，其余取 incoming。
-  if (incoming.keyPointTimes || current.keyPointTimes) {
-    const nextTimes = (incoming.keyPointTimes ?? []).map((value) =>
-      typeof value === "number" && Number.isFinite(value) ? value : null);
-    (current.keyPointTimes ?? []).forEach((value, index) => {
+  // keyPointTimes / keyPointHeadlines 与 keyPoints 平行重建：锁定的行沿用 current
+  // 的附属值，其余取 incoming（与渲染层 lib/summary 的 mirrorKeyPointField 同步）。
+  const mirrorField = (source, fallback) => {
+    if (!source && !fallback) return undefined;
+    const next = (fallback ?? []).map((value) => value ?? null);
+    (source ?? []).forEach((value, index) => {
       if (!locks.has(`keyPoints:${index}`)) return;
-      const time = typeof value === "number" && Number.isFinite(value) ? value : null;
-      if (index < nextTimes.length) nextTimes[index] = time;
-      else nextTimes.push(time);
+      if (index < next.length) next[index] = value ?? null;
+      else next.push(value ?? null);
     });
-    merged.keyPointTimes = nextTimes;
-  }
+    return next;
+  };
+  const mirroredTimes = mirrorField(current.keyPointTimes, incoming.keyPointTimes);
+  if (mirroredTimes) merged.keyPointTimes = mirroredTimes;
+  const mirroredHeadlines = mirrorField(current.keyPointHeadlines, incoming.keyPointHeadlines);
+  if (mirroredHeadlines) merged.keyPointHeadlines = mirroredHeadlines;
   const lockedActions = (current.actionItems ?? []).filter((item) => locks.has(`action:${item.id}`));
   const lockedById = new Map(lockedActions.map((item) => [item.id, item]));
   merged.actionItems = [
