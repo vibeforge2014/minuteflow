@@ -28,11 +28,12 @@ interface Props {
   onConfigure(): void;
 }
 
-/** 任务状态 → 用户可读文案；三种 waiting_* 是可恢复的缺组件等待态。 */
+/** 任务状态 → 用户可读文案；waiting_* 是可恢复的等待态（缺组件，或网络波动自动断点续跑）。 */
 const statusText: Record<ImportJob["status"], string> = {
   queued: "等待处理", copying: "正在复制", preparing: "准备音频", transcribing: "转录中",
   diarizing: "识别发言人", summarizing: "生成纪要", waiting_for_model: "等待配置转录",
   waiting_for_summary_model: "等待配置总结", waiting_for_audio_tool: "等待音频组件",
+  waiting_for_network: "等待网络，自动续跑",
   complete: "已完成", cancelled: "已取消，可继续", failed: "处理失败"
 };
 
@@ -116,10 +117,10 @@ export function ImportDrawer(props: Props) {
             {job.error && <p className="import-job__error content-motion-enter">{job.error}</p>}
             <div className="import-job__actions" onClick={(event) => event.stopPropagation()}>
               {/* 行内操作按钮阻止冒泡，避免触发整行「打开会议」。 */}
-              {["failed", "cancelled"].includes(job.status) && <button onClick={() => props.onRetry(job.id)}><ArrowClockwise size={14} />重试当前阶段</button>}
+              {["failed", "cancelled", "waiting_for_network"].includes(job.status) && <button onClick={() => props.onRetry(job.id)}><ArrowClockwise size={14} />{job.status === "waiting_for_network" ? "立即重试" : "重试当前阶段"}</button>}
               {["waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(job.status) && <button onClick={props.onConfigure}><GearSix size={14} />配置</button>}
               {!['complete', 'cancelled', 'failed'].includes(job.status) && <button onClick={() => props.onCancel(job.id)}>取消</button>}
-              {["complete", "cancelled", "failed", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(job.status) && <button className="import-job__remove" onClick={() => props.onRemove(job.id)}><Trash size={14} />删除</button>}
+              {["complete", "cancelled", "failed", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool", "waiting_for_network"].includes(job.status) && <button className="import-job__remove" onClick={() => props.onRemove(job.id)}><Trash size={14} />删除</button>}
             </div>
           </article>
         ))}

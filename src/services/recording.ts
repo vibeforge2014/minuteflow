@@ -304,7 +304,7 @@ export class MeetingRecorder {
   /**
    * 转写循环：每轮独立录一个 8 秒的自包含块，立刻送主进程转写（不落盘、用完即弃）。
    * 块送出时先经 onProvisional 显示“转写中”占位段，定稿结果到达后被合并逻辑取代；
-   * 瞬时失败自动重试一次，仍失败才告警并移除占位段。
+   * 瞬时失败按 1.5s/5s/15s 退避多轮重试，仍失败才告警并留空该块（按序提交不受影响）。
    * 暂停期间只休眠不采集；块时间戳换算为相对会议起点，供转写段落排序与播放器同步。
    */
   private async runTranscriptionLoop(track: CaptureTrack, stream: MediaStream) {
@@ -348,17 +348,29 @@ export class MeetingRecorder {
       this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
       const request = () => api.transcription.processChunk(payload);
       const transcription = (async () => {
+        // 网关/本地运行时偶发失败：按 1.5s/5s/15s 退避多轮重试（每次请求内部还会再重试
+        // 瞬时 5xx/网络抖动），仍失败才告警并以空结果提交——该块留空，已归档音频可在
+        // 会后通过导入流程补转录；按序提交机制保证后续块不会被卡住。
+        const retryDelaysMs = [1_500, 5_000, 15_000];
         let result: TranscriptionChunkResult = { segments: [] };
-        try {
-          result = await request();
-        } catch (firstError) {
-          // 瞬时故障（网络抖动/本地进程偶发失败）等 1.5 秒重试一次，仍失败才告警。
-          await new Promise((resolve) => setTimeout(resolve, 1_500));
+        let failure: unknown;
+        for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+          if (attempt > 0) {
+            // 停止录音/切换档案时不再等待退避，避免拖慢收尾；本次失败按告警处理。
+            if (this.stopTranscription || !this.sttProfile) break;
+            await new Promise((resolve) => setTimeout(resolve, retryDelaysMs[attempt - 1]));
+            if (this.stopTranscription || !this.sttProfile) break;
+          }
           try {
             result = await request();
-          } catch {
-            this.callbacks.onWarning(firstError instanceof Error ? firstError.message : "转录任务失败");
+            failure = undefined;
+            break;
+          } catch (error) {
+            failure = error;
           }
+        }
+        if (failure !== undefined) {
+          this.callbacks.onWarning(failure instanceof Error ? failure.message : "转录任务失败");
         }
         state.completed.set(sequence, {
           provisionalId: provisional.id,

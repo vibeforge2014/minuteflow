@@ -509,6 +509,9 @@ function importTranscriptStatus(job: ImportJob | undefined, segmentCount: number
   if (job.status === "preparing" || job.stage === "preparing") return "正在准备音频…";
   if (job.status === "waiting_for_model") return "等待配置转录模型，录音已安全归档。";
   if (job.status === "waiting_for_audio_tool") return "音频组件需要恢复后才能继续转录。";
+  if (job.status === "waiting_for_network") {
+    return `转录服务暂时不可达，稍后将自动从第 ${(job.completedChunks || 0) + 1} 段断点继续（已等待 ${job.transcriptionRetryAttempts || 1} 次）。`;
+  }
   if (job.status === "failed") return `转录暂停：${job.error || "处理失败"}`;
   if (job.status === "cancelled") return "导入处理已取消，已有转录仍会保留。";
   if (job.status === "transcribing" || job.stage === "transcribing") {

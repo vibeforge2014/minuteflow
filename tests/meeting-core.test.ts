@@ -64,7 +64,7 @@ import { simplifyChinese, simplifySummary } from "../src/lib/chinese";
 import { derivePermissionSetupPhase, finishPermissionSetup, isMicrophonePermissionError, isScreenPermissionError, shouldOpenPermissionSetup, shouldRequestMicrophone } from "../src/lib/permissions";
 import { lockSummaryField, mergeSummaryRevision, removeSummaryListItem, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { buildBasicKeyPoints, KEY_POINT_MAX_CHARS } from "../electron/services/chinese.mjs";
-import { normalizeImportChunkSegments } from "../electron/services/import-queue.mjs";
+import { cancelImport, normalizeImportChunkSegments, removeImportJob, retryImport, wakeImportQueue } from "../electron/services/import-queue.mjs";
 import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "../electron/services/chunk-planning.mjs";
 import { plannedCharacters, punctuationCut, typewriterStep } from "../src/lib/typewriter";
 import {
@@ -139,9 +139,11 @@ import {
   listModelProfiles,
   listVoiceprintPeople,
   listVoiceprintSamples,
+  loadJob,
   loadMeeting,
   normalizeExclusiveModelProfiles,
   openDatabase,
+  saveJob,
   saveMeeting,
   saveModelProfile,
   saveVoiceprintSample
@@ -1253,6 +1255,95 @@ describe("model provider compatibility", () => {
     expect(timeoutSpy).toHaveBeenCalledWith(330_000);
   });
 
+  it("retries a transient gateway 5xx with backoff and succeeds", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          error: { code: "", message: "Database error, please contact the administrator (request id: 2026100114402994954)", type: "new_api_error" }
+        }), { status: 500, headers: { "content-type": "application/json" } }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ text: "重试后成功" }), {
+          status: 200, headers: { "content-type": "application/json" }
+        }));
+      const pending = transcribeRemote({
+        baseUrl: "https://new-api.example",
+        model: "whisper-1",
+        options: { responseFormat: "json" }
+      }, "secret", new Uint8Array([1, 2, 3]), "chunk-76.wav", "zh");
+      await vi.advanceTimersByTimeAsync(2_000);
+      const result = await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.text).toBe("重试后成功");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails with the gateway message and request id after exhausting transcription retries", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(
+        JSON.stringify({ error: { message: "upstream error" } }),
+        { status: 502, headers: { "content-type": "application/json", "x-request-id": "req-abc-123" } }
+      ));
+      const pending = transcribeRemote({
+        baseUrl: "https://new-api.example",
+        model: "whisper-1",
+        options: { responseFormat: "json" }
+      }, "secret", new Uint8Array([1, 2, 3]), "chunk-0.wav", "zh");
+      pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(pending).rejects.toThrow(/502 upstream error（request id: req-abc-123）/);
+      await expect(pending).rejects.toThrow(/已自动重试 2 次仍失败/);
+      const failure = await pending.catch((error) => error);
+      // retryable 标记驱动导入队列的 waiting_for_network 断点自动续跑。
+      expect(failure?.retryable).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("grows the import auto-resume backoff and caps it at five minutes", () => {
+    expect([1, 2, 3, 4, 5, 6, 20].map(nextTranscriptionResumeDelayMs))
+      .toEqual([15_000, 30_000, 60_000, 120_000, 300_000, 300_000, 300_000]);
+  });
+
+  it("does not retry transcription auth failures", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("unauthorized", { status: 401 }));
+    const pending = transcribeRemote({
+      baseUrl: "https://gateway.example/v1",
+      model: "whisper-1"
+    }, "bad-secret", new Uint8Array([1, 2, 3]), "chunk-0.wav");
+    // 4xx 配置类错误既不重试，也不带 retryable（导入队列应立即失败而非自动续跑）。
+    await expect(pending).rejects.toThrow(/401 unauthorized/);
+    const failure = await pending.catch((error) => error);
+    expect(failure?.retryable).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries fast network failures before giving up", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.spyOn(globalThis, "fetch")
+        .mockRejectedValueOnce(new TypeError("fetch failed"))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ text: "网络恢复" }), {
+          status: 200, headers: { "content-type": "application/json" }
+        }));
+      const pending = transcribeRemote({
+        baseUrl: "https://gateway.example/v1",
+        model: "whisper-1"
+      }, "secret", new Uint8Array([1, 2, 3]), "chunk-1.wav", "zh");
+      await vi.advanceTimersByTimeAsync(2_000);
+      const result = await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.text).toBe("网络恢复");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses Anthropic's native Messages API for Claude presets", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
       content: [{ type: "text", text: validSummaryPayload }]
@@ -2236,5 +2327,46 @@ describe("模型档案单选「正在使用」", () => {
     const remaining = db.prepare("SELECT id FROM model_profiles WHERE kind = 'llm' AND enabled = 1 AND id LIKE 'usability-%' ORDER BY name").all();
     expect(remaining.length).toBe(1);
     expect(remaining[0].id).toBe("usability-p1"); // 名称序：服务 A
+  });
+});
+
+describe("导入队列网络波动断点续跑", () => {
+  /** 直接落库一条处于 waiting_for_network 的任务；archivedPath 留空让队列领取后在复制阶段快速失败，不影响同步断言。 */
+  const seedWaitingJob = (id: string) => saveJob({
+    id, type: "import", status: "waiting_for_network", createdAt: new Date().toISOString(),
+    sourcePath: "/nonexistent/acceptance.mp3", stage: "transcribing",
+    completedChunks: 5, totalChunks: 40, transcriptionRetryAttempts: 2,
+    error: "转录模型请求失败：502 upstream error（已自动重试 2 次仍失败）（第 2 次等待，30 秒后自动从断点继续）"
+  });
+
+  it("wakeImportQueue requeues waiting_for_network and keeps the backoff attempt count", () => {
+    // 诱饵任务（更早创建）让队列先领取并在真实异步复制阶段挂起，目标任务在本轮
+    // 断言期间保持 queued 不被管线消费；wake 直接用 saveJob 落库、不经 notify 广播。
+    saveJob({
+      id: "net-decoy-1", type: "import", status: "queued", createdAt: "2020-01-01T00:00:00.000Z",
+      meetingId: "net-decoy-meeting", sourcePath: "/nonexistent/decoy.mp3", sourceName: "decoy.mp3"
+    });
+    seedWaitingJob("net-wake-1");
+    wakeImportQueue();
+    const job = loadJob("net-wake-1");
+    expect(job?.status).toBe("queued");
+    expect(job?.error).toBeUndefined();
+    // 退避计数跨唤醒保留：应用重启/保存档案唤醒后从更长退避继续，而非从头 15 秒。
+    expect(job?.transcriptionRetryAttempts).toBe(2);
+  });
+
+  it("retryImport resets the attempt counter for a fresh manual retry", () => {
+    seedWaitingJob("net-retry-1");
+    const next = retryImport("net-retry-1");
+    expect(next.status).toBe("queued");
+    expect(next.transcriptionRetryAttempts).toBe(0);
+  });
+
+  it("waiting_for_network can be cancelled and removed like other recoverable waits", () => {
+    seedWaitingJob("net-cancel-1");
+    expect(cancelImport("net-cancel-1").status).toBe("cancelled");
+    seedWaitingJob("net-remove-1");
+    expect(removeImportJob("net-remove-1")).toEqual({ removed: true });
+    expect(loadJob("net-remove-1")).toBeNull();
   });
 });

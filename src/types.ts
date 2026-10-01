@@ -534,11 +534,13 @@ export interface ImportCandidate {
 /** 导入任务阶段：复制 → 预处理 → 转写 → 说话人分离 → 总结 → 完成。 */
 export type ImportStage = "copying" | "preparing" | "transcribing" | "diarizing" | "summarizing" | "complete";
 /**
- * 导入任务状态：队列与各阶段之外，还包含三种可恢复等待态——
- * waiting_for_model / waiting_for_summary_model / waiting_for_audio_tool（缺组件时暂停而非报错）。
+ * 导入任务状态：队列与各阶段之外，还包含可恢复等待态——
+ * waiting_for_model / waiting_for_summary_model / waiting_for_audio_tool（缺组件时暂停而非报错）、
+ * waiting_for_network（远程转录遇持续网络/网关波动，按退避自动从断点续跑）。
  */
 export type ImportStatus = "queued" | "copying" | "preparing" | "transcribing" | "diarizing" | "summarizing" |
-  "waiting_for_model" | "waiting_for_summary_model" | "waiting_for_audio_tool" | "complete" | "cancelled" | "failed";
+  "waiting_for_model" | "waiting_for_summary_model" | "waiting_for_audio_tool" | "waiting_for_network" |
+  "complete" | "cancelled" | "failed";
 
 /**
  * 导入任务：后台单 Worker 处理的音频导入作业，关联生成的会议与所选模型档案。
@@ -558,6 +560,8 @@ export interface ImportJob {
   totalChunks?: number;
   /** 已完成并落盘的分段数。 */
   completedChunks?: number;
+  /** waiting_for_network 期间累计的自动续跑次数；成功一块后清零。 */
+  transcriptionRetryAttempts?: number;
   /** 当前正在处理的音频时间区间。 */
   currentChunkStartMs?: number;
   currentChunkEndMs?: number;

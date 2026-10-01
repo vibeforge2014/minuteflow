@@ -815,9 +815,49 @@ export async function transcribeWithMlxWhisper(profile, audioBuffer, fileName, l
 }
 
 /**
+ * 可中断的退避等待：调用方取消（信号 abort）时立即以「任务已取消」拒绝，不再发起下一次尝试。
+ */
+function waitMs(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => { clearTimeout(timer); reject(new Error("任务已取消。")); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+    if (signal?.aborted) return onAbort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * 远程转录在请求级重试耗尽后的断点续跑退避节奏：15s/30s/60s/120s，之后封顶 5 分钟。
+ * 纯函数供导入队列（waiting_for_network 自动续跑）与测试复用；attempt 从 1 起计。
+ */
+export function nextTranscriptionResumeDelayMs(attempt) {
+  return [15_000, 30_000, 60_000, 120_000][Math.max(1, attempt) - 1] ?? 300_000;
+}
+
+/**
+ * 把非 2xx 响应转成可读错误文案：优先取 OpenAI 风格 error.message（New API 等网关
+ * 会把内部数据库故障的 request id 写在里面），无法解析时保留响应原文。
+ */
+function describeTranscriptionFailure(response, bodyText) {
+  let detail = String(bodyText ?? "").trim();
+  try {
+    const parsed = JSON.parse(detail);
+    const error = parsed?.error ?? parsed;
+    const message = typeof error === "string" ? error : (error?.message ?? error?.msg ?? "");
+    if (message) detail = String(message).trim();
+  } catch { /* 非 JSON 响应体，保留原文 */ }
+  const requestId = response.headers?.get?.("x-request-id");
+  if (requestId && !detail.includes(requestId)) detail += `（request id: ${requestId}）`;
+  return `转录模型请求失败：${response.status} ${detail}`.trim();
+}
+
+/**
  * 远程转录（OpenAI 兼容 /audio/transcriptions 接口）。副作用：网络请求。
  * New API 是服务网关预设，仍使用同一 OpenAI 兼容端点，不存在独立的 New API 协议。
  * 响应形状做了容错（data/result 包裹、text/transcript 字段、JSON 或纯文本体均可）。
+ * 自建网关偶发把瞬时数据库故障（如 SQLite 并发锁）包装成 500 返回：对 429/5xx/网络
+ * 抖动做最多 3 次尝试（2s、8s 退避），避免一次瞬时错误暂停几百块的导入任务；
+ * 4xx 配置类错误、调用方取消与 330 秒超时不重试。
  * @param {object} profile stt 模型档案
  * @param {string} apiKey 密钥（sherpa-onnx 等无密钥场景可为空）
  * @returns {Promise<{text: string, language?: string, duration?: number, segments: Array}>}
@@ -836,7 +876,6 @@ export async function transcribeRemote(
   const transcriptionTimeoutMs = Math.max(profile.options?.timeoutMs ?? 0, 330_000);
   const defaultResponseFormat = profile.options?.responseFormat
     ?? (profile.options?.apiFlavor === "new-api" || profile.model !== "whisper-1" ? "json" : "verbose_json");
-  const form = new FormData();
   const extension = path.extname(String(fileName || "")).toLowerCase();
   const audioMimeType = ({
     ".wav": "audio/wav",
@@ -847,34 +886,61 @@ export async function transcribeRemote(
     ".mp3": "audio/mpeg",
     ".flac": "audio/flac"
   })[extension] || "application/octet-stream";
-  form.append("file", new Blob([audioBuffer], { type: audioMimeType }), fileName);
-  form.append("model", profile.model);
-  if (language) form.append("language", language);
-  if (defaultResponseFormat !== "text") form.append("response_format", defaultResponseFormat);
-  if (glossary.length) form.append("prompt", glossary.slice(0, 200).join("，"));
-  const response = await fetch(apiUrl(profile, "audio/transcriptions", profile.options?.transcriptionEndpoint), {
-    method: "POST",
-    headers: {
-      ...authorizationHeaders(profile, apiKey),
-      ...(profile.options?.headers ?? {})
-    },
-    body: form,
-    signal: requestSignal(signal, transcriptionTimeoutMs)
-  });
-  if (!response.ok) throw new Error(`转录模型请求失败：${response.status} ${await response.text()}`);
-  const contentType = response.headers.get("content-type") ?? "";
-  const payload = contentType.includes("json") ? await response.json() : { text: await response.text() };
-  const result = payload.data ?? payload.result ?? payload;
-  return {
-    text: result.text ?? result.transcript ?? "",
-    language: result.language ?? language,
-    duration: result.duration,
-    segments: (result.segments ?? []).map((segment) => ({
-      startMs: Math.round((segment.start ?? 0) * 1000),
-      endMs: Math.round((segment.end ?? segment.start ?? 0) * 1000),
-      text: String(segment.text ?? "").trim()
-    })).filter((segment) => segment.text)
-  };
+  const retryBackoffMs = [2_000, 8_000];
+  let lastFailure;
+  for (let attempt = 0; ; attempt += 1) {
+    // FormData 每次尝试重建（Blob 可复用），保证前一次失败不会留下半消费的请求体。
+    const form = new FormData();
+    form.append("file", new Blob([audioBuffer], { type: audioMimeType }), fileName);
+    form.append("model", profile.model);
+    if (language) form.append("language", language);
+    if (defaultResponseFormat !== "text") form.append("response_format", defaultResponseFormat);
+    if (glossary.length) form.append("prompt", glossary.slice(0, 200).join("，"));
+    let response;
+    try {
+      response = await fetch(apiUrl(profile, "audio/transcriptions", profile.options?.transcriptionEndpoint), {
+        method: "POST",
+        headers: {
+          ...authorizationHeaders(profile, apiKey),
+          ...(profile.options?.headers ?? {})
+        },
+        body: form,
+        signal: requestSignal(signal, transcriptionTimeoutMs)
+      });
+    } catch (error) {
+      // 调用方取消（导入取消/退出）与 330 秒超时直接抛出；其余（fetch failed、
+      // 连接重置等快速失败的网络抖动）进入退避重试。
+      if (signal?.aborted || error?.name === "TimeoutError" || error?.name === "AbortError") throw error;
+      lastFailure = new Error(`转录模型请求失败：网络错误 ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (response) {
+      if (response.ok) {
+        const contentType = response.headers.get("content-type") ?? "";
+        const payload = contentType.includes("json") ? await response.json() : { text: await response.text() };
+        const result = payload.data ?? payload.result ?? payload;
+        return {
+          text: result.text ?? result.transcript ?? "",
+          language: result.language ?? language,
+          duration: result.duration,
+          segments: (result.segments ?? []).map((segment) => ({
+            startMs: Math.round((segment.start ?? 0) * 1000),
+            endMs: Math.round((segment.end ?? segment.start ?? 0) * 1000),
+            text: String(segment.text ?? "").trim()
+          })).filter((segment) => segment.text)
+        };
+      }
+      lastFailure = new Error(describeTranscriptionFailure(response, await response.text()));
+      // 4xx（鉴权/参数/额度配置）重试也不会成功，立即失败让用户去修配置。
+      if (response.status !== 429 && response.status < 500) throw lastFailure;
+    }
+    if (attempt >= retryBackoffMs.length) {
+      // retryable 标记供导入队列识别「值得自动断点续跑」的失败（4xx 配置类错误不带此标记）。
+      lastFailure.retryable = true;
+      lastFailure.message += `（已自动重试 ${attempt} 次仍失败）`;
+      throw lastFailure;
+    }
+    await waitMs(retryBackoffMs[attempt], signal);
+  }
 }
 
 /**

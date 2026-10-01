@@ -2,7 +2,8 @@
  * 音频导入的持久化后台队列（Electron 主进程 / 服务层）。
  * 单 worker 串行处理导入任务：复制归档 →（部分格式）生成播放副本 → 转录 →
  * 说话人分离 → 自动总结。任务状态全部落库（jobs 表），应用重启后可续跑；
- * 缺模型/组件时任务进入 waiting_for_* 可恢复暂停态，不阻塞其他任务、不弹系统对话框。
+ * 缺模型/组件时任务进入 waiting_for_* 可恢复暂停态，不阻塞其他任务、不弹系统对话框；
+ * 远程转录遇持续网络/网关波动时进入 waiting_for_network，按退避自动从断点续跑。
  * 主要导出：configureImportQueue、describeImportFiles、enqueueImports、listImportJobs、
  * retryImport、cancelImport、wakeImportQueue、runQueue。
  * 被 main.mjs 的 imports:* 通道与启动流程调用；内部依赖 database、providers、
@@ -30,6 +31,7 @@ import { readSecret } from "./secrets.mjs";
 import {
   generateVisualSummaryWithOpenAICompatible,
   isVisualSummaryProfileVerified,
+  nextTranscriptionResumeDelayMs,
   summarizeLocally,
   summarizeWithOpenAICompatible,
   transcribeRemote,
@@ -297,7 +299,7 @@ export function listImportJobs() {
 export function retryImport(id) {
   const job = loadJob(id);
   if (!job) throw new Error("导入任务不存在。");
-  const next = patchJob(id, { status: "queued", error: undefined });
+  const next = patchJob(id, { status: "queued", error: undefined, transcriptionRetryAttempts: 0 });
   void runQueue();
   return next;
 }
@@ -312,7 +314,7 @@ export function cancelImport(id) {
 }
 
 /** 可删除状态：终态 + 可恢复等待态；进行中（含排队）任务必须先取消，避免与 worker 竞争。 */
-const REMOVABLE_JOB_STATUSES = ["complete", "cancelled", "failed", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"];
+const REMOVABLE_JOB_STATUSES = ["complete", "cancelled", "failed", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool", "waiting_for_network"];
 
 /**
  * 从任务队列移除一条任务记录（imports:remove 通道调用）。
@@ -331,15 +333,28 @@ export function removeImportJob(id) {
 /**
  * 唤醒队列（应用启动、保存模型档案后由 main.mjs 调用）：
  * 把因缺模型/组件暂停（waiting_for_*）的任务复位为 queued 并驱动队列，
- * 让"先导入、后配置模型"的顺序也能自动续跑。
+ * 让"先导入、后配置模型"的顺序也能自动续跑。waiting_for_network 同属可恢复
+ * 等待态（网络/网关波动），保留 transcriptionRetryAttempts 使退避节奏跨次递增。
  */
 export function wakeImportQueue() {
   for (const job of listImportJobs()) {
-    if (["waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(job.status)) {
+    if (["waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool", "waiting_for_network"].includes(job.status)) {
       saveJob({ ...job, status: "queued", error: undefined });
     }
   }
   void runQueue();
+}
+
+// 网络波动断点续跑的唤醒定时器：退避结束才驱动队列，平时不空转。
+// unref 保证它不阻止应用退出；任务状态已落库，重启后由启动流程的 wakeImportQueue 接管。
+let autoResumeTimer;
+function scheduleQueueAutoResume(delayMs) {
+  clearTimeout(autoResumeTimer);
+  autoResumeTimer = setTimeout(() => {
+    autoResumeTimer = null;
+    wakeImportQueue();
+  }, delayMs);
+  autoResumeTimer.unref?.();
 }
 
 /**
@@ -366,7 +381,8 @@ export async function runQueue() {
  * 执行单个导入任务的完整流水线（副作用：复制文件、转码、转录子进程/网络、写库）。
  * 各阶段用任务字段（archivedPath / playbackReady / transcriptionComplete /
  * diarizationComplete / summaryComplete）记录断点，崩溃重启后从未完成处续跑。
- * 缺模型/FFmpeg 时置为 waiting_for_* 暂停并返回（可恢复），其余异常标记 failed。
+ * 缺模型/FFmpeg 时置为 waiting_for_* 暂停并返回（可恢复）；远程转录的持续网络
+ * 波动置为 waiting_for_network 并按退避自动续跑，其余异常标记 failed。
  */
 async function processJob(initial) {
   const controller = new AbortController();
@@ -504,9 +520,26 @@ async function processJob(initial) {
           extractionStartMs, chunkEndMs - extractionStartMs, controller.signal
         );
         const audio = await readFile(chunkPath);
-        const rawResult = LOCAL_TRANSCRIPTION_TRANSPORTS.includes(sttProfile.transport)
-          ? await transcribeLocal(sttProfile, audio, `chunk-${chunkIndex}.wav`, language, controller.signal)
-          : await transcribeRemote(sttProfile, readSecret(sttProfile.secretId), audio, `chunk-${chunkIndex}.wav`, language, [], controller.signal);
+        let rawResult;
+        try {
+          rawResult = LOCAL_TRANSCRIPTION_TRANSPORTS.includes(sttProfile.transport)
+            ? await transcribeLocal(sttProfile, audio, `chunk-${chunkIndex}.wav`, language, controller.signal)
+            : await transcribeRemote(sttProfile, readSecret(sttProfile.secretId), audio, `chunk-${chunkIndex}.wav`, language, [], controller.signal);
+        } catch (error) {
+          if (controller.signal.aborted || !error?.retryable) throw error;
+          // 网关/网络持续波动（请求级重试已耗尽）：进入可恢复等待态，按退避自动从
+          // 当前块续跑。断点 = 已完成块数 + 持久化切块计划，崩溃/重启也不会重切重算。
+          const attempt = (job.transcriptionRetryAttempts || 0) + 1;
+          const delayMs = nextTranscriptionResumeDelayMs(attempt);
+          patchJob(job.id, {
+            status: "waiting_for_network",
+            stage: "transcribing",
+            transcriptionRetryAttempts: attempt,
+            error: `${error instanceof Error ? error.message : "转录模型请求失败"}（第 ${attempt} 次等待，${Math.round(delayMs / 1000)} 秒后自动从断点继续）`
+          });
+          scheduleQueueAutoResume(delayMs);
+          return;
+        }
         const result = simplifyTranscriptResult(rawResult);
         // 用户可能在转录期间编辑标题/笔记/已出现的文本；每块落盘前重读最新会议，
         // 只把本块结果合进去，避免后台快照覆盖前台编辑。
@@ -532,7 +565,9 @@ async function processJob(initial) {
         completedChunks = chunkIndex + 1;
         job = patchJob(job.id, {
           completedChunks,
-          progress: 0.35 + (0.33 * completedChunks / totalChunks)
+          progress: 0.35 + (0.33 * completedChunks / totalChunks),
+          // 服务恢复后清零等待计数，下次波动重新从最短退避起步。
+          ...(job.transcriptionRetryAttempts ? { transcriptionRetryAttempts: 0 } : {})
         });
         ({ job, meeting } = await maybeUpdateRollingSummary(job, meeting, profiles, controller.signal));
         await rm(chunkPath, { force: true }).catch(() => {});
