@@ -54,10 +54,34 @@ jobs:
           echo "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          SSH_CMD="ssh -i ~/.ssh/deploy_key $SSH_USER@$SSH_HOST"
+
+          # 首次部署自举：/opt 下建目录需要 root。目录已存在则直接用；
+          # 否则尝试免密 sudo 创建并交给部署用户；都不行则明确提示手动初始化。
+          if ! $SSH_CMD "test -d /opt/minuteflow-license"; then
+            if $SSH_CMD "sudo -n mkdir -p /opt/minuteflow-license && sudo -n chown \$USER /opt/minuteflow-license"; then
+              echo "已通过 sudo 自举创建 /opt/minuteflow-license"
+            else
+              echo "::error::服务器尚未初始化：/opt/minuteflow-license 不存在，且部署用户无免密 sudo。请按 server/README.md「一次性服务器初始化」手动完成后重新触发本 workflow。"
+              exit 1
+            fi
+          fi
+
           # 代码随仓库走；data/ 与 env 不在 rsync 范围（excluded），持久化数据不受部署影响
           rsync -az --delete \
             --exclude 'data/' \
             -e "ssh -i ~/.ssh/deploy_key" server/ \
             "$SSH_USER@$SSH_HOST:/opt/minuteflow-license/"
-          ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" \
-            "sudo systemctl restart minuteflow-license && sleep 1 && curl -sf http://127.0.0.1:8787/healthz"
+
+          # systemd 单元由 README 的一次性初始化安装；此处重启并做健康检查。
+          # sudo 不可用时降级为提示手动重启（代码已就位），不算部署失败。
+          if $SSH_CMD "systemctl list-unit-files | grep -q '^minuteflow-license'"; then
+            if $SSH_CMD "sudo -n systemctl restart minuteflow-license"; then
+              sleep 1
+              $SSH_CMD "curl -sf http://127.0.0.1:8787/healthz && echo && echo '部署完成，服务健康'"
+            else
+              echo "::warning::代码已部署，但部署用户无免密 sudo，无法自动重启服务。请手动执行：sudo systemctl restart minuteflow-license"
+            fi
+          else
+            echo "::warning::代码已部署到 /opt/minuteflow-license，但 systemd 单元尚未安装。请按 server/README.md 安装 minuteflow-license.service 并配置 /etc/minuteflow-license/env。"
+          fi

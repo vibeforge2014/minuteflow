@@ -19,6 +19,8 @@
 
 ## 部署（zensoft.top）
 
+> `deploy-license.yml` 在目标目录不存在时会尝试免密 `sudo mkdir` 自举；部署用户无 sudo 时首次部署会明确报错并指向本节——按下面步骤手动完成一次初始化即可，之后的代码更新由 workflow 自动 rsync + 重启。
+
 ```bash
 # 1. 代码与数据目录
 sudo mkdir -p /opt/minuteflow-license/data
