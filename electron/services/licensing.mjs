@@ -398,9 +398,12 @@ export async function deactivateLicense() {
  * 付费功能统一授权墙（main.mjs 各付费通道入口处 await 调用）。
  * 未授权时抛出带 [LICENSE_REQUIRED] 前缀的错误——自定义 error.code 属性
  * 无法穿越 contextBridge，前缀是渲染层识别授权错误并弹购买墙的唯一依据。
+ * 开发构建（npm run dev:electron，未打包）不启用授权墙：¥99 购买墙只约束打包发布版，
+ * 避免开发者本机测试被自己产品的付费墙挡住。
  * @returns {Promise<object>} 已授权时返回授权状态
  */
 export async function requireLicense() {
+  if (!app.isPackaged) return { state: "licensed", devBypass: true };
   const status = await getLicenseStatus();
   if (status.state !== "licensed") {
     // Prefix the code into the message because custom Error properties (like
