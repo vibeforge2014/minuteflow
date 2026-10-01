@@ -53,8 +53,13 @@ jobs:
           mkdir -p ~/.ssh
           echo "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          SSH_CMD="ssh -i ~/.ssh/deploy_key $SSH_USER@$SSH_HOST"
+          # accept-new（TOFU）取代 ssh-keyscan：keyscan 在 DNS 抖动时 exit 1 会直接中断脚本
+          SSH_CMD="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new $SSH_USER@$SSH_HOST"
+
+          if ! $SSH_CMD "true"; then
+            echo "::error::无法通过 SSH 连接 $SSH_HOST：请检查 ZENSOFT_SSH_* 密钥与网络。"
+            exit 1
+          fi
 
           # 首次部署自举：/opt 下建目录需要 root。目录已存在则直接用；
           # 否则尝试免密 sudo 创建并交给部署用户；都不行则明确提示手动初始化。
@@ -70,7 +75,7 @@ jobs:
           # 代码随仓库走；data/ 与 env 不在 rsync 范围（excluded），持久化数据不受部署影响
           rsync -az --delete \
             --exclude 'data/' \
-            -e "ssh -i ~/.ssh/deploy_key" server/ \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" server/ \
             "$SSH_USER@$SSH_HOST:/opt/minuteflow-license/"
 
           # systemd 单元由 README 的一次性初始化安装；此处重启并做健康检查。
