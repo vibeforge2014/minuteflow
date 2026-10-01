@@ -42,6 +42,7 @@ import {
   applyDiarization,
   cosineSimilarity,
   matchVoiceprint,
+  mergeDiarizationClusters,
   voiceprintModelKey
 } from "../electron/services/diarization.mjs";
 import {
@@ -662,6 +663,24 @@ describe("transcript window merge", () => {
     expect(result.map((item) => item.speakerName)).toEqual(["发言人1", "发言人2"]);
   });
 
+  it("assigns gap segments to the temporally nearest turn instead of keeping a colliding legacy label", () => {
+    const turns = [
+      { startMs: 0, endMs: 4_000, speakerId: "speaker-1" },
+      { startMs: 8_000, endMs: 12_000, speakerId: "speaker-2" }
+    ];
+    // 4000–8000 是轮次间隙：靠前段归 speaker-1、靠后段归 speaker-2，
+    // 不能沿用旧的 speaker-1（会与分离出的 speaker-1 撞 id 出现双名）。
+    const result = applyDiarization([
+      segment("gap-late", 4_200, 6_000, "间隙偏后"),
+      segment("gap-early", 6_100, 7_900, "间隙偏前"),
+      segment("second", 9_000, 10_000, "第二位发言")
+    ], turns);
+    expect(result[0].speakerId).toBe("speaker-1");
+    expect(result[1].speakerId).toBe("speaker-2");
+    expect(result[2].speakerId).toBe("speaker-2");
+    expect(new Set(result.map((item) => item.speakerId)).size).toBe(2);
+  });
+
   it("applies a confidently identified voiceprint name without changing the speaker id", () => {
     const result = applyDiarization([
       segment("known", 500, 2_500, "已识别发言")
@@ -685,6 +704,59 @@ describe("transcript window merge", () => {
     expect(voiceprintModelKey({ options: { embeddingModelPath: "/models/3d-speaker-v1.onnx" } }))
       .toBe("3d-speaker-v1.onnx");
     expect(voiceprintModelKey({ options: {} })).toBe("");
+  });
+});
+
+describe("diarization cluster merging", () => {
+  const turn = (startMs: number, endMs: number, speakerId: string) => ({ startMs, endMs, speakerId });
+  const sameVoice = Float32Array.from([1, 0]);
+  const sameVoiceDrifted = Float32Array.from([0.95, 0.05]);
+  const otherVoice = Float32Array.from([0, 1]);
+
+  it("merges same-speaker clusters above the similarity threshold and relabels densely by first appearance", () => {
+    const merged = mergeDiarizationClusters(
+      [turn(0, 90_000, "a"), turn(95_000, 150_000, "b"), turn(160_000, 170_000, "c")],
+      new Map([["a", sameVoice], ["b", sameVoiceDrifted], ["c", otherVoice]])
+    );
+    expect(new Set(merged.map((item) => item.speakerId)).size).toBe(2);
+    expect(merged[0].speakerId).toBe("speaker-1");
+    expect(merged[1].speakerId).toBe("speaker-1");
+    expect(merged[2].speakerId).toBe("speaker-2");
+  });
+
+  it("keeps distinct speakers separate", () => {
+    const merged = mergeDiarizationClusters(
+      [turn(0, 90_000, "a"), turn(95_000, 150_000, "b")],
+      new Map([["a", sameVoice], ["b", otherVoice]])
+    );
+    expect(new Set(merged.map((item) => item.speakerId)).size).toBe(2);
+  });
+
+  it("folds short fragments into the most similar cluster", () => {
+    const merged = mergeDiarizationClusters(
+      [turn(0, 90_000, "a"), turn(95_000, 150_000, "b"), turn(151_000, 154_000, "f")],
+      new Map([["a", sameVoice], ["b", otherVoice], ["f", sameVoiceDrifted]])
+    );
+    expect(new Set(merged.map((item) => item.speakerId)).size).toBe(2);
+    expect(merged.find((item) => item.startMs === 151_000)?.speakerId).toBe("speaker-1");
+  });
+
+  it("folds unembeddable fragments into the time-adjacent cluster", () => {
+    const merged = mergeDiarizationClusters(
+      [turn(0, 90_000, "a"), turn(95_000, 150_000, "b"), turn(150_500, 151_500, "n")],
+      new Map([["a", sameVoice], ["b", otherVoice], ["n", null]])
+    );
+    expect(new Set(merged.map((item) => item.speakerId)).size).toBe(2);
+    expect(merged.find((item) => item.startMs === 150_500)?.speakerId)
+      .toBe(merged.find((item) => item.startMs === 95_000)?.speakerId);
+  });
+
+  it("resolves chained merges through cluster roots", () => {
+    const merged = mergeDiarizationClusters(
+      [turn(0, 90_000, "a"), turn(95_000, 150_000, "b"), turn(150_200, 150_800, "f")],
+      new Map([["a", sameVoice], ["b", sameVoiceDrifted], ["f", null]])
+    );
+    expect(new Set(merged.map((item) => item.speakerId)).size).toBe(1);
   });
 });
 

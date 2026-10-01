@@ -683,7 +683,7 @@ export function normalizeImportChunkSegments(result, extractionStartMs, nominalS
       startMs,
       endMs,
       speakerId: "speaker-1",
-      speakerName: "发言人 1",
+      speakerName: "发言人1",
       text,
       status: "final",
       track: "mixed"
