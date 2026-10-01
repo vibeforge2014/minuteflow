@@ -58,6 +58,7 @@ import { simplifyChinese, simplifySummary } from "../src/lib/chinese";
 import { derivePermissionSetupPhase, finishPermissionSetup, isMicrophonePermissionError, isScreenPermissionError, shouldOpenPermissionSetup, shouldRequestMicrophone } from "../src/lib/permissions";
 import { lockSummaryField, mergeSummaryRevision, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { normalizeImportChunkSegments } from "../electron/services/import-queue.mjs";
+import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "../electron/services/chunk-planning.mjs";
 import { audioContentType, parseByteRange } from "../electron/services/media.mjs";
 import { isTrustedPermissionRequest, isTrustedRendererUrl } from "../electron/services/permissions.mjs";
 import {
@@ -474,6 +475,41 @@ describe("progressive import transcript", () => {
     }, 59_000, 60_000, 120_000, "job:chunk:1:", [segment("old", 59_000, 60_200, "已经出现")]);
     expect(result.map((item) => item.text)).toEqual(["继续讨论"]);
     expect(result[0].startMs).toBe(61_100);
+  });
+});
+
+describe("adaptive import chunk planning", () => {
+  it("falls back to the nominal 10s grid when no silence is available", () => {
+    expect(planTranscriptionChunkBoundaries(35_000)).toEqual([0, 10_000, 20_000, 30_000]);
+    expect(planTranscriptionChunkBoundaries(5_000)).toEqual([0]);
+  });
+
+  it("snaps each boundary to the nearest silence midpoint inside the search window", () => {
+    const boundaries = planTranscriptionChunkBoundaries(40_000, [30_500, 11_200, 19_000]);
+    expect(boundaries).toEqual([0, 11_200, 19_000, 30_500]);
+    for (let index = 1; index < boundaries.length; index += 1) {
+      const length = boundaries[index] - boundaries[index - 1];
+      expect(length).toBeGreaterThanOrEqual(7_000);
+      expect(length).toBeLessThanOrEqual(13_000);
+    }
+  });
+
+  it("ignores silences below the minimum chunk length or outside the snap window", () => {
+    expect(planTranscriptionChunkBoundaries(30_000, [5_000, 14_000, 25_000])).toEqual([0, 10_000, 20_000]);
+  });
+
+  it("pairs silencedetect events in order and drops unclosed or tail-adjacent silences", () => {
+    const stderr = [
+      "[silencedetect @ 0x1] silence_start: 3.2",
+      "[silencedetect @ 0x1] silence_end: 3.9 | silence_duration: 0.7",
+      "[silencedetect @ 0x1] silence_start: -0.01",
+      "[silencedetect @ 0x1] silence_end: 0.5 | silence_duration: 0.51",
+      "[silencedetect @ 0x1] silence_start: 12.05",
+      "[silencedetect @ 0x1] silence_end: 12.45 | silence_duration: 0.4",
+      "[silencedetect @ 0x1] silence_start: 59.8"
+    ].join("\n");
+    expect(parseSilenceMidpoints(stderr, 60_000)).toEqual([245, 3_550, 12_250]);
+    expect(parseSilenceMidpoints("no events here", 60_000)).toEqual([]);
   });
 });
 

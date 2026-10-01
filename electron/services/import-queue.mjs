@@ -42,6 +42,7 @@ import { applyDiarization, diarizeWithSherpa } from "./diarization.mjs";
 import { managedFfmpegPath, resolveLocalModelProfile } from "./local-models.mjs";
 import { simplifyTranscriptResult } from "./chinese.mjs";
 import { groupTranscriptSegments, splitTimedTranscriptText } from "./transcript-grouping.mjs";
+import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "./chunk-planning.mjs";
 
 const LOCAL_TRANSCRIPTION_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"];
 /** 与 main.mjs 的 transcribeLocally 同构：按 transport 分派本地转录（导入流程不注入术语表）。 */
@@ -70,7 +71,8 @@ let notifyMeeting = () => {};
 
 const LEGACY_TRANSCRIPTION_CHUNK_MS = 60_000;
 const LEGACY_TRANSCRIPTION_OVERLAP_MS = 1_000;
-const TRANSCRIPTION_PLAN_VERSION = 2;
+// v3：切块边界在 10 秒目标网格附近吸附最近静音中点，避免把词切成两半；计划持久化后重启不漂移。
+const TRANSCRIPTION_PLAN_VERSION = 3;
 const TRANSCRIPTION_CHUNK_MS = 10_000;
 const TRANSCRIPTION_OVERLAP_MS = 2_000;
 const PARAGRAPHING_VERSION = 2;
@@ -442,7 +444,20 @@ async function processJob(initial) {
       const chunkOverlapMs = job.chunkOverlapMs
         || (legacyInProgress ? LEGACY_TRANSCRIPTION_OVERLAP_MS : TRANSCRIPTION_OVERLAP_MS);
       const chunkingVersion = job.chunkingVersion || (legacyInProgress ? 1 : TRANSCRIPTION_PLAN_VERSION);
-      const totalChunks = Math.max(1, Math.ceil(durationMs / chunkDurationMs));
+      // v3 起，先对整段录音做一次静音扫描，把切块边界吸附到目标网格附近的自然停顿。
+      // 边界计划随任务落库：崩溃重启后沿用同一份切点，已完成块的 id 与时间轴保持稳定。
+      // 已开工却没有边界计划的任务（理论不可达）、扫描失败或没有可用静音时回落固定网格。
+      let chunkBoundaries = Array.isArray(job.chunkBoundaries) && job.chunkBoundaries.length
+        ? job.chunkBoundaries
+        : null;
+      if (!chunkBoundaries && chunkingVersion >= 3 && !(job.completedChunks > 0)) {
+        const silenceMidpoints = await detectSilenceMidpoints(job.id, bundledFfmpeg, job.archivedPath, controller.signal, durationMs);
+        chunkBoundaries = planTranscriptionChunkBoundaries(durationMs, silenceMidpoints);
+      }
+      const useAdaptiveBoundaries = Boolean(chunkBoundaries);
+      const totalChunks = useAdaptiveBoundaries
+        ? chunkBoundaries.length
+        : Math.max(1, Math.ceil(durationMs / chunkDurationMs));
       let completedChunks = Math.min(job.completedChunks || 0, totalChunks);
       const chunkDirectory = path.join(path.dirname(job.archivedPath), `transcription-${job.id}`);
       await mkdir(chunkDirectory, { recursive: true });
@@ -450,14 +465,17 @@ async function processJob(initial) {
         status: "transcribing", stage: "transcribing", progress: 0.35,
         sttProfileId: sttProfile.id, durationMs, totalChunks, completedChunks,
         chunkingVersion, chunkDurationMs, chunkOverlapMs,
+        chunkBoundaries: useAdaptiveBoundaries ? chunkBoundaries : undefined,
         paragraphingVersion: job.paragraphingVersion || PARAGRAPHING_VERSION
       });
       const language = job.language === "auto" ? "" : job.language;
       for (let chunkIndex = completedChunks; chunkIndex < totalChunks; chunkIndex += 1) {
         if (controller.signal.aborted || loadJob(job.id)?.status === "cancelled") return;
-        const nominalStartMs = chunkIndex * chunkDurationMs;
+        const nominalStartMs = useAdaptiveBoundaries ? chunkBoundaries[chunkIndex] : chunkIndex * chunkDurationMs;
         const extractionStartMs = Math.max(0, nominalStartMs - (chunkIndex ? chunkOverlapMs : 0));
-        const chunkEndMs = Math.min(durationMs, nominalStartMs + chunkDurationMs);
+        const chunkEndMs = useAdaptiveBoundaries
+          ? (chunkIndex + 1 < chunkBoundaries.length ? chunkBoundaries[chunkIndex + 1] : durationMs)
+          : Math.min(durationMs, nominalStartMs + chunkDurationMs);
         const chunkPath = path.join(chunkDirectory, `chunk-${String(chunkIndex).padStart(5, "0")}.wav`);
         job = patchJob(job.id, {
           status: "transcribing",
@@ -712,6 +730,31 @@ function extractTranscriptionChunk(jobId, executable, input, output, startMs, du
       if (activeProcesses.get(jobId) === child) activeProcesses.delete(jobId);
       if (code === 0) return resolve();
       reject(new Error(signal.aborted || killedBy ? "任务已取消。" : `准备转录分段失败：${details.trim()}`));
+    });
+  });
+}
+
+/**
+ * 对整段录音做一次静音扫描（ffmpeg silencedetect），返回各静音段中点（毫秒，升序），
+ * 供切块边界吸附。尽力而为：启动失败、被取消或解析不到静音都返回空数组，
+ * 调用方回落固定网格，静音扫描本身绝不阻断导入。
+ */
+function detectSilenceMidpoints(jobId, executable, input, signal, durationMs) {
+  return new Promise((resolve) => {
+    const child = spawn(executable, [
+      "-hide_banner", "-i", input,
+      "-af", "silencedetect=noise=-35dB:d=0.3", "-vn", "-f", "null", "-"
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+    activeProcesses.set(jobId, child);
+    let details = "";
+    child.stderr.on("data", (chunk) => { details = `${details}${chunk}`.slice(-1_000_000); });
+    child.on("error", () => {
+      if (activeProcesses.get(jobId) === child) activeProcesses.delete(jobId);
+      resolve([]);
+    });
+    child.on("close", () => {
+      if (activeProcesses.get(jobId) === child) activeProcesses.delete(jobId);
+      resolve(signal.aborted ? [] : parseSilenceMidpoints(details, durationMs));
     });
   });
 }
