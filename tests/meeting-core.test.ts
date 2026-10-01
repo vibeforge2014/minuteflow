@@ -1822,6 +1822,11 @@ describe("visual summary schema and capability gates", () => {
     expect(simplifyChinese("聚焦核心任务與核心結論")).toBe("聚焦核心任务与核心结论");
   });
 
+  it("normalizes the ASR variant 什幺 to 什么 without touching standalone 幺", () => {
+    expect(simplifyChinese("为什幺会出现这种情况，做什幺事")).toBe("为什么会出现这种情况，做什么事");
+    expect(simplifyChinese("家里的老幺和幺妹")).toBe("家里的老幺和幺妹");
+  });
+
   it("tolerates string-serialized section numbers and schemaVersion from compatible gateways", () => {
     const result = validateVisualSummary({
       ...visualPayload,

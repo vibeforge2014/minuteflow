@@ -6,7 +6,9 @@ const toSimplified = Converter({ from: "twp", to: "cn" });
 
 export const simplifyChinese = (value: string) => toSimplified(value)
   // OpenCC twp 会把部分商务语境中的“核心”词组误判成技术术语“内核”。
-  .replace(/内核(?=(任务|内容|观点|结论|流程|能力|目标))/g, "核心");
+  .replace(/内核(?=(任务|内容|观点|结论|流程|能力|目标))/g, "核心")
+  // 语音识别网关常把“什么”识别成异体写法“什幺”（幺≠麼，OpenCC 不处理）；按词组归一，不影响“幺妹”“老幺”等单字用法。
+  .replace(/什幺/g, "什么");
 
 export function simplifyTranscriptSegment(segment: TranscriptSegment): TranscriptSegment {
   return { ...segment, text: simplifyChinese(segment.text) };
