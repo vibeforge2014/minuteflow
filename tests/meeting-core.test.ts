@@ -60,6 +60,15 @@ import { derivePermissionSetupPhase, finishPermissionSetup, isMicrophonePermissi
 import { lockSummaryField, mergeSummaryRevision, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { normalizeImportChunkSegments } from "../electron/services/import-queue.mjs";
 import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "../electron/services/chunk-planning.mjs";
+import { plannedCharacters, punctuationCut, typewriterStep } from "../src/lib/typewriter";
+import {
+  absorbTranscriptSegments,
+  displayedTranscriptSegments,
+  emptyRevealState,
+  revealPending,
+  revealTick,
+  seedTranscriptReveal
+} from "../src/lib/transcript-reveal";
 import { audioContentType, parseByteRange } from "../electron/services/media.mjs";
 import { isTrustedPermissionRequest, isTrustedRendererUrl } from "../electron/services/permissions.mjs";
 import {
@@ -511,6 +520,87 @@ describe("adaptive import chunk planning", () => {
     ].join("\n");
     expect(parseSilenceMidpoints(stderr, 60_000)).toEqual([245, 3_550, 12_250]);
     expect(parseSilenceMidpoints("no events here", 60_000)).toEqual([]);
+  });
+});
+
+describe("typewriter pacing", () => {
+  it("scales the per-take character budget with the backlog within 40..160 cps", () => {
+    expect(plannedCharacters("")).toBe(0);
+    expect(plannedCharacters("五个字")).toBeGreaterThanOrEqual(1);
+    expect(plannedCharacters("六".repeat(400))).toBe(Math.round((160 * 40) / 1000));
+  });
+
+  it("cuts at sentence and comma punctuation with proportional pauses", () => {
+    expect(punctuationCut("然后我们继续。之后")).toEqual({ emit: "然后我们继续。", pauseTicks: 3 });
+    expect(punctuationCut("首先，")).toEqual({ emit: "首先，", pauseTicks: 1 });
+    expect(punctuationCut("没有任何标点符号出现")).toBeNull();
+    // 每拍字数按缓冲长度计（40 字/秒 × 40ms ≈ 2 字/拍）：标点落在拍内即切分。
+    const step = typewriterStep("一。后面的内容还在缓冲里慢慢排队");
+    expect(step?.emit).toBe("一。");
+    expect(step?.pauseTicks).toBe(3);
+  });
+});
+
+describe("transcript streaming reveal", () => {
+  const drainAll = (segments: TranscriptSegment[], state: ReturnType<typeof emptyRevealState>) => {
+    const emitted: string[] = [];
+    for (let guard = 0; guard < 5_000; guard += 1) {
+      const tick = revealTick(segments, state);
+      if (!tick) {
+        if (!revealPending(state)) break;
+        continue;
+      }
+      emitted.push(tick.emit);
+    }
+    return emitted.join("");
+  };
+
+  it("seeds existing content as fully revealed and streams only new arrivals", () => {
+    const state = seedTranscriptReveal([segment("a", 0, 5_000, "已有内容")], emptyRevealState(), true);
+    expect(revealPending(state)).toBe(false);
+    absorbTranscriptSegments([segment("a", 0, 5_000, "已有内容"), segment("b", 6_000, 12_000, "新到达的句子。")], state, true);
+    expect(state.queue).toEqual(["b"]);
+    const shown = displayedTranscriptSegments([segment("a", 0, 5_000, "已有内容"), segment("b", 6_000, 12_000, "新到达的句子。")], state);
+    expect(shown[0].text).toBe("已有内容");
+    expect(shown[1].text).toBe("");
+    const all = drainAll([segment("a", 0, 5_000, "已有内容"), segment("b", 6_000, 12_000, "新到达的句子。")], state);
+    expect(all).toBe("新到达的句子。");
+    expect(revealPending(state)).toBe(false);
+  });
+
+  it("queues appended text on an already-revealed segment and reveals segments in arrival order", () => {
+    const state = seedTranscriptReveal([segment("a", 0, 5_000, "开头")], emptyRevealState(), true);
+    absorbTranscriptSegments([segment("a", 0, 8_000, "开头继续补充的半句话，")], state, true);
+    absorbTranscriptSegments([segment("a", 0, 8_000, "开头继续补充的半句话，"), segment("b", 9_000, 15_000, "下一段。")], state, true);
+    expect(state.queue).toEqual(["a", "b"]);
+    const firstTick = revealTick([segment("a", 0, 8_000, "开头继续补充的半句话，"), segment("b", 9_000, 15_000, "下一段。")], state);
+    expect(firstTick?.id).toBe("a");
+    expect(firstTick?.emit).toBe("继续");
+    const drained = (firstTick?.emit ?? "") + drainAll([segment("a", 0, 8_000, "开头继续补充的半句话，"), segment("b", 9_000, 15_000, "下一段。")], state);
+    expect(drained).toBe("继续补充的半句话，下一段。");
+  });
+
+  it("snaps shortened rewrites into place instead of retyping", () => {
+    const state = seedTranscriptReveal([segment("a", 0, 5_000, "很长的一段临时转写文本")], emptyRevealState(), true);
+    absorbTranscriptSegments([segment("a", 0, 5_000, "修正后的文本")], state, true);
+    expect(state.queue).toEqual([]);
+    expect(displayedTranscriptSegments([segment("a", 0, 5_000, "修正后的文本")], state)[0].text).toBe("修正后的文本");
+  });
+
+  it("passes everything through once the session is no longer active", () => {
+    const state = seedTranscriptReveal([segment("a", 0, 5_000, "已有内容")], emptyRevealState(), true);
+    absorbTranscriptSegments([segment("a", 0, 5_000, "已有内容追加"), segment("b", 9_000, 15_000, "新句子。")], state, true);
+    absorbTranscriptSegments([segment("a", 0, 5_000, "已有内容追加"), segment("b", 9_000, 15_000, "新句子。")], state, false);
+    expect(revealPending(state)).toBe(false);
+    const shown = displayedTranscriptSegments([segment("a", 0, 5_000, "已有内容追加"), segment("b", 9_000, 15_000, "新句子。")], state);
+    expect(shown.map((item) => item.text)).toEqual(["已有内容追加", "新句子。"]);
+  });
+
+  it("seeds inactive sessions fully so history never typewrites", () => {
+    const state = seedTranscriptReveal([segment("a", 0, 5_000, "历史内容")], emptyRevealState(), false);
+    absorbTranscriptSegments([segment("a", 0, 9_000, "历史内容新增了尾巴")], state, false);
+    expect(revealPending(state)).toBe(false);
+    expect(displayedTranscriptSegments([segment("a", 0, 9_000, "历史内容新增了尾巴")], state)[0].text).toBe("历史内容新增了尾巴");
   });
 });
 

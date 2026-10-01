@@ -23,6 +23,7 @@ import { mergeSpeakerLabels } from "../lib/transcript";
 import { classifyTextChange } from "../lib/content-motion";
 import { useEnteringItemIds } from "../hooks/useContentMotion";
 import { useExitPresence } from "../hooks/useExitPresence";
+import { useStreamingTranscript } from "../hooks/useStreamingTranscript";
 import type { WorkspaceStage } from "../lib/workspace";
 
 interface TranscriptViewProps {
@@ -57,7 +58,11 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   const speakers = useMemo(() => Array.from(new Map(
     meeting.transcript.map((segment) => [segment.speakerId, segment.speakerName])
   )), [meeting.transcript]);
-  const visibleSegments = meeting.transcript.slice(-visibleCount);
+  // 转录流式揭示：导入进行中（任务未终结）或会议进行中时，新到达文本按打字机
+  // 节奏逐拍铺开，与 AI 问答同一观感；历史内容与 Reduced Motion 直接透传。
+  const importActive = Boolean(importJob) && !["complete", "failed", "cancelled"].includes(importJob?.status ?? "");
+  const displayTranscript = useStreamingTranscript(meeting, importActive || stage === "live");
+  const visibleSegments = displayTranscript.slice(-visibleCount);
   const visibleSegmentIds = useMemo(() => visibleSegments.map((segment) => segment.id), [visibleSegments]);
   const enteringSegmentIds = useEnteringItemIds(meeting.id, visibleSegmentIds);
   // 同一批新入场的段落按 0/40/80ms 级联出现，避免整块转录结果齐刷刷闪现。
@@ -65,7 +70,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     () => visibleSegments.filter((segment) => enteringSegmentIds.has(segment.id)).map((segment) => segment.id),
     [visibleSegments, enteringSegmentIds]
   );
-  const tailSegment = meeting.transcript.at(-1);
+  const tailSegment = displayTranscript.at(-1);
   const tailSignature = tailSegment ? `${tailSegment.id}:${tailSegment.text.length}:${tailSegment.status}` : "";
 
   const refreshVoiceprints = useCallback(() => {

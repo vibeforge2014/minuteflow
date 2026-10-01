@@ -11,6 +11,7 @@ import { ChatTeardropText, Eraser, PaperPlaneRight, X } from "@phosphor-icons/re
 import type { Meeting } from "../types";
 import { api } from "../lib/api";
 import { markdownToHtml } from "../lib/markdown";
+import { TYPEWRITER_TICK_MS, typewriterStep } from "../lib/typewriter";
 
 export interface ChatMessage {
   id: string;
@@ -125,41 +126,23 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
       if (drainTimer !== null) return;
       drainTimer = window.setInterval(() => {
         if (pauseTicks > 0) { pauseTicks -= 1; return; }
-        // 本拍计划出多少字：目标速率（字/秒）× 拍长（40ms）。
-        const takeOf = (pending: string) => {
-          if (!pending) return 0;
-          const cps = Math.min(160, Math.max(40, pending.length * 0.35));
-          return Math.max(1, Math.round((cps * 40) / 1000));
-        };
-        // 短语节奏：缓冲头部若即将越过标点，就切在标点处，随后小停一拍/三拍。
-        const cutAtPunctuation = (chunk: string) => {
-          const strong = chunk.search(/[。！？；]/);
-          if (strong >= 1) return { text: chunk.slice(0, strong + 1), pause: 3 };
-          const soft = chunk.search(/[，、：]/);
-          if (soft >= 1) return { text: chunk.slice(0, soft + 1), pause: 1 };
-          return null;
-        };
-        const drain = (pending: string) => {
-          const planned = pending.slice(0, takeOf(pending));
-          const cut = cutAtPunctuation(planned);
-          if (cut) { pauseTicks = Math.max(pauseTicks, cut.pause); return cut.text; }
-          return planned;
-        };
-        const contentChunk = buffer.content ? drain(buffer.content) : "";
-        const reasoningChunk = buffer.reasoning ? drain(buffer.reasoning) : "";
-        if (!contentChunk && !reasoningChunk) return;
-        buffer.content = buffer.content.slice(contentChunk.length);
-        buffer.reasoning = buffer.reasoning.slice(reasoningChunk.length);
+        // 出字节奏与断句小停统一走 typewriter 核心（转写流式揭示共用同一观感）。
+        const contentStep = typewriterStep(buffer.content);
+        const reasoningStep = typewriterStep(buffer.reasoning);
+        if (!contentStep && !reasoningStep) return;
+        buffer.content = buffer.content.slice((contentStep?.emit ?? "").length);
+        buffer.reasoning = buffer.reasoning.slice((reasoningStep?.emit ?? "").length);
+        pauseTicks = Math.max(pauseTicks, contentStep?.pauseTicks ?? 0, reasoningStep?.pauseTicks ?? 0);
         patchPending((message) => {
-          const text = message.text + contentChunk;
-          const reasoning = (message.reasoning ?? "") + reasoningChunk;
+          const text = message.text + (contentStep?.emit ?? "");
+          const reasoning = (message.reasoning ?? "") + (reasoningStep?.emit ?? "");
           return { ...message, text, reasoning: reasoning || undefined };
         });
         if (!buffer.content && !buffer.reasoning && drainTimer !== null) {
           window.clearInterval(drainTimer);
           drainTimer = null;
         }
-      }, 40);
+      }, TYPEWRITER_TICK_MS);
     };
     try {
       const result = await api.chat.send(trimmed, history, {
