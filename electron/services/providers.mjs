@@ -635,9 +635,14 @@ export async function generateVisualSummaryWithOpenAICompatible(profile, apiKey,
           signal: requestSignal(signal, profile.options?.timeoutMs ?? 60_000)
         });
         if (!response.ok) {
-          const error = new Error(`视觉纪要模型请求失败：${response.status} ${await response.text()}`);
+          const bodyText = await response.text();
+          const error = new Error(`视觉纪要模型请求失败：${friendlyHttpError(
+            response.status,
+            bodyText,
+            response.headers.get("x-request-id") ?? response.headers.get("request-id")
+          )}`);
           error.retriableWithoutResponseFormat = [400, 404, 422].includes(response.status)
-            || /response_format/i.test(error.message);
+            || /response_format/i.test(bodyText);
           throw error;
         }
         content = extractMessageContent(await response.json());
@@ -1111,6 +1116,155 @@ async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, lang
  * LLM 走一次最小请求确认连通，远程 stt 上传内置 WAV 确认真实转录端点。
  * @returns {Promise<{ok: true, message: string}>} 成功时带用户可读的提示
  */
+/** 把 HTTP 错误响应翻译成可操作的中文提示：按状态码区分密钥/地址/限流/服务端四类常见原因，
+ *  并尽量带上网关返回的 error.message 与 request id，方便用户拿着凭据去服务商侧排查。 */
+export function friendlyHttpError(status, bodyText, requestId) {
+  const advice = status === 401 || status === 403
+    ? "密钥无效或无权限：请检查 API Key 是否正确，以及该密钥是否开通了所填模型"
+    : status === 404
+      ? "接口地址或模型名不存在：请检查 Base URL 与模型名"
+      : status === 429
+        ? "请求过于频繁或额度不足：请稍后重试，或检查账户余额与限流设置"
+        : status >= 500
+          ? "服务端暂时不可用：请稍后重试"
+          : null;
+  let detail = "";
+  let extractedRequestId = requestId || null;
+  if (typeof bodyText === "string" && bodyText.trim()) {
+    try {
+      const parsed = JSON.parse(bodyText);
+      const errorBody = parsed?.error;
+      const message = typeof errorBody === "string" ? errorBody : errorBody?.message;
+      if (message) detail = String(message);
+      const bodyRequestId = parsed?.request_id || errorBody?.request_id;
+      if (bodyRequestId) extractedRequestId = String(bodyRequestId);
+    } catch {
+      detail = bodyText.trim();
+    }
+  }
+  if (detail.length > 240) detail = `${detail.slice(0, 240)}…`;
+  return [
+    advice ? `${advice}（HTTP ${status}）` : `HTTP ${status}`,
+    detail,
+    extractedRequestId ? `请求标识 ${extractedRequestId}` : ""
+  ].filter(Boolean).join(" · ");
+}
+
+/** 解析 OpenAI 兼容 /models 响应为模型 id 列表；容忍 data/models 包装与纯字符串项。 */
+export function parseModelListPayload(payload) {
+  const data = Array.isArray(payload?.data) ? payload.data
+    : Array.isArray(payload?.models) ? payload.models
+    : Array.isArray(payload) ? payload
+    : [];
+  return data
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") {
+        if (typeof item.id === "string") return item.id;
+        if (typeof item.name === "string") return item.name;
+      }
+      return null;
+    })
+    .map((id) => (id || "").trim())
+    .filter(Boolean)
+    .slice(0, 200);
+}
+
+/** 拉取在线服务的可用模型列表（OpenAI 兼容与 Ollama 的 /models 同为 {data:[{id}]} 形状）。
+ *  Anthropic/Gemini 原生协议返回 null，设置页据此退回静态推荐建议；
+ *  网络/HTTP 失败抛出可读错误（含网关 request id）。 */
+export async function listRemoteModels(profile, apiKey, signal) {
+  if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") return null;
+  const response = await fetch(apiUrl(profile, "models"), {
+    headers: {
+      ...authorizationHeaders(profile, apiKey),
+      ...(profile.options?.headers ?? {})
+    },
+    signal: requestSignal(signal, 10_000)
+  });
+  if (!response.ok) {
+    throw new Error(friendlyHttpError(
+      response.status,
+      await response.text(),
+      response.headers.get("x-request-id") ?? response.headers.get("request-id")
+    ));
+  }
+  return parseModelListPayload(await response.json());
+}
+
+/** 网络层错误（fetch failed/DNS/拒连/超时）翻译成可操作的中文提示，
+ *  避免裸 TypeError 直接进设置页；LLM 测试与视觉纪要验证共用。 */
+function rethrowFriendlyNetworkError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/abort|timeout|TIMEOUT/i.test(message)) {
+    throw new Error("连接测试超时：请检查 Base URL 是否可达、密钥是否有效，或网络/代理设置。");
+  }
+  if (/fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN/i.test(message)) {
+    throw new Error("无法连接到该 Base URL：请检查地址是否正确、服务是否在线，以及网络/代理设置。");
+  }
+  throw error;
+}
+
+/** 在线 LLM 档案的连接测试主体：启用视觉纪要时先跑真实验证请求，
+ *  否则按原生协议 / OpenAI 兼容聊天接口做最小探测。 */
+async function testLlmProfileConnection(profile, apiKey) {
+  if (profile.options?.visualSummaryEnabled) {
+    await generateVisualSummaryWithOpenAICompatible(profile, apiKey, {
+      title: "视觉纪要能力测试",
+      participants: ["测试参与者"],
+      summary: {
+        topics: ["连接验证"],
+        keyPoints: ["模型需要返回受限的视觉纪要 JSON。"],
+        decisions: ["验证 schema 后启用视觉纪要。"],
+        actionItems: [],
+        openQuestions: [],
+        risks: [],
+        nextSteps: ["保存验证结果。"],
+        updatedAt: new Date().toISOString()
+      }
+    });
+    const visualSummaryVerifiedAt = new Date().toISOString();
+    return {
+      ok: true,
+      message: "模型调用与视觉纪要结构验证均成功。",
+      visualSummaryVerifiedAt,
+      visualSummaryVerifiedFingerprint: visualSummaryProfileFingerprint(profile)
+    };
+  }
+  if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
+    const payload = profile.options.apiFlavor === "anthropic"
+      ? await requestAnthropic(profile, apiKey, "只回复 OK", 16)
+      : await requestGemini(profile, apiKey, "只回复 OK", 16);
+    if (!extractMessageContent(payload)) throw new Error("连接成功，但模型没有返回消息内容。");
+    return { ok: true, message: "模型调用成功，原生接口可用。" };
+  }
+  const response = await fetch(apiUrl(profile, "chat/completions", profile.options?.chatEndpoint), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authorizationHeaders(profile, apiKey),
+      ...(profile.options?.headers ?? {})
+    },
+    body: JSON.stringify({
+      model: profile.model,
+      messages: [{ role: "user", content: "只回复 OK" }],
+      max_tokens: 4,
+      temperature: 0
+    }),
+    signal: AbortSignal.timeout(20_000)
+  });
+  if (!response.ok) {
+    throw new Error(friendlyHttpError(
+      response.status,
+      await response.text(),
+      response.headers.get("x-request-id") ?? response.headers.get("request-id")
+    ));
+  }
+  const payload = await response.json();
+  if (!extractMessageContent(payload)) throw new Error("连接成功，但模型没有返回兼容的消息内容。");
+  return { ok: true, message: "模型调用成功，接口兼容。" };
+}
+
 export async function testModelProfile(profile, apiKey) {
   if (profile.transport === "local-summary") {
     return { ok: true, message: "本机基础纪要已就绪，完全离线运行，无需联网或密钥。" };
@@ -1221,55 +1375,8 @@ export async function testModelProfile(profile, apiKey) {
     return { ok: true, message: "测试音频转录成功，接口可用。" };
   }
   if (profile.kind === "llm") {
-    if (profile.options?.visualSummaryEnabled) {
-      await generateVisualSummaryWithOpenAICompatible(profile, apiKey, {
-        title: "视觉纪要能力测试",
-        participants: ["测试参与者"],
-        summary: {
-          topics: ["连接验证"],
-          keyPoints: ["模型需要返回受限的视觉纪要 JSON。"],
-          decisions: ["验证 schema 后启用视觉纪要。"],
-          actionItems: [],
-          openQuestions: [],
-          risks: [],
-          nextSteps: ["保存验证结果。"],
-          updatedAt: new Date().toISOString()
-        }
-      });
-      const visualSummaryVerifiedAt = new Date().toISOString();
-      return {
-        ok: true,
-        message: "模型调用与视觉纪要结构验证均成功。",
-        visualSummaryVerifiedAt,
-        visualSummaryVerifiedFingerprint: visualSummaryProfileFingerprint(profile)
-      };
-    }
-    if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
-      const payload = profile.options.apiFlavor === "anthropic"
-        ? await requestAnthropic(profile, apiKey, "只回复 OK", 16)
-        : await requestGemini(profile, apiKey, "只回复 OK", 16);
-      if (!extractMessageContent(payload)) throw new Error("连接成功，但模型没有返回消息内容。");
-      return { ok: true, message: "模型调用成功，原生接口可用。" };
-    }
-    const response = await fetch(apiUrl(profile, "chat/completions", profile.options?.chatEndpoint), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...authorizationHeaders(profile, apiKey),
-        ...(profile.options?.headers ?? {})
-      },
-      body: JSON.stringify({
-        model: profile.model,
-        messages: [{ role: "user", content: "只回复 OK" }],
-        max_tokens: 4,
-        temperature: 0
-      }),
-      signal: AbortSignal.timeout(20_000)
-    });
-    if (!response.ok) throw new Error(`连接失败：HTTP ${response.status} ${await response.text()}`);
-    const payload = await response.json();
-    if (!extractMessageContent(payload)) throw new Error("连接成功，但模型没有返回兼容的消息内容。");
-    return { ok: true, message: "模型调用成功，接口兼容。" };
+    // 视觉纪要验证/聊天探测的网络层失败统一翻译，HTTP 层失败已在内部走 friendlyHttpError。
+    return testLlmProfileConnection(profile, apiKey).catch(rethrowFriendlyNetworkError);
   }
   const response = await fetch(apiUrl(profile, "models"), {
     headers: {
@@ -1278,7 +1385,13 @@ export async function testModelProfile(profile, apiKey) {
     },
     signal: AbortSignal.timeout(15_000)
   });
-  if (!response.ok) throw new Error(`连接失败：HTTP ${response.status} ${await response.text()}`);
+  if (!response.ok) {
+    throw new Error(friendlyHttpError(
+      response.status,
+      await response.text(),
+      response.headers.get("x-request-id") ?? response.headers.get("request-id")
+    ));
+  }
   return { ok: true, message: "连接成功。" };
 }
 

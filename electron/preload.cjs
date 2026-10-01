@@ -1,6 +1,15 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
-const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
+// ipcRenderer.invoke 会把主进程抛出的错误包装成 "Error invoking remote method 'x': <原因>"，
+// 渲染层（尤其设置页的错误反馈）只需要真实原因，这里统一剥掉包装。
+const invoke = async (channel, ...args) => {
+  try {
+    return await ipcRenderer.invoke(channel, ...args);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, ""));
+  }
+};
 
 contextBridge.exposeInMainWorld("meetingAPI", {
   meetings: {
@@ -60,6 +69,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     list: () => invoke("models:list"),
     save: (profile, apiKey) => invoke("models:save", profile, apiKey),
     test: (profile, apiKey) => invoke("models:test", profile, apiKey),
+    listModels: (profile, apiKey) => invoke("models:list-models", profile, apiKey),
     deleteSecret: (secretId) => invoke("models:delete-secret", secretId),
     scanLocal: () => invoke("models:scan-local"),
     scanDiarization: () => invoke("models:scan-diarization"),

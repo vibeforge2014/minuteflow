@@ -21,7 +21,10 @@ import {
   chatWithMeetingContext,
   createChatStreamAccumulator,
   extractChatResponse,
+  friendlyHttpError,
   generateVisualSummaryWithOpenAICompatible,
+  listRemoteModels,
+  parseModelListPayload,
   summarizeWithOpenAICompatible,
   summarizeLocally,
   parseEvidenceTimeMs,
@@ -133,10 +136,14 @@ vi.mock("@ffmpeg-installer/ffmpeg", () => ({
 import {
   deleteVoiceprintPerson,
   listMeetings,
+  listModelProfiles,
   listVoiceprintPeople,
   listVoiceprintSamples,
   loadMeeting,
+  normalizeExclusiveModelProfiles,
+  openDatabase,
   saveMeeting,
+  saveModelProfile,
   saveVoiceprintSample
 } from "../electron/database.mjs";
 
@@ -2125,5 +2132,109 @@ describe("chat 流式请求默认值", () => {
     expect(result.content).toBe("共 2 个行动项。");
     expect(result.reasoning).toBe("先定位行动项");
     fetchMock.mockRestore();
+  });
+});
+
+describe("模型设置易用性：模型列表拉取与错误翻译", () => {
+  const remoteProfile = (changes: Partial<ModelProfile>): ModelProfile => ({
+    name: "智谱 GLM",
+    kind: "llm",
+    transport: "openai-chat",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-5.3",
+    options: {},
+    enabled: true,
+    ...changes
+  });
+
+  it("parses OpenAI-shaped, gateway-shaped and string model lists", () => {
+    expect(parseModelListPayload({ data: [{ id: "glm-5.3" }, { id: "qwen-plus" }] })).toEqual(["glm-5.3", "qwen-plus"]);
+    expect(parseModelListPayload({ models: ["whisper-1"] })).toEqual(["whisper-1"]);
+    expect(parseModelListPayload(["a", " b ", ""])).toEqual(["a", "b"]);
+    expect(parseModelListPayload({ object: "list" })).toEqual([]);
+    expect(parseModelListPayload(null)).toEqual([]);
+  });
+
+  it("listRemoteModels returns null for native protocols and hits {base}/models otherwise", async () => {
+    expect(await listRemoteModels(remoteProfile({ options: { apiFlavor: "anthropic" } }), "k")).toBeNull();
+    expect(await listRemoteModels(remoteProfile({ options: { apiFlavor: "gemini" } }), "k")).toBeNull();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(
+      JSON.stringify({ data: [{ id: "glm-5.3" }, { id: "glm-5.2" }] }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    ));
+    const models = await listRemoteModels(remoteProfile({}), "k");
+    expect(models).toEqual(["glm-5.3", "glm-5.2"]);
+    // 端点沿用 apiUrl 约定：已有 /v1 前缀直接拼 /models，密钥走 Bearer 头。
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("https://open.bigmodel.cn/api/paas/v4/models");
+    expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer k");
+    fetchMock.mockRestore();
+  });
+
+  it("listRemoteModels maps HTTP failures to friendly errors with the gateway request id", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(
+      JSON.stringify({ error: { message: "login fail: bad key" }, request_id: "req-123" }),
+      { status: 401, headers: { "content-type": "application/json" } }
+    ));
+    await expect(listRemoteModels(remoteProfile({}), "bad")).rejects.toThrow(/密钥无效或无权限.*login fail: bad key.*请求标识 req-123/);
+    fetchMock.mockRestore();
+  });
+
+  it("friendlyHttpError distinguishes auth, not-found, rate-limit and server causes", () => {
+    expect(friendlyHttpError(401, "", null)).toMatch(/密钥无效或无权限.*（HTTP 401）$/);
+    expect(friendlyHttpError(404, "", null)).toMatch(/接口地址或模型名不存在.*（HTTP 404）$/);
+    expect(friendlyHttpError(429, "", null)).toMatch(/请求过于频繁或额度不足.*（HTTP 429）$/);
+    expect(friendlyHttpError(502, "upstream error", "req-x")).toMatch(/服务端暂时不可用.*（HTTP 502） · upstream error · 请求标识 req-x/);
+    // JSON body 里的 error.message 优先于原文展示；未知状态码仍保留数字。
+    expect(friendlyHttpError(400, JSON.stringify({ error: { message: "model not found: foo" } }), null)).toMatch(/HTTP 400 · model not found: foo/);
+  });
+
+  it("testModelProfile surfaces friendly auth errors instead of a raw JSON blob", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(
+      JSON.stringify({ error: { message: "login fail" } }),
+      { status: 401, headers: { "content-type": "application/json", "x-request-id": "req-9" } }
+    ));
+    await expect(testModelProfile(remoteProfile({}), "bad")).rejects.toThrow(/密钥无效或无权限.*login fail.*请求标识 req-9/);
+    fetchMock.mockRestore();
+  });
+});
+
+describe("模型档案单选「正在使用」", () => {
+  const llmProfile = (id: string, name: string): ModelProfile => ({
+    id, name, kind: "llm", transport: "openai-chat",
+    baseUrl: "https://api.example.com/v1", model: "m", options: {}, enabled: true
+  });
+
+  it("saving an enabled profile deactivates siblings of the same kind only", () => {
+    saveModelProfile(llmProfile("usability-p1", "服务 A"));
+    saveModelProfile(llmProfile("usability-p2", "服务 B"));
+    // 保存 B（启用）后同类只剩 B；stt 档案不受影响。
+    const stt = { ...llmProfile("usability-s1", "转录服务"), kind: "stt" as const, transport: "openai-audio" as const };
+    saveModelProfile(stt);
+    saveModelProfile(llmProfile("usability-p1", "服务 A"));
+    const profiles = listModelProfiles().filter((profile) => profile.id.startsWith("usability-"));
+    expect(profiles.find((profile) => profile.id === "usability-p1")?.enabled).toBe(true);
+    expect(profiles.find((profile) => profile.id === "usability-p2")?.enabled).toBe(false);
+    expect(profiles.find((profile) => profile.id === "usability-s1")?.enabled).toBe(true);
+  });
+
+  it("saving a disabled profile never steals the active slot", () => {
+    saveModelProfile(llmProfile("usability-p3", "服务 C"));
+    saveModelProfile({ ...llmProfile("usability-p3", "服务 C"), enabled: false });
+    const active = listModelProfiles().filter((profile) => profile.kind === "llm" && profile.enabled);
+    // 停用保存不抢「正在使用」位。
+    expect(active.some((profile) => profile.id === "usability-p3")).toBe(false);
+  });
+
+  it("startup migration keeps only the first enabled profile per kind", () => {
+    // 直接写库模拟历史遗留的「同类多个同时启用」，迁移应按运行时的名称序保留第一个。
+    const db = openDatabase();
+    db.prepare("UPDATE model_profiles SET enabled = 1 WHERE kind = 'llm' AND id LIKE 'usability-%'").run();
+    const before = db.prepare("SELECT COUNT(*) AS n FROM model_profiles WHERE kind = 'llm' AND enabled = 1 AND id LIKE 'usability-%'").get();
+    expect(before.n).toBeGreaterThanOrEqual(2);
+    normalizeExclusiveModelProfiles();
+    const remaining = db.prepare("SELECT id FROM model_profiles WHERE kind = 'llm' AND enabled = 1 AND id LIKE 'usability-%' ORDER BY name").all();
+    expect(remaining.length).toBe(1);
+    expect(remaining[0].id).toBe("usability-p1"); // 名称序：服务 A
   });
 });

@@ -428,6 +428,18 @@ const browserApi: MeetingAPI = {
       }
       return { ok: true, message: "浏览器预览配置有效；Electron 中会发起真实连接测试。" };
     },
+    async listModels(profile) {
+      // 预览孪生：返回与该档案预设相称的示例列表（含当前模型），让下拉交互可演示。
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      if (profile.options.apiFlavor === "anthropic") {
+        return { models: ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-6"] };
+      }
+      if (profile.options.apiFlavor === "gemini") {
+        return { models: ["gemini-3.6-flash", "gemini-3.6-pro", "gemini-3.6-flash-lite"] };
+      }
+      const seed = profile.model ? [profile.model] : [];
+      return { models: [...new Set([...seed, "gpt-4.1-mini", "deepseek-chat", "qwen-plus", "kimi-k2.6"])] };
+    },
     async deleteSecret() {},
     async scanLocal() {
       return { models: [], runtimes: {} };

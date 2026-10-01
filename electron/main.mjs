@@ -45,6 +45,7 @@ import {
   loadAudioAsset,
   markRunningJobsInterrupted,
   markInterruptedRecordings,
+  normalizeExclusiveModelProfiles,
   renameVoiceprintPerson,
   restoreMeeting,
   saveAudioAsset,
@@ -59,6 +60,7 @@ import {
   chatWithMeetingContext,
   generateVisualSummaryWithOpenAICompatible,
   isVisualSummaryProfileVerified,
+  listRemoteModels,
   summarizeLocally,
   summarizeWithOpenAICompatible,
   testModelProfile,
@@ -1121,6 +1123,12 @@ function registerIpc() {
       : profile;
     return testModelProfile(resolved, apiKey || readSecret(profile.secretId));
   });
+  // models:list-models — 拉取在线服务的可用模型列表，设置页模型下拉调用；
+  // 未保存密钥时自动回退到已存密钥，原生协议返回 null 由渲染层退回静态建议。
+  trustedHandle("models:list-models", async (_event, profile, apiKey) => {
+    const models = await listRemoteModels(profile, apiKey || readSecret(profile.secretId));
+    return { models };
+  });
   // models:delete-secret — 删除指定凭据（删除/切换档案时调用，避免密钥残留）。
   trustedHandle("models:delete-secret", (_event, secretId) => deleteSecret(secretId));
   // models:scan-local — 扫描常见目录发现已有本地 Whisper 模型（下载目录、
@@ -1430,6 +1438,8 @@ app.whenReady().then(async () => {
   // 进行中的导入任务复位为 queued 待重试。
   markInterruptedRecordings();
   markRunningJobsInterrupted();
+  // 历史多启用档案收敛为同类单选「正在使用」（保留实际生效的那个，其余停用不删）。
+  normalizeExclusiveModelProfiles();
   // 导入队列的任务状态变化经 imports:job-updated 推送给渲染层（后台执行，不抢焦点）。
   configureImportQueue({
     notify: (job) => {

@@ -720,6 +720,8 @@ export interface MeetingAPI {
       visualSummaryVerifiedAt?: string;
       visualSummaryVerifiedFingerprint?: string;
     }>;
+    /** 拉取在线服务的可用模型列表（OpenAI 兼容与 Ollama）；原生协议返回 null 表示不支持。 */
+    listModels(profile: ModelProfile, apiKey?: string): Promise<{ models: string[] | null }>;
     deleteSecret(secretId: string): Promise<void>;
     scanLocal(): Promise<LocalModelScanResult>;
     /** 扫描本机已有的说话人分离/声纹 ONNX 模型（声纹设置「检测本机」入口）。 */

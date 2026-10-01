@@ -940,40 +940,80 @@ export function listModelProfiles() {
     }));
 }
 
-/** 新增或更新模型档案（models:save 调用；密钥本身存于 secrets.mjs，这里只存 secretId 引用）。 */
+/** 新增或更新模型档案（models:save 调用；密钥本身存于 secrets.mjs，这里只存 secretId 引用）。
+ *  同类档案互斥启用：保存启用档案时在同一事务里停用兄弟档案，让「保存/切换即生效」
+ *  成为唯一心智模型——运行时对每个 kind 只取唯一启用的档案。 */
 export function saveModelProfile(profile) {
   const db = openDatabase();
   const timestamp = nowIso();
   const id = profile.id || randomUUID();
-  db.prepare(`
-    INSERT INTO model_profiles(
-      id, name, kind, transport, base_url, model, secret_id, options_json,
-      enabled, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      kind = excluded.kind,
-      transport = excluded.transport,
-      base_url = excluded.base_url,
-      model = excluded.model,
-      secret_id = excluded.secret_id,
-      options_json = excluded.options_json,
-      enabled = excluded.enabled,
-      updated_at = excluded.updated_at
-  `).run(
-    id,
-    profile.name,
-    profile.kind,
-    profile.transport,
-    profile.baseUrl || null,
-    profile.model || null,
-    profile.secretId || null,
-    JSON.stringify(profile.options ?? {}),
-    profile.enabled === false ? 0 : 1,
-    timestamp,
-    timestamp
-  );
-  return { ...profile, id };
+  const enabled = profile.enabled === false ? 0 : 1;
+  // node:sqlite 没有 better-sqlite3 式的 transaction() 包装，用显式 BEGIN/COMMIT，
+  // 失败回滚，保证「写档案 + 互斥停用兄弟档案」是原子操作。
+  db.exec("BEGIN");
+  try {
+    db.prepare(`
+      INSERT INTO model_profiles(
+        id, name, kind, transport, base_url, model, secret_id, options_json,
+        enabled, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        kind = excluded.kind,
+        transport = excluded.transport,
+        base_url = excluded.base_url,
+        model = excluded.model,
+        secret_id = excluded.secret_id,
+        options_json = excluded.options_json,
+        enabled = excluded.enabled,
+        updated_at = excluded.updated_at
+    `).run(
+      id,
+      profile.name,
+      profile.kind,
+      profile.transport,
+      profile.baseUrl || null,
+      profile.model || null,
+      profile.secretId || null,
+      JSON.stringify(profile.options ?? {}),
+      enabled,
+      timestamp,
+      timestamp
+    );
+    if (enabled) {
+      db.prepare("UPDATE model_profiles SET enabled = 0, updated_at = ? WHERE kind = ? AND id != ? AND enabled != 0")
+        .run(timestamp, profile.kind, id);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return { ...profile, id, enabled: Boolean(enabled) };
+}
+
+/** 启动迁移：历史数据里同类多个档案可能同时启用，而运行时只按名称排序取第一个；
+ *  显式保留实际生效的那个、停用其余，与单选「正在使用」语义对齐（不删除任何数据）。 */
+export function normalizeExclusiveModelProfiles() {
+  const db = openDatabase();
+  const rows = db.prepare("SELECT id, kind FROM model_profiles WHERE enabled != 0 ORDER BY kind, name").all();
+  const seenKinds = new Set();
+  const staleIds = [];
+  for (const row of rows) {
+    if (seenKinds.has(row.kind)) staleIds.push(row.id);
+    else seenKinds.add(row.kind);
+  }
+  if (!staleIds.length) return [];
+  const deactivate = db.prepare("UPDATE model_profiles SET enabled = 0 WHERE id = ?");
+  db.exec("BEGIN");
+  try {
+    staleIds.forEach((id) => deactivate.run(id));
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return staleIds;
 }
 
 /** 应用启动时调用：把仍处于 recording 状态的会议标记为 interrupted（上次进程未正常结束录音的兜底）。 */

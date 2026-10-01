@@ -1190,6 +1190,8 @@ button {
 .editor-toolbar button:active,
 .settings-nav button:active,
 .model-catalog__section button:active,
+.model-catalog__row-main:active,
+.model-picker__option:active,
 .model-catalog__custom:active,
 .new-meeting:active,
 .readiness-item ~ .preparation-start:active,
@@ -3482,6 +3484,213 @@ html[data-surface="permission-helper"] #root {
 .model-catalog__section small { color: #96908c; font-size: 8px; }
 .model-catalog__section > button > svg { color: var(--green); }
 
+/* 已保存档案行：主体按钮 + 「正在使用」单选开关（同类互斥，见 database.saveModelProfile）。 */
+.model-catalog__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-catalog__row-main {
+  min-width: 0;
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 8px;
+  color: #373230;
+  background: #fff;
+  border: 1px solid #e7e4e1;
+  border-radius: 10px;
+  text-align: left;
+}
+
+.model-catalog__row-main:hover { border-color: #e8c7bd; background: #fffaf7; }
+.model-catalog__row.is-selected .model-catalog__row-main {
+  border-color: #e59a85;
+  background: #fff8f4;
+  box-shadow: 0 0 0 2px rgba(231, 111, 81, .08);
+}
+.model-catalog__row-main > span:nth-child(2) {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.model-catalog__row-main strong { font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.model-catalog__row-main small { color: #96908c; font-size: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+.model-catalog__badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.model-badge {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.model-badge--active { color: #c4573b; background: #ffe9de; }
+.model-badge--visual { color: #3c7a52; background: #e2f2e6; }
+.model-badge--key { color: #8a8480; background: #f1efec; }
+
+.model-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 19px;
+  padding: 0;
+  border-radius: 999px;
+  background: #ddd8d3;
+  border: 1px solid #d4cec9;
+  transition: background var(--motion-fast, .18s ease), border-color var(--motion-fast, .18s ease);
+}
+
+.model-switch__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(31, 36, 43, .18);
+  transition: transform var(--motion-fast, .18s ease);
+}
+
+.model-switch.is-on { background: var(--accent, #e76f51); border-color: var(--accent, #e76f51); }
+.model-switch.is-on .model-switch__knob { transform: translateX(13px); }
+.model-switch:disabled { opacity: .55; cursor: default; }
+.model-switch:active:not(:disabled) { transform: scale(.96); }
+
+/* 模型下拉：输入框 + 获取按钮 + 浮层菜单（推荐置顶、远端列表按需过滤）。 */
+.model-picker {
+  position: relative;
+  min-width: 0;
+}
+
+.model-picker input { padding-right: 32px; }
+
+.model-picker__trigger {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: #8a8480;
+  background: transparent;
+  border: none;
+}
+
+.model-picker__trigger:hover { color: #373230; background: #f6f1ec; }
+.model-picker__trigger:active { transform: translateY(-50%) scale(.94); }
+.model-picker__trigger:disabled { opacity: .6; }
+
+.model-picker__spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid #e7ddd5;
+  border-top-color: var(--accent, #e76f51);
+  animation: model-picker-spin .8s linear infinite;
+}
+
+@keyframes model-picker-spin { to { transform: rotate(360deg); } }
+
+.model-picker__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  max-height: 248px;
+  overflow-y: auto;
+  padding: 5px;
+  background: #fff;
+  border: 1px solid #eadfd8;
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(31, 36, 43, .12);
+  transform-origin: top center;
+  animation: model-picker-menu-in var(--motion-fast, .18s ease);
+}
+
+@keyframes model-picker-menu-in {
+  from { opacity: 0; transform: scale(.97) translateY(-3px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.model-picker__option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  font-size: 10px;
+  color: #373230;
+  background: transparent;
+  border: none;
+  text-align: left;
+}
+
+.model-picker__option > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.model-picker__option:hover { background: #fff6f1; }
+.model-picker__option.is-current { background: #fff2ec; color: #1f242b; font-weight: 600; }
+.model-picker__option.is-recommended > small {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #ffe9de;
+  color: #c4573b;
+  font-size: 8px;
+  font-weight: 600;
+}
+
+.model-picker__divider { height: 1px; margin: 4px 6px; background: #f0ebe6; }
+
+.model-picker__empty {
+  padding: 12px 10px;
+  font-size: 9px;
+  color: #96908c;
+  text-align: center;
+}
+
+.model-picker__meta {
+  padding: 6px 10px 4px;
+  font-size: 8px;
+  color: #a8a29d;
+  border-top: 1px solid #f4efeb;
+}
+
+.model-picker__hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 9px;
+  line-height: 1.5;
+  color: #8a8480;
+}
+
 .model-catalog__custom {
   flex: 0 0 auto;
   min-height: 38px;
@@ -5726,10 +5935,13 @@ html[data-surface="permission-helper"] #root {
   .connection-status,
   .advanced-provider-options[open] > .field,
   .advanced-provider-options[open] > div,
-  .visual-capability-setting > span.is-verified {
+  .visual-capability-setting > span.is-verified,
+  .model-picker__menu {
     animation: content-fade-enter 140ms ease-out both !important;
     transform: none !important;
   }
+
+  .model-switch__knob { transition: none !important; }
 
   .visual-capability-setting input[type="checkbox"]:active,
   .profile-editor input[type="checkbox"]:active,
@@ -5742,6 +5954,9 @@ html[data-surface="permission-helper"] #root {
   .icon-button:active,
   .settings-nav button:active,
   .model-catalog__section button:active,
+  .model-catalog__row-main:active,
+  .model-switch:active:not(:disabled),
+  .model-picker__trigger:active,
   .new-meeting:active,
   .meeting-row-wrap:active .meeting-row:not(.is-selected) {
     transform: none !important;

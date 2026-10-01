@@ -5,7 +5,7 @@
  * 在线服务预设（国内外厂商 + New API 网关）一键预填端点/接口格式/推荐模型，通常只需填密钥。
  * 实际的模型调用与本地运行时解析在 electron/services/providers.mjs 与 local-models.mjs。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowClockwise,
   CaretDown,
@@ -47,6 +47,16 @@ import type {
 
 /** 四种本地 Whisper 运行时（whisper.cpp GGML/GGUF、Python .pt、CT2、MLX）统一呈现为一个「本地 Whisper」。 */
 const LOCAL_WHISPER_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"] as const;
+
+/** 视觉纪要验证指纹（与主进程 visualSummaryProfileFingerprint 同构）：
+ *  传输协议/地址/模型/兼容协议/聊天端点任一变化即视为未验证，保存或测试时需重新验证。 */
+const visualFingerprint = (profile: ModelProfile) => JSON.stringify({
+  transport: profile.transport,
+  baseUrl: (profile.baseUrl || "").trim().replace(/\/+$/, ""),
+  model: (profile.model || "").trim(),
+  apiFlavor: profile.options.apiFlavor ?? "openai",
+  chatEndpoint: profile.options.chatEndpoint ?? ""
+});
 const isLocalWhisperTransport = (transport: string | undefined) =>
   !!transport && (LOCAL_WHISPER_TRANSPORTS as readonly string[]).includes(transport);
 /** 新建档案的空白模板（自定义服务从这里开始）。 */
@@ -121,7 +131,7 @@ const providerPresets: Record<string, Partial<ModelProfile>> = {
     kind: "llm",
     transport: "openai-chat",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    model: "glm-5.2"
+    model: "glm-5.3"
   },
   kimi: {
     name: "Moonshot Kimi",
@@ -135,7 +145,7 @@ const providerPresets: Record<string, Partial<ModelProfile>> = {
     kind: "llm",
     transport: "openai-chat",
     baseUrl: "https://api.minimaxi.com/v1",
-    model: "MiniMax-M2.7",
+    model: "minimax-m3",
     options: { timeoutMs: 60_000, chatEndpoint: "text/chatcompletion_v2" }
   },
   siliconflow: {
@@ -283,6 +293,14 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
   /** 配置面板“世代”：目录里切换选中服务（预设/已保存/自定义）时 +1，
    *  驱动编辑器面板重放进场过渡；字段编辑不递增，打字不会打断输入。 */
   const [editorGeneration, setEditorGeneration] = useState(0);
+  /** 模型下拉：远端列表（随服务地址/协议变化失效）、拉取状态与菜单开合。 */
+  const [modelList, setModelList] = useState<string[] | null>(null);
+  const [modelListBusy, setModelListBusy] = useState(false);
+  const [modelListError, setModelListError] = useState<string | null>(null);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  /** 已保存列表「正在使用」开关的行级忙碌态，防止连点。 */
+  const [switchBusy, setSwitchBusy] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<AppUpdateCheckResult | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const dialogRef = useDialogFocus<HTMLDivElement>(open, {
@@ -343,6 +361,52 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
       });
     });
   }, [open, tab]);
+  // 服务地址/协议/端点变化后旧列表作废；切预设/切档案（editorGeneration）同样重置。
+  useEffect(() => {
+    setModelList(null);
+    setModelListError(null);
+    setModelMenuOpen(false);
+  }, [editorGeneration, editing?.baseUrl, editing?.options?.apiFlavor, editing?.options?.chatEndpoint]);
+
+  // 模型下拉打开时点外部关闭（与系统 select 行为一致）。
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (modelMenuRef.current && !modelMenuRef.current.contains(event.target as Node)) {
+        setModelMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [modelMenuOpen]);
+
+  // 用名称+transport 反查当前档案命中的预设（驱动下拉框回显）；pythonWhisper 归并为统一的 whisper 预设。
+  const matchedPresetKey = editing
+    ? Object.entries(providerPresets).find(([, preset]) => preset.name === editing.name && preset.transport === editing.transport)?.[0] ?? ""
+    : "";
+  const activePresetKey = matchedPresetKey === "pythonWhisper" ? "whisper" : matchedPresetKey;
+
+  /** 模型下拉的候选：预设推荐（含当前值）置顶带徽标，其余为远端列表按字母序、随输入过滤。 */
+  const modelSuggestions = useMemo(() => {
+    const recommended: string[] = [];
+    const preset = activePresetKey ? providerPresets[activePresetKey as keyof typeof providerPresets] : undefined;
+    if (preset?.model) recommended.push(preset.model);
+    const current = (editing?.model ?? "").trim();
+    if (current && !recommended.includes(current)) recommended.push(current);
+    const filter = current.toLowerCase();
+    const matches = (id: string) => !filter || id.toLowerCase().includes(filter);
+    return {
+      recommended: recommended.filter(matches).map((id) => ({ id, recommended: true })),
+      fetched: (modelList ?? [])
+        .filter((id) => !recommended.includes(id))
+        .sort((a, b) => a.localeCompare(b))
+        .filter(matches)
+        .slice(0, 60)
+        .map((id) => ({ id, recommended: false })),
+      total: modelList?.length ?? 0
+    };
+  }, [activePresetKey, editing?.model, modelList]);
+
   if (!mounted) return null;
 
   /** 从预设开始编辑：套用预设字段并清空密钥/状态。 */
@@ -384,17 +448,82 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
     return saved;
   };
 
+  /** 拉取在线服务的可用模型列表（OpenAI 兼容与 Ollama）；已有缓存时直接展开菜单。 */
+  const fetchModelList = async () => {
+    if (!editing || modelListBusy) return;
+    if (modelList) {
+      setModelMenuOpen((open) => !open);
+      return;
+    }
+    setModelListBusy(true);
+    setModelListError(null);
+    try {
+      const result = await api.models.listModels(editing, apiKey.trim() || undefined);
+      if (result.models === null) {
+        setModelListError("该服务的原生协议暂不支持自动获取，可直接输入模型名。");
+        return;
+      }
+      if (!result.models.length) {
+        setModelListError("服务没有返回任何模型，可直接输入模型名。");
+        return;
+      }
+      setModelList(result.models);
+      setModelMenuOpen(true);
+    } catch (error) {
+      setModelListError(`未能获取列表：${error instanceof Error ? error.message : "网络错误"}。可直接输入模型名。`);
+    } finally {
+      setModelListBusy(false);
+    }
+  };
+
+  /** 已保存档案的「正在使用」单选切换：主进程同 kind 互斥停用兄弟档案，这里整表刷新反映。 */
+  const toggleActiveProfile = async (profile: ModelProfile) => {
+    if (!profile.id || switchBusy) return;
+    setSwitchBusy(profile.id);
+    try {
+      await api.models.save({ ...profile, enabled: !profile.enabled });
+      await loadProfiles();
+      if (editing?.id === profile.id) setEditing({ ...editing, enabled: !profile.enabled });
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "切换失败");
+    } finally {
+      setSwitchBusy(null);
+    }
+  };
+
   /** 保存档案：密钥随请求送到主进程安全存储，渲染层不再持有明文。
-   *  保存成功即关闭弹窗——收回动画就是“已保存”的反馈；失败留在弹窗内展示原因。 */
+   *  勾选了视觉纪要但未通过真实验证时，保存过程顺带完成验证——失败留在弹窗内给出原因，
+   *  杜绝「已保存却静默不生效」；保存成功即关闭弹窗，收回动画就是“已保存”的反馈。 */
   const saveProfile = async () => {
     if (!editing) return;
+    let toSave = editing;
+    const key = apiKey.trim();
     setBusy(true);
     setStatus(null);
     try {
-      const saved = mergeSavedProfile(await api.models.save(editing, apiKey || undefined));
+      if (
+        toSave.kind === "llm"
+        && toSave.options.visualSummaryEnabled
+        && toSave.options.visualSummaryVerifiedFingerprint !== visualFingerprint(toSave)
+      ) {
+        setStatus("正在验证视觉纪要…");
+        const result = await api.models.test(toSave, key || undefined);
+        toSave = {
+          ...toSave,
+          options: {
+            ...toSave.options,
+            visualSummaryVerifiedAt: result.visualSummaryVerifiedAt,
+            visualSummaryVerifiedFingerprint: result.visualSummaryVerifiedFingerprint
+          }
+        };
+        setStatus(null);
+      }
+      const saved = mergeSavedProfile(await api.models.save(toSave, key || undefined));
       setEditing(saved);
       setApiKey("");
       setStatus("配置已安全保存。");
+      // 保存的档案即「正在使用」：主进程已互斥停用兄弟档案，整表刷新让目录立即反映。
+      if (saved.enabled !== false) await loadProfiles();
       onClose();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "保存失败");
@@ -411,7 +540,7 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
     // 只禁用按钮没有任何文字变化，用户会以为点击没生效。
     setStatus("正在测试连接…");
     try {
-      const result = await api.models.test(editing, apiKey || undefined);
+      const result = await api.models.test(editing, apiKey.trim() || undefined);
       if (result.visualSummaryVerifiedAt && result.visualSummaryVerifiedFingerprint) {
         const verified: ModelProfile = {
           ...editing,
@@ -470,12 +599,6 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
     : api.system.platform === "darwin"
       ? "应用只接受 HTTPS 官网清单和官方发布地址。下载完成后，请打开 DMG 并将新版本拖入“应用程序”。"
       : "应用只接受 HTTPS 官网清单和官方发布地址。";
-
-  // 用名称+transport 反查当前档案命中的预设（驱动下拉框回显）；pythonWhisper 归并为统一的 whisper 预设。
-  const matchedPresetKey = editing
-    ? Object.entries(providerPresets).find(([, preset]) => preset.name === editing.name && preset.transport === editing.transport)?.[0] ?? ""
-    : "";
-  const activePresetKey = matchedPresetKey === "pythonWhisper" ? "whisper" : matchedPresetKey;
 
   return (
     <div className={`modal-backdrop ${closing ? "is-closing" : ""}`} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -538,9 +661,31 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                       <button className={editing?.transport === "sherpa-onnx" ? "is-selected" : ""} onClick={() => startPreset("sherpa")}><span className="profile-icon"><FingerprintSimple size={18} /></span><span><strong>本地声纹识别</strong><small>多人会议区分发言人 · 数据不出本机</small></span>{editing?.transport === "sherpa-onnx" && <CheckCircle size={16} weight="fill" />}</button>
                     </div>
                   </>)}
-                  {!!profiles.length && <div className="model-catalog__section"><span>已保存</span>{profiles.filter((profile) => profile.kind === (tab === "llm" ? "llm" : "stt") || (tab === "transcription" && profile.kind === "diarization")).map((profile) => (
-                    <button key={profile.id} className={editing?.id === profile.id ? "is-selected" : ""} onClick={() => { setEditing(normalizeLegacyProviderProfile(profile)); setApiKey(""); setStatus(null); setEditorGeneration((value) => value + 1); }}><span className="profile-icon">{profile.kind === "stt" ? "STT" : profile.kind === "llm" ? "LLM" : "SPK"}</span><span><strong>{profile.name}</strong><small>{profile.kind === "diarization" ? (profile.options?.segmentationModelPath && profile.options?.embeddingModelPath ? "声纹识别已就绪" : "待补齐模型") : (profile.model || "尚未选择模型")}</small></span>{profile.enabled && <CheckCircle size={16} weight="fill" />}</button>
-                  ))}</div>}
+                  {!!profiles.length && <div className="model-catalog__section"><span>已保存</span>{profiles.filter((profile) => profile.kind === (tab === "llm" ? "llm" : "stt") || (tab === "transcription" && profile.kind === "diarization")).map((profile) => {
+                    const visualVerified = Boolean(profile.options?.visualSummaryEnabled && profile.options?.visualSummaryVerifiedAt);
+                    return (
+                      <div key={profile.id} className={`model-catalog__row ${editing?.id === profile.id ? "is-selected" : ""}`}>
+                        <button className="model-catalog__row-main" onClick={() => { setEditing(normalizeLegacyProviderProfile(profile)); setApiKey(""); setStatus(null); setEditorGeneration((value) => value + 1); }}>
+                          <span className="profile-icon">{profile.kind === "stt" ? "STT" : profile.kind === "llm" ? "LLM" : "SPK"}</span>
+                          <span><strong>{profile.name}</strong><small>{profile.kind === "diarization" ? (profile.options?.segmentationModelPath && profile.options?.embeddingModelPath ? "声纹识别已就绪" : "待补齐模型") : (profile.model || "尚未选择模型")}</small></span>
+                          <span className="model-catalog__badges">
+                            {profile.enabled && <span className="model-badge model-badge--active">使用中</span>}
+                            {visualVerified && <span className="model-badge model-badge--visual" title="视觉纪要已通过真实验证">视觉✓</span>}
+                            {profile.secretId && <span className="model-badge model-badge--key" title="已安全保存密钥">钥</span>}
+                          </span>
+                        </button>
+                        <button
+                          className={`model-switch ${profile.enabled ? "is-on" : ""}`}
+                          role="switch"
+                          aria-checked={profile.enabled}
+                          aria-label={profile.enabled ? `停用 ${profile.name}` : `将 ${profile.name} 设为正在使用`}
+                          title={profile.enabled ? "正在使用 · 点击停用" : "点击设为正在使用"}
+                          disabled={switchBusy === profile.id}
+                          onClick={() => void toggleActiveProfile(profile)}
+                        ><span className="model-switch__knob" /></button>
+                      </div>
+                    );
+                  })}</div>}
                   <button className="model-catalog__custom" onClick={startCustomProfile}><Plus size={15} />自定义服务</button>
                 </aside>
                 {editing && (
@@ -577,7 +722,47 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                           <label className="field"><span>名称</span><input value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></label>
                           <div className="field"><span>用于</span><div className="readonly-control">{editing.kind === "diarization" ? "多人会议中区分发言人" : tab === "llm" ? "会议总结与行动项" : "会议语音转文字"}</div></div>
                           <div className="field"><span>连接方式</span><div className="readonly-control">{editing.transport === "sherpa-onnx" ? "内置引擎 · 全程在本机运行，无需联网" : editing.transport === "local-summary" ? "本机离线规则引擎" : isLocalWhisperTransport(editing.transport) ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
-                      {!isLocalWhisperTransport(editing.transport) && editing.transport !== "local-summary" && editing.transport !== "sherpa-onnx" && <label className="field"><span>模型</span><input value={editing.model} onChange={(event) => setEditing({ ...editing, model: event.target.value, options: invalidateVisualVerification(editing.options) })} placeholder={tab === "llm" ? "例如 gpt-4.1-mini" : "例如 whisper-1"} /></label>}
+                          {!isLocalWhisperTransport(editing.transport) && editing.transport !== "local-summary" && editing.transport !== "sherpa-onnx" && (
+                            <div className="field field--model-picker" ref={modelMenuRef}>
+                              <span>模型</span>
+                              <div className={`model-picker ${modelMenuOpen ? "is-open" : ""}`}>
+                                <input
+                                  value={editing.model}
+                                  onChange={(event) => setEditing({ ...editing, model: event.target.value, options: invalidateVisualVerification(editing.options) })}
+                                  onFocus={() => { if (modelList) setModelMenuOpen(true); }}
+                                  onKeyDown={(event) => { if (event.key === "Escape") setModelMenuOpen(false); }}
+                                  placeholder={tab === "llm" ? "点击右侧获取列表，或直接输入" : "例如 whisper-1"}
+                                />
+                                {editing.options.apiFlavor !== "anthropic" && editing.options.apiFlavor !== "gemini" && (
+                                  <button type="button" className="model-picker__trigger" onClick={() => void fetchModelList()} disabled={modelListBusy} aria-label={modelList ? "展开或收起模型列表" : "获取可用模型列表"} title={modelList ? "展开/收起模型列表" : "从服务获取可用模型列表"}>
+                                    {modelListBusy ? <span className="model-picker__spinner" aria-hidden="true" /> : <CaretDown size={14} />}
+                                  </button>
+                                )}
+                                {modelMenuOpen && (
+                                  <div className="model-picker__menu" role="listbox" aria-label="可用模型">
+                                    {modelSuggestions.recommended.map((item) => (
+                                      <button key={`rec-${item.id}`} type="button" role="option" aria-selected={item.id === editing.model} className={`model-picker__option is-recommended ${item.id === editing.model ? "is-current" : ""}`} onClick={() => { setEditing({ ...editing, model: item.id, options: invalidateVisualVerification(editing.options) }); setModelMenuOpen(false); }}>
+                                        <span>{item.id}</span><small>推荐</small>
+                                      </button>
+                                    ))}
+                                    {!!modelSuggestions.recommended.length && !!modelSuggestions.fetched.length && <div className="model-picker__divider" />}
+                                    {modelSuggestions.fetched.map((item) => (
+                                      <button key={item.id} type="button" role="option" aria-selected={item.id === editing.model} className={`model-picker__option ${item.id === editing.model ? "is-current" : ""}`} onClick={() => { setEditing({ ...editing, model: item.id, options: invalidateVisualVerification(editing.options) }); setModelMenuOpen(false); }}>
+                                        <span>{item.id}</span>
+                                      </button>
+                                    ))}
+                                    {!modelSuggestions.recommended.length && !modelSuggestions.fetched.length && (
+                                      <div className="model-picker__empty">{modelList ? "没有匹配的模型，将按输入内容保存。" : "点击右侧按钮获取可用模型列表。"}</div>
+                                    )}
+                                    {modelList && !!modelSuggestions.total && (
+                                      <div className="model-picker__meta">服务返回 {modelSuggestions.total} 个模型{modelSuggestions.fetched.length < modelSuggestions.total ? `，显示前 ${modelSuggestions.fetched.length} 个匹配项` : ""}</div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                              {modelListError && <small className="model-picker__hint">{modelListError}</small>}
+                            </div>
+                          )}
                     </div>
                     {editing.transport === "local-summary" ? (
                       <div className="field"><span>说明</span><div className="readonly-control">完全离线的规则纪要：从转录中提取要点、决策、行动项与风险，不发起任何网络请求，适合无网环境或隐私优先场景；追求更高质量可另配在线总结服务。</div></div>
@@ -642,7 +827,11 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                           <span><strong>启用视觉纪要</strong><small>最终纪要完成后，再用结构化内容生成可分享的信息图。</small></span>
                         </label>
                         <span className={editing.options.visualSummaryVerifiedAt ? "is-verified" : ""}>
-                          {editing.options.visualSummaryVerifiedAt ? "已通过结构验证" : "开启后请测试连接"}
+                          {editing.options.visualSummaryVerifiedAt
+                            ? "已通过结构验证"
+                            : editing.options.visualSummaryEnabled
+                              ? "保存或测试时自动验证"
+                              : "开启后保存时自动验证"}
                         </span>
                       </section>
                     )}
