@@ -1,10 +1,11 @@
 /**
- * 说话人分离（Electron 主进程 / 服务层）。
- * 基于 sherpa-onnx-node（Pyannote segmentation + 3D-Speaker embedding + 聚类）
- * 对整段音频做离线分离，并把轮次标签套回转录段落。
- * 主要导出：diarizeWithSherpa、applyDiarization。
- * 被 services/import-queue.mjs 的导入流水线（diarizing 阶段）调用。
- * 副作用：拉起 ffmpeg 子进程、写临时 WAV。
+ * 说话人分离服务（Electron 主进程侧门面）：
+ * - diarizeWithSherpa：整段离线分离。重推理在独立 utilityProcess
+ *   （diarization-worker.mjs）中执行，主进程事件循环不再被长推理阻塞；
+ * - extractVoiceprintEmbedding：「给发言人改名后记住」的单人声纹登记，
+ *   只喂 ≤30 秒音频，开销小，留在主进程内完成；
+ * - applyDiarization / 声纹比对等纯逻辑在 diarization-core.mjs，
+ *   与 worker 共用，保证两条路径行为一致。
  */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -13,195 +14,22 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
 import { managedFfmpegPath } from "./local-models.mjs";
+import { computeVoiceprintEmbedding } from "./diarization-core.mjs";
 
-// ESM 环境下加载 CJS 原生模块（sherpa-onnx-node）需要 createRequire。
-const require = createRequire(import.meta.url);
+export {
+  cosineSimilarity,
+  mergeDiarizationClusters,
+  matchVoiceprint,
+  DEFAULT_VOICEPRINT_THRESHOLD,
+  DEFAULT_VOICEPRINT_MARGIN
+} from "./diarization-core.mjs";
 
-// 官方 Node 示例使用 0.6；MinuteFlow 再增加“第一名与第二名的差距”约束，
-// 以牺牲少量召回换取更少的错误姓名。档案可在高级 options 中覆盖这两个值。
-export const DEFAULT_VOICEPRINT_THRESHOLD = 0.64;
-export const DEFAULT_VOICEPRINT_MARGIN = 0.05;
-const MIN_VOICEPRINT_AUDIO_MS = 2_000;
-const MAX_VOICEPRINT_AUDIO_MS = 30_000;
+const nodeRequire = createRequire(import.meta.url);
 
 /** 同一个 embedding 模型生成的向量才能互相比对；移动模型文件不影响已保存声纹。 */
 export function voiceprintModelKey(profile) {
   const modelPath = profile?.options?.embeddingModelPath;
   return modelPath ? path.basename(modelPath).toLowerCase() : "";
-}
-
-/** 余弦相似度（无效/维度不同返回 -1，不让损坏样本参与自动命名）。 */
-export function cosineSimilarity(left, right) {
-  if (!left?.length || left.length !== right?.length) return -1;
-  let dot = 0;
-  let leftNorm = 0;
-  let rightNorm = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    const a = Number(left[index]);
-    const b = Number(right[index]);
-    if (!Number.isFinite(a) || !Number.isFinite(b)) return -1;
-    dot += a * b;
-    leftNorm += a * a;
-    rightNorm += b * b;
-  }
-  if (!leftNorm || !rightNorm) return -1;
-  return dot / Math.sqrt(leftNorm * rightNorm);
-}
-
-export const DIARIZATION_MERGE_SIMILARITY = 0.7;
-export const DIARIZATION_FRAGMENT_SECONDS = 10;
-export const DIARIZATION_FRAGMENT_SIMILARITY_FLOOR = 0.55;
-
-/**
- * 聚类后处理合并。真实嘈杂音频里逐段嵌入噪声大，sherpa 的阈值聚类常把同一个
- * 说话人劈成多个簇（碎片簇可达十几个）。两阶段修正：
- * 1) 平均链接合并——簇心余弦 ≥ mergeSimilarity 的簇两两合并，合并后按时长加权重算簇心；
- * 2) 碎片归并——总时长 < minClusterSeconds 的簇优先并入相似度 ≥ fragmentSimilarityFloor
- *    的最相似簇；提不出簇心（语音不足 2 秒）或没有合格相似者并入时间相邻的较大簇。
- * 纯函数（簇心向量由调用方计算），说话人 id 按时间首次出现顺序重排为 speaker-1..N。
- */
-export function mergeDiarizationClusters(turns, centroidEmbeddings, {
-  mergeSimilarity = DIARIZATION_MERGE_SIMILARITY,
-  minClusterSeconds = DIARIZATION_FRAGMENT_SECONDS,
-  fragmentSimilarityFloor = DIARIZATION_FRAGMENT_SIMILARITY_FLOOR
-} = {}) {
-  const clusters = new Map();
-  // 簇归属父指针：absorb 只合并记账，轮次对象上的旧 speakerId 由这里解析到簇根。
-  const labelOf = new Map();
-  const rootOf = (id) => {
-    let current = id;
-    while (labelOf.has(current) && labelOf.get(current) !== current) current = labelOf.get(current);
-    return current;
-  };
-  for (const turn of turns) {
-    const cluster = clusters.get(turn.speakerId) ?? { turns: [], durationMs: 0, centroid: centroidEmbeddings?.get(turn.speakerId) ?? null };
-    labelOf.set(turn.speakerId, turn.speakerId);
-    cluster.turns.push(turn);
-    cluster.durationMs += turn.endMs - turn.startMs;
-    clusters.set(turn.speakerId, cluster);
-  }
-  const absorb = (sourceId, targetId) => {
-    const source = clusters.get(sourceId);
-    const target = clusters.get(targetId);
-    target.turns.push(...source.turns);
-    target.durationMs += source.durationMs;
-    // 时长加权平均近似合并簇心；任一侧缺失时保留较大簇的原簇心。
-    if (source.centroid && target.centroid && source.centroid.length === target.centroid.length) {
-      const total = target.durationMs;
-      const weight = source.durationMs / total;
-      const blended = new Float32Array(target.centroid.length);
-      for (let index = 0; index < blended.length; index += 1) {
-        blended[index] = target.centroid[index] * (1 - weight) + source.centroid[index] * weight;
-      }
-      target.centroid = blended;
-    }
-    labelOf.set(sourceId, targetId);
-    clusters.delete(sourceId);
-  };
-
-  // 阶段一：平均链接合并同一个人的大簇。
-  while (clusters.size > 1) {
-    let best = null;
-    for (const [leftId, left] of clusters) {
-      if (!left.centroid) continue;
-      for (const [rightId, right] of clusters) {
-        if (rightId === leftId || !right.centroid) continue;
-        const similarity = cosineSimilarity(left.centroid, right.centroid);
-        if (similarity >= mergeSimilarity && (!best || similarity > best.similarity)) {
-          best = { similarity, source: leftId, target: rightId };
-        }
-      }
-    }
-    if (!best) break;
-    // 大簇吸收小簇，保持簇心锚定在主要内容上。
-    const [source, target] = clusters.get(best.source).durationMs <= clusters.get(best.target).durationMs
-      ? [best.source, best.target]
-      : [best.target, best.source];
-    absorb(source, target);
-  }
-
-  // 阶段二：碎片簇归并。按时长从小到大处理，各自独立选择去处。
-  for (const fragmentId of [...clusters.keys()].sort((left, right) => clusters.get(left).durationMs - clusters.get(right).durationMs)) {
-    const fragment = clusters.get(fragmentId);
-    if (!fragment || fragment.durationMs >= minClusterSeconds * 1000 || clusters.size === 1) continue;
-    let bestId = null;
-    let bestSimilarity = fragmentSimilarityFloor;
-    if (fragment.centroid) {
-      for (const [candidateId, candidate] of clusters) {
-        if (candidateId === fragmentId || !candidate.centroid) continue;
-        const similarity = cosineSimilarity(fragment.centroid, candidate.centroid);
-        if (similarity >= bestSimilarity) { bestSimilarity = similarity; bestId = candidateId; }
-      }
-    }
-    if (!bestId) {
-      // 时间相邻兜底：找该簇时间轴上前后最近的轮次所属簇。
-      const fragmentStart = Math.min(...fragment.turns.map((turn) => turn.startMs));
-      const fragmentEnd = Math.max(...fragment.turns.map((turn) => turn.endMs));
-      let nearest = null;
-      for (const [candidateId, candidate] of clusters) {
-        if (candidateId === fragmentId) continue;
-        for (const turn of candidate.turns) {
-          const gap = turn.endMs <= fragmentStart
-            ? fragmentStart - turn.endMs
-            : turn.startMs >= fragmentEnd ? turn.startMs - fragmentEnd : 0;
-          if (!nearest || gap < nearest.gap) nearest = { gap, candidateId };
-        }
-      }
-      bestId = nearest?.candidateId;
-    }
-    if (bestId) absorb(fragmentId, bestId);
-  }
-
-  // 按时间首次出现顺序重排为密集编号（以合并后的簇根为准）。
-  const ordered = [...clusters.values()]
-    .flatMap((cluster) => cluster.turns)
-    .sort((left, right) => left.startMs - right.startMs);
-  const relabel = new Map();
-  return ordered.map((turn) => {
-    const root = rootOf(turn.speakerId);
-    if (!relabel.has(root)) relabel.set(root, `speaker-${relabel.size + 1}`);
-    return { ...turn, speakerId: relabel.get(root) };
-  });
-}
-
-/** 把同一姓名的多次本地学习样本归一化平均，降低单场噪音对识别的影响。 */
-function voiceprintCentroids(samples, dimension) {
-  const groups = new Map();
-  for (const sample of samples) {
-    if (!sample?.name || sample.embedding?.length !== dimension) continue;
-    const values = groups.get(sample.name) ?? [];
-    values.push(sample.embedding);
-    groups.set(sample.name, values);
-  }
-  return Array.from(groups, ([name, vectors]) => {
-    const centroid = new Float32Array(dimension);
-    for (const vector of vectors) {
-      for (let index = 0; index < dimension; index += 1) centroid[index] += vector[index] / vectors.length;
-    }
-    return { name, embedding: centroid, sampleCount: vectors.length };
-  });
-}
-
-/**
- * 给一个未知向量找最可靠的历史姓名。除了最低相似度，还要求领先第二名足够多；
- * 不满足时返回 null，让 UI 保持“发言人 N”而不是冒险误认。
- */
-export function matchVoiceprint(embedding, samples, options = {}) {
-  if (!embedding?.length) return null;
-  const threshold = options.threshold ?? DEFAULT_VOICEPRINT_THRESHOLD;
-  const margin = options.margin ?? DEFAULT_VOICEPRINT_MARGIN;
-  const ranked = voiceprintCentroids(samples, embedding.length)
-    .map((candidate) => ({
-      name: candidate.name,
-      sampleCount: candidate.sampleCount,
-      score: cosineSimilarity(embedding, candidate.embedding)
-    }))
-    .sort((left, right) => right.score - left.score);
-  const best = ranked[0];
-  const runnerUp = ranked[1];
-  if (!best || best.score < threshold) return null;
-  if (runnerUp && best.score - runnerUp.score < margin) return null;
-  return best;
 }
 
 /** 拉起子进程并等待退出（windowsHide 防止 Windows 上闪控制台窗口），失败抛出 stderr。 */
@@ -226,6 +54,8 @@ function runProcess(command, args) {
 async function ensureWave(filePath, sherpaOnnx) {
   if (path.extname(filePath).toLowerCase() === ".wav") {
     try {
+      // readWave 默认返回零拷贝外部缓冲数组；Electron 的 V8 禁用外部缓冲区，
+      // 必须传 false 让其拷贝进堆（包括本次仅探测采样率的读取）。
       const wave = sherpaOnnx.readWave(filePath, false);
       if (wave.sampleRate === 16_000) return { filePath, temporary: false };
     } catch {
@@ -241,76 +71,6 @@ async function ensureWave(filePath, sherpaOnnx) {
   return { filePath: target, temporary: true };
 }
 
-/** 从若干说话区间拼接最多 30 秒单人语音，过短时拒绝学习/识别以减少误判。 */
-function collectIntervalSamples(wave, intervals) {
-  const maximumSamples = Math.round(wave.sampleRate * MAX_VOICEPRINT_AUDIO_MS / 1000);
-  const minimumSamples = Math.round(wave.sampleRate * MIN_VOICEPRINT_AUDIO_MS / 1000);
-  const chunks = [];
-  let total = 0;
-  for (const interval of [...intervals].sort((left, right) => left.startMs - right.startMs)) {
-    if (total >= maximumSamples) break;
-    const start = Math.max(0, Math.floor(interval.startMs * wave.sampleRate / 1000));
-    const end = Math.min(wave.samples.length, Math.ceil(interval.endMs * wave.sampleRate / 1000));
-    if (end <= start) continue;
-    const chunk = wave.samples.subarray(start, Math.min(end, start + maximumSamples - total));
-    if (!chunk.length) continue;
-    chunks.push(chunk);
-    total += chunk.length;
-  }
-  if (total < minimumSamples) {
-    throw new Error("可用的单人语音不足 2 秒，请在该发言人有更多内容后再记住。");
-  }
-  const samples = new Float32Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    samples.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return samples;
-}
-
-/** 用当前 diarization 档案的 3D-Speaker 模型计算一份本地声纹向量。 */
-function computeVoiceprintEmbedding(sherpaOnnx, embeddingModel, wave, intervals) {
-  const extractor = new sherpaOnnx.SpeakerEmbeddingExtractor({
-    model: embeddingModel,
-    numThreads: 2,
-    debug: false,
-    provider: "cpu"
-  });
-  const stream = extractor.createStream();
-  stream.acceptWaveform({ sampleRate: wave.sampleRate, samples: collectIntervalSamples(wave, intervals) });
-  // compute 默认返回零拷贝外部缓冲数组；Electron 主进程 V8 禁用外部缓冲区，
-  // 必须传 false 让 addon 把向量拷进堆（与 readWave 的第二个参数同理）。
-  const embedding = extractor.compute(stream, false);
-  if (!embedding?.length) throw new Error("未能从所选片段提取有效声纹。");
-  return Float32Array.from(embedding);
-}
-
-/** 逐簇计算平均声纹（同一 extractor 复用，每簇最多取 30 秒）；不足 2 秒的簇记 null，交给时间相邻兜底。 */
-function computeClusterCentroids(sherpaOnnx, embeddingModel, wave, turns) {
-  const extractor = new sherpaOnnx.SpeakerEmbeddingExtractor({
-    model: embeddingModel,
-    numThreads: 2,
-    debug: false,
-    provider: "cpu"
-  });
-  const centroids = new Map();
-  for (const speakerId of new Set(turns.map((turn) => turn.speakerId))) {
-    try {
-      const stream = extractor.createStream();
-      stream.acceptWaveform({
-        sampleRate: wave.sampleRate,
-        samples: collectIntervalSamples(wave, turns.filter((turn) => turn.speakerId === speakerId))
-      });
-      const embedding = extractor.compute(stream, false);
-      centroids.set(speakerId, embedding?.length ? Float32Array.from(embedding) : null);
-    } catch {
-      centroids.set(speakerId, null);
-    }
-  }
-  return centroids;
-}
-
 /**
  * 从已知转录时间区间提取声纹，供“给发言人改名后记住”调用。
  * 音频与向量始终留在 Electron 主进程和本地数据库。
@@ -320,7 +80,7 @@ export async function extractVoiceprintEmbedding(profile, audioFilePath, interva
   if (!embeddingModel) throw new Error("请先在说话人分离设置中配置 3D-Speaker 模型。");
   let sherpaOnnx;
   try {
-    sherpaOnnx = require("sherpa-onnx-node");
+    sherpaOnnx = nodeRequire("sherpa-onnx-node");
   } catch {
     throw new Error("未安装 sherpa-onnx-node 运行时，暂时无法记住声纹。");
   }
@@ -333,12 +93,57 @@ export async function extractVoiceprintEmbedding(profile, audioFilePath, interva
   }
 }
 
+/** 兜底上限：1 小时录音的分离实测约 8-10 分钟，给到 30 分钟防 worker 变僵尸进程。 */
+const DIARIZATION_WORKER_TIMEOUT_MS = 30 * 60_000;
+
 /**
- * 用 sherpa-onnx 做离线说话人分离。副作用：ffmpeg 子进程、临时 WAV、
- * 进程内跑分离模型（CPU 密集）。
+ * fork diarization-worker 并等待一条结果消息；调用方取消（signal abort）或
+ * worker 异常退出/超时都会立即落定 Promise 并回收子进程。
+ */
+function runDiarizationWorker(request, signal) {
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = nodeRequire("electron").utilityProcess.fork(
+        new URL("./diarization-worker.mjs", import.meta.url).pathname,
+        [],
+        { serviceName: "minuteflow-diarization", stdio: "ignore" }
+      );
+    } catch (error) {
+      reject(new Error(`无法启动说话人分离进程：${error instanceof Error ? error.message : error}`));
+      return;
+    }
+    let settled = false;
+    const finish = (settle, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(guard);
+      signal?.removeEventListener("abort", onAbort);
+      try { child.kill(); } catch { /* 已退出 */ }
+      settle(value);
+    };
+    const onAbort = () => finish(reject, new Error("任务已取消。"));
+    const guard = setTimeout(() => finish(reject, new Error("说话人分离超时，请稍后重试。")), DIARIZATION_WORKER_TIMEOUT_MS);
+    if (signal?.aborted) return onAbort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    child.on("message", (message) => {
+      if (message?.ok) finish(resolve, message.turns);
+      else finish(reject, new Error(message?.error || "说话人分离失败。"));
+    });
+    child.once("exit", (code) => {
+      if (!settled) finish(reject, new Error(`说话人分离进程异常退出（代码 ${code ?? "?"}）。`));
+    });
+    child.postMessage({ id: 1, ...request });
+  });
+}
+
+/**
+ * 用 sherpa-onnx 做离线说话人分离。副作用：utilityProcess（内部再用 FFmpeg
+ * 子进程与临时 WAV）、进程外跑分离模型（CPU 密集但不再阻塞主进程）。
  * @param {object} profile diarization 模型档案（segmentation/embedding 模型路径等）
- * @param {object} options expectedSpeakers 已知人数（-1 自动聚类），threshold 聚类阈值
- * @returns {Promise<Array<{startMs, endMs, speakerId}>>} 说话人轮次列表
+ * @param {object} options expectedSpeakers 已知人数（-1 自动聚类），threshold 聚类阈值，
+ * voiceprints 本地声纹样本（兼容者自动命名），signal 取消信号
+ * @returns {Promise<Array<{startMs, endMs, speakerId, speakerName?}>>} 说话人轮次列表
  */
 export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
   const segmentationModel = profile.options?.segmentationModelPath;
@@ -346,75 +151,24 @@ export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
   if (!segmentationModel || !embeddingModel) {
     throw new Error("请配置 Pyannote segmentation 与 3D-Speaker embedding 模型路径。");
   }
-
-  let sherpaOnnx;
-  try {
-    sherpaOnnx = require("sherpa-onnx-node");
-  } catch {
-    throw new Error("未安装 sherpa-onnx-node 运行时，请重新安装应用或改用手动发言人标签。");
-  }
-
-  const waveAsset = await ensureWave(audioFilePath, sherpaOnnx);
-  try {
-    const diarizer = new sherpaOnnx.OfflineSpeakerDiarization({
-      segmentation: { pyannote: { model: segmentationModel } },
-      embedding: { model: embeddingModel },
-      clustering: {
-        numClusters: options.expectedSpeakers ?? -1,
-        threshold: options.threshold ?? profile.options?.clusteringThreshold ?? 0.5
-      },
-      minDurationOn: 0.2,
-      minDurationOff: 0.5
-    });
-    // readWave 默认返回零拷贝外部缓冲数组；Electron 的 V8 禁用外部缓冲区，
-    // 再传回 addon 会抛 "External buffers are not allowed"，必须传 false 让其拷贝进堆。
-    const wave = sherpaOnnx.readWave(waveAsset.filePath, false);
-    // 模型只接受其固有采样率（16k），不匹配直接报错而不是静默产出错误结果。
-    if (diarizer.sampleRate !== wave.sampleRate) {
-      throw new Error(`说话人模型需要 ${diarizer.sampleRate}Hz 音频，实际为 ${wave.sampleRate}Hz。`);
-    }
-    const rawTurns = diarizer.process(wave.samples).map((turn) => ({
-      startMs: Math.round((turn.start ?? turn.startSeconds ?? 0) * 1000),
-      endMs: Math.round((turn.end ?? turn.endSeconds ?? 0) * 1000),
-      speakerId: `speaker-${Number(turn.speaker ?? turn.speakerId ?? 0) + 1}`
-    }));
-    // 阈值聚类在真实嘈杂音频上常把同一人劈成多个簇：算出簇心后做后处理合并。
-    const centroidEmbeddings = computeClusterCentroids(sherpaOnnx, embeddingModel, wave, rawTurns);
-    const turns = mergeDiarizationClusters(rawTurns, centroidEmbeddings);
-    const compatibleSamples = (options.voiceprints ?? []).filter((sample) =>
-      sample.modelKey === voiceprintModelKey(profile));
-    if (!compatibleSamples.length) return turns;
-
-    const identified = new Map();
-    const claimedNames = new Set();
-    const candidates = [];
-    for (const speakerId of new Set(turns.map((turn) => turn.speakerId))) {
-      try {
-        const embedding = computeVoiceprintEmbedding(
-          sherpaOnnx,
-          embeddingModel,
-          wave,
-          turns.filter((turn) => turn.speakerId === speakerId)
-        );
-        const match = matchVoiceprint(embedding, compatibleSamples, {
-          threshold: profile.options?.voiceprintThreshold,
-          margin: profile.options?.voiceprintMargin
-        });
-        if (match) candidates.push({ speakerId, ...match });
-      } catch {
-        // 片段太短或模型拒绝输入时仅跳过自动命名，分离结果本身仍然有效。
-      }
-    }
-    // 同一场会议中一个历史姓名只自动分配给置信度最高的聚类，避免两个人被同时误标为同一人。
-    candidates.sort((left, right) => right.score - left.score).forEach((candidate) => {
-      if (claimedNames.has(candidate.name)) return;
-      claimedNames.add(candidate.name);
-      identified.set(candidate.speakerId, candidate.name);
-    });
-    return turns.map((turn) => ({ ...turn, speakerName: identified.get(turn.speakerId) }));
-  } finally {
-    if (waveAsset.temporary) await unlink(waveAsset.filePath).catch(() => {});
-  }
+  const modelKey = voiceprintModelKey(profile);
+  // 样本向量序列化成普通数组跨进程传递（仍在同一台设备上，不出本机）。
+  const voiceprintSamples = (options.voiceprints ?? [])
+    .filter((sample) => sample.modelKey === modelKey)
+    .map((sample) => ({ name: sample.name, embedding: Array.from(sample.embedding ?? []) }));
+  return runDiarizationWorker({
+    audioFilePath,
+    ffmpegPath: await managedFfmpegPath(),
+    segmentationModel,
+    embeddingModel,
+    clustering: {
+      numClusters: options.expectedSpeakers ?? -1,
+      threshold: options.threshold ?? profile.options?.clusteringThreshold ?? 0.5
+    },
+    voiceprintSamples,
+    voiceprintThreshold: profile.options?.voiceprintThreshold,
+    voiceprintMargin: profile.options?.voiceprintMargin
+  }, options.signal);
 }
 
 /**
