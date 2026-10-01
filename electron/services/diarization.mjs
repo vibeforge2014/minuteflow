@@ -279,7 +279,9 @@ function computeVoiceprintEmbedding(sherpaOnnx, embeddingModel, wave, intervals)
   });
   const stream = extractor.createStream();
   stream.acceptWaveform({ sampleRate: wave.sampleRate, samples: collectIntervalSamples(wave, intervals) });
-  const embedding = extractor.compute(stream);
+  // compute 默认返回零拷贝外部缓冲数组；Electron 主进程 V8 禁用外部缓冲区，
+  // 必须传 false 让 addon 把向量拷进堆（与 readWave 的第二个参数同理）。
+  const embedding = extractor.compute(stream, false);
   if (!embedding?.length) throw new Error("未能从所选片段提取有效声纹。");
   return Float32Array.from(embedding);
 }
@@ -300,7 +302,7 @@ function computeClusterCentroids(sherpaOnnx, embeddingModel, wave, turns) {
         sampleRate: wave.sampleRate,
         samples: collectIntervalSamples(wave, turns.filter((turn) => turn.speakerId === speakerId))
       });
-      const embedding = extractor.compute(stream);
+      const embedding = extractor.compute(stream, false);
       centroids.set(speakerId, embedding?.length ? Float32Array.from(embedding) : null);
     } catch {
       centroids.set(speakerId, null);
