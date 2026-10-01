@@ -1583,12 +1583,269 @@ html.marketing-mode body.site-menu-open {
 .price-card li svg { color: #f3a18b; }
 .price-card .site-button { width: 100%; justify-content: center; }
 
+.price-card__secondary {
+  display: block;
+  margin-top: 12px;
+  color: #f3a18b;
+  font-size: 12.5px;
+  text-align: center;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .policy-document .refund-highlight {
   background: var(--site-accent-soft);
   border-color: rgba(231, 111, 81, 0.18);
 }
 
 .refund-highlight h2 { color: var(--site-accent-strong); }
+
+/* ---------------------------------------------------------------------------
+ * 购买页（/buy/）：居中收银卡——通道选择 / 二维码轮询 / 激活码结果
+ * ------------------------------------------------------------------------- */
+.buy-page {
+  width: min(1080px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 120px 0 110px;
+}
+
+.buy-hero {
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 30px 0 34px;
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  text-align: center;
+}
+
+.buy-hero h1 {
+  margin: 14px 0 10px;
+  font-size: clamp(2.5rem, 6vw, 3.9rem);
+  line-height: 1.05;
+  letter-spacing: -0.055em;
+}
+
+.buy-hero > p {
+  max-width: 480px;
+  margin: 0 0 8px;
+  color: var(--site-muted);
+  font-size: 15px;
+  line-height: 1.8;
+}
+
+.buy-sandbox {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: #f3f4f5;
+  color: #666b75;
+  font-size: 12px;
+  font-weight: 590;
+}
+
+.buy-card {
+  position: relative;
+  max-width: 470px;
+  margin: 0 auto;
+  padding: 30px 32px 24px;
+  display: grid;
+  gap: 20px;
+  justify-items: center;
+  background: white;
+  border: 1px solid var(--site-line);
+  border-radius: 22px;
+  box-shadow: 0 18px 50px rgba(26, 30, 40, 0.06);
+}
+
+.buy-channels {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.buy-channel {
+  display: grid;
+  justify-items: center;
+  gap: 9px;
+  padding: 24px 12px 19px;
+  background: white;
+  border: 1px solid var(--site-line);
+  border-radius: 16px;
+  cursor: pointer;
+  color: var(--site-ink);
+  font-size: 15px;
+  font-weight: 620;
+  transition:
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color 150ms ease,
+    background 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.buy-channel svg { color: #07c160; }
+.buy-channel--alipay svg { color: #1677ff; }
+.buy-channel--mock { grid-column: 1 / -1; padding: 15px 12px 13px; }
+.buy-channel--mock svg { color: var(--site-accent-strong); }
+
+.buy-channel:not(:disabled):hover {
+  transform: translateY(-1px);
+  border-color: rgba(231, 111, 81, 0.4);
+  background: var(--site-accent-soft);
+  box-shadow: 0 10px 26px rgba(198, 81, 56, 0.1);
+}
+
+.buy-channel:not(:disabled):active { transform: scale(0.97); transition-duration: 90ms; }
+
+.buy-channel:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.buy-channel small {
+  color: var(--site-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.buy-qr {
+  display: grid;
+  justify-items: center;
+  gap: 13px;
+  width: 100%;
+}
+
+.buy-qr > strong { font-size: 15px; letter-spacing: -0.01em; }
+
+.buy-qr img {
+  width: 232px;
+  height: 232px;
+  border: 1px solid var(--site-line);
+  border-radius: 16px;
+}
+
+.buy-qr--pending {
+  width: 232px;
+  height: 232px;
+  border-radius: 16px;
+  background: #f7f4f1;
+  animation: buy-fade 1.1s ease-in-out infinite alternate;
+}
+
+@keyframes buy-fade { from { opacity: 0.55; } to { opacity: 1; } }
+
+.buy-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--site-muted);
+  font-size: 13px;
+}
+
+.buy-countdown {
+  font-variant-numeric: tabular-nums;
+  color: var(--site-accent-strong);
+  font-weight: 650;
+}
+
+.buy-dots { display: inline-flex; gap: 4px; }
+
+.buy-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--site-accent-strong);
+  animation: buy-dot 1.2s infinite ease-in-out;
+}
+
+.buy-dots i:nth-child(2) { animation-delay: 0.15s; }
+.buy-dots i:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes buy-dot {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+.buy-regenerate {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--site-accent-strong);
+  font-size: 13px;
+  text-decoration: underline;
+  text-decoration-color: rgba(198, 81, 56, 0.3);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.buy-regenerate:active { transform: scale(0.97); }
+
+.buy-license {
+  display: grid;
+  justify-items: center;
+  gap: 13px;
+  width: 100%;
+}
+
+.buy-license > svg { color: #1db273; }
+.buy-license > strong { font-size: 17px; letter-spacing: -0.015em; }
+
+.buy-license__key {
+  padding: 15px 20px;
+  border-radius: 14px;
+  background: var(--site-accent-soft);
+  color: var(--site-accent-strong);
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: clamp(18px, 4.4vw, 24px);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+
+.buy-steps {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  margin: 4px 0 0;
+  padding: 0 0 0 18px;
+  color: var(--site-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.buy-error {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #fdf0ed;
+  color: var(--site-accent-strong);
+  font-size: 13px;
+}
+
+.buy-fallback { display: grid; justify-items: center; gap: 14px; color: var(--site-muted); font-size: 14px; }
+
+.buy-legal {
+  margin: 2px 0 0;
+  color: #8a8e97;
+  font-size: 12px;
+  text-align: center;
+}
+
+.buy-legal a { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .buy-channel,
+  .buy-regenerate { transition: none; }
+  .buy-dots i,
+  .buy-qr--pending { animation: none; }
+}
+
+@media (max-width: 640px) {
+  .buy-page { padding-top: 96px; }
+  .buy-card { padding: 24px 20px 20px; }
+  .buy-channels { grid-template-columns: 1fr; }
+  .buy-qr img, .buy-qr--pending { width: 208px; height: 208px; }
+}
 
 .site-footer {
   min-height: 225px;

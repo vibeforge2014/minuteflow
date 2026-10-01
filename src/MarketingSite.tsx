@@ -8,6 +8,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
+import QRCode from "qrcode";
 import {
   AppleLogo,
   ArrowUp,
@@ -18,6 +19,7 @@ import {
   CheckCircle,
   ClockCountdown,
   CloudSlash,
+  Copy,
   Desktop,
   DeviceMobile,
   Export,
@@ -27,20 +29,22 @@ import {
   List,
   LockKey,
   Microphone,
+  QrCode,
   ShieldCheck,
   Sparkle,
   Stack,
   Translate,
   UsersThree,
   Waveform,
+  WechatLogo,
   WindowsLogo,
   X
 } from "@phosphor-icons/react";
 import productWorkspace from "../implementation-1440x1024-final.png";
 import { BrandMark } from "./components/BrandMark";
 
-/** 站点路由：首页 / 规格 / 定价 / 条款 / 隐私 / 退款。 */
-type SiteRoute = "home" | "specs" | "pricing" | "terms" | "privacy" | "refund";
+/** 站点路由：首页 / 规格 / 定价 / 购买 / 条款 / 隐私 / 退款。 */
+type SiteRoute = "home" | "specs" | "pricing" | "buy" | "terms" | "privacy" | "refund";
 /** 演示区块的三个阶段：会中记录 / 会中整理 / 会后行动。 */
 type DemoMode = "record" | "organize" | "act";
 
@@ -149,7 +153,7 @@ export function MarketingSite() {
         setMenuOpen={setMenuOpen}
         isScrolled={isScrolled}
       />
-      {route === "specs" ? <SpecsPage /> : route === "home" ? <LandingPage /> : <PolicyPage route={route} />}
+      {route === "specs" ? <SpecsPage /> : route === "home" ? <LandingPage /> : route === "buy" ? <BuyPage /> : <PolicyPage route={route} />}
       <SiteFooter />
       <button
         className={`site-scroll-top ${isScrolled ? "is-visible" : ""}`}
@@ -853,14 +857,257 @@ function FeatureRows({
   );
 }
 
-type PolicyRoute = Exclude<SiteRoute, "home" | "specs">;
+type PolicyRoute = Exclude<SiteRoute, "home" | "specs" | "buy">;
+
+// ---------------------------------------------------------------------------
+// 购买页：选择通道 → 生成二维码 → 轮询订单 → 支付成功展示激活码
+// ---------------------------------------------------------------------------
+type BuyChannel = "wechat" | "alipay" | "mock";
+type BuyOrder = {
+  orderId: string;
+  channel: BuyChannel;
+  state: string;
+  payload: string;
+  amountFen: number;
+  expiresAt: string;
+  licenseKey?: string;
+};
+
+/** 授权后端地址：生产与官网同域（nginx /api/license），本地联调直连 8787。 */
+function licenseApiRoot(): string {
+  const host = window.location.hostname;
+  return host === "localhost" || host === "127.0.0.1" || host === "::1"
+    ? "http://127.0.0.1:8787"
+    : "";
+}
+
+/** 购买页：扫码收银台。订单金额由服务端固定（¥99），页面只负责发起与轮询。 */
+function BuyPage() {
+  const [channels, setChannels] = useState<{ wechat: boolean; alipay: boolean; mock: boolean } | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [order, setOrder] = useState<BuyOrder | null>(null);
+  const [qrSrc, setQrSrc] = useState("");
+  const [busyChannel, setBusyChannel] = useState<BuyChannel | null>(null);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+
+  // 通道就绪态：决定渲染微信/支付宝按钮与沙箱徽标。
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${licenseApiRoot()}/api/license/healthz`)
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error("bad status"))))
+      .then((payload) => {
+        if (!cancelled) setChannels(payload.channels ?? { wechat: false, alipay: false, mock: false });
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 二维码渲染。
+  useEffect(() => {
+    if (!order?.payload) {
+      setQrSrc("");
+      return;
+    }
+    let cancelled = false;
+    QRCode.toDataURL(order.payload, { margin: 1, width: 464, color: { dark: "#1f1a17", light: "#ffffff" } })
+      .then((url) => {
+        if (!cancelled) setQrSrc(url);
+      })
+      .catch(() => {
+        if (!cancelled) setQrSrc("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [order?.payload]);
+
+  // 2 秒轮询订单状态，直到 paid / expired。
+  useEffect(() => {
+    if (!order || order.state !== "created") return;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await fetch(`${licenseApiRoot()}/api/license/orders/${order.orderId}`);
+        if (!response.ok) return;
+        const view = await response.json();
+        if (!cancelled && view.state !== "created") setOrder(view);
+      } catch {
+        // 网络抖动：等待下一拍。
+      }
+    }, 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [order]);
+
+  // 倒计时心跳（created 状态下每秒刷新剩余时间）。
+  useEffect(() => {
+    if (!order || order.state !== "created") return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [order]);
+
+  async function createOrder(channel: BuyChannel) {
+    setBusyChannel(channel);
+    setError("");
+    setCopied(false);
+    try {
+      const response = await fetch(`${licenseApiRoot()}/api/license/orders`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ channel })
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.orderId) {
+        setError(payload?.error ?? "下单失败，请稍后重试。");
+        return;
+      }
+      setOrder(payload);
+    } catch {
+      setError("暂时无法连接支付服务，请检查网络后重试。");
+    } finally {
+      setBusyChannel(null);
+    }
+  }
+
+  async function copyLicenseKey() {
+    if (!order?.licenseKey) return;
+    try {
+      await navigator.clipboard.writeText(order.licenseKey);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2_000);
+    } catch {
+      // 剪贴板被拒绝：用户可手动选中复制。
+    }
+  }
+
+  const remainingMs = order?.state === "created" ? Math.max(0, Date.parse(order.expiresAt) - now) : 0;
+  const remainingLabel = `${Math.floor(remainingMs / 60_000)}:${String(Math.floor((remainingMs % 60_000) / 1_000)).padStart(2, "0")}`;
+  const amountLabel = order ? `¥${(order.amountFen / 100).toFixed(order.amountFen % 100 === 0 ? 0 : 2)}` : "¥99";
+  const channelLabel = order?.channel === "alipay" ? "支付宝" : order?.channel === "mock" ? "沙箱支付" : "微信支付";
+
+  return (
+    <main id="main-content" className="buy-page" tabIndex={-1}>
+      <header className="buy-hero">
+        <span className="section-kicker">购买 MinuteFlow</span>
+        <h1>¥99，一次买断。</h1>
+        <p>扫码支付后立即获得激活码，可在最多 2 台你个人的设备上使用。支付由微信支付 / 支付宝安全处理，7 天内支持退款。</p>
+        {channels?.mock && <span className="buy-sandbox">沙箱模式 · 商户通道联调中，支付不会产生真实扣款</span>}
+      </header>
+      <div className="buy-card">
+        {loadError && (
+          <div className="buy-fallback">
+            <p>支付服务暂时不可用，请稍后刷新重试。</p>
+            <a className="site-button site-button--ghost" href={siteHref("/buy/")} onClick={(event) => {
+              event.preventDefault();
+              setLoadError(false);
+              window.location.reload();
+            }}>重新加载</a>
+          </div>
+        )}
+        {!loadError && !order && (
+          <div className="buy-channels" role="group" aria-label="选择支付方式">
+            <button
+              type="button"
+              className="buy-channel"
+              disabled={!channels?.wechat || busyChannel !== null}
+              onClick={() => void createOrder("wechat")}
+            >
+              <WechatLogo size={30} weight="fill" aria-hidden />
+              <span>微信支付</span>
+              <small>{channels?.wechat ? `${amountLabel} · 扫码支付` : "暂未开通"}</small>
+            </button>
+            <button
+              type="button"
+              className="buy-channel buy-channel--alipay"
+              disabled={!channels?.alipay || busyChannel !== null}
+              onClick={() => void createOrder("alipay")}
+            >
+              <QrCode size={30} weight="bold" aria-hidden />
+              <span>支付宝</span>
+              <small>{channels?.alipay ? `${amountLabel} · 扫码支付` : "暂未开通"}</small>
+            </button>
+            {channels?.mock && (
+              <button
+                type="button"
+                className="buy-channel buy-channel--mock"
+                disabled={busyChannel !== null}
+                onClick={() => void createOrder("mock")}
+              >
+                <Sparkle size={26} weight="fill" aria-hidden />
+                <span>沙箱通道</span>
+                <small>联调用 · 3 秒自动支付</small>
+              </button>
+            )}
+          </div>
+        )}
+        {!loadError && order && order.state === "created" && (
+          <div className="buy-qr">
+            <strong>{channelLabel} · {amountLabel}</strong>
+            {qrSrc ? <img src={qrSrc} alt={`${channelLabel}付款二维码`} width={232} height={232} /> : <span className="buy-qr--pending" aria-hidden />}
+            <p className="buy-status">
+              <span className="buy-dots" aria-hidden><i /><i /><i /></span>
+              等待支付 · 二维码 <b className="buy-countdown">{remainingLabel}</b> 内有效
+            </p>
+            <button type="button" className="buy-regenerate" onClick={() => void createOrder(order.channel)}>
+              二维码过期？重新生成
+            </button>
+          </div>
+        )}
+        {!loadError && order && order.state === "expired" && (
+          <div className="buy-qr">
+            <strong>二维码已过期</strong>
+            <p className="buy-status">订单超时未支付，点击下方重新生成二维码。</p>
+            <button type="button" className="site-button site-button--primary" onClick={() => void createOrder(order.channel)}>
+              重新生成二维码
+            </button>
+          </div>
+        )}
+        {!loadError && order && order.state === "refunded" && (
+          <div className="buy-qr">
+            <strong>订单已退款</strong>
+            <p className="buy-status">该订单的授权已撤销。如有疑问请联系 xhdp123@126.com。</p>
+          </div>
+        )}
+        {!loadError && order && order.state === "paid" && (
+          <div className="buy-license">
+            <CheckCircle size={34} weight="fill" aria-hidden />
+            <strong>支付成功</strong>
+            <code className="buy-license__key">{order.licenseKey || "激活码生成中…请稍后刷新"}</code>
+            <button type="button" className="site-button site-button--primary" onClick={() => void copyLicenseKey()}>
+              {copied ? <><Check size={16} weight="bold" /> 已复制</> : <><Copy size={16} weight="bold" /> 复制激活码</>}
+            </button>
+            <ol className="buy-steps">
+              <li>打开 MinuteFlow 桌面应用，进入「设置 → 激活」。</li>
+              <li>粘贴激活码并确认，授权立即生效。</li>
+              <li>激活码请在本地妥善保存，也可随时回到本页查询订单。</li>
+            </ol>
+          </div>
+        )}
+        {error && <p className="buy-error" role="alert">{error}</p>}
+        <p className="buy-legal">
+          付款由绍兴市臻书科技有限公司（zensoft.top）直接收款 ·{" "}
+          <a href={siteHref("/refund/")}>7 天退款</a> ·{" "}
+          <a href={siteHref("/terms/")}>服务条款</a>
+        </p>
+      </div>
+    </main>
+  );
+}
 
 /** 政策四页（定价/条款/隐私/退款）的头部元信息。 */
 const policyMeta: Record<PolicyRoute, { eyebrow: string; title: string; summary: string }> = {
   pricing: { eyebrow: "清晰定价", title: "一次购买，长期使用。", summary: "没有隐藏套餐，也没有自动续费。以人民币一次性购买 MinuteFlow 桌面版授权。" },
   terms: { eyebrow: "服务条款", title: "使用 MinuteFlow 前，请了解这些约定。", summary: "本条款说明软件许可、可接受的使用方式、交易关系和双方责任。" },
   privacy: { eyebrow: "隐私政策", title: "你的会议内容，默认留在你的设备上。", summary: "本政策说明 MinuteFlow 处理哪些信息、为什么处理，以及你可以如何联系我们行使权利。" },
-  refund: { eyebrow: "退款政策", title: "购买后 7 天内，可申请退款。", summary: "如果 MinuteFlow 不适合你，可在符合以下条件时通过 Paddle 申请退款。" }
+  refund: { eyebrow: "退款政策", title: "购买后 7 天内，可申请退款。", summary: "如果 MinuteFlow 不适合你，可在符合以下条件时通过邮件申请，款项按原支付渠道退回。" }
 };
 
 /** 政策页骨架：头部元信息 + 左侧政策导航 + 对应内容组件。 */
@@ -893,19 +1140,20 @@ function PricingContent() {
     <section className="price-card">
       <div><span>MinuteFlow 桌面版</span><h2><b>¥99</b> 人民币</h2><p>一次性购买 · 非订阅 · 不自动续费</p></div>
       <ul><li><Check size={18} weight="bold" /> 完整桌面会议工作台</li><li><Check size={18} weight="bold" /> 本地录音、笔记与会议库</li><li><Check size={18} weight="bold" /> 自带模型或配置第三方 AI 服务</li><li><Check size={18} weight="bold" /> 7 天退款申请期</li></ul>
-      <a className="site-button site-button--primary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">获取 MinuteFlow <ArrowUpRight size={16} /></a>
+      <a className="site-button site-button--primary" href={siteHref("/buy/")}>立即购买 <ArrowUpRight size={16} /></a>
+      <a className="price-card__secondary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">先下载试用（免费版可录音与记笔记）</a>
     </section>
-    <section><h2>付款与交付</h2><p>价格为人民币 99 元。Paddle 是本产品订单的 Merchant of Record（记录商户），负责安全结账、税费计算、付款凭证、账单支持与退款处理。结账页会在付款前显示最终应付金额及适用税费。</p></section>
-    <section><h2>授权范围</h2><p>购买后获得 MinuteFlow 桌面版的个人使用授权。授权不包含第三方模型、云端转写或 API 的使用费用；如果你自行配置此类服务，相关费用由对应服务商收取。</p></section>
+    <section><h2>付款与交付</h2><p>价格为人民币 99 元，支持微信支付与支付宝扫码付款，由绍兴市臻书科技有限公司（zensoft.top）直接收款。付款成功后，购买页会立即显示激活码；在应用中输入激活码即完成授权，无需注册账户。</p></section>
+    <section><h2>授权范围</h2><p>购买后获得 MinuteFlow 桌面版的个人使用授权，可在最多 2 台你个人拥有的设备上激活使用。授权不包含第三方模型、云端转写或 API 的使用费用；如果你自行配置此类服务，相关费用由对应服务商收取。</p></section>
     <section><h2>购买前说明</h2><p>请先确认设备满足系统要求。当前支持 macOS 14.2+ 与 Windows 10 22H2+。购买即表示你同意我们的服务条款、隐私政策与退款政策。</p></section>
   </article>;
 }
 
-/** 服务条款内容：销售主体、Paddle、许可、责任等八节。 */
+/** 服务条款内容：销售主体、购买支付、许可、责任等八节。 */
 function TermsContent() {
   return <article className="policy-document">
     <section><h2>1. 适用范围与销售主体</h2><p>本条款适用于 MinuteFlow 软件及官网。MinuteFlow 由位于中国的个人开发者运营。联系邮箱：<a href="mailto:xhdp123@126.com">xhdp123@126.com</a>；联系电话：<a href="tel:+8618705850056">+86 187 0585 0056</a>。</p></section>
-    <section><h2>2. 购买与 Paddle</h2><p>我们的订单流程由在线转售商 Paddle.com 执行。Paddle 是所有订单的 Merchant of Record，负责付款、账单客服、税务处理及退款。购买交易还受 <a href="https://www.paddle.com/legal/buyer-terms" target="_blank" rel="noreferrer">Paddle 买家条款</a>约束。</p></section>
+    <section><h2>2. 购买与支付</h2><p>订单通过官网购买页完成，支持微信支付与支付宝扫码付款，由绍兴市臻书科技有限公司直接收款。付款成功后发放激活码，激活码可在最多 2 台你个人拥有的设备上使用。支付通道本身的服务条款以微信支付及支付宝的相应协议为准。</p></section>
     <section><h2>3. 软件许可</h2><p>完成付款后，你获得一项个人、非独占、不可转让的 MinuteFlow 使用许可。你可以在本人拥有或控制的兼容设备上安装使用，但不得转售、出租、破解授权机制，或在法律禁止的范围外反向工程软件。</p></section>
     <section><h2>4. 用户责任</h2><p>你应确保录音和处理会议内容具有必要的知情同意与合法依据，并妥善保护设备、会议数据及第三方 API 凭据。不得使用 MinuteFlow 侵犯他人隐私、知识产权或从事违法活动。</p></section>
     <section><h2>5. 第三方服务</h2><p>你可以自行配置转写或 AI 服务商。此类服务由第三方独立提供，其可用性、费用和数据处理规则由对应服务商负责。MinuteFlow 不会代你向第三方提交内容，除非你主动完成配置并发起相关功能。</p></section>
@@ -921,7 +1169,7 @@ function PrivacyContent() {
     <section><h2>1. 谁负责处理信息</h2><p>MinuteFlow 由位于中国的个人开发者运营。隐私问题或权利请求请发送至 <a href="mailto:xhdp123@126.com">xhdp123@126.com</a>，或致电 <a href="tel:+8618705850056">+86 187 0585 0056</a>。</p></section>
     <section><h2>2. 本地会议数据</h2><p>会议录音、逐字稿、笔记、纪要、行动项与应用设置默认存储在你的设备上。我们不会运营一个用于收集这些内容的 MinuteFlow 云端账户或同步服务。卸载软件前请自行导出需要保留的数据。</p></section>
     <section><h2>3. 你主动配置的第三方服务</h2><p>当你配置并使用第三方转写或 AI 服务时，完成请求所需的音频、文本或提示词会直接发送给你选择的提供商。处理行为受该提供商的隐私政策约束。API 凭据保存在设备的安全存储中。</p></section>
-    <section><h2>4. 购买与付款信息</h2><p>Paddle 作为 Merchant of Record 处理结账、付款、税务、收据、反欺诈和退款。我们可能收到订单状态、产品、金额、国家/地区、交易标识及用于履行许可和提供支持的有限买家信息，但不会收到完整银行卡资料。详见 <a href="https://www.paddle.com/legal/privacy" target="_blank" rel="noreferrer">Paddle 隐私政策</a>。</p></section>
+    <section><h2>4. 购买与付款信息</h2><p>支付由微信支付与支付宝通道处理，我们不会接触或存储你的银行卡、支付账户等敏感资料。为履行许可、提供支持与处理退款，我们会保留订单编号、支付渠道、金额、时间与对应激活码的必要记录。相关处理同时受微信支付与支付宝的隐私政策约束。</p></section>
     <section><h2>5. 官网与支持</h2><p>本静态官网不要求登录，也不设置产品分析或广告跟踪 Cookie。托管服务可能为安全与运行目的处理常规访问日志。当你通过邮件或电话联系我们时，我们会处理你提供的联系方式、问题内容和必要的订单信息，以回应请求、排查故障或履行法律义务。</p></section>
     <section><h2>6. 保存、安全与披露</h2><p>本地内容的保存期限由你决定。支持记录仅在处理请求、履行交易和法律义务所需期间保存。除受托服务商、法律要求或保护合法权利所必需的情形外，我们不会出售或披露你的个人信息。</p></section>
     <section><h2>7. 你的权利</h2><p>根据适用法律，你可以请求访问、更正或删除我们持有的个人信息，或对特定处理提出异议。请通过上述邮箱联系；我们可能需要核验身份。设备上的本地数据可由你直接在应用内管理或删除。</p></section>
@@ -933,10 +1181,10 @@ function PrivacyContent() {
 function RefundContent() {
   return <article className="policy-document">
     <section className="refund-highlight"><h2>7 天退款保证</h2><p>自首次购买完成之日起 7 个自然日内，你可以申请退回 MinuteFlow 的一次性购买款项。</p></section>
-    <section><h2>如何申请</h2><p>打开 Paddle 发送的购买收据，使用其中的订单管理或退款入口；也可以访问 <a href="https://paddle.net" target="_blank" rel="noreferrer">paddle.net</a> 联系 Paddle 买家支持。为便于查询，请准备购买邮箱和交易编号。你也可以发送邮件至 <a href="mailto:xhdp123@126.com">xhdp123@126.com</a> 寻求协助。</p></section>
-    <section><h2>适用条件</h2><p>申请需在 7 天期限内提交。退款通常退回原付款方式，实际到账时间由 Paddle、银行或支付机构决定。退款完成后，对应软件许可将终止。</p></section>
+    <section><h2>如何申请</h2><p>发送邮件至 <a href="mailto:xhdp123@126.com">xhdp123@126.com</a>，附上激活码或购买页显示的订单信息。我们核实后会通过微信支付或支付宝按原路退回款项。</p></section>
+    <section><h2>适用条件</h2><p>申请需在 7 天期限内提交。退款按原支付渠道退回，实际到账时间由微信支付、支付宝及银行决定。退款完成后，对应激活码将被撤销，软件许可随之终止。</p></section>
     <section><h2>例外情况</h2><p>法律允许时，对于欺诈、滥用退款机制、已发起拒付或无法验证的订单，我们可能拒绝退款。由第三方 API、模型或其他服务商收取的费用不属于 MinuteFlow 购买款，无法通过本政策退还。</p></section>
-    <section><h2>法定消费者权利</h2><p>本政策不限制适用法律赋予你的强制性消费者权利。如当地法律规定更长的撤销期、退款权或其他救济，以该法律为准。Paddle 也可能依据其政策和适用法律处理退款。</p></section>
+    <section><h2>法定消费者权利</h2><p>本政策不限制适用法律赋予你的强制性消费者权利。如当地法律规定更长的撤销期、退款权或其他救济，以该法律为准。</p></section>
   </article>;
 }
 
@@ -970,10 +1218,11 @@ function SiteFooter() {
   );
 }
 
-/** 从 pathname + hash 解析当前路由：政策页看路径尾部，specs 看 hash，其余为首页。 */
+/** 从 pathname + hash 解析当前路由：政策/购买页看路径尾部，specs 看 hash，其余为首页。 */
 function getRoute(): SiteRoute {
   const path = window.location.pathname.replace(/\/+$/, "");
   if (path.endsWith("/pricing")) return "pricing";
+  if (path.endsWith("/buy")) return "buy";
   if (path.endsWith("/terms")) return "terms";
   if (path.endsWith("/privacy")) return "privacy";
   if (path.endsWith("/refund")) return "refund";

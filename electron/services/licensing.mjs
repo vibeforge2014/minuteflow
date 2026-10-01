@@ -320,6 +320,19 @@ export async function getLicenseStatus({ refresh = false } = {}) {
     if (!rolledBack && isTransient && Number.isFinite(lastVerified) && Date.now() - lastVerified <= offlineGraceMs) {
       return publicStatus(state, config, { offline: true, message: "当前离线，已使用最近一次有效授权。" });
     }
+    if (!isTransient) {
+      // Terminal verdict (invalid/revoked/over-limit): end the entitlement NOW and
+      // persist it — otherwise requireLicense keeps riding the 72h cache on a
+      // state file that still says "licensed". Keep deviceId/指纹 so re-activation
+      // on this machine reuses the same device slot.
+      const remaining = { deviceId: state.deviceId, machineFingerprint: state.machineFingerprint };
+      deleteSecret(licenseSecretId);
+      await writeState(remaining);
+      return publicStatus(remaining, config, {
+        state: "unlicensed",
+        message: error instanceof Error ? error.message : "授权验证失败。"
+      });
+    }
     return publicStatus(state, config, {
       state: "error",
       message: error instanceof Error ? error.message : "授权验证失败。"
@@ -419,13 +432,13 @@ export async function requireLicense() {
 }
 
 /**
- * 返回购买页地址（licensing:open-checkout）：优先配置值，缺省官网 pricing 页；
+ * 返回购买页地址（licensing:open-checkout）：优先配置值，缺省官网购买页；
  * 地址必须能解析为 URL 且为 HTTPS，否则报错（不允许把用户带去非加密页面）。
  * @returns {Promise<string>} 购买页 URL
  */
 export async function checkoutUrl() {
   const config = await getConfig();
-  const candidate = config.checkoutUrl || "https://zensoft.top/minuteflow/pricing/";
+  const candidate = config.checkoutUrl || "https://zensoft.top/minuteflow/buy/";
   let url;
   try {
     url = new URL(candidate);

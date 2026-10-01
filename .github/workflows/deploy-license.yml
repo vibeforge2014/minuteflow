@@ -1,0 +1,63 @@
+name: Deploy MinuteFlow license service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - ".github/workflows/deploy-license.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-license
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run license server tests
+        run: npm run test:license
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check deploy secrets
+        id: secrets
+        env:
+          SSH_KEY: ${{ secrets.ZENSOFT_SSH_KEY }}
+        run: |
+          if [ -z "$SSH_KEY" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::ZENSOFT_SSH_KEY 等密钥未配置，跳过部署"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy to zensoft.top
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          SSH_KEY: ${{ secrets.ZENSOFT_SSH_KEY }}
+          SSH_HOST: ${{ secrets.ZENSOFT_SSH_HOST }}
+          SSH_USER: ${{ secrets.ZENSOFT_SSH_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # 代码随仓库走；data/ 与 env 不在 rsync 范围（excluded），持久化数据不受部署影响
+          rsync -az --delete \
+            --exclude 'data/' \
+            -e "ssh -i ~/.ssh/deploy_key" server/ \
+            "$SSH_USER@$SSH_HOST:/opt/minuteflow-license/"
+          ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" \
+            "sudo systemctl restart minuteflow-license && sleep 1 && curl -sf http://127.0.0.1:8787/healthz"

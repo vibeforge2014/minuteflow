@@ -1,0 +1,25 @@
+# /etc/systemd/system/minuteflow-license.service
+# 授权/支付后端：nginx 反代 https://zensoft.top/api/license/* → 127.0.0.1:8787。
+[Unit]
+Description=MinuteFlow license & payment service
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/minuteflow-license
+EnvironmentFile=/etc/minuteflow-license/env
+ExecStart=/usr/bin/node src/index.mjs
+Restart=on-failure
+RestartSec=2
+
+# 沙箱加固：只允许写自己的数据目录
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/minuteflow-license/data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,7 @@
 /**
  * 付费墙对话框（¥99 一次性购买）：解锁录音/转写/AI 纪要/导入/导出前弹出。
- * 提供三个动作：跳转 Paddle 购买页、输入激活码（主进程经 HTTPS 验证服务校验并绑定设备）、
- * 「恢复购买」（强制刷新授权状态，覆盖离线宽限期的过期缓存）。
+ * 提供三个动作：跳转官网购买页（微信支付/支付宝扫码）、输入激活码（主进程经 HTTPS
+ * 验证服务校验并绑定设备）、「恢复购买」（强制刷新授权状态，覆盖离线宽限期的过期缓存）。
  * 验证/激活的实际逻辑在 electron/services/licensing.mjs；这里只做 UI 与状态回传。
  */
 import { useEffect, useState } from "react";
@@ -70,7 +70,7 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
         <div><input id="license-key" value={licenseKey} onChange={(event) => setLicenseKey(event.target.value)} placeholder="输入购买后收到的激活码" autoComplete="off" spellCheck={false} /><button className="button button--primary" disabled={busy || !licenseKey.trim()} onClick={activate}>激活</button></div>
       </div> : null}
       {error && <p className="paywall-error" role="alert">{error}</p>}
-      {status && !status.verificationConfigured && !error && <p className="paywall-config-note">购买入口已就绪；激活验证服务将在 Paddle 审核完成后启用。</p>}
+      {status && !status.verificationConfigured && !error && <p className="paywall-config-note">购买入口已就绪；激活验证服务正在接入，稍后重启应用即可使用。</p>}
       {status?.insecureStorage && !error && <p className="paywall-config-note">当前为未签名版本，密钥将以未加密方式保存在本地，建议安装官方签名版本。</p>}
       <div className="paywall-actions">
         <button className="button button--primary paywall-buy" onClick={async () => {
@@ -80,7 +80,7 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
         <button className="button" onClick={() => setShowActivation((value) => !value)}><Key size={15} />{showActivation ? "收起激活" : "输入激活码"}</button>
         <button className="text-button" disabled={busy} onClick={refresh}><ArrowClockwise size={14} className={busy ? "spin" : ""} />{busy ? "正在验证" : "恢复购买"}</button>
       </div>
-      <footer><ShieldCheck size={14} /><span>付款由 Paddle 安全处理。授权验证仅发送激活码、设备标识与应用版本。</span></footer>
+      <footer><ShieldCheck size={14} /><span>支付由微信支付 / 支付宝安全处理。授权验证仅发送激活码、设备标识与应用版本。</span></footer>
     </section>
   </div>;
 }
