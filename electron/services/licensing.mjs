@@ -28,9 +28,11 @@ const cacheTtlMs = 72 * 60 * 60 * 1_000;
 // the first device, and stop honoring it after the fixed deadline.
 const temporaryLicenseHashes = [
   "b073dfd808f321b85324cbc40592a8f8eebfb1c756551c47226258e236a2b999",
-  "6ba04be973fddb8b1b8a7084db786c01761773c77745045a4babff88992e6383"
+  "6ba04be973fddb8b1b8a7084db786c01761773c77745045a4babff88992e6383",
+  // 2026-10-01 签发：开发者自用 + 过渡期延续（Paddle 验证服务上线前）。
+  "c06217c435ef9e9d6fd7e64212517d906dd9c43880bedb5e6791e99fbd89efa6"
 ];
-const temporaryLicenseExpiresAt = "2026-10-01T00:00:00.000Z";
+const temporaryLicenseExpiresAt = "2027-01-31T00:00:00.000Z";
 // A wall-clock-vs-uptime skew beyond this many seconds signals the clock was
 // rolled back: if the wall claims less time elapsed than uptime advanced, or
 // the stored lastVerifiedAt is in the future, treat as tampering.
