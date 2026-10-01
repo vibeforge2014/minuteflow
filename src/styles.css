@@ -3484,49 +3484,65 @@ html[data-surface="permission-helper"] #root {
 .model-catalog__section small { color: #96908c; font-size: 8px; }
 .model-catalog__section > button > svg { color: var(--green); }
 
-/* 已保存档案行：主体按钮 + 「正在使用」单选开关（同类互斥，见 database.saveModelProfile）。 */
+/* 已保存档案行：一张完整卡片 = 主体按钮（图标+两行文字）+ 右侧「正在使用」单选开关（同类互斥，见 database.saveModelProfile）。
+   开关状态本身即「使用中」，不再另设徽标，避免挤占名称列。 */
 .model-catalog__row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 6px;
-}
-
-.model-catalog__row-main {
   min-width: 0;
   min-height: 54px;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   padding: 8px;
-  color: #373230;
   background: #fff;
   border: 1px solid #e7e4e1;
   border-radius: 10px;
-  text-align: left;
 }
 
-.model-catalog__row-main:hover { border-color: #e8c7bd; background: #fffaf7; }
-.model-catalog__row.is-selected .model-catalog__row-main {
+.model-catalog__row:hover { border-color: #e8c7bd; background: #fffaf7; }
+.model-catalog__row.is-selected {
   border-color: #e59a85;
   background: #fff8f4;
   box-shadow: 0 0 0 2px rgba(231, 111, 81, .08);
 }
-.model-catalog__row-main > span:nth-child(2) {
+
+.model-catalog__row-main {
+  min-width: 0;
+  align-self: stretch;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 0;
+  color: #373230;
+  background: transparent;
+  border: none;
+  text-align: left;
+}
+
+.model-catalog__text {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 3px;
 }
-.model-catalog__row-main strong { font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.model-catalog__row-main small { color: #96908c; font-size: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
-.model-catalog__badges {
-  display: inline-flex;
+.model-catalog__titleline {
+  min-width: 0;
+  display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
 }
+
+.model-catalog__row-main strong {
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: 11px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.model-catalog__row-main small { color: #96908c; font-size: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
 .model-badge {
   flex: 0 0 auto;
@@ -3538,7 +3554,6 @@ html[data-surface="permission-helper"] #root {
   white-space: nowrap;
 }
 
-.model-badge--active { color: #c4573b; background: #ffe9de; }
 .model-badge--visual { color: #3c7a52; background: #e2f2e6; }
 .model-badge--key { color: #8a8480; background: #f1efec; }
 

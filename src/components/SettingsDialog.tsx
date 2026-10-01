@@ -742,11 +742,13 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                       <div key={profile.id} className={`model-catalog__row ${editing?.id === profile.id ? "is-selected" : ""}`}>
                         <button className="model-catalog__row-main" onClick={() => { setEditing(normalizeLegacyProviderProfile(profile)); setApiKey(""); setStatus(null); setEditorGeneration((value) => value + 1); }}>
                           <span className="profile-icon">{profile.kind === "stt" ? "STT" : profile.kind === "llm" ? "LLM" : "SPK"}</span>
-                          <span><strong>{profile.name}</strong><small>{profile.kind === "diarization" ? (profile.options?.segmentationModelPath && profile.options?.embeddingModelPath ? "声纹识别已就绪" : "待补齐模型") : (profile.model || "尚未选择模型")}</small></span>
-                          <span className="model-catalog__badges">
-                            {profile.enabled && <span className="model-badge model-badge--active">使用中</span>}
-                            {visualVerified && <span className="model-badge model-badge--visual" title="视觉纪要已通过真实验证">视觉✓</span>}
-                            {profile.secretId && <span className="model-badge model-badge--key" title="已安全保存密钥">钥</span>}
+                          <span className="model-catalog__text">
+                            <span className="model-catalog__titleline">
+                              <strong>{profile.name}</strong>
+                              {visualVerified && <span className="model-badge model-badge--visual" title="视觉纪要已通过真实验证">视觉✓</span>}
+                              {profile.secretId && <span className="model-badge model-badge--key" title="已安全保存密钥">钥</span>}
+                            </span>
+                            <small>{profile.kind === "diarization" ? (profile.options?.segmentationModelPath && profile.options?.embeddingModelPath ? "声纹识别已就绪" : "待补齐模型") : (profile.model || "尚未选择模型")}</small>
                           </span>
                         </button>
                         <button
