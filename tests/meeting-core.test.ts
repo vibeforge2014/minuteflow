@@ -870,11 +870,23 @@ describe("structured meeting summary", () => {
     expect(summary.actionItems[0]).toMatchObject({ owner: "刘婷", status: "todo" });
     expect(summary.openQuestions).toContain("上线日期是否确定？");
     expect(summary.keyPoints).not.toContain("决定采用 A 方案。");
-    expect(summary.keyPoints.some((item) => /^(会议决定|后续安排|讨论重点)：/.test(item))).toBe(true);
+    // 类别由 decisions/risks 等独立字段承载；关键结论行是干净的结论文本，
+    // 不再携带「会议决定/讨论重点」这类会在卡片里反复出现的前缀小标题。
+    expect(summary.keyPoints.length).toBeGreaterThan(0);
+    expect(summary.keyPoints.every((item) => /^(会议决定|后续安排|风险提示|讨论重点)：/.test(item) === false)).toBe(true);
   });
 
   it("rejects structurally invalid responses", () => {
     expect(() => validateSummary({ topics: "not-an-array" })).toThrow();
+  });
+
+  it("heals legacy key-point label prefixes on the read path", () => {
+    const healed = simplifySummary({
+      topics: [],
+      keyPoints: ["讨论重点：旧版本烤进文本的标签", "会议决定：也是标签", "干净的结论不需要处理"],
+      decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: []
+    });
+    expect(healed.keyPoints).toEqual(["旧版本烤进文本的标签", "也是标签", "干净的结论不需要处理"]);
   });
 
   it("backfills unique ids for AI action items that omit them", () => {

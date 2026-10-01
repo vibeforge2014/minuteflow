@@ -58,7 +58,9 @@ export function simplifySummary(summary = {}) {
   return {
     ...summary,
     topics: list(summary.topics),
-    keyPoints: list(summary.keyPoints),
+    // 读路径自愈：剥掉旧版本本机纪要烤进文本的「会议决定/讨论重点」等前缀标签，
+    // 让已保存会议的关键结论卡片不再反复出现同一个小标题。
+    keyPoints: list(summary.keyPoints).map((item) => item.replace(/^(会议决定|后续安排|风险提示|讨论重点)：/, "")),
     decisions: list(summary.decisions),
     actionItems: Array.isArray(summary.actionItems)
       ? summary.actionItems.map((item) => ({
@@ -88,7 +90,9 @@ export function simplifyMeetingAiText(meeting) {
 
 /**
  * 无总结模型时生成压缩后的关键要点。它按句/分句评分，提取最有信息量的 1–2 个分句，
- * 再加上“会议决定/后续安排/风险提示/讨论重点”标签，避免把长转录原样搬进文档。
+ * 避免把长转录原样搬进文档。关键结论行不再携带「会议决定/讨论重点」这类前缀标签：
+ * 类别已经由纪要 schema 的 decisions/risks/actionItems 等独立字段承载，行内重复
+ * 标签会让关键结论卡片里同一个小标题反复出现。
  */
 export function buildBasicKeyPoints(transcript = []) {
   const informationPattern = /(确认|决定|结论|完成|进展|方案|目标|问题|原因|数据|结果|计划|建议|需要|风险|负责|下一步)/g;
@@ -119,11 +123,7 @@ export function buildBasicKeyPoints(transcript = []) {
     const normalized = core.replace(/[\s，。！？、,.!?;；:：'"“”‘’]/g, "");
     if (!normalized || [...seen].some((value) => value.includes(normalized) || normalized.includes(value))) continue;
     seen.add(normalized);
-    const label = /(决定|确认|结论|采用|确定)/.test(core) ? "会议决定"
-      : /(需要|负责|完成|跟进|计划|下一步)/.test(core) ? "后续安排"
-        : /(风险|延期|阻塞|合规|隐患)/.test(core) ? "风险提示"
-          : "讨论重点";
-    points.push(`${label}：${core}${core.length < unit.text.length ? "…" : ""}`);
+    points.push(`${core}${core.length < unit.text.length ? "…" : ""}`);
     if (points.length >= 6) break;
   }
   return points;

@@ -42,7 +42,8 @@ export function simplifySummary(summary: MeetingSummary): MeetingSummary {
   return {
     ...summary,
     topics: list(summary.topics),
-    keyPoints: list(summary.keyPoints),
+    // 读路径自愈：剥掉旧版本本机纪要烤进文本的「会议决定/讨论重点」等前缀标签。
+    keyPoints: list(summary.keyPoints).map((item) => item.replace(/^(会议决定|后续安排|风险提示|讨论重点)：/, "")),
     decisions: list(summary.decisions),
     actionItems: (summary.actionItems ?? []).map((item) => ({
       ...item,
