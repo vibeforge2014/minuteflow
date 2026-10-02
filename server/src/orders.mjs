@@ -9,7 +9,7 @@ import { config } from "./config.mjs";
 import { db, nowIso, transaction } from "./db.mjs";
 import { issueLicenseForOrder, licensePlaintext } from "./licenses.mjs";
 import { createNativeOrder, queryOrderByOutTradeNo as queryWechat } from "./wechat.mjs";
-import { createPrecreateOrder, queryOrderByOutTradeNo as queryAlipay } from "./alipay.mjs";
+import { createPagePayUrl, createPrecreateOrder, queryOrderByOutTradeNo as queryAlipay } from "./alipay.mjs";
 
 const ORDER_DESCRIPTION = "MinuteFlow 会议助手 · 一次性买断授权";
 
@@ -32,9 +32,17 @@ export async function createOrder(channel) {
       outTradeNo, description: ORDER_DESCRIPTION, amountFen: config.amountFen, expiresAt
     });
   } else if (channel === "alipay") {
-    qrPayload = await createPrecreateOrder({
-      outTradeNo, subject: ORDER_DESCRIPTION, amountFen: config.amountFen, expiresAt
-    });
+    if (config.alipay.product === "face") {
+      qrPayload = await createPrecreateOrder({
+        outTradeNo, subject: ORDER_DESCRIPTION, amountFen: config.amountFen, expiresAt
+      });
+    } else {
+      // 电脑网站支付：返回收银台跳转 URL，return_url 带订单号回购买页续轮询。
+      qrPayload = createPagePayUrl({
+        outTradeNo, subject: ORDER_DESCRIPTION, amountFen: config.amountFen,
+        returnUrl: `${config.publicBaseUrl}/minuteflow/buy/?order=${id}`
+      });
+    }
   } else {
     throw new Error("不支持的支付通道。");
   }
@@ -123,7 +131,8 @@ export function publicOrderView(order) {
     orderId: order.id,
     channel: order.channel,
     state: order.state,
-    type: "qr",
+    // 支付宝电脑网站支付的 payload 是收银台跳转 URL（https 开头），当面付/微信是二维码内容。
+    type: order.channel === "alipay" && order.qr_payload?.startsWith("https://") ? "redirect" : "qr",
     payload: order.qr_payload,
     amountFen: order.amount_fen,
     expiresAt: order.expires_at,

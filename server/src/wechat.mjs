@@ -22,7 +22,7 @@ function buildAuthorization(method, urlPathWithQuery, bodyText) {
   const signature = createSign("RSA-SHA256")
     .update(message)
     .sign(asPem(config.wechat.privateKey, "PRIVATE KEY"), "base64");
-  return `WECHATPAY2-SHA256-RFC4647 pubkey="${config.wechat.mchid}",nonce_str="${nonce}",timestamp="${timestamp}",signature="${signature}",serial_no="${config.wechat.serialNo}"`;
+  return `WECHATPAY2-SHA256-RSA2048 mchid="${config.wechat.mchid}",nonce_str="${nonce}",timestamp="${timestamp}",signature="${signature}",serial_no="${config.wechat.serialNo}"`;
 }
 
 async function v3Request(method, urlPathWithQuery, bodyObject) {

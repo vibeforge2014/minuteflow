@@ -867,6 +867,7 @@ type BuyOrder = {
   orderId: string;
   channel: BuyChannel;
   state: string;
+  type?: string;
   payload: string;
   amountFen: number;
   expiresAt: string;
@@ -892,6 +893,27 @@ function BuyPage() {
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
+  // 回跳续单：支付宝电脑网站支付付款后经 return_url（?order=<id>）回到本页，
+  // 直接恢复该订单的轮询；读完后立刻抹掉查询参数避免刷新/分享时重复进入。
+  useEffect(() => {
+    const resumeId = new URLSearchParams(window.location.search).get("order");
+    if (!resumeId || !/^[0-9a-f-]{36}$/i.test(resumeId)) return;
+    window.history.replaceState(null, "", window.location.pathname);
+    let cancelled = false;
+    fetch(`${licenseApiRoot()}/api/license/orders/${resumeId}`)
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error("bad status"))))
+      .then((view) => {
+        if (!cancelled && view?.orderId) setOrder(view);
+        else if (!cancelled) setError("未找到对应的订单，请重新发起支付。");
+      })
+      .catch(() => {
+        if (!cancelled) setError("暂时无法查询订单状态，请稍后刷新重试。");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // 通道就绪态：决定渲染微信/支付宝按钮与沙箱徽标。
   useEffect(() => {
     let cancelled = false;
@@ -908,9 +930,9 @@ function BuyPage() {
     };
   }, []);
 
-  // 二维码渲染。
+  // 二维码渲染（redirect 型订单跳收银台，不出二维码）。
   useEffect(() => {
-    if (!order?.payload) {
+    if (!order?.payload || order.type === "redirect") {
       setQrSrc("");
       return;
     }
@@ -970,6 +992,10 @@ function BuyPage() {
         return;
       }
       setOrder(payload);
+      // 支付宝电脑网站支付：整页跳转支付宝收银台，付款后经 return_url 带订单号回来续轮询。
+      if (payload.type === "redirect" && payload.payload) {
+        window.location.assign(payload.payload);
+      }
     } catch {
       setError("暂时无法连接支付服务，请检查网络后重试。");
     } finally {
@@ -1032,7 +1058,7 @@ function BuyPage() {
             >
               <QrCode size={30} weight="bold" aria-hidden />
               <span>支付宝</span>
-              <small>{channels?.alipay ? `${amountLabel} · 扫码支付` : "暂未开通"}</small>
+              <small>{channels?.alipay ? `${amountLabel} · 跳转支付宝收银台` : "暂未开通"}</small>
             </button>
             {channels?.mock && (
               <button
@@ -1048,7 +1074,19 @@ function BuyPage() {
             )}
           </div>
         )}
-        {!loadError && order && order.state === "created" && (
+        {!loadError && order && order.state === "created" && order.type === "redirect" && (
+          <div className="buy-qr">
+            <strong>支付宝 · {amountLabel}</strong>
+            <p className="buy-status">
+              <span className="buy-dots" aria-hidden><i /><i /><i /></span>
+              已跳转支付宝收银台，付款完成后本页会自动显示激活码
+            </p>
+            <button type="button" className="buy-regenerate" onClick={() => window.location.assign(order.payload)}>
+              没有跳转？重新打开支付宝收银台
+            </button>
+          </div>
+        )}
+        {!loadError && order && order.state === "created" && order.type !== "redirect" && (
           <div className="buy-qr">
             <strong>{channelLabel} · {amountLabel}</strong>
             {qrSrc ? <img src={qrSrc} alt={`${channelLabel}付款二维码`} width={232} height={232} /> : <span className="buy-qr--pending" aria-hidden />}
@@ -1063,10 +1101,10 @@ function BuyPage() {
         )}
         {!loadError && order && order.state === "expired" && (
           <div className="buy-qr">
-            <strong>二维码已过期</strong>
-            <p className="buy-status">订单超时未支付，点击下方重新生成二维码。</p>
+            <strong>{order.type === "redirect" ? "订单已过期" : "二维码已过期"}</strong>
+            <p className="buy-status">订单超时未支付，点击下方重新发起支付。</p>
             <button type="button" className="site-button site-button--primary" onClick={() => void createOrder(order.channel)}>
-              重新生成二维码
+              重新发起支付
             </button>
           </div>
         )}

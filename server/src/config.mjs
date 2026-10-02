@@ -59,7 +59,12 @@ export const config = {
     /** 支付宝公钥（非应用公钥），用于异步通知验签。 */
     alipayPublicKey: optionalFile(env.ALIPAY_PUBLIC_KEY_PATH || env.ALIPAY_PUBLIC_KEY),
     /** 网关：生产 https://openapi.alipay.com，沙箱用 https://openapi-sandbox.dl.alipay.com。 */
-    gateway: env.ALIPAY_GATEWAY || "https://openapi.alipay.com"
+    gateway: env.ALIPAY_GATEWAY || "https://openapi.alipay.com",
+    /**
+     * 收单产品：page = 电脑网站支付（跳支付宝收银台，桌面端收银台内呈现扫码/登录）；
+     * face = 当面付 precreate（站内二维码，需单独签约当面付）。默认 page。
+     */
+    product: env.ALIPAY_PRODUCT === "face" ? "face" : "page"
   },
   /** 激活码静态加密主密钥（32 字节 hex/base64/text 均可，长度补齐到 32 字节）。 */
   masterKey: env.LICENSE_MASTER_KEY || ""

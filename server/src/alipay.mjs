@@ -75,6 +75,35 @@ export async function createPrecreateOrder({ outTradeNo, subject, amountFen, exp
   return body.qr_code;
 }
 
+/**
+ * 电脑网站支付（alipay.trade.page.pay）：返回已签名的收银台跳转 URL。
+ * 用户浏览器整页跳转到支付宝收银台（桌面端内呈现扫码/登录），付款后经
+ * return_url 回购买页继续轮询，落账仍以 notify_url 异步通知 + 主动查单为准。
+ */
+export function createPagePayUrl({ outTradeNo, subject, amountFen, returnUrl }) {
+  const params = {
+    app_id: config.alipay.appId,
+    method: "alipay.trade.page.pay",
+    charset: "utf-8",
+    sign_type: "RSA2",
+    timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }),
+    version: "1.0",
+    notify_url: `${config.publicBaseUrl}/api/license/webhooks/alipay`,
+    return_url: returnUrl,
+    biz_content: JSON.stringify({
+      out_trade_no: outTradeNo,
+      product_code: "FAST_INSTANT_TRADE_PAY",
+      total_amount: (amountFen / 100).toFixed(2),
+      subject
+    })
+  };
+  params.sign = signParams(params);
+  const query = Object.keys(params)
+    .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`)
+    .join("&");
+  return `${config.alipay.gateway}/gateway.do?${query}`;
+}
+
 /** 主动查单（对账补偿）。 */
 export async function queryOrderByOutTradeNo(outTradeNo) {
   return openApi("alipay.trade.query", { out_trade_no: outTradeNo });
