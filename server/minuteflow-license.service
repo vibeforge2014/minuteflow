@@ -6,8 +6,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=www-data
-Group=www-data
+# 专用系统用户（服务器初始化时 useradd -r -M -s /sbin/nologin minuteflow 创建）；
+# ALinux/RHEL 系没有 www-data，Debian/Ubuntu 上可自行替换。
+User=minuteflow
+Group=minuteflow
 WorkingDirectory=/opt/minuteflow-license
 EnvironmentFile=/etc/minuteflow-license/env
 ExecStart=/usr/bin/node src/index.mjs
