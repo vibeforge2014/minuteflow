@@ -19,10 +19,13 @@ function alipayTimestamp() {
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
 }
 
-/** 支付宝签名串：所有业务与公共参数（不含 sign/sign_type）按 key 字典序 k=v& 拼接。 */
-function canonicalQuery(params) {
+/**
+ * 支付宝签名串：参数按 key 字典序 k=v& 拼接（过滤空值）。
+ * 请求签名只排除 sign（网关验签串包含 sign_type）；异步通知验签则同时排除 sign_type。
+ */
+function canonicalQuery(params, excluded = new Set(["sign"])) {
   return Object.keys(params)
-    .filter((key) => params[key] !== undefined && params[key] !== "" && key !== "sign" && key !== "sign_type")
+    .filter((key) => params[key] !== undefined && params[key] !== "" && !excluded.has(key))
     .sort()
     .map((key) => `${key}=${params[key]}`)
     .join("&");
@@ -135,7 +138,7 @@ export function verifyNotifySignature(form) {
   if (!sign) return false;
   try {
     return createVerify("RSA-SHA256")
-      .update(canonicalQuery(form), "utf8")
+      .update(canonicalQuery(form, new Set(["sign", "sign_type"])), "utf8")
       .verify(asPem(config.alipay.alipayPublicKey, "PUBLIC KEY"), sign, "base64");
   } catch {
     return false;
