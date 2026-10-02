@@ -22,21 +22,30 @@
 > `deploy-license.yml` 在目标目录不存在时会尝试免密 `sudo mkdir` 自举；部署用户无 sudo 时首次部署会明确报错并指向本节——按下面步骤手动完成一次初始化即可，之后的代码更新由 workflow 自动 rsync + 重启。
 
 ```bash
-# 1. 代码与数据目录
+# 0. Node >= 22（node:sqlite），先确认：node -v
+# 1. 代码与数据目录（权限拆分：代码根目录归部署用户供 CI rsync，data/ 归 www-data 供服务写库）
 sudo mkdir -p /opt/minuteflow-license/data
-sudo rsync -a server/ /opt/minuteflow-license/          # 由 deploy-license.yml 自动完成
-sudo chown -R www-data:www-data /opt/minuteflow-license
+sudo chown <部署用户=ZENSOFT_SSH_USER> /opt/minuteflow-license
+sudo chown -R www-data:www-data /opt/minuteflow-license/data
 
-# 2. 环境变量（chmod 600，属主 root:www-data）
+# 2. 环境变量（chmod 600；systemd 以 root 读取，无需 www-data 可读）
 sudo mkdir -p /etc/minuteflow-license
 sudoedit /etc/minuteflow-license/env     # 见下方清单
 
-# 3. systemd
+# 3. systemd（代码首次由 deploy-license.yml rsync 到位后再 start；
+#    enable 先行，workflow 部署完会 sudo -n restart 自动拉起）
 sudo cp /opt/minuteflow-license/minuteflow-license.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now minuteflow-license
-systemctl status minuteflow-license && curl -s http://127.0.0.1:8787/healthz
+sudo systemctl daemon-reload && sudo systemctl enable minuteflow-license
 
-# 4. nginx：把 nginx.conf.example 的 location 段并入 zensoft.top 站点后 reload
+# 4. 允许部署用户免密重启这一项服务（仅此一条，最小授权，CI 部署后自动重启用）
+echo '<部署用户> ALL=(root) NOPASSWD: /usr/bin/systemctl restart minuteflow-license' \
+  | sudo tee /etc/sudoers.d/minuteflow-license-deploy
+sudo chmod 440 /etc/sudoers.d/minuteflow-license-deploy
+
+# 5. nginx：把 nginx.conf.example 的 location 段并入 zensoft.top 站点后
+sudo nginx -t && sudo systemctl reload nginx
+#    首次验证：触发一次 deploy-license.yml，绿了即
+curl -s https://zensoft.top/api/license/healthz
 ```
 
 ### 环境变量清单 `/etc/minuteflow-license/env`
