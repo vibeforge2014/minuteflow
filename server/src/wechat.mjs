@@ -100,21 +100,17 @@ export function decryptResource(apiv3Key, { nonce, ciphertext, associated_data: 
 }
 
 /**
- * 回调验签：Wechatpay-Signature 头形如
- * `timestamp="..",nonce="..",signature="..",serial=".."`；
- * 用微信支付公钥验证「timestamp\nnonce\nbody\n」的 SHA256 签名。
- * 头缺失、字段不全或验签失败一律返回 false（调用方回 400/500 让微信重投）。
+ * 回调验签：微信把签名放在 Wechatpay-Signature（裸 base64，不是 k="v" 串——
+ * 那是商户请求 Authorization 头的格式），时间戳/nonce 在独立的
+ * Wechatpay-Timestamp / Wechatpay-Nonce 头。验签串
+ * 「timestamp\nnonce\nbody\n」用微信支付平台公钥做 SHA256-RSA 验证。
+ * 头缺失或验签失败一律返回 false（调用方回 401 让微信重投）。
  */
 export function verifyNotifySignature(headers, rawBody) {
-  const headerText = headers["wechatpay-signature"];
-  if (!headerText) return false;
-  const fields = {};
-  for (const part of String(headerText).split(",")) {
-    const match = part.match(/^\s*([a-z_]+)="([^"]*)"\s*$/i);
-    if (match) fields[match[1].toLowerCase()] = match[2];
-  }
-  const { timestamp, nonce, signature } = fields;
-  if (!timestamp || !nonce || !signature) return false;
+  const signature = String(headers["wechatpay-signature"] ?? "").trim();
+  const timestamp = String(headers["wechatpay-timestamp"] ?? "").trim();
+  const nonce = String(headers["wechatpay-nonce"] ?? "").trim();
+  if (!signature || !timestamp || !nonce) return false;
   const message = `${timestamp}\n${nonce}\n${rawBody}\n`;
   try {
     return createVerify("RSA-SHA256")

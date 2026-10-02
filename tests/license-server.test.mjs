@@ -177,6 +177,7 @@ function insertManualOrder(channel, outTradeNo) {
 }
 
 function wechatSignedNotification(privateKeyPem, notification) {
+  // 与微信支付真实回调一致：签名是裸 base64，timestamp/nonce 在独立请求头。
   const raw = JSON.stringify(notification);
   const timestamp = String(Math.floor(Date.now() / 1000));
   const nonce = randomBytes(8).toString("hex");
@@ -185,7 +186,10 @@ function wechatSignedNotification(privateKeyPem, notification) {
     raw,
     headers: {
       "content-type": "application/json",
-      "wechatpay-signature": `timestamp="${timestamp}",nonce="${nonce}",signature="${signature}",serial="TEST"`
+      "wechatpay-timestamp": timestamp,
+      "wechatpay-nonce": nonce,
+      "wechatpay-serial": "PUB_KEY_ID_TEST",
+      "wechatpay-signature": signature
     }
   };
 }
