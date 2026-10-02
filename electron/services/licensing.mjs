@@ -418,7 +418,8 @@ export async function deactivateLicense() {
  * @returns {Promise<object>} 已授权时返回授权状态
  */
 export async function requireLicense() {
-  if (!app.isPackaged) return { state: "licensed", devBypass: true };
+  // MINUTEFLOW_REQUIRE_LICENSE=1：未打包的开发版也启用授权墙，供对真实验证服务做端到端联调。
+  if (!app.isPackaged && process.env.MINUTEFLOW_REQUIRE_LICENSE !== "1") return { state: "licensed", devBypass: true };
   const status = await getLicenseStatus();
   if (status.state !== "licensed") {
     // Prefix the code into the message because custom Error properties (like
