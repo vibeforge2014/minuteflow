@@ -25,8 +25,10 @@ export const config = {
   /** 对外_BASE：拼 notify_url 等绝对地址用，必须与 nginx 对外域名一致。 */
   publicBaseUrl: env.LICENSE_PUBLIC_BASE_URL || "https://zensoft.top",
   productId: "minuteflow-desktop",
-  /** 固定售价（分）：金额只在服务端决定，客户端与前端无权指定。 */
-  amountFen: 9_900,
+  /** 固定售价（分）：金额只在服务端决定，客户端与前端无权指定。LICENSE_AMOUNT_FEN 仅供临时调价（如 ¥0.01 真实支付验证）。 */
+  amountFen: Number.parseInt(env.LICENSE_AMOUNT_FEN ?? "", 10) > 0
+    ? Number.parseInt(env.LICENSE_AMOUNT_FEN, 10)
+    : 9_900,
   currency: "CNY",
   /** 订单有效期（毫秒）：微信/支付宝二维码同寿命。 */
   orderTtlMs: 15 * 60_000,

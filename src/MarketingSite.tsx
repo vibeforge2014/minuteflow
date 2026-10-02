@@ -885,6 +885,7 @@ function licenseApiRoot(): string {
 /** 购买页：扫码收银台。订单金额由服务端固定（¥99），页面只负责发起与轮询。 */
 function BuyPage() {
   const [channels, setChannels] = useState<{ wechat: boolean; alipay: boolean; mock: boolean } | null>(null);
+  const [priceFen, setPriceFen] = useState(9_900);
   const [loadError, setLoadError] = useState(false);
   const [order, setOrder] = useState<BuyOrder | null>(null);
   const [qrSrc, setQrSrc] = useState("");
@@ -920,7 +921,10 @@ function BuyPage() {
     fetch(`${licenseApiRoot()}/api/license/healthz`)
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error("bad status"))))
       .then((payload) => {
-        if (!cancelled) setChannels(payload.channels ?? { wechat: false, alipay: false, mock: false });
+        if (!cancelled) {
+          setChannels(payload.channels ?? { wechat: false, alipay: false, mock: false });
+          if (Number.isFinite(payload.amountFen) && payload.amountFen > 0) setPriceFen(payload.amountFen);
+        }
       })
       .catch(() => {
         if (!cancelled) setLoadError(true);
@@ -1016,14 +1020,16 @@ function BuyPage() {
 
   const remainingMs = order?.state === "created" ? Math.max(0, Date.parse(order.expiresAt) - now) : 0;
   const remainingLabel = `${Math.floor(remainingMs / 60_000)}:${String(Math.floor((remainingMs % 60_000) / 1_000)).padStart(2, "0")}`;
-  const amountLabel = order ? `¥${(order.amountFen / 100).toFixed(order.amountFen % 100 === 0 ? 0 : 2)}` : "¥99";
+  // 售价只信服务端：订单金额优先，否则用 healthz 下发的当前售价（联调时可临时调价）。
+  const formatFen = (fen: number) => `¥${(fen / 100).toFixed(fen % 100 === 0 ? 0 : 2)}`;
+  const amountLabel = formatFen(order?.amountFen ?? priceFen);
   const channelLabel = order?.channel === "alipay" ? "支付宝" : order?.channel === "mock" ? "沙箱支付" : "微信支付";
 
   return (
     <main id="main-content" className="buy-page" tabIndex={-1}>
       <header className="buy-hero">
         <span className="section-kicker">购买 MinuteFlow</span>
-        <h1>¥99，一次买断。</h1>
+        <h1>{amountLabel}，一次买断。</h1>
         <p>扫码支付后立即获得激活码，可在最多 2 台你个人的设备上使用。支付由微信支付 / 支付宝安全处理，7 天内支持退款。</p>
         {channels?.mock && <span className="buy-sandbox">沙箱模式 · 商户通道联调中，支付不会产生真实扣款</span>}
       </header>

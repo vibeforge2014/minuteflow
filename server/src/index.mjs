@@ -198,10 +198,11 @@ async function route(req, res) {
   const method = req.method ?? "GET";
 
   if (method === "GET" && (pathname === "/healthz" || pathname === "/api/license/healthz")) {
-    // 购买页据此渲染可用通道（只暴露布尔就绪态，不含任何商户信息）。
+    // 购买页据此渲染可用通道与当前售价（不含任何商户信息）。
     sendJson(res, 200, {
       ok: true,
       productId: config.productId,
+      amountFen: config.amountFen,
       channels: { wechat: channelReady("wechat"), alipay: channelReady("alipay"), mock: channelReady("mock") }
     }, cors);
     return;
