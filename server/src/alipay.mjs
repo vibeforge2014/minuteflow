@@ -1,5 +1,5 @@
 /**
- * 支付宝当面付（alipay.trade.precreate 扫码）。零依赖实现：
+ * 支付宝通道（零依赖实现）：当面付 precreate 扫码 + 电脑网站支付 page.pay 跳转。
  * - 系统参数组装 + 应用私钥 RSA2（SHA256-with-RSA）签名；
  * - 异步通知（form 表单）用支付宝公钥验签；
  * - 网关可切沙箱（ALIPAY_GATEWAY）。
@@ -10,6 +10,13 @@ import { config } from "./config.mjs";
 
 function asPem(text, label) {
   return text.includes("BEGIN") ? text : `-----BEGIN ${label}-----\n${text.replace(/\s+/g, "")}\n-----END ${label}-----\n`;
+}
+
+/** 支付宝网关要求 yyyy-MM-dd HH:mm:ss（东八区、零填充）；toLocaleString("zh-CN") 会产出斜杠格式被 invalid-timestamp 拒绝。 */
+function alipayTimestamp() {
+  const d = new Date(Date.now() + 8 * 3_600_000); // 平移到东八区后按 UTC 字段读取
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
 }
 
 /** 支付宝签名串：所有业务与公共参数（不含 sign/sign_type）按 key 字典序 k=v& 拼接。 */
@@ -38,7 +45,7 @@ async function openApi(method, bizContent, extra = {}) {
     format: "JSON",
     charset: "utf-8",
     sign_type: "RSA2",
-    timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }),
+    timestamp: alipayTimestamp(),
     version: "1.0",
     notify_url: `${config.publicBaseUrl}/api/license/webhooks/alipay`,
     ...extra,
@@ -86,7 +93,7 @@ export function createPagePayUrl({ outTradeNo, subject, amountFen, returnUrl }) 
     method: "alipay.trade.page.pay",
     charset: "utf-8",
     sign_type: "RSA2",
-    timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }),
+    timestamp: alipayTimestamp(),
     version: "1.0",
     notify_url: `${config.publicBaseUrl}/api/license/webhooks/alipay`,
     return_url: returnUrl,
