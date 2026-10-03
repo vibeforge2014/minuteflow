@@ -9,12 +9,17 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { config } from "./config.mjs";
 
-/** RFC3986 percentEncode：空格 %20（非 +）、* → %2A、~ 不编码。 */
+/** 严格 RFC3986 percentEncode：非保留字符仅 A-Za-z0-9-_.~，其余逐字节 %XX 大写。
+ *  阿里云服务端验签用同款严格编码（' → %27、空格 → %20、* → %2A），
+ *  encodeURIComponent 的宽松变体（保留 !'()*）会 SignatureDoesNotMatch。 */
 function percentEncode(value) {
-  return encodeURIComponent(String(value))
-    .replace(/\+/g, "%20")
-    .replace(/\*/g, "%2A")
-    .replace(/%7E/g, "~");
+  const raw = Buffer.from(String(value), "utf8");
+  let out = "";
+  for (const byte of raw) {
+    const ch = String.fromCharCode(byte);
+    out += /[A-Za-z0-9\-_.~]/.test(ch) ? ch : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
 }
 
 async function directMailSend({ to, subject, html }) {
