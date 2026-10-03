@@ -635,6 +635,10 @@ const browserApi: MeetingAPI = {
     async openCheckout() {
       window.open("https://zensoft.top/minuteflow/pricing/", "_blank", "noopener,noreferrer");
       return { opened: true as const };
+    },
+    async openRecover() {
+      window.open("https://zensoft.top/minuteflow/recover/", "_blank", "noopener,noreferrer");
+      return { opened: true as const };
     }
   },
   updates: {

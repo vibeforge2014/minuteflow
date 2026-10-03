@@ -92,6 +92,7 @@ import {
 import {
   activateLicense,
   checkoutUrl,
+  recoverUrl,
   deactivateLicense,
   getLicenseStatus,
   requireLicense
@@ -1302,6 +1303,11 @@ function registerIpc() {
   // licensing:open-checkout — 打开购买页（系统浏览器），付费墙"购买"按钮调用。
   trustedHandle("licensing:open-checkout", async () => {
     await shell.openExternal(await checkoutUrl());
+    return { opened: true };
+  });
+  // licensing:open-recover — 打开激活码找回页（系统浏览器），付费墙"忘记激活码"链接调用。
+  trustedHandle("licensing:open-recover", async () => {
+    await shell.openExternal(await recoverUrl());
     return { opened: true };
   });
   // system:get-permissions — 查询系统麦克风/屏幕权限状态（按平台返回差异字段），

@@ -15,10 +15,11 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
-import { config, channelReady } from "./config.mjs";
+import { config, channelReady, mailReady } from "./config.mjs";
 import { db, nowIso, transaction } from "./db.mjs";
-import { findLicenseByNormalizedKey, normalizeLicenseKey } from "./licenses.mjs";
-import { createOrder, getOrderView, handlePaidNotification } from "./orders.mjs";
+import { findLicenseByNormalizedKey, licensePlaintext, normalizeLicenseKey } from "./licenses.mjs";
+import { createOrder, getOrderView, handlePaidNotification, normalizeEmail, maskEmail } from "./orders.mjs";
+import { sendMail } from "./mail.mjs";
 import { decryptResource, verifyNotifySignature as verifyWechatSignature } from "./wechat.mjs";
 import { verifyNotifySignature as verifyAlipaySignature } from "./alipay.mjs";
 
@@ -95,6 +96,69 @@ function allowOrderFromIp(ip) {
 /** 测试钩子：清空限流窗口。 */
 export function resetOrderRateLimiter() {
   orderHitsByIp.clear();
+}
+
+/** 滑动窗口通用限流（内存，单进程服务够用；超出阈值返回 false 并记账）。 */
+function slidingWindowAllow(map, key, max, windowMs) {
+  const now = Date.now();
+  const hits = (map.get(key) ?? []).filter((time) => now - time < windowMs);
+  if (hits.length >= max) {
+    map.set(key, hits);
+    return false;
+  }
+  hits.push(now);
+  map.set(key, hits);
+  if (map.size > 10_000) {
+    for (const [k, list] of map) {
+      if (list.every((time) => now - time >= windowMs)) map.delete(k);
+    }
+  }
+  return true;
+}
+
+// 反激活释放限流：每激活码 24h 最多 4 次，防止持码者无限轮换设备占用绑定槽。
+const releaseHitsByKey = new Map();
+function allowReleaseForKey(keyHash) {
+  return slidingWindowAllow(releaseHitsByKey, keyHash, 4, 24 * 3_600_000);
+}
+
+// 找回限流：每 IP 每小时 5 次、每邮箱每小时 3 次（找回邮件是外发副作用，须防刷）。
+const recoverHitsByIp = new Map();
+const recoverHitsByEmail = new Map();
+function allowRecoverFromIp(ip) {
+  return slidingWindowAllow(recoverHitsByIp, ip, 5, 3_600_000);
+}
+function allowRecoverForEmail(email) {
+  return slidingWindowAllow(recoverHitsByEmail, email, 3, 3_600_000);
+}
+
+/** 测试钩子：清空 release/recover 限流窗口。 */
+export function resetRecoveryLimiters() {
+  releaseHitsByKey.clear();
+  recoverHitsByIp.clear();
+  recoverHitsByEmail.clear();
+}
+
+/** 找回邮件正文：全部 active 激活码 + 签发日期 + 支持邮箱。 */
+function recoveryEmailHtml(email, licenses) {
+  const rows = licenses.map((license) => {
+    const key = licensePlaintext(license) || "（读取失败，请回复本邮件人工处理）";
+    return `<tr><td style="padding:8px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;letter-spacing:.5px;color:#b3502f;font-weight:600;">${key}</td><td style="padding:8px 12px;color:#6b625c;">${license.issued_at.slice(0, 10)}</td></tr>`;
+  }).join("");
+  return `
+<div style="max-width:520px;margin:0 auto;padding:24px;font-family:-apple-system,'PingFang SC','Helvetica Neue',sans-serif;color:#2a2320;">
+  <h2 style="margin:0 0 4px;font-size:18px;">MinuteFlow 激活码找回</h2>
+  <p style="margin:0 0 16px;color:#6b625c;font-size:13px;">应 ${email} 的请求发送。若非本人操作请忽略本邮件。</p>
+  <table style="border-collapse:collapse;width:100%;background:#fdf6f2;border:1px solid #f3ddd2;border-radius:8px;">
+    <tr><th align="left" style="padding:8px 12px;color:#9a8f88;font-size:12px;font-weight:500;">激活码</th><th align="left" style="padding:8px 12px;color:#9a8f88;font-size:12px;font-weight:500;">签发日期</th></tr>
+    ${rows}
+  </table>
+  <p style="margin:16px 0 0;font-size:13px;line-height:1.7;color:#4a423d;">
+    在 MinuteFlow 桌面应用「解锁 → 输入激活码」中粘贴即可。每个激活码最多绑定 2 台设备；
+    换设备时先在「设置 → 通用 → 授权」停用本机。如有问题联系
+    <a href="mailto:xhdp123@126.com" style="color:#b3502f;">xhdp123@126.com</a>。
+  </p>
+</div>`;
 }
 
 function clientIp(req) {
@@ -225,7 +289,7 @@ async function route(req, res) {
         sendJson(res, 503, { error: label }, cors);
         return;
       }
-      const view = await createOrder(channel);
+      const view = await createOrder(channel, body.email);
       console.log(`[order] created ${view.orderId} channel=${channel} state=${view.state}`);
       sendJson(res, 201, view, cors);
     } catch (error) {
@@ -334,6 +398,82 @@ async function route(req, res) {
       console.error("[verify] 处理失败:", error.message);
       sendJson(res, 500, { valid: false, message: "验证服务暂时不可用，请稍后再试。" }, cors);
     }
+    return;
+  }
+
+  // 反激活：停用本机授权时释放服务端设备绑定槽位（换新机器不被 2 台上限卡住）。
+  if (method === "POST" && pathname === "/api/license/release") {
+    let body = {};
+    try {
+      body = JSON.parse(await readBody(req) || "{}");
+    } catch {
+      sendJson(res, 400, { error: "请求格式错误。" }, cors);
+      return;
+    }
+    const normalized = normalizeLicenseKey(body.licenseKey ?? "");
+    const fingerprint = String(body.machineFingerprint ?? "").trim().slice(0, 256);
+    if (!normalized || !fingerprint) {
+      sendJson(res, 400, { error: "参数缺失。" }, cors);
+      return;
+    }
+    const license = findLicenseByNormalizedKey(normalized);
+    if (!license) {
+      sendJson(res, 401, { error: "激活码无效。" }, cors);
+      return;
+    }
+    if (!allowReleaseForKey(license.key_hash)) {
+      sendJson(res, 429, { error: "操作过于频繁，请稍后再试。" }, cors);
+      return;
+    }
+    // 幂等：绑定不存在也返回成功，不向调用方泄露当前绑定状态。
+    db.prepare("DELETE FROM device_bindings WHERE license_id = ? AND machine_fingerprint = ?")
+      .run(license.id, fingerprint);
+    console.log(`[release] license=${license.id.slice(0, 8)} released a device binding`);
+    sendJson(res, 200, { released: true }, cors);
+    return;
+  }
+
+  // 激活码找回：按购买邮箱把 active 激活码发回本人邮箱。防枚举 + 双重限流。
+  if (method === "POST" && pathname === "/api/license/recover") {
+    if (!mailReady()) {
+      sendJson(res, 503, { error: "邮件服务暂未配置，请联系 xhdp123@126.com 找回激活码。" }, cors);
+      return;
+    }
+    let body = {};
+    try {
+      body = JSON.parse(await readBody(req) || "{}");
+    } catch {
+      sendJson(res, 400, { error: "请求格式错误。" }, cors);
+      return;
+    }
+    const email = normalizeEmail(body.email);
+    if (!email) {
+      sendJson(res, 400, { error: "请输入有效的邮箱地址。" }, cors);
+      return;
+    }
+    if (!allowRecoverFromIp(clientIp(req))) {
+      sendJson(res, 429, { error: "请求过于频繁，请稍后再试。" }, cors);
+      return;
+    }
+    if (!allowRecoverForEmail(email)) {
+      sendJson(res, 429, { error: "请求过于频繁，请稍后再试。" }, cors);
+      return;
+    }
+    try {
+      const licenses = db.prepare(
+        "SELECT * FROM licenses WHERE customer_email = ? AND state = 'active' ORDER BY issued_at"
+      ).all(email);
+      if (licenses.length > 0) {
+        await sendMail({ to: email, subject: "MinuteFlow 激活码找回", html: recoveryEmailHtml(email, licenses) });
+        console.log(`[recover] sent ${licenses.length} key(s) to ${maskEmail(email)}`);
+      } else {
+        console.log(`[recover] no match for ${maskEmail(email)}`);
+      }
+    } catch (error) {
+      // 发送失败也回通用成功：不能利用错误差异探测邮箱是否有购买记录。
+      console.error("[recover] 发送失败:", error.message);
+    }
+    sendJson(res, 200, { sent: true }, cors);
     return;
   }
 

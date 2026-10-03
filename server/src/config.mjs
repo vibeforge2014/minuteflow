@@ -69,8 +69,27 @@ export const config = {
     product: env.ALIPAY_PRODUCT === "face" ? "face" : "page"
   },
   /** 激活码静态加密主密钥（32 字节 hex/base64/text 均可，长度补齐到 32 字节）。 */
-  masterKey: env.LICENSE_MASTER_KEY || ""
+  masterKey: env.LICENSE_MASTER_KEY || "",
+
+  /**
+   * 激活码找回邮件：阿里云邮件推送 DirectMail（RPC SingleSendMail）。
+   * 未配置时 /api/license/recover 优雅降级 503，不影响下单与支付。
+   */
+  mail: {
+    accessKeyId: env.DM_ACCESS_KEY_ID || "",
+    accessKeySecret: env.DM_ACCESS_KEY_SECRET || "",
+    /** 发信地址（须在 DirectMail 控制台创建并验证，如 noreply@mail.zensoft.top）。 */
+    accountName: env.DM_ACCOUNT_NAME || "",
+    fromAlias: env.DM_FROM_ALIAS || "MinuteFlow",
+    endpoint: env.DM_ENDPOINT || "https://dm.aliyuncs.com",
+    region: env.DM_REGION || "cn-hangzhou"
+  }
 };
+
+/** 邮件通道是否配置齐（缺任一项时找回接口降级）。 */
+export function mailReady() {
+  return Boolean(config.mail.accessKeyId && config.mail.accessKeySecret && config.mail.accountName);
+}
 
 /** 各通道是否已配置齐真实密钥。 */
 export function channelReady(channel) {

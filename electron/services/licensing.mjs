@@ -52,7 +52,8 @@ async function getConfig() {
   } catch {}
   cachedConfig = {
     checkoutUrl: process.env.MINUTEFLOW_CHECKOUT_URL?.trim() || fileConfig.checkoutUrl || "",
-    verificationUrl: process.env.MINUTEFLOW_LICENSE_VERIFY_URL?.trim() || fileConfig.verificationUrl || ""
+    verificationUrl: process.env.MINUTEFLOW_LICENSE_VERIFY_URL?.trim() || fileConfig.verificationUrl || "",
+    recoverUrl: process.env.MINUTEFLOW_RECOVER_URL?.trim() || fileConfig.recoverUrl || ""
   };
   return cachedConfig;
 }
@@ -127,12 +128,21 @@ function machineFingerprint() {
     .digest("hex");
 }
 
+/** 激活码脱敏展示：保留 MF- 前缀段与末 4 位（MF-AB12…XY9Z）。 */
+function maskLicenseKey(key) {
+  const trimmed = String(key || "").trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length <= 11) return trimmed;
+  return `${trimmed.slice(0, 7)}…${trimmed.slice(-4)}`;
+}
+
 /** 把内部状态整理为渲染层可见的授权状态对象（不含敏感字段，只保留展示所需信息）。 */
 function publicStatus(state, config, overrides = {}) {
   const licensed = state.status === "licensed";
   return {
     state: licensed ? "licensed" : "unlicensed",
     productId,
+    licenseKeyMasked: licensed ? maskLicenseKey(readSecret(licenseSecretId)) : undefined,
     customerEmail: licensed ? state.customerEmail : undefined,
     entitlementId: licensed ? state.entitlementId : undefined,
     activatedAt: licensed ? state.activatedAt : undefined,
@@ -400,10 +410,30 @@ export async function activateLicense(licenseKey) {
   return publicStatus(next, config);
 }
 
-/** 停用本机授权（licensing:deactivate）：删除密钥并清空授权状态，但保留 deviceId/指纹以便再激活。 */
+/**
+ * 停用本机授权（licensing:deactivate）：
+ * 1. 先 best-effort 通知验证服务释放本机设备绑定槽位（换新机器不被 2 台上限卡住）——
+ *    8 秒超时、任何失败（离线/服务不可用）都不阻塞本地清权，槽位留在服务端由上限文案兜底；
+ * 2. 删除密钥并清空授权状态，保留 deviceId/指纹以便同机再激活复用原绑定。
+ */
 export async function deactivateLicense() {
   const config = await getConfig();
   const state = await readState();
+  const licenseKey = state.status === "licensed" ? readSecret(licenseSecretId) : "";
+  if (licenseKey && config.verificationUrl) {
+    try {
+      const releaseUrl = new URL(config.verificationUrl);
+      releaseUrl.pathname = releaseUrl.pathname.replace(/\/verify\/?$/, "/release");
+      await fetch(releaseUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ licenseKey, machineFingerprint: machineFingerprint() }),
+        signal: AbortSignal.timeout(8_000)
+      });
+    } catch {
+      // 释放失败不阻塞停用：本地已无授权，服务端槽位由 2 台上限文案与人工换绑兜底。
+    }
+  }
   deleteSecret(licenseSecretId);
   await writeState({ deviceId: state.deviceId, machineFingerprint: state.machineFingerprint });
   return publicStatus({ deviceId: state.deviceId, machineFingerprint: state.machineFingerprint }, config);
@@ -447,5 +477,23 @@ export async function checkoutUrl() {
     throw new Error("购买地址配置无效，请联系 xhdp123@126.com。");
   }
   if (url.protocol !== "https:") throw new Error("购买地址必须使用 HTTPS。");
+  return url.toString();
+}
+
+/**
+ * 返回激活码找回页地址（licensing:open-recover）：优先配置值，缺省官网找回页。
+ * 与 checkoutUrl 同样只接受 HTTPS。
+ * @returns {Promise<string>} 找回页 URL
+ */
+export async function recoverUrl() {
+  const config = await getConfig();
+  const candidate = config.recoverUrl || "https://zensoft.top/minuteflow/recover/";
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    throw new Error("找回页地址配置无效，请联系 xhdp123@126.com。");
+  }
+  if (url.protocol !== "https:") throw new Error("找回页地址必须使用 HTTPS。");
   return url.toString();
 }

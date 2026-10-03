@@ -73,6 +73,14 @@ db.exec(`
   );
 `);
 
+// 轻量迁移：给既有 orders 表补 customer_email（选填购买邮箱，用于激活码找回）。
+// ALTER TABLE 无 IF NOT EXISTS，列已存在时捕获 "duplicate column" 即幂等通过。
+try {
+  db.exec("ALTER TABLE orders ADD COLUMN customer_email TEXT");
+} catch {
+  // 列已存在（SQLite 报 duplicate column name）。
+}
+
 export const nowIso = () => new Date().toISOString();
 
 /**

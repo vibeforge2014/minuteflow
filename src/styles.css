@@ -2695,6 +2695,8 @@ html[data-surface="permission-helper"] #root {
 .activation-box label { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; color: #656b74; font-size: 10px; font-weight: 650; }
 .activation-box > div { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
 .activation-box input { min-width: 0; height: 34px; padding: 0 10px; border: 1px solid #dcdfe4; border-radius: 7px; font: inherit; font-size: 11px; }
+.activation-box .activation-recover { margin-top: 8px; color: #98664f; font-size: 10px; }
+.activation-box .activation-recover:hover { color: var(--accent-strong); }
 .paywall-error { margin: 0 0 12px; padding: 9px 10px; color: #a74531; background: #fff3ef; border-radius: 8px; font-size: 10px; }
 .paywall-config-note { margin: 0 0 12px; padding: 9px 10px; color: #776039; background: #fff9ec; border-radius: 8px; font-size: 10px; line-height: 1.45; }
 .paywall-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -4567,6 +4569,55 @@ html[data-surface="permission-helper"] #root {
   padding: 13px 18px;
   color: #79726e;
   font-size: 10px;
+}
+
+/* 授权卡片（通用设置）：已激活态展示脱敏码，停用需内联二次确认。 */
+.license-card__row { flex-wrap: wrap; }
+
+.license-card__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #467053;
+  font-size: 13px;
+}
+
+.license-card__state > svg { flex-shrink: 0; color: #4f8a5e; }
+
+.license-card__key {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: #f5f0eb;
+  color: #625950;
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  user-select: all;
+}
+
+.license-card__confirm { display: inline-flex; align-items: center; gap: 9px; }
+
+.license-card__confirm small { color: #79726e; font-size: 11px; }
+
+.license-card__error {
+  margin: 0 0 12px;
+  padding: 9px 14px;
+  border-radius: 9px;
+  background: #fdf0ed;
+  color: #b3452c;
+  font-size: 12px;
+}
+
+.button--danger {
+  color: white;
+  background: var(--red);
+  border-color: var(--red);
+}
+
+.button--danger:hover {
+  color: white;
+  background: #d13a3d;
+  border-color: #d13a3d;
 }
 
 .local-first-banner {

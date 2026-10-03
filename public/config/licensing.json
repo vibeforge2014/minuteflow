@@ -1,4 +1,5 @@
 {
   "checkoutUrl": "https://zensoft.top/minuteflow/buy/",
-  "verificationUrl": "https://zensoft.top/api/license/verify"
+  "verificationUrl": "https://zensoft.top/api/license/verify",
+  "recoverUrl": "https://zensoft.top/minuteflow/recover/"
 }

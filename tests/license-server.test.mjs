@@ -23,7 +23,8 @@ const {
 } = await import("../server/src/licenses.mjs");
 const { db } = await import("../server/src/db.mjs");
 const { createOrder, markRefunded } = await import("../server/src/orders.mjs");
-const { createLicenseServer, resetOrderRateLimiter } = await import("../server/src/index.mjs");
+const { createLicenseServer, resetOrderRateLimiter, resetRecoveryLimiters } = await import("../server/src/index.mjs");
+const { setMailTransportForTest } = await import("../server/src/mail.mjs");
 
 const server = createLicenseServer();
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -348,4 +349,121 @@ test("order creation is rate limited per IP", async () => {
   assert.deepEqual(statuses, [201, 201, 429]);
   config.orderRateLimit = { windowMs: 60_000, max: 5 };
   resetOrderRateLimiter();
+});
+
+// ---------------------------------------------------------------------------
+// 购买邮箱：随单存储、发码带入 license、对外视图脱敏
+// ---------------------------------------------------------------------------
+test("order email is stored, propagated to the license, and masked in the public view", async () => {
+  resetOrderRateLimiter();
+  const created = await postJson("/api/license/orders", { channel: "mock", email: "  Buyer@Example.COM " });
+  assert.equal(created.status, 201);
+  let paid = null;
+  for (let attempt = 0; attempt < 20 && !paid; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const view = await (await fetch(`${base}/api/license/orders/${created.body.orderId}`)).json();
+    if (view.state === "paid") paid = view;
+  }
+  assert.ok(paid, "mock 订单应自动落账");
+  assert.equal(paid.customerEmailMasked, "buy***@example.com");
+  const license = db.prepare("SELECT customer_email FROM licenses WHERE order_id = ?").get(created.body.orderId);
+  assert.equal(license.customer_email, "buyer@example.com");
+  // 非法邮箱按未填处理，不拦支付。
+  const invalid = await postJson("/api/license/orders", { channel: "mock", email: "not-an-email" });
+  assert.equal(invalid.status, 201);
+});
+
+// ---------------------------------------------------------------------------
+// 反激活释放：腾出设备槽位、幂等、限流
+// ---------------------------------------------------------------------------
+test("release frees a device slot; unknown keys 401; repeated releases rate limited", async () => {
+  resetOrderRateLimiter();
+  resetRecoveryLimiters();
+  const created = await postJson("/api/license/orders", { channel: "mock" });
+  let key = "";
+  for (let attempt = 0; attempt < 20 && !key; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const view = await (await fetch(`${base}/api/license/orders/${created.body.orderId}`)).json();
+    if (view.state === "paid") key = view.licenseKey;
+  }
+  assert.ok(key);
+  assert.equal((await postJson("/api/license/verify", { licenseKey: key, machineFingerprint: "rel-a" })).status, 200);
+  assert.equal((await postJson("/api/license/verify", { licenseKey: key, machineFingerprint: "rel-b" })).status, 200);
+  const capped = await postJson("/api/license/verify", { licenseKey: key, machineFingerprint: "rel-c" });
+  assert.equal(capped.body.valid, false);
+
+  // 释放 rel-b 的绑定 → 第三台 rel-c 立即可绑。
+  const release = await postJson("/api/license/release", { licenseKey: key, machineFingerprint: "rel-b" });
+  assert.equal(release.status, 200);
+  assert.equal(release.body.released, true);
+  const after = await postJson("/api/license/verify", { licenseKey: key, machineFingerprint: "rel-c" });
+  assert.equal(after.body.valid, true);
+
+  // 幂等：重复释放不存在的绑定也 200；未知激活码 401（与 verify 口径一致）。
+  assert.equal((await postJson("/api/license/release", { licenseKey: key, machineFingerprint: "rel-b" })).status, 200);
+  assert.equal((await postJson("/api/license/release", { licenseKey: "MF-WWWW-XXXX-YYYY-ZZZZ", machineFingerprint: "x" })).status, 401);
+  assert.equal((await postJson("/api/license/release", { machineFingerprint: "x" })).status, 400);
+
+  // 限流：同一激活码 24h 内第 5 次释放被拒（401/400 在记账前返回，不计入窗口）。
+  const statuses = [];
+  for (let index = 0; index < 3; index += 1) {
+    statuses.push((await postJson("/api/license/release", { licenseKey: key, machineFingerprint: "rel-b" })).status);
+  }
+  assert.deepEqual(statuses, [200, 200, 429]);
+});
+
+// ---------------------------------------------------------------------------
+// 激活码找回：未配置降级 503、防枚举通用响应、命中发信、限流
+// ---------------------------------------------------------------------------
+test("recover degrades to 503 without mail config", async () => {
+  const saved = { ...config.mail };
+  config.mail.accessKeyId = "";
+  const result = await postJson("/api/license/recover", { email: "someone@example.com" });
+  assert.equal(result.status, 503);
+  Object.assign(config.mail, saved);
+});
+
+test("recover sends active keys for a matching email and stays generic for unknowns", async () => {
+  resetOrderRateLimiter();
+  resetRecoveryLimiters();
+  const created = await postJson("/api/license/orders", { channel: "mock", email: "owner@example.com" });
+  let key = "";
+  for (let attempt = 0; attempt < 20 && !key; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const view = await (await fetch(`${base}/api/license/orders/${created.body.orderId}`)).json();
+    if (view.state === "paid") key = view.licenseKey;
+  }
+  assert.ok(key);
+
+  const saved = { ...config.mail };
+  Object.assign(config.mail, { accessKeyId: "test-ak", accessKeySecret: "test-sk", accountName: "noreply@test" });
+  const sent = [];
+  setMailTransportForTest(async (payload) => { sent.push(payload); return { RequestId: "t" }; });
+  try {
+    const hit = await postJson("/api/license/recover", { email: "owner@example.com" });
+    assert.equal(hit.status, 200);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].to, "owner@example.com");
+    assert.ok(sent[0].html.includes(key), "邮件正文应包含激活码");
+
+    // 未知邮箱：同样 200 通用响应，但不发信。
+    const miss = await postJson("/api/license/recover", { email: "nobody@example.com" });
+    assert.equal(miss.status, 200);
+    assert.equal(sent.length, 1);
+
+    // 邮箱限流：同一邮箱 1 小时内第 4 次被拒（前 3 次含上面的 hit）。
+    const fourth = await postJson("/api/license/recover", { email: "owner@example.com" });
+    assert.equal(fourth.status, 200); // 第 2 次
+    const fifth = await postJson("/api/license/recover", { email: "owner@example.com" });
+    assert.equal(fifth.status, 200); // 第 3 次
+    const sixth = await postJson("/api/license/recover", { email: "owner@example.com" });
+    assert.equal(sixth.status, 429); // 第 4 次 → 拒
+
+    // 非法邮箱 400。
+    assert.equal((await postJson("/api/license/recover", { email: "bad" })).status, 400);
+  } finally {
+    setMailTransportForTest(null);
+    Object.assign(config.mail, saved);
+    resetRecoveryLimiters();
+  }
 });

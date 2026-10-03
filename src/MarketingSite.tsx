@@ -43,8 +43,8 @@ import {
 import productWorkspace from "../implementation-1440x1024-final.png";
 import { BrandMark } from "./components/BrandMark";
 
-/** 站点路由：首页 / 规格 / 定价 / 购买 / 条款 / 隐私 / 退款。 */
-type SiteRoute = "home" | "specs" | "pricing" | "buy" | "terms" | "privacy" | "refund";
+/** 站点路由：首页 / 规格 / 定价 / 购买 / 找回 / 条款 / 隐私 / 退款。 */
+type SiteRoute = "home" | "specs" | "pricing" | "buy" | "recover" | "terms" | "privacy" | "refund";
 /** 演示区块的三个阶段：会中记录 / 会中整理 / 会后行动。 */
 type DemoMode = "record" | "organize" | "act";
 
@@ -153,7 +153,7 @@ export function MarketingSite() {
         setMenuOpen={setMenuOpen}
         isScrolled={isScrolled}
       />
-      {route === "specs" ? <SpecsPage /> : route === "home" ? <LandingPage /> : route === "buy" ? <BuyPage /> : <PolicyPage route={route} />}
+      {route === "specs" ? <SpecsPage /> : route === "home" ? <LandingPage /> : route === "buy" ? <BuyPage /> : route === "recover" ? <RecoverPage /> : <PolicyPage route={route} />}
       <SiteFooter />
       <button
         className={`site-scroll-top ${isScrolled ? "is-visible" : ""}`}
@@ -857,7 +857,7 @@ function FeatureRows({
   );
 }
 
-type PolicyRoute = Exclude<SiteRoute, "home" | "specs" | "buy">;
+type PolicyRoute = Exclude<SiteRoute, "home" | "specs" | "buy" | "recover">;
 
 // ---------------------------------------------------------------------------
 // 购买页：选择通道 → 生成二维码 → 轮询订单 → 支付成功展示激活码
@@ -872,6 +872,7 @@ type BuyOrder = {
   amountFen: number;
   expiresAt: string;
   licenseKey?: string;
+  customerEmailMasked?: string;
 };
 
 /** 授权后端地址：生产与官网同域（nginx /api/license），本地联调直连 8787。 */
@@ -893,6 +894,10 @@ function BuyPage() {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  // 选填购买邮箱：随订单存到服务端，用于激活码找回；本地记住，下次购买免填。
+  const [email, setEmail] = useState(() => {
+    try { return window.localStorage.getItem("mf:buy-email") ?? ""; } catch { return ""; }
+  });
 
   // 回跳续单：支付宝电脑网站支付付款后经 return_url（?order=<id>）回到本页，
   // 直接恢复该订单的轮询；读完后立刻抹掉查询参数避免刷新/分享时重复进入。
@@ -985,10 +990,12 @@ function BuyPage() {
     setError("");
     setCopied(false);
     try {
+      const trimmedEmail = email.trim();
+      try { window.localStorage.setItem("mf:buy-email", trimmedEmail); } catch { /* 隐私模式忽略 */ }
       const response = await fetch(`${licenseApiRoot()}/api/license/orders`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ channel })
+        body: JSON.stringify({ channel, email: trimmedEmail })
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok || !payload?.orderId) {
@@ -1045,6 +1052,20 @@ function BuyPage() {
           </div>
         )}
         {!loadError && !order && (
+          <>
+          <div className="buy-email">
+            <label htmlFor="buy-email">邮箱（选填）</label>
+            <input
+              id="buy-email"
+              type="email"
+              inputMode="email"
+              autoComplete="email"
+              placeholder="用于接收激活码和找回，可不填"
+              value={email}
+              maxLength={254}
+              onChange={(event) => setEmail(event.target.value)}
+            />
+          </div>
           <div className="buy-channels" role="group" aria-label="选择支付方式">
             <button
               type="button"
@@ -1079,6 +1100,7 @@ function BuyPage() {
               </button>
             )}
           </div>
+          </>
         )}
         {!loadError && order && order.state === "created" && order.type === "redirect" && (
           <div className="buy-qr">
@@ -1125,6 +1147,9 @@ function BuyPage() {
             <CheckCircle size={34} weight="fill" aria-hidden />
             <strong>支付成功</strong>
             <code className="buy-license__key">{order.licenseKey || "激活码生成中…请稍后刷新"}</code>
+            {order.customerEmailMasked && (
+              <p className="buy-license__sent">激活码已同时发送至 {order.customerEmailMasked}，请查收（别忘检查垃圾箱）。</p>
+            )}
             <button type="button" className="site-button site-button--primary" onClick={() => void copyLicenseKey()}>
               {copied ? <><Check size={16} weight="bold" /> 已复制</> : <><Copy size={16} weight="bold" /> 复制激活码</>}
             </button>
@@ -1139,7 +1164,91 @@ function BuyPage() {
         <p className="buy-legal">
           付款由绍兴市臻书科技有限公司（zensoft.top）直接收款 ·{" "}
           <a href={siteHref("/refund/")}>7 天退款</a> ·{" "}
+          <a href={siteHref("/recover/")}>找回激活码</a> ·{" "}
           <a href={siteHref("/terms/")}>服务条款</a>
+        </p>
+      </div>
+    </main>
+  );
+}
+
+/** 找回页：输入购买邮箱 → 服务端把 active 激活码发回该邮箱（防枚举：无论是否命中都是同一句成功文案）。 */
+function RecoverPage() {
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState("");
+
+  async function sendRecovery() {
+    const trimmed = email.trim();
+    if (!trimmed) {
+      setError("请输入购买时填写的邮箱地址。");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`${licenseApiRoot()}/api/license/recover`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: trimmed })
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(payload?.error ?? "发送失败，请稍后重试。");
+        return;
+      }
+      setDone(true);
+    } catch {
+      setError("暂时无法连接服务，请检查网络后重试。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main id="main-content" className="buy-page" tabIndex={-1}>
+      <header className="buy-hero">
+        <span className="section-kicker">激活码找回</span>
+        <h1>激活码丢了？邮件找回。</h1>
+        <p>输入购买时填写的邮箱，我们会把名下所有有效激活码发送到该邮箱。忘记邮箱或未填写，请联系 xhdp123@126.com。</p>
+      </header>
+      <div className="buy-card">
+        {done ? (
+          <div className="buy-license">
+            <CheckCircle size={34} weight="fill" aria-hidden />
+            <strong>请求已提交</strong>
+            <p className="buy-status">如果该邮箱有购买记录，激活码邮件已发出，请查收（别忘检查垃圾箱）。</p>
+            <button type="button" className="site-button site-button--ghost" onClick={() => setDone(false)}>
+              换一个邮箱再试
+            </button>
+          </div>
+        ) : (
+          <div className="buy-email buy-email--block">
+            <label htmlFor="recover-email">购买邮箱</label>
+            <input
+              id="recover-email"
+              type="email"
+              inputMode="email"
+              autoComplete="email"
+              placeholder="you@example.com"
+              value={email}
+              maxLength={254}
+              disabled={busy}
+              onChange={(event) => setEmail(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void sendRecovery();
+              }}
+            />
+            <button type="button" className="site-button site-button--primary" disabled={busy} onClick={() => void sendRecovery()}>
+              {busy ? "发送中…" : "发送激活码邮件"}
+            </button>
+          </div>
+        )}
+        {error && <p className="buy-error" role="alert">{error}</p>}
+        <p className="buy-legal">
+          每个邮箱每小时最多请求 3 次 ·{" "}
+          <a href={siteHref("/buy/")}>返回购买页</a>
         </p>
       </div>
     </main>
@@ -1267,6 +1376,7 @@ function getRoute(): SiteRoute {
   const path = window.location.pathname.replace(/\/+$/, "");
   if (path.endsWith("/pricing")) return "pricing";
   if (path.endsWith("/buy")) return "buy";
+  if (path.endsWith("/recover")) return "recover";
   if (path.endsWith("/terms")) return "terms";
   if (path.endsWith("/privacy")) return "privacy";
   if (path.endsWith("/refund")) return "refund";

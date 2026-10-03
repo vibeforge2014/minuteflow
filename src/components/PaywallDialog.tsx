@@ -68,6 +68,10 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
       {showActivation ? <div className="activation-box">
         <label htmlFor="license-key"><Key size={15} />激活码</label>
         <div><input id="license-key" value={licenseKey} onChange={(event) => setLicenseKey(event.target.value)} placeholder="输入购买后收到的激活码" autoComplete="off" spellCheck={false} /><button className="button button--primary" disabled={busy || !licenseKey.trim()} onClick={activate}>激活</button></div>
+        <button className="text-button activation-recover" onClick={async () => {
+          try { await api.licensing.openRecover(); }
+          catch (caught) { setError(caught instanceof Error ? caught.message : "无法打开找回页面，请稍后再试。"); }
+        }}>忘记激活码？邮件找回</button>
       </div> : null}
       {error && <p className="paywall-error" role="alert">{error}</p>}
       {status && !status.verificationConfigured && !error && <p className="paywall-config-note">购买入口已就绪；激活验证服务正在接入，稍后重启应用即可使用。</p>}

@@ -388,6 +388,8 @@ export interface SystemPermissionStatus {
 export interface LicenseStatus {
   state: "licensed" | "unlicensed" | "error";
   productId: string;
+  /** 脱敏激活码（MF-XXXX…XXXX），仅本机已激活时存在，用于设置页展示。 */
+  licenseKeyMasked?: string;
   customerEmail?: string;
   entitlementId?: string;
   activatedAt?: string;
@@ -774,6 +776,7 @@ export interface MeetingAPI {
     activate(licenseKey: string): Promise<LicenseStatus>;
     deactivate(): Promise<LicenseStatus>;
     openCheckout(): Promise<{ opened: true }>;
+    openRecover(): Promise<{ opened: true }>;
   };
   updates: {
     getState(): Promise<AppUpdateCheckResult>;

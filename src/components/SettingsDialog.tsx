@@ -37,6 +37,7 @@ import { useExitPresence } from "../hooks/useExitPresence";
 import type {
   DiarizationScanResult,
   DownloadableModel,
+  LicenseStatus,
   LocalModelFile,
   LocalModelScanResult,
   ModelDownloadProgress,
@@ -316,7 +317,7 @@ const invalidateVisualVerification = (options: ModelProfile["options"]): ModelPr
 /** 设置页标签：五个标签页（软件更新仅桌面端展示）。 */
 export type SettingsTab = "llm" | "transcription" | "general" | "storage" | "updates";
 
-export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; initialTab?: SettingsTab; onClose(): void }) {
+export function SettingsDialog({ open, initialTab, onClose, licenseStatus, onLicenseStatusChange }: { open: boolean; initialTab?: SettingsTab; onClose(): void; licenseStatus: LicenseStatus | null; onLicenseStatusChange(status: LicenseStatus): void }) {
   const profiles = useMeetingStore((state) => state.profiles);
   const setProfiles = useMeetingStore((state) => state.setProfiles);
   const preferences = useMeetingStore((state) => state.preferences);
@@ -344,6 +345,31 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
   const [switchBusy, setSwitchBusy] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<AppUpdateCheckResult | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  /** 授权卡片：停用的内联二次确认、忙碌态与失败文案（成功即整卡切换状态，无需文案）。 */
+  const [deactivateConfirm, setDeactivateConfirm] = useState(false);
+  const [deactivateBusy, setDeactivateBusy] = useState(false);
+  const [licenseError, setLicenseError] = useState<string | null>(null);
+  /** 停用本机授权：先由主进程尽力释放服务端设备绑定，再清除本地密钥；释放失败也会完成本地停用。 */
+  const handleDeactivate = async () => {
+    setDeactivateBusy(true);
+    setLicenseError(null);
+    try {
+      onLicenseStatusChange(await api.licensing.deactivate());
+      setDeactivateConfirm(false);
+    } catch (caught) {
+      setLicenseError(caught instanceof Error ? caught.message : "停用失败，请稍后再试。");
+    } finally {
+      setDeactivateBusy(false);
+    }
+  };
+  const handleOpenCheckout = async () => {
+    setLicenseError(null);
+    try {
+      await api.licensing.openCheckout();
+    } catch (caught) {
+      setLicenseError(caught instanceof Error ? caught.message : "无法打开购买页，请稍后再试。");
+    }
+  };
   const dialogRef = useDialogFocus<HTMLDivElement>(open, {
     initialFocus: ".settings-nav button.is-active",
     onEscape: onClose
@@ -954,6 +980,30 @@ export function SettingsDialog({ open, initialTab, onClose }: { open: boolean; i
                   <label><span><strong>AI 会议纪要间隔</strong><small>有足够新内容时自动归纳的频率</small></span><select value={preferences.summaryIntervalSeconds} onChange={(event) => updatePreferences({ ...preferences, summaryIntervalSeconds: Number(event.target.value) })}><option value="60">约每 1 分钟</option><option value="120">约每 2 分钟</option><option value="300">约每 5 分钟</option></select></label>
                 </section>
                 <section className="settings-card settings-card--stacked"><div className="settings-card__title"><Sparkle size={19} /><div><strong>自定义术语</strong><small>帮助模型更准确地识别人名、产品名和缩写</small></div></div><label><textarea rows={6} value={preferences.glossary.join("\n")} onChange={(event) => updatePreferences({ ...preferences, glossary: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} placeholder="例如：MinuteFlow、Q3 复盘、SKU（每行一个）" /><small className="field-hint">每行填写一个术语，修改会自动保存。</small></label></section>
+                <section className="settings-card license-card"><div className="settings-card__title"><Key size={19} /><div><strong>授权</strong><small>一个激活码最多可在 2 台设备上使用</small></div></div>
+                  {licenseStatus?.state === "licensed" ? (
+                    <>
+                      <div className="settings-card__action license-card__row">
+                        <span className="license-card__state"><CheckCircle size={16} weight="fill" />已激活{licenseStatus.licenseKeyMasked ? <> · <code className="license-card__key">{licenseStatus.licenseKeyMasked}</code></> : null}</span>
+                        {deactivateConfirm ? (
+                          <span className="license-card__confirm">
+                            <small>停用将释放本机的设备占用，之后需重新激活。</small>
+                            <button className="button button--small" disabled={deactivateBusy} onClick={() => { setDeactivateConfirm(false); setLicenseError(null); }}>取消</button>
+                            <button className="button button--small button--danger" disabled={deactivateBusy} onClick={handleDeactivate}>{deactivateBusy ? "正在停用…" : "确认停用"}</button>
+                          </span>
+                        ) : (
+                          <button className="button" onClick={() => { setDeactivateConfirm(true); setLicenseError(null); }}>停用本机授权</button>
+                        )}
+                      </div>
+                      {licenseError && <p className="license-card__error">{licenseError}</p>}
+                    </>
+                  ) : (
+                    <div className="settings-card__action">
+                      <span>{licenseStatus?.state === "error" ? (licenseStatus.message || "授权状态读取异常，可稍后重试。") : "尚未激活，录制、转写与 AI 纪要需要解锁后使用"}</span>
+                      <button className="button" onClick={handleOpenCheckout}>前往购买页</button>
+                    </div>
+                  )}
+                </section>
               </div>
             )}
             {tab === "storage" && (

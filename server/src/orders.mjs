@@ -19,11 +19,27 @@ function newOutTradeNo() {
   return `MF${date}${randomUUID().replace(/-/g, "").slice(0, 18).toUpperCase()}`;
 }
 
+/** 购买邮箱归一：小写去空白。选填字段：空或格式非法一律按未填（null）处理，不拦支付。 */
+export function normalizeEmail(value) {
+  const email = String(value ?? "").trim().toLowerCase();
+  if (!email) return null;
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return null;
+  return email;
+}
+
+/** 邮箱脱敏（对外视图）：qia***@126.com。 */
+export function maskEmail(email) {
+  const [local, domain] = String(email).split("@");
+  const head = local.slice(0, Math.min(3, Math.max(1, local.length - 1)));
+  return `${head}***@${domain}`;
+}
+
 /** 创建订单并生成支付二维码。返回对外安全的订单视图。 */
-export async function createOrder(channel) {
+export async function createOrder(channel, customerEmail) {
   const id = randomUUID();
   const outTradeNo = newOutTradeNo();
   const expiresAt = new Date(Date.now() + config.orderTtlMs);
+  const email = normalizeEmail(customerEmail);
   let qrPayload = "";
   if (channel === "mock") {
     qrPayload = `mock://pay/${outTradeNo}`;
@@ -47,9 +63,9 @@ export async function createOrder(channel) {
     throw new Error("不支持的支付通道。");
   }
   db.prepare(`
-    INSERT INTO orders (id, channel, out_trade_no, amount_fen, state, qr_payload, expires_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?)
-  `).run(id, channel, outTradeNo, config.amountFen, qrPayload, expiresAt.toISOString(), nowIso(), nowIso());
+    INSERT INTO orders (id, channel, out_trade_no, amount_fen, state, qr_payload, expires_at, created_at, updated_at, customer_email)
+    VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)
+  `).run(id, channel, outTradeNo, config.amountFen, qrPayload, expiresAt.toISOString(), nowIso(), nowIso(), email);
   if (channel === "mock") {
     // 沙箱通道：3 秒后自动支付成功，联调全链路（页面轮询会看到 created → paid）。
     // 定时器必须自捕获：finalizeOrder 是同步的，抛错会击穿进程。
@@ -75,7 +91,11 @@ export function finalizeOrder(orderId, { transactionId }) {
     db.prepare("UPDATE orders SET state = 'paid', transaction_id = ?, paid_at = ?, updated_at = ? WHERE id = ?")
       .run(transactionId, nowIso(), nowIso(), orderId);
     const paid = db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId);
-    issueLicenseForOrder(paid);
+    const license = issueLicenseForOrder(paid);
+    // 发码时把购买邮箱带到 license（找回邮件按 licenses.customer_email 检索）。
+    if (paid.customer_email && license && !license.customer_email) {
+      db.prepare("UPDATE licenses SET customer_email = ? WHERE id = ?").run(paid.customer_email, license.id);
+    }
     return paid;
   });
 }
@@ -141,6 +161,8 @@ export function publicOrderView(order) {
   if (order.state === "paid") {
     const license = db.prepare("SELECT * FROM licenses WHERE order_id = ?").get(order.id);
     view.licenseKey = license?.state === "active" ? licensePlaintext(license) : "";
+    // 脱敏邮箱：成功页提示「激活码已发送至 q***@126.com」，不回传完整地址。
+    if (license?.customer_email) view.customerEmailMasked = maskEmail(license.customer_email);
   }
   return view;
 }

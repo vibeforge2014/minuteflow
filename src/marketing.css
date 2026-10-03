@@ -1802,6 +1802,51 @@ html.marketing-mode body.site-menu-open {
   user-select: all;
 }
 
+.buy-license__sent {
+  margin: 0;
+  max-width: 34em;
+  color: var(--site-muted);
+  font-size: 13px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+/* 选填购买邮箱（购买页）与找回页邮箱输入：暖色轻表单，与 buy-card 同体系。 */
+.buy-email {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  margin: 0 0 16px;
+}
+
+.buy-email label {
+  color: var(--site-muted);
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+}
+
+.buy-email input {
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid var(--site-line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  color: inherit;
+  font-size: 14px;
+}
+
+.buy-email input::placeholder { color: #a9a29c; }
+
+.buy-email input:focus-visible {
+  outline: none;
+  border-color: rgba(231, 111, 81, 0.55);
+  box-shadow: 0 0 0 3px rgba(231, 111, 81, 0.16);
+}
+
+/* 找回页：邮箱 + 发送按钮纵向排布。 */
+.buy-email--block { margin: 0; }
+.buy-email--block .site-button { margin-top: 6px; }
+
 .buy-steps {
   display: grid;
   gap: 7px;
