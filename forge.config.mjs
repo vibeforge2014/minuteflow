@@ -7,6 +7,7 @@
  */
 import { FusesPlugin } from "@electron-forge/plugin-fuses";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
+import { execFileSync } from "node:child_process";
 
 const isMac = process.platform === "darwin";
 const appleIdentity = process.env.APPLE_IDENTITY;
@@ -21,6 +22,21 @@ const notarizeOptions = appleNotaryProfile
   : appleApiKey && appleApiKeyId && appleApiIssuer
     ? { appleApiKey, appleApiKeyId, appleApiIssuer }
     : undefined;
+
+// forge 的 osxNotarize 只在 afterSign 公证 .app，产出的 DMG 本身没有公证票；
+// 发布校验脚本要求 DMG 装订票（v0.1.24 起两次靠手动 notarytool submit + stapler 补救）。
+// 这里在 postMake 对每个 DMG 产物自动提交公证并装订校验，使 `npm run make` 一步出可发布产物。
+async function notarizeAndStapleDmg(dmgPath) {
+  console.log(`[forge] 公证并装订 DMG: ${dmgPath}`);
+  execFileSync("xcrun", [
+    "notarytool", "submit", dmgPath,
+    "--keychain-profile", appleNotaryProfile,
+    "--no-s3-acceleration", "--wait"
+  ], { stdio: "inherit" });
+  execFileSync("xcrun", ["stapler", "staple", dmgPath], { stdio: "inherit" });
+  execFileSync("xcrun", ["stapler", "validate", dmgPath], { stdio: "inherit" });
+  console.log(`[forge] DMG 公证装订完成: ${dmgPath}`);
+}
 
 export default {
   packagerConfig: {
@@ -80,6 +96,17 @@ export default {
     }
   },
   rebuildConfig: {},
+  hooks: {
+    postMake: async (_forgeConfig, makeResults) => {
+      if (!isMac || !appleNotaryProfile) return makeResults;
+      for (const result of makeResults) {
+        for (const artifact of result.artifacts || []) {
+          if (artifact.endsWith(".dmg")) await notarizeAndStapleDmg(artifact);
+        }
+      }
+      return makeResults;
+    }
+  },
   makers: [
     {
       name: "@electron-forge/maker-squirrel",
