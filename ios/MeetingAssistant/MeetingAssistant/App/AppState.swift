@@ -26,10 +26,11 @@ final class AppState {
 
   // MARK: - 检查面板标签
 
-  /// 会议详情中“转录 / AI 纪要”两个检查面板的切换标签。
+  /// 会议详情中“转录 / AI 纪要 / AI 问答”三个检查面板的切换标签。
   enum InspectorTab: String, CaseIterable, Identifiable {
     case transcript = "转录"
     case summary = "AI 纪要"
+    case chat = "AI 问答"
 
     var id: String { rawValue }
   }

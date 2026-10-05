@@ -26,6 +26,10 @@ struct MeetingAssistantApp: App {
   @State private var preferences = AppPreferences()
   /// 音频导入协调器：导入外部音频并转录为会议。
   @State private var importCoordinator = AudioImportCoordinator()
+  /// 会议回放播放器：AVPlayer 回放本机音频（全局单会话，倍速会话内记忆）。
+  @State private var player = MeetingPlayer()
+  /// AI 问答会话存储：按会议维护多轮对话与打字机铺字状态。
+  @State private var chatStore = MeetingChatStore()
 
   // MARK: - 初始化
 
@@ -66,6 +70,8 @@ struct MeetingAssistantApp: App {
         .environment(recorder)
         .environment(preferences)
         .environment(importCoordinator)
+        .environment(player)
+        .environment(chatStore)
     }
     .modelContainer(modelContainer)
   }

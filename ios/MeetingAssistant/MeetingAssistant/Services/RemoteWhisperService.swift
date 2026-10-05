@@ -145,6 +145,101 @@ struct RemoteWhisperService {
     throw RemoteWhisperError.invalidResponse
   }
 
+  // MARK: - 连接测试
+
+  /// 用一小段内置静音 WAV 做真实上传测试（不查询 /models——不少网关
+  /// 只校验转写路径）；任何 2xx 都视为连通。
+  ///
+  /// - Parameter preferences: 提供 Base URL、模型名与语言。
+  /// - 副作用：读取 Keychain API Key；写临时 WAV 与 multipart 文件；发起上传。
+  func testConnection(preferences: AppPreferences) async throws {
+    guard
+      let apiKey = try KeychainService().load(
+        account: KeychainService.transcriptionAPIKeyAccount
+      ),
+      !apiKey.isEmpty
+    else {
+      throw RemoteWhisperError.missingAPIKey
+    }
+    guard let endpoint = endpoint(baseURL: preferences.transcriptionBaseURL) else {
+      throw RemoteWhisperError.invalidEndpoint
+    }
+
+    let boundary = "MeetingAssistant-\(UUID().uuidString)"
+    let wavURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("whisper-test-\(UUID().uuidString).wav")
+    let bodyURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("\(UUID().uuidString).multipart")
+    defer {
+      try? FileManager.default.removeItem(at: wavURL)
+      try? FileManager.default.removeItem(at: bodyURL)
+    }
+    do {
+      try Self.silentWAVData().write(to: wavURL)
+      let bodyData = try makeMultipartBodyData(
+        audioURL: wavURL,
+        model: preferences.transcriptionModel,
+        language: preferences.language,
+        responseFormat: nil,
+        boundary: boundary
+      )
+      try bodyData.write(to: bodyURL)
+    } catch {
+      throw RemoteWhisperError.invalidResponse
+    }
+
+    var request = URLRequest(url: endpoint)
+    request.httpMethod = "POST"
+    request.timeoutInterval = 60
+    request.setValue(
+      "multipart/form-data; boundary=\(boundary)",
+      forHTTPHeaderField: "Content-Type"
+    )
+    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+    let (data, response) = try await URLSession.shared.upload(for: request, fromFile: bodyURL)
+    guard let http = response as? HTTPURLResponse else {
+      throw RemoteWhisperError.invalidResponse
+    }
+    guard (200..<300).contains(http.statusCode) else {
+      throw RemoteWhisperError.server(
+        http.statusCode,
+        String(data: data, encoding: .utf8) ?? "未知错误"
+      )
+    }
+  }
+
+  /// 生成 0.3 秒 16kHz 单声道 16-bit 静音 WAV（44 字节 RIFF 头 + 零数据）。
+  nonisolated static func silentWAVData() -> Data {
+    let sampleRate = 16_000
+    let seconds = 0.3
+    let sampleCount = Int(Double(sampleRate) * seconds)
+    var data = Data()
+    func append(_ value: UInt32) {
+      withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+    }
+    func append16(_ value: UInt16) {
+      withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+    }
+    let byteRate = UInt32(sampleRate) * 2
+    let dataSize = UInt32(sampleCount * 2)
+    data.append(contentsOf: Array("RIFF".utf8))
+    append(36 + dataSize)
+    data.append(contentsOf: Array("WAVE".utf8))
+    data.append(contentsOf: Array("fmt ".utf8))
+    append(16)
+    append16(1)  // PCM
+    append16(1)  // 单声道
+    append(UInt32(sampleRate))
+    append(byteRate)
+    append16(2)  // 块对齐
+    append16(16) // 位深
+    data.append(contentsOf: Array("data".utf8))
+    append(dataSize)
+    data.append(Data(count: Int(dataSize)))
+    return data
+  }
+
   // MARK: - 私有方法
 
   /// 把 Base URL 归一化为 …/audio/transcriptions 端点（容忍末尾斜杠与已带路径）。
@@ -177,10 +272,35 @@ struct RemoteWhisperService {
   ) throws -> URL {
     let outputURL = FileManager.default.temporaryDirectory
       .appendingPathComponent("\(UUID().uuidString).multipart")
-    FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+    try FileManager.default.createFile(atPath: outputURL.path, contents: nil)
     let output = try FileHandle(forWritingTo: outputURL)
-    defer { try? output.close() }
+    do {
+      try writeMultipartBody(
+        to: output,
+        audioURL: audioURL,
+        model: model,
+        language: language,
+        responseFormat: responseFormat,
+        boundary: boundary
+      )
+      try? output.close()
+    } catch {
+      try? output.close()
+      try? FileManager.default.removeItem(at: outputURL)
+      throw error
+    }
+    return outputURL
+  }
 
+  /// 把 multipart 体写入已打开的文件句柄（测试连接复用同一拼装逻辑）。
+  private func writeMultipartBody(
+    to output: FileHandle,
+    audioURL: URL,
+    model: String,
+    language: String,
+    responseFormat: String?,
+    boundary: String
+  ) throws {
     func write(_ string: String) throws {
       try output.write(contentsOf: Data(string.utf8))
     }
@@ -214,7 +334,37 @@ struct RemoteWhisperService {
       try output.write(contentsOf: data)
     }
     try write("\r\n--\(boundary)--\r\n")
-    return outputURL
+  }
+
+  /// 以内存方式拼装 multipart 体（连接测试的小文件场景）。
+  private func makeMultipartBodyData(
+    audioURL: URL,
+    model: String,
+    language: String,
+    responseFormat: String?,
+    boundary: String
+  ) throws -> Data {
+    var body = Data()
+    func append(_ string: String) {
+      body.append(contentsOf: Data(string.utf8))
+    }
+    append("--\(boundary)\r\n")
+    append("Content-Disposition: form-data; name=\"model\"\r\n\r\n")
+    append("\(model)\r\n")
+    append("--\(boundary)\r\n")
+    append("Content-Disposition: form-data; name=\"language\"\r\n\r\n")
+    append("\(language.prefix(2))\r\n")
+    if let responseFormat {
+      append("--\(boundary)\r\n")
+      append("Content-Disposition: form-data; name=\"response_format\"\r\n\r\n")
+      append("\(responseFormat)\r\n")
+    }
+    append("--\(boundary)\r\n")
+    append("Content-Disposition: form-data; name=\"file\"; filename=\"\(audioURL.lastPathComponent)\"\r\n")
+    append("Content-Type: application/octet-stream\r\n\r\n")
+    body.append(try Data(contentsOf: audioURL))
+    append("\r\n--\(boundary)--\r\n")
+    return body
   }
 
   private func audioDuration(at url: URL) -> TimeInterval {

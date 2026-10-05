@@ -124,114 +124,87 @@ struct NewMeetingView: View {
 
 // MARK: - 设置
 
-/// 设置页：AI 总结、语音转录、纪要更新、说话人说明与隐私存储分区。
+/// 常用 OpenAI 兼容供应商预设：一键预填官方端点与推荐模型。
+struct ModelServicePreset: Identifiable {
+  /// 展示名。
+  let name: String
+  /// 官方 Base URL（New API 网关留空，由用户填自己的地址）。
+  let baseURL: String
+  /// 推荐模型名。
+  let model: String
+
+  var id: String { name }
+
+  /// AI 总结常用预设（国内服务直连官方端点）。
+  static let summaryPresets: [ModelServicePreset] = [
+    .init(name: "DeepSeek", baseURL: "https://api.deepseek.com/v1", model: "deepseek-chat"),
+    .init(name: "Kimi（月之暗面）", baseURL: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k"),
+    .init(name: "通义千问", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus"),
+    .init(name: "智谱 GLM", baseURL: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash"),
+    .init(name: "OpenAI", baseURL: "https://api.openai.com/v1", model: "gpt-4.1-mini"),
+    .init(name: "New API 网关", baseURL: "", model: "gpt-4.1-mini"),
+  ]
+
+  /// 转写常用预设。
+  static let transcriptionPresets: [ModelServicePreset] = [
+    .init(name: "OpenAI Whisper", baseURL: "https://api.openai.com/v1", model: "whisper-1"),
+    .init(name: "New API 网关", baseURL: "", model: "whisper-1"),
+  ]
+}
+
+/// 设置页：模型服务工作台（AI 总结 / 语音转录两个任务子页）、纪要节奏、
+/// 说话人说明与隐私存储分区。
 /// 导航位置：iPhone 为 TabView“设置”标签（无完成按钮）；iPad 经全局 sheet
 /// 弹出（带“完成”按钮）。
 struct SettingsView: View {
   /// 关闭弹层（仅 iPad sheet 场景使用）。
   @Environment(\.dismiss) private var dismiss
-  /// 用户偏好（表单直接绑定）。
+  /// 用户偏好（读取当前任务选择用于主页副标题）。
   @Environment(AppPreferences.self) private var preferences
 
   /// 是否显示工具栏“完成”按钮（sheet 场景）。
   let showsDoneButton: Bool
-  /// 纪要 API Key 输入（仅点击保存时写入 Keychain）。
-  @State private var summaryAPIKey = ""
-  /// 转录（Whisper）API Key 输入。
-  @State private var transcriptionAPIKey = ""
-  /// 保存/测试结果文案（alert 展示）。
-  @State private var statusMessage: String?
-  /// 是否正在测试连接。
-  @State private var isTestingConnection = false
 
   var body: some View {
     @Bindable var preferences = preferences
 
     Form {
+      // 模型服务：先说清楚任务结果，再进入 Provider/协议细节（子页）。
       Section {
-        Picker("纪要模型", selection: $preferences.summaryProvider) {
-          ForEach(SummaryProviderKind.allCases) { provider in
-            Text(provider.rawValue).tag(provider)
+        NavigationLink {
+          TaskModelSettingsView(task: .summary)
+        } label: {
+          Label {
+            VStack(alignment: .leading, spacing: 3) {
+              Text("AI 总结")
+              Text(taskSummary(.summary))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+          } icon: {
+            Image(systemName: "sparkles")
+              .foregroundStyle(MeetingTheme.primary)
           }
         }
-
-        // 仅远程模式显示 Base URL / 模型名 / API Key 与测试连接。
-        if preferences.summaryProvider == .openAICompatible {
-          TextField("Base URL", text: $preferences.summaryBaseURL)
-            .textInputAutocapitalization(.never)
-            .keyboardType(.URL)
-          TextField("模型名称", text: $preferences.summaryModel)
-            .textInputAutocapitalization(.never)
-          SecureField("API Key", text: $summaryAPIKey)
-            .textContentType(.password)
-
-          HStack {
-            Button("保存密钥") {
-              saveKey(
-                summaryAPIKey,
-                account: KeychainService.summaryAPIKeyAccount
-              )
+        NavigationLink {
+          TaskModelSettingsView(task: .transcription)
+        } label: {
+          Label {
+            VStack(alignment: .leading, spacing: 3) {
+              Text("语音转录")
+              Text(taskSummary(.transcription))
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
-            Spacer()
-            Button {
-              Task { await testSummaryConnection() }
-            } label: {
-              if isTestingConnection {
-                ProgressView()
-              } else {
-                Text("测试连接")
-              }
-            }
-            .disabled(summaryAPIKey.isEmpty || isTestingConnection)
-          }
-
-          Toggle("启用视觉纪要", isOn: $preferences.visualSummaryEnabled)
-          if preferences.visualSummaryEnabled {
-            LabeledContent(
-              "视觉结构验证",
-              value: preferences.visualSummaryIsVerified ? "已通过" : "请测试连接"
-            )
-            .foregroundStyle(preferences.visualSummaryIsVerified ? MeetingTheme.success : .secondary)
+          } icon: {
+            Image(systemName: "waveform")
+              .foregroundStyle(MeetingTheme.primary)
           }
         }
       } header: {
-        Text("AI 总结")
+        Text("模型服务")
       } footer: {
-        Text("本地基础纪要不会上传数据。视觉纪要需显式开启并测试；生成视觉版时只发送已保存的普通纪要和必要会议元信息。")
-      }
-
-      Section {
-        Picker("转录模型", selection: $preferences.transcriptionProvider) {
-          ForEach(TranscriptionProviderKind.allCases) { provider in
-            Text(provider.rawValue).tag(provider)
-          }
-        }
-        Picker("主要语言", selection: $preferences.language) {
-          Text("中文（简体）").tag("zh-CN")
-          Text("English").tag("en-US")
-          Text("日本語").tag("ja-JP")
-        }
-
-        // 仅远程 Whisper 模式显示接口配置。
-        if preferences.transcriptionProvider == .remoteWhisper {
-          TextField("Base URL", text: $preferences.transcriptionBaseURL)
-            .textInputAutocapitalization(.never)
-            .keyboardType(.URL)
-          TextField("模型名称", text: $preferences.transcriptionModel)
-            .textInputAutocapitalization(.never)
-          SecureField("API Key", text: $transcriptionAPIKey)
-            .textContentType(.password)
-          Button("保存 Whisper 密钥") {
-            saveKey(
-              transcriptionAPIKey,
-              account: KeychainService.transcriptionAPIKeyAccount
-            )
-          }
-        }
-      } header: {
-        Text("语音转录")
-      } footer: {
-        Text("Apple Speech 是内置路径；远程 Whisper 配置用于导入音频和后续后台处理。")
+        Text("两个任务各自独立设置；都在“本机运行”与“在线服务”之间选择。AI 问答复用「AI 总结」的在线模型。")
       }
 
       Section {
@@ -276,9 +249,197 @@ struct SettingsView: View {
         }
       }
     }
+  }
+
+  /// 任务在主页副标题里的当前选择摘要。
+  private func taskSummary(_ task: ModelServiceTask) -> String {
+    switch task {
+    case .summary:
+      preferences.summaryProvider == .local ? "本机运行 · 无需联网" : "在线服务 · \(preferences.summaryModel)"
+    case .transcription:
+      preferences.transcriptionProvider == .appleSpeech ? "本机运行 · Apple Speech" : "在线服务 · \(preferences.transcriptionModel)"
+    }
+  }
+}
+
+// MARK: - 任务子页
+
+/// 模型任务种类：决定子页的文案、偏好字段与预设列表。
+enum ModelServiceTask {
+  case summary
+  case transcription
+
+  /// 页面标题。
+  var title: String {
+    switch self {
+    case .summary: "AI 总结"
+    case .transcription: "语音转录"
+    }
+  }
+
+  /// 结果导向的用户收益描述（先讲结果，再讲 Provider 细节）。
+  var outcomeDescription: String {
+    switch self {
+    case .summary:
+      "录音中和会后把语音整理成结构化纪要：关键点、决策、风险与行动项。选择本机运行可完全离线；选择在线服务可获得更高质量，需配置模型与密钥。"
+    case .transcription:
+      "把语音变成带时间戳的文字。本机运行使用系统语音识别，免费且即时；在线服务支持远程 Whisper，适合导入音频的整段转写。"
+    }
+  }
+}
+
+/// 任务模型设置子页：本机/在线二选一 → 预设与字段 → 保存密钥与测试连接。
+/// 导航位置：设置主页 NavigationLink push 进入。
+private struct TaskModelSettingsView: View {
+  /// 目标任务。
+  let task: ModelServiceTask
+  /// 用户偏好（表单直接绑定）。
+  @Environment(AppPreferences.self) private var preferences
+
+  /// API Key 输入（仅点击保存时写入 Keychain）。
+  @State private var apiKey = ""
+  /// 保存/测试结果文案（alert 展示）。
+  @State private var statusMessage: String?
+  /// 是否正在测试连接。
+  @State private var isTestingConnection = false
+
+  /// 该任务当前是否走在线服务。
+  private var isOnline: Bool {
+    switch task {
+    case .summary: preferences.summaryProvider == .openAICompatible
+    case .transcription: preferences.transcriptionProvider == .remoteWhisper
+    }
+  }
+
+  /// 该任务对应的预设列表。
+  private var presets: [ModelServicePreset] {
+    switch task {
+    case .summary: ModelServicePreset.summaryPresets
+    case .transcription: ModelServicePreset.transcriptionPresets
+    }
+  }
+
+  /// 当前 Base URL 与模型（读写的便捷绑定目标由 switch 决定）。
+  private var currentBaseURL: String {
+    switch task {
+    case .summary: preferences.summaryBaseURL
+    case .transcription: preferences.transcriptionBaseURL
+    }
+  }
+
+  private var currentModel: String {
+    switch task {
+    case .summary: preferences.summaryModel
+    case .transcription: preferences.transcriptionModel
+    }
+  }
+
+  private var keychainAccount: String {
+    switch task {
+    case .summary: KeychainService.summaryAPIKeyAccount
+    case .transcription: KeychainService.transcriptionAPIKeyAccount
+    }
+  }
+
+  var body: some View {
+    @Bindable var preferences = preferences
+
+    Form {
+      // 运行位置：结果导向二选一，不先暴露协议细节。
+      Section {
+        Picker("运行位置", selection: runLocationBinding) {
+          Text("在本机运行").tag(false)
+          Text("使用在线服务").tag(true)
+        }
+        .pickerStyle(.segmented)
+        if task == .transcription {
+          Picker("主要语言", selection: $preferences.language) {
+            Text("中文（简体）").tag("zh-CN")
+            Text("English").tag("en-US")
+            Text("日本語").tag("ja-JP")
+          }
+        }
+        Text(task.outcomeDescription)
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+      }
+
+      if isOnline {
+        // 常用预设：一键预填官方端点与推荐模型。
+        Section {
+          Menu {
+            ForEach(presets) { preset in
+              Button(preset.name) { apply(preset) }
+            }
+          } label: {
+            Label(
+              presetLabel.isEmpty ? "选择常用服务预设" : "预设：\(presetLabel)",
+              systemImage: "wand.and.stars"
+            )
+          }
+          TextField("Base URL", text: baseURLBinding)
+            .textInputAutocapitalization(.never)
+            .keyboardType(.URL)
+          TextField("模型名称", text: modelBinding)
+            .textInputAutocapitalization(.never)
+          SecureField("API Key", text: $apiKey)
+            .textContentType(.password)
+
+          HStack {
+            Button("保存密钥") {
+              saveKey(apiKey, account: keychainAccount)
+            }
+            .disabled(apiKey.isEmpty)
+            Spacer()
+            Button {
+              Task { await testConnection() }
+            } label: {
+              if isTestingConnection {
+                ProgressView()
+              } else {
+                Text("测试连接")
+              }
+            }
+            .disabled(isTestingConnection)
+          }
+        } header: {
+          Text("在线服务")
+        } footer: {
+          Text(footerText)
+        }
+
+        // 视觉纪要开关只属于 AI 总结任务。
+        if task == .summary {
+          Section {
+            Toggle("启用视觉纪要", isOn: $preferences.visualSummaryEnabled)
+            if preferences.visualSummaryEnabled {
+              LabeledContent(
+                "视觉结构验证",
+                value: preferences.visualSummaryIsVerified ? "已通过" : "请测试连接"
+              )
+              .foregroundStyle(preferences.visualSummaryIsVerified ? MeetingTheme.success : .secondary)
+            }
+          } header: {
+            Text("视觉纪要")
+          } footer: {
+            Text("需显式开启并通过真实结构验证；生成视觉版时只发送已保存的普通纪要和必要会议元信息。")
+          }
+        }
+      } else {
+        Section {
+          Text(localOnlyDescription)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        } header: {
+          Text("本机运行")
+        }
+      }
+    }
+    .navigationTitle(task.title)
+    .navigationBarTitleDisplayMode(.inline)
     // 保存/测试结果提示。
     .alert(
-      "模型设置",
+      task.title,
       isPresented: Binding(
         get: { statusMessage != nil },
         set: { if !$0 { statusMessage = nil } }
@@ -290,18 +451,90 @@ struct SettingsView: View {
     }
     // 进入页面时预填已保存的密钥（仅展示，不回写）。
     .task {
-      summaryAPIKey =
-        (try? KeychainService().load(
-          account: KeychainService.summaryAPIKeyAccount
-        )) ?? ""
-      transcriptionAPIKey =
-        (try? KeychainService().load(
-          account: KeychainService.transcriptionAPIKeyAccount
-        )) ?? ""
+      apiKey = (try? KeychainService().load(account: keychainAccount)) ?? ""
     }
   }
 
-  // MARK: - 私有方法
+  // MARK: - 绑定
+
+  /// 本机/在线二选一写到对应 Provider。
+  private var runLocationBinding: Binding<Bool> {
+    Binding(
+      get: { isOnline },
+      set: { online in
+        switch task {
+        case .summary:
+          preferences.summaryProvider = online ? .openAICompatible : .local
+        case .transcription:
+          preferences.transcriptionProvider = online ? .remoteWhisper : .appleSpeech
+        }
+      }
+    )
+  }
+
+  private var baseURLBinding: Binding<String> {
+    switch task {
+    case .summary: Binding(
+      get: { preferences.summaryBaseURL },
+      set: { preferences.summaryBaseURL = $0 }
+    )
+    case .transcription: Binding(
+      get: { preferences.transcriptionBaseURL },
+      set: { preferences.transcriptionBaseURL = $0 }
+    )
+    }
+  }
+
+  private var modelBinding: Binding<String> {
+    switch task {
+    case .summary: Binding(
+      get: { preferences.summaryModel },
+      set: { preferences.summaryModel = $0 }
+    )
+    case .transcription: Binding(
+      get: { preferences.transcriptionModel },
+      set: { preferences.transcriptionModel = $0 }
+    )
+    }
+  }
+
+  /// 与当前端点匹配的预设名（无匹配为空）。
+  private var presetLabel: String {
+    presets.first {
+      !$0.baseURL.isEmpty
+        && $0.baseURL == currentBaseURL.trimmingCharacters(in: .whitespaces)
+    }?.name ?? ""
+  }
+
+  /// 在线区块的脚注文案。
+  private var footerText: String {
+    switch task {
+    case .summary:
+      "密钥仅保存在系统钥匙串。AI 问答复用这里的在线模型，只发送当前会议的纪要与转录文本。New API 网关预设不预填地址，填入你的网关 Base URL（一般以 /v1 结尾）即可。"
+    case .transcription:
+      "远程 Whisper 用于导入音频的整段转写，使用 OpenAI 兼容 /v1/audio/transcriptions 接口。"
+    }
+  }
+
+  /// 本机区块说明。
+  private var localOnlyDescription: String {
+    switch task {
+    case .summary:
+      "本机基础纪要由关键词引擎生成，完全离线，不上传任何数据。"
+    case .transcription:
+      "Apple Speech 由系统提供，免费即时；识别是否完全在设备端取决于语言与系统资源。"
+    }
+  }
+
+  // MARK: - 动作
+
+  /// 应用一个预设（New API 等空端点预设只填模型，地址留给你输入）。
+  private func apply(_ preset: ModelServicePreset) {
+    if !preset.baseURL.isEmpty {
+      baseURLBinding.wrappedValue = preset.baseURL
+    }
+    modelBinding.wrappedValue = preset.model
+  }
 
   /// 保存或清空 API Key（空值删除对应条目）。
   /// - 副作用：Keychain 写/删操作；结果写入 statusMessage。
@@ -318,21 +551,25 @@ struct SettingsView: View {
     }
   }
 
-  /// 先保存 Key，再用一次最小纪要请求验证连通性。
-  /// - 副作用：Keychain 写入 + 网络调用（远程模式）；结果写入 statusMessage。
-  private func testSummaryConnection() async {
-    saveKey(
-      summaryAPIKey,
-      account: KeychainService.summaryAPIKeyAccount
-    )
+  /// 先保存 Key，再用一次最小请求验证连通性（总结任务走纪要通道并顺带
+  /// 验证视觉结构）。
+  /// - 副作用：Keychain 写入 + 网络调用；结果写入 statusMessage。
+  private func testConnection() async {
+    saveKey(apiKey, account: keychainAccount)
     isTestingConnection = true
     defer { isTestingConnection = false }
     do {
-      try await SummaryService().testConnection(preferences: preferences)
-      if preferences.visualSummaryEnabled {
-        preferences.markVisualSummaryVerified()
-        statusMessage = "连接与视觉纪要结构验证成功"
-      } else {
+      switch task {
+      case .summary:
+        try await SummaryService().testConnection(preferences: preferences)
+        if preferences.visualSummaryEnabled {
+          preferences.markVisualSummaryVerified()
+          statusMessage = "连接与视觉纪要结构验证成功"
+        } else {
+          statusMessage = "连接成功"
+        }
+      case .transcription:
+        try await RemoteWhisperService().testConnection(preferences: preferences)
         statusMessage = "连接成功"
       }
     } catch {

@@ -12,6 +12,8 @@ import SwiftUI
 /// iPad 三栏工作区：侧栏会议库 + 中栏会议文档 + 详情栏洞察面板，底部安全区内放置录音条。
 struct TabletWorkspaceView: View {
   @Environment(AppState.self) private var appState
+  /// 回放播放器（会议切换时重新挂载音频）。
+  @Environment(MeetingPlayer.self) private var player
   let meetings: [MeetingRecord]
   let onImport: () -> Void
   /// 三栏可见性（用户可手动收起侧栏/中栏）。
@@ -43,6 +45,14 @@ struct TabletWorkspaceView: View {
           .frame(maxWidth: 760)
           .padding(.horizontal, 20)
           .padding(.vertical, 10)
+      }
+    }
+    // 选中会议变化时挂载其本机音频（无音频自动卸载）。
+    .onChange(of: appState.selectedMeetingID) { _, _ in
+      if let meeting = selectedMeeting {
+        player.attach(meeting: meeting)
+      } else {
+        player.detach()
       }
     }
   }
@@ -182,18 +192,20 @@ private struct PhoneMeetingsView: View {
   }
 }
 
-/// iPhone 会议详情页：顶部分段切换 文档 / 转录 / AI 纪要，底部常驻录音条。
+/// iPhone 会议详情页：顶部分段切换 文档 / 转录 / AI 纪要 / AI 问答，底部常驻录音条。
 private struct PhoneMeetingDetailView: View {
   enum Section: String, CaseIterable, Identifiable {
     case document = "文档"
     case transcript = "转录"
     case summary = "AI 纪要"
+    case chat = "AI 问答"
 
     var id: String { rawValue }
   }
 
   let meeting: MeetingRecord
   @State private var selectedSection: Section = .document
+  @Environment(MeetingPlayer.self) private var player
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
@@ -216,6 +228,8 @@ private struct PhoneMeetingDetailView: View {
           TranscriptPanelView(meeting: meeting)
         case .summary:
           SummaryPanelView(meeting: meeting)
+        case .chat:
+          MeetingChatPanelView(meeting: meeting)
         }
       }
       .id(selectedSection)
@@ -223,13 +237,18 @@ private struct PhoneMeetingDetailView: View {
     }
     .navigationBarTitleDisplayMode(.inline)
     .animation(reduceMotion ? ContentMotion.quick : ContentMotion.view, value: selectedSection)
-    .navigationTitle(selectedSection == .document ? "会议文档" : selectedSection.rawValue)
+    .navigationTitle(
+      selectedSection == .document
+        ? "会议文档" : selectedSection == .chat ? "AI 问答" : selectedSection.rawValue
+    )
     .safeAreaInset(edge: .bottom, spacing: 6) {
       RecorderBar(meeting: meeting, compact: true)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(MeetingTheme.canvas)
     }
+    // 详情页出现即挂载本会议音频（文档分段同样会兜底）。
+    .onAppear { player.attach(meeting: meeting) }
   }
 }
 

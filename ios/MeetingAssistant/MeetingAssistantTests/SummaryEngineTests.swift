@@ -352,3 +352,102 @@ final class SummaryEngineTests: XCTestCase {
     XCTAssertTrue(backup.contains("视觉导出测试"))
   }
 }
+
+// MARK: - 打字机与思维链剥离
+
+final class MeetingChatSupportTests: XCTestCase {
+  func testTypewriterPacingRampsWithBufferAndCapsAt160() {
+    XCTAssertEqual(TypewriterPacing.charactersPerSecond(buffer: 0), 0)
+    XCTAssertEqual(
+      TypewriterPacing.charactersPerSecond(buffer: 1),
+      TypewriterPacing.baseCharactersPerSecond + 1.2,
+      accuracy: 0.001
+    )
+    // 大缓冲封顶 160。
+    XCTAssertEqual(
+      TypewriterPacing.charactersPerSecond(buffer: 500),
+      TypewriterPacing.maxCharactersPerSecond,
+      accuracy: 0.001
+    )
+  }
+
+  func testTypewriterPunctuationPauses() {
+    XCTAssertEqual(
+      TypewriterPacing.pauseMilliseconds(after: "。"),
+      TypewriterPacing.sentencePauseMilliseconds
+    )
+    XCTAssertEqual(
+      TypewriterPacing.pauseMilliseconds(after: "，"),
+      TypewriterPacing.clausePauseMilliseconds
+    )
+    XCTAssertNil(TypewriterPacing.pauseMilliseconds(after: "会"))
+  }
+
+  func testChatTurnRevealConsumesTargetAndReportsBuffer() {
+    var turn = ChatTurn(role: "assistant", text: "", isStreaming: true)
+    turn.appendTarget("你好。")
+    XCTAssertEqual(turn.remainingBuffer, 3)
+    XCTAssertEqual(turn.revealOneCharacter(), "你")
+    XCTAssertEqual(turn.revealOneCharacter(), "好")
+    XCTAssertEqual(turn.displayedText, "你好")
+    turn.finishStreaming()
+    XCTAssertFalse(turn.isStreaming)
+    XCTAssertEqual(turn.revealOneCharacter(), "。")
+    XCTAssertNil(turn.revealOneCharacter())
+    XCTAssertEqual(turn.displayedText, "你好。")
+  }
+
+  func testThinkingStripperRemovesInlineReasoningAcrossChunkSplits() {
+    var stripper = ThinkingStreamStripper()
+    // 整段思维链被吞掉，只留正文。
+    XCTAssertNil(stripper.push("<think>推理过程</think>"))
+    XCTAssertEqual(stripper.push("结论"), "结论")
+    // 开闭标记都跨增量拆开也能正确处理：“<thi”是前缀先扣留，思维链吞掉，
+    // 结束标记补全后放出后续正文。
+    var split = ThinkingStreamStripper()
+    XCTAssertEqual(split.push("第一段<thi"), "第一段")
+    XCTAssertNil(split.push("nk>推理</th"))
+    XCTAssertEqual(split.push("ink>第二段"), "第二段")
+    // 与思维链无关的 HTML 片段原样放行（不是 <think> 前缀）。
+    var plain = ThinkingStreamStripper()
+    XCTAssertEqual(plain.push("第一段<span"), "第一段<span")
+    // 未闭合思维链在 flush 时整体丢弃。
+    var unclosed = ThinkingStreamStripper()
+    XCTAssertNil(unclosed.push("<think>还在想"))
+    XCTAssertNil(unclosed.flush())
+    // 尾部疑似标记前缀在 flush 时按正文返回。
+    var tail = ThinkingStreamStripper()
+    XCTAssertEqual(tail.push("正文<"), "正文")
+    XCTAssertEqual(tail.flush(), "<")
+  }
+
+  func testSilentWAVHasValidRIFFHeader() {
+    let data = RemoteWhisperService.silentWAVData()
+    XCTAssertEqual(String(decoding: data.prefix(4), as: UTF8.self), "RIFF")
+    XCTAssertEqual(String(decoding: data.subdata(in: 8..<12), as: UTF8.self), "WAVE")
+    XCTAssertEqual(String(decoding: data.subdata(in: 36..<40), as: UTF8.self), "data")
+    // 0.3 秒 16kHz 16-bit 单声道 = 9600 字节数据 + 44 字节头。
+    XCTAssertEqual(data.count, 9_644)
+  }
+
+  func testMeetingContextClampsAndNotesEmptySources() {
+    let context = MeetingChatStore.meetingContext(
+      title: "周会",
+      summary: "",
+      decisions: "",
+      transcript: ""
+    )
+    XCTAssertTrue(context.contains("周会"))
+    XCTAssertTrue(context.contains("还没有纪要或转录"))
+
+    let long = String(repeating: "字", count: 20_000)
+    let clamped = MeetingChatStore.meetingContext(
+      title: "评审",
+      summary: long,
+      decisions: "",
+      transcript: long
+    )
+    XCTAssertLessThan(clamped.count, 20_000)
+    XCTAssertTrue(clamped.contains("截尾"))
+  }
+}

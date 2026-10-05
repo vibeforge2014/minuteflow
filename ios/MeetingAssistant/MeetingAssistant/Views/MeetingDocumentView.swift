@@ -24,6 +24,8 @@ struct MeetingDocumentView: View {
   @Environment(\.modelContext) private var modelContext
   /// 读取自动纪要间隔用于展示。
   @Environment(AppPreferences.self) private var preferences
+  /// 回放播放器（文档页负责把本会议音频挂载上去）。
+  @Environment(MeetingPlayer.self) private var player
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   /// 双向绑定的会议模型。
   @Bindable var meeting: MeetingRecord
@@ -38,9 +40,11 @@ struct MeetingDocumentView: View {
   // MARK: - 视图内容
 
   var body: some View {
-    // 文档纵向结构：页眉 + 各内容卡片。
+    // 文档纵向结构：页眉 + 回放条 + 各内容卡片。
     VStack(spacing: 0) {
       documentHeader
+      // 回放条：仅有可回放本机音频时出现；紧凑「回放」操作，展开时间轴。
+      PlaybackBar(meeting: meeting)
       if showsVisualSwitcher {
         Picker("纪要显示方式", selection: $documentMode) {
           ForEach(DocumentMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
@@ -108,6 +112,8 @@ struct MeetingDocumentView: View {
     .onChange(of: meeting.visualSummary?.generatedAt) { _, generatedAt in
       if generatedAt != nil, showsVisualSwitcher { documentMode = .visual }
     }
+    // 挂载本会议音频到全局回放播放器（缺文件时自动卸载，不留空播放器）。
+    .onAppear { player.attach(meeting: meeting) }
   }
 
   // MARK: - 分区视图

@@ -96,13 +96,15 @@ struct InsightPanelView: View {
       .background(MeetingTheme.surface)
       Divider()
 
-      // 按标签切换：转录面板 / AI 纪要面板。
+      // 按标签切换：转录面板 / AI 纪要面板 / AI 问答面板。
       Group {
         switch appState.inspectorTab {
         case .transcript:
           TranscriptPanelView(meeting: meeting)
         case .summary:
           SummaryPanelView(meeting: meeting)
+        case .chat:
+          MeetingChatPanelView(meeting: meeting)
         }
       }
       .id(appState.inspectorTab)
@@ -115,13 +117,21 @@ struct InsightPanelView: View {
 }
 
 /// 实时转录面板：定稿片段列表 + 录音中的临时转写行，自动滚动跟随最新内容。
+/// 回放进行中时：时间戳可点按跳转播放器，当前播放片段歌词式高亮并自动跟随。
 /// 导航位置：iPad 为 InsightPanelView 的“转录”标签；iPhone 为详情页“转录”分段。
 struct TranscriptPanelView: View {
   /// 录音协调器（临时转写与录音状态）。
   @Environment(RecordingCoordinator.self) private var recorder
+  /// 回放播放器（播放同步：时间戳跳转 + 当前行高亮）。
+  @Environment(MeetingPlayer.self) private var player
   /// 目标会议。
   let meeting: MeetingRecord
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  /// 本会议是否处于回放同步态。
+  private var isPlaybackSynced: Bool {
+    player.attachedMeetingID == meeting.id && player.hasAudio
+  }
 
   private enum DisplayRow: Identifiable {
     case stored(TranscriptSegmentRecord)
@@ -154,6 +164,15 @@ struct TranscriptPanelView: View {
               .font(.caption.weight(.semibold))
               .foregroundStyle(MeetingTheme.primary)
             Spacer()
+            if isPlaybackSynced {
+              Label(
+                String(format: "%.2g×", player.rate),
+                systemImage: player.isPlaying ? "speaker.wave.2.fill" : "speaker.wave.1"
+              )
+              .font(.caption)
+              .foregroundStyle(.secondary)
+              .contentTransition(.numericText())
+            }
             Text("\(displayRows.count) 段")
               .font(.caption)
               .foregroundStyle(.secondary)
@@ -166,7 +185,13 @@ struct TranscriptPanelView: View {
             Group {
               switch row {
               case .stored(let segment):
-                TranscriptSegmentRow(segment: segment)
+                TranscriptSegmentRow(
+                  segment: segment,
+                  playbackActive: isPlaybackSynced && player.isPlaying,
+                  isCurrentSegment: isPlaybackSynced && player.currentSegmentID == segment.id
+                ) {
+                  player.seek(to: segment.startTime)
+                }
               case .live(let paragraph):
                 LiveTranscriptRow(paragraph: paragraph)
               }
@@ -202,20 +227,50 @@ struct TranscriptPanelView: View {
           }
         }
       }
+      // 回放同步：当前片段变化时滚动跟随（歌词式）。
+      .onChange(of: player.currentSegmentID) { _, currentID in
+        guard isPlaybackSynced, player.isPlaying, let currentID else { return }
+        if reduceMotion {
+          proxy.scrollTo(currentID, anchor: .center)
+        } else {
+          withAnimation(ContentMotion.content) {
+            proxy.scrollTo(currentID, anchor: .center)
+          }
+        }
+      }
+      // 播放位置推进时更新“当前片段”定位（含暂停后跳转）。
+      .onChange(of: player.currentTime) { _, _ in
+        guard isPlaybackSynced else { return }
+        player.updateSync(with: meeting.orderedSegments)
+      }
+      .onChange(of: isPlaybackSynced) { _, active in
+        if active {
+          player.updateSync(with: meeting.orderedSegments)
+        }
+      }
     }
   }
 }
 
-/// 单条转录行：时间戳、可改名的说话人菜单、可编辑文本与定稿状态图标。
+/// 单条转录行：时间戳（回放时可点按跳转）、可改名的说话人菜单、可编辑文本
+/// 与定稿状态图标；回放同步时当前片段整行歌词式高亮。
 private struct TranscriptSegmentRow: View {
   /// 双向绑定的转录片段（就地编辑文本与说话人）。
   @Bindable var segment: TranscriptSegmentRecord
+  /// 回放是否进行中（决定时间戳是否呈现可点按的主色态）。
+  var playbackActive = false
+  /// 是否为当前播放时间命中的片段（歌词式高亮）。
+  var isCurrentSegment = false
+  /// 点按时间戳跳转播放器。
+  var onSeekTimestamp: () -> Void = {}
 
   var body: some View {
     HStack(alignment: .top, spacing: 10) {
-      Text(MeetingFormatters.timestamp(segment.startTime))
+      timestampView
         .font(.caption.monospacedDigit())
-        .foregroundStyle(.tertiary)
+        .foregroundStyle(
+          playbackActive ? AnyShapeStyle(MeetingTheme.primary) : AnyShapeStyle(HierarchicalShapeStyle.tertiary)
+        )
         .frame(width: 40, alignment: .leading)
 
       VStack(alignment: .leading, spacing: 6) {
@@ -239,6 +294,7 @@ private struct TranscriptSegmentRow: View {
 
         TextField("转录内容", text: $segment.text, axis: .vertical)
           .font(.subheadline)
+          .foregroundStyle(isCurrentSegment ? .primary : .secondary)
           .textFieldStyle(.plain)
       }
 
@@ -253,6 +309,29 @@ private struct TranscriptSegmentRow: View {
     }
     .padding(.horizontal, 14)
     .padding(.vertical, 12)
+    // 歌词式同步高亮：当前片段整行软主色衬底（Reduced Motion 保留该语义色）。
+    .background {
+      if isCurrentSegment {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .fill(MeetingTheme.primary.opacity(0.10))
+          .padding(.horizontal, 6)
+      }
+    }
+    .animation(ContentMotion.quick, value: isCurrentSegment)
+  }
+
+  /// 时间戳：回放同步时可点按跳转，否则纯展示。
+  @ViewBuilder
+  private var timestampView: some View {
+    if playbackActive {
+      Button(action: onSeekTimestamp) {
+        Text(MeetingFormatters.timestamp(segment.startTime))
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("跳转到 \(MeetingFormatters.timestamp(segment.startTime))")
+    } else {
+      Text(MeetingFormatters.timestamp(segment.startTime))
+    }
   }
 
   /// 按说话人分配固定颜色（“我”为主色，示例说话人有专属色）。
