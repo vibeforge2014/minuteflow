@@ -82,7 +82,8 @@ final class ScreenshotWalkerUITests: XCTestCase {
       }
     }
 
-    // 9. 首次引导（独立启动）
+    // 9. 首次引导（独立启动；段选择会写入 UserDefaults，进入前先归位、
+    //    结束后恢复，保证 walker 重复运行是幂等的）
     let onboard = XCUIApplication()
     onboard.launchArguments = ["UI_TESTING", "UI_TESTING_ONBOARDING"]
     onboard.launch()
@@ -92,12 +93,43 @@ final class ScreenshotWalkerUITests: XCTestCase {
       let skip = onboard.buttons["稍后允许，继续配置"]
       if skip.waitForExistence(timeout: 5) {
         skip.tap()
+        // 语音转录页（第 3 步）：归位 Apple Speech，保证「继续」可用并截默认态。
+        let apple = onboard.buttons["Apple Speech"].firstMatch
+        if apple.waitForExistence(timeout: 3) { apple.tap() }
         snap(onboard, "ios-onboarding2")
       }
       let next = onboard.buttons["onboarding-transcription-next"]
       if next.waitForExistence(timeout: 5) {
         next.tap()
+        // AI 总结页（第 4 步）：先归位本机基础截默认态，再截在线分支。
+        let local = onboard.buttons["本地基础纪要"].firstMatch
+        if local.waitForExistence(timeout: 3) { local.tap() }
         snap(onboard, "ios-onboarding3")
+        let online = onboard.buttons["OpenAI 兼容接口"].firstMatch
+        if online.waitForExistence(timeout: 3) {
+          online.tap()
+          snap(onboard, "ios-onboarding4-online")
+          // 打开预设菜单并选择 DeepSeek，验证一键预填官方端点与推荐模型。
+          let presetMenu = onboard.buttons["model-preset-menu"].firstMatch
+          if presetMenu.waitForExistence(timeout: 3) {
+            presetMenu.tap()
+            Thread.sleep(forTimeInterval: 1.2)
+            let deepseek = onboard.buttons["DeepSeek"].firstMatch
+            if deepseek.waitForExistence(timeout: 3) {
+              deepseek.tap()
+              snap(onboard, "ios-onboarding4-online-preset")
+            }
+          }
+          onboard.buttons["返回"].firstMatch.tap()
+          // 语音转录页（第 3 步）：远程 Whisper 分支展示转写厂商预设。
+          let remote = onboard.buttons["远程 Whisper"].firstMatch
+          if remote.waitForExistence(timeout: 3) {
+            remote.tap()
+            snap(onboard, "ios-onboarding2-remote")
+            // 恢复默认段，避免选中态残留影响下次运行。
+            onboard.buttons["Apple Speech"].firstMatch.tap()
+          }
+        }
       }
     }
   }

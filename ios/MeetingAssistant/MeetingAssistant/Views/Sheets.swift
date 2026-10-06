@@ -152,6 +152,43 @@ struct ModelServicePreset: Identifiable {
   ]
 }
 
+/// 厂商预设选择行：一键预填官方端点与推荐模型，设置子页与首次引导共用。
+struct ModelPresetMenu: View {
+  /// 该任务可选的预设列表。
+  let presets: [ModelServicePreset]
+  /// 预填目标：Base URL。
+  @Binding var baseURL: String
+  /// 预填目标：模型名。
+  @Binding var model: String
+
+  /// 与当前端点匹配的预设名（无匹配为空；New API 等空端点预设不参与匹配）。
+  private var matchedName: String {
+    presets.first {
+      !$0.baseURL.isEmpty
+        && $0.baseURL == baseURL.trimmingCharacters(in: .whitespaces)
+    }?.name ?? ""
+  }
+
+  var body: some View {
+    Menu {
+      ForEach(presets) { preset in
+        Button(preset.name) {
+          if !preset.baseURL.isEmpty {
+            baseURL = preset.baseURL
+          }
+          model = preset.model
+        }
+      }
+    } label: {
+      Label(
+        matchedName.isEmpty ? "选择常用服务预设" : "预设：\(matchedName)",
+        systemImage: "wand.and.stars"
+      )
+    }
+    .accessibilityIdentifier("model-preset-menu")
+  }
+}
+
 /// 设置页：模型服务工作台（AI 总结 / 语音转录两个任务子页）、纪要节奏、
 /// 说话人说明与隐私存储分区。
 /// 导航位置：iPhone 为 TabView“设置”标签（无完成按钮）；iPad 经全局 sheet
@@ -320,20 +357,6 @@ private struct TaskModelSettingsView: View {
   }
 
   /// 当前 Base URL 与模型（读写的便捷绑定目标由 switch 决定）。
-  private var currentBaseURL: String {
-    switch task {
-    case .summary: preferences.summaryBaseURL
-    case .transcription: preferences.transcriptionBaseURL
-    }
-  }
-
-  private var currentModel: String {
-    switch task {
-    case .summary: preferences.summaryModel
-    case .transcription: preferences.transcriptionModel
-    }
-  }
-
   private var keychainAccount: String {
     switch task {
     case .summary: KeychainService.summaryAPIKeyAccount
@@ -367,16 +390,7 @@ private struct TaskModelSettingsView: View {
       if isOnline {
         // 常用预设：一键预填官方端点与推荐模型。
         Section {
-          Menu {
-            ForEach(presets) { preset in
-              Button(preset.name) { apply(preset) }
-            }
-          } label: {
-            Label(
-              presetLabel.isEmpty ? "选择常用服务预设" : "预设：\(presetLabel)",
-              systemImage: "wand.and.stars"
-            )
-          }
+          ModelPresetMenu(presets: presets, baseURL: baseURLBinding, model: modelBinding)
           TextField("Base URL", text: baseURLBinding)
             .textInputAutocapitalization(.never)
             .keyboardType(.URL)
@@ -498,14 +512,6 @@ private struct TaskModelSettingsView: View {
     }
   }
 
-  /// 与当前端点匹配的预设名（无匹配为空）。
-  private var presetLabel: String {
-    presets.first {
-      !$0.baseURL.isEmpty
-        && $0.baseURL == currentBaseURL.trimmingCharacters(in: .whitespaces)
-    }?.name ?? ""
-  }
-
   /// 在线区块的脚注文案。
   private var footerText: String {
     switch task {
@@ -527,14 +533,6 @@ private struct TaskModelSettingsView: View {
   }
 
   // MARK: - 动作
-
-  /// 应用一个预设（New API 等空端点预设只填模型，地址留给你输入）。
-  private func apply(_ preset: ModelServicePreset) {
-    if !preset.baseURL.isEmpty {
-      baseURLBinding.wrappedValue = preset.baseURL
-    }
-    modelBinding.wrappedValue = preset.model
-  }
 
   /// 保存或清空 API Key（空值删除对应条目）。
   /// - 副作用：Keychain 写/删操作；结果写入 statusMessage。
@@ -788,6 +786,21 @@ struct OnboardingView: View {
 
         if preferences.transcriptionProvider == .remoteWhisper {
           Divider()
+          // 常用厂商预设：一键预填官方端点与推荐模型。
+          ModelPresetMenu(
+            presets: ModelServicePreset.transcriptionPresets,
+            baseURL: Binding(
+              get: { preferences.transcriptionBaseURL },
+              set: { preferences.transcriptionBaseURL = $0 }
+            ),
+            model: Binding(
+              get: { preferences.transcriptionModel },
+              set: { preferences.transcriptionModel = $0 }
+            )
+          )
+          Text("预设会填好官方地址与模型名；New API 网关需自行填网关地址（一般以 /v1 结尾）。")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
           TextField("Base URL", text: Binding(
             get: { preferences.transcriptionBaseURL },
             set: { preferences.transcriptionBaseURL = $0 }
@@ -835,6 +848,21 @@ struct OnboardingView: View {
         .accessibilityIdentifier("onboarding-summary-provider")
 
         if preferences.summaryProvider == .openAICompatible {
+          // 常用厂商预设：一键预填官方端点与推荐模型，通常只需再填密钥。
+          ModelPresetMenu(
+            presets: ModelServicePreset.summaryPresets,
+            baseURL: Binding(
+              get: { preferences.summaryBaseURL },
+              set: { preferences.summaryBaseURL = $0 }
+            ),
+            model: Binding(
+              get: { preferences.summaryModel },
+              set: { preferences.summaryModel = $0 }
+            )
+          )
+          Text("预设会填好官方地址与推荐模型，通常只需再填密钥；New API 网关需自行填网关地址（一般以 /v1 结尾）。")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
           TextField("Base URL", text: Binding(
             get: { preferences.summaryBaseURL },
             set: { preferences.summaryBaseURL = $0 }
