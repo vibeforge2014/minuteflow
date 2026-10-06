@@ -407,7 +407,7 @@ final class MeetingChatStore {
       parts.append("会议纪要：\n\(clamp(summary, summaryLimit))")
     }
     if !decisions.isEmpty {
-      parts.append("关键决策：\n\(clamp(decisions, 2_000))")
+      parts.append("决策：\n\(clamp(decisions, 2_000))")
     }
     if !transcript.isEmpty {
       parts.append("转录（可能截尾，仅保留最近部分）：\n\(clamp(transcript, transcriptLimit))")

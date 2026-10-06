@@ -22,10 +22,10 @@ enum MeetingStatus: String, Codable, CaseIterable {
   /// 面向用户的中文状态文案。
   var title: String {
     switch self {
-    case .draft: "未开始"
-    case .recording: "进行中"
-    case .processing: "整理中"
-    case .completed: "已完成"
+    case .draft: "会前准备"
+    case .recording: "会议进行中"
+    case .processing: "录音处理中"
+    case .completed: "会后整理"
     }
   }
 }
@@ -68,7 +68,7 @@ final class MeetingRecord {
   var personalNotes: String
   /// AI 纪要 Markdown 文本（可编辑）。
   var summaryText: String
-  /// 关键决策（每行一条）。
+  /// 决策（每行一条）。
   var decisionsText: String
   /// 未决问题（每行一条）。
   var openQuestionsText: String
@@ -228,6 +228,57 @@ final class MeetingRecord {
   }
 
   // MARK: - 纪要应用
+
+  /// 解析 summaryText 中「## 关键结论」小节的条目行（去掉 Markdown 列表前缀）。
+  static func keyConclusionLines(in markdown: String) -> [String] {
+    guard let range = markdown.range(of: "## 关键结论") else { return [] }
+    var lines: [String] = []
+    for rawLine in markdown[range.upperBound...].split(separator: "\n") {
+      let line = rawLine.trimmingCharacters(in: .whitespaces)
+      if line.hasPrefix("##") { break }
+      guard !line.isEmpty else { continue }
+      lines.append(
+        line.replacingOccurrences(of: #"^[\-\*•]\s*"#, with: "", options: .regularExpression)
+      )
+    }
+    return lines
+  }
+
+  /// 把条目行写回「## 关键结论」小节（其余小节原样保留；空列表移除该小节）。
+  static func replacingKeyConclusions(in markdown: String, with lines: [String]) -> String {
+    var result: [String] = []
+    var inSection = false
+    var replaced = false
+    for rawLine in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
+      let line = rawLine.trimmingCharacters(in: .whitespaces)
+      if line.hasPrefix("## ") {
+        if inSection {
+          inSection = false
+          // 旧小节内容与其后的空行已在下方统一跳过，无需额外清理。
+        }
+        if line == "## 关键结论" {
+          inSection = true
+          replaced = true
+          if !lines.isEmpty {
+            result.append("## 关键结论")
+            result.append(contentsOf: lines.map { "- \($0)" })
+            result.append("")
+          }
+          continue
+        }
+      }
+      if inSection { continue }
+      result.append(String(rawLine))
+    }
+    if !replaced, !lines.isEmpty {
+      if !result.isEmpty { result.append("") }
+      result.append("## 关键结论")
+      result.append(contentsOf: lines.map { "- \($0)" })
+    }
+    return result.joined(separator: "\n")
+      .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
 
   /// 把一次 SummaryDraft 结果写回会议，并增量补录不重复的行动项。
   ///

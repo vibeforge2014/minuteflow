@@ -454,8 +454,13 @@ struct SummaryPanelView: View {
 
         Group {
           if displayMode == .normal {
+          KeyConclusionsCard(
+            title: meeting.status == .recording ? "会议进展" : "关键结论",
+            markdown: $meeting.summaryText,
+            revision: meeting.lastSummaryAt
+          )
           SummarySectionCard(
-            title: "关键决策",
+            title: "决策",
             systemImage: "checkmark.seal",
             text: $meeting.decisionsText,
             revision: meeting.lastSummaryAt
@@ -633,6 +638,174 @@ private struct SummarySectionCard: View {
       in: RoundedRectangle(cornerRadius: 12)
     )
     .contentUpdateFeedback(revision: revision)
+  }
+}
+
+/// 关键结论卡：暖色衬底 + 珊瑚圆点行（与桌面端「关键结论」区块同一视觉语言）。
+/// 行就地编辑并写回 summaryText 的「## 关键结论」小节；结论无顺序语义，
+/// 用圆点而不是编号。会议文档与 AI 纪要面板共用。
+struct KeyConclusionsCard: View {
+  /// 卡片标题：录音中沿用「会议进展」，其余阶段为「关键结论」。
+  let title: String
+  /// 绑定的纪要 Markdown（读写「## 关键结论」小节）。
+  @Binding var markdown: String
+  /// 最近一次纪要应用时间（语义色轻提示）。
+  let revision: Date?
+  /// 录音中的滚动更新节奏说明；nil 时不显示。
+  var cadence: String? = nil
+  /// 最近更新时间说明；nil 时不显示。
+  var lastUpdated: String? = nil
+  /// 是否在卡片底部渲染其余小节（主题要点等）的只读文本。
+  var showsRemainingSections = false
+
+  /// 当前「## 关键结论」小节的条目（空串代表待输入的新行）。
+  private var lines: [String] {
+    MeetingRecord.keyConclusionLines(in: markdown)
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(alignment: .firstTextBaseline) {
+        Label(title, systemImage: "doc.text")
+          .font(.headline)
+        Spacer()
+        if let cadence {
+          Label(cadence, systemImage: "circle.fill")
+            .font(.caption.weight(.medium))
+            .foregroundStyle(MeetingTheme.success)
+        }
+        if let lastUpdated {
+          Text(lastUpdated)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+
+      if lines.isEmpty {
+        Text("转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。")
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+          .padding(12)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 12))
+      } else {
+        VStack(alignment: .leading, spacing: 2) {
+          ForEach(lines.indices, id: \.self) { index in
+            HStack(alignment: .firstTextBaseline, spacing: 9) {
+              Circle()
+                .fill(MeetingTheme.primary)
+                .frame(width: 7, height: 7)
+                .padding(.top, 8)
+              TextField("新的结论", text: lineBinding(at: index))
+                .font(.subheadline)
+                .textFieldStyle(.plain)
+              Button {
+                removeLine(at: index)
+              } label: {
+                Image(systemName: "minus.circle")
+                  .font(.caption)
+                  .foregroundStyle(.tertiary)
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("删除这条结论")
+            }
+            .padding(.vertical, 5)
+          }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+      }
+
+      Button {
+        writeBack(lines + [""])
+      } label: {
+        Label("添加结论", systemImage: "plus")
+      }
+      .buttonStyle(.borderless)
+      .font(.subheadline)
+
+      if showsRemainingSections {
+        RemainingSummarySections(markdown: markdown)
+      }
+    }
+    .padding(16)
+    .background(MeetingTheme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    .overlay {
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .stroke(MeetingTheme.divider)
+    }
+    .contentUpdateFeedback(revision: revision, cornerRadius: 16)
+  }
+
+  // MARK: - 行读写
+
+  /// 单行双向绑定：写回时仅替换该行，其余小节原样保留。
+  private func lineBinding(at index: Int) -> Binding<String> {
+    Binding(
+      get: { index < lines.count ? lines[index] : "" },
+      set: { newValue in
+        guard index < lines.count else { return }
+        var updated = lines
+        updated[index] = newValue
+        writeBack(updated)
+      }
+    )
+  }
+
+  private func removeLine(at index: Int) {
+    guard index < lines.count else { return }
+    var updated = lines
+    updated.remove(at: index)
+    writeBack(updated)
+  }
+
+  /// 把行列表写回 markdown 并即时保存（由调用方 modelContext 落盘）。
+  private func writeBack(_ newLines: [String]) {
+    markdown = MeetingRecord.replacingKeyConclusions(in: markdown, with: newLines)
+  }
+}
+
+/// 关键结论以外的纪要小节（主题要点等）只读渲染；决策/风险等另有可编辑卡片。
+private struct RemainingSummarySections: View {
+  let markdown: String
+
+  /// 去掉「## 关键结论」小节后的其余小节。
+  private var sections: [(title: String, items: [String])] {
+    let remaining = MeetingRecord.replacingKeyConclusions(in: markdown, with: [])
+    var result: [(String, [String])] = []
+    var current: (String, [String])?
+    for rawLine in remaining.split(separator: "\n") {
+      let line = rawLine.trimmingCharacters(in: .whitespaces)
+      if line.hasPrefix("## ") {
+        if let section = current { result.append(section) }
+        current = (String(line.dropFirst(3)), [])
+      } else if !line.isEmpty, current != nil {
+        current?.1.append(
+          line.replacingOccurrences(of: #"^[\-\*•]\s*"#, with: "", options: .regularExpression)
+        )
+      }
+    }
+    if let section = current { result.append(section) }
+    return result
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      ForEach(sections, id: \.title) { section in
+        VStack(alignment: .leading, spacing: 5) {
+          Text(section.title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+          ForEach(section.items, id: \.self) { item in
+            Text(item)
+              .font(.subheadline)
+              .foregroundStyle(.secondary)
+          }
+        }
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
   }
 }
 

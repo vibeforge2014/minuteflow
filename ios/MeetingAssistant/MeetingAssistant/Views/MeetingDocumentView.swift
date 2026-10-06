@@ -106,9 +106,12 @@ struct MeetingDocumentView: View {
     } message: {
       Text(exportError ?? "")
     }
-    // 标题或笔记变化时刷新更新时间并保存。
+    // 标题、参与者或笔记变化时刷新更新时间并保存。
     .onChange(of: meeting.title) { _, _ in markUpdated() }
+    .onChange(of: meeting.participantsText) { _, _ in markUpdated() }
     .onChange(of: meeting.personalNotes) { _, _ in markUpdated() }
+    // 关键结论卡片的就地编辑写回 summaryText 后同样落盘。
+    .onChange(of: meeting.summaryText) { _, _ in markUpdated() }
     .onChange(of: meeting.visualSummary?.generatedAt) { _, generatedAt in
       if generatedAt != nil, showsVisualSwitcher { documentMode = .visual }
     }
@@ -156,11 +159,13 @@ struct MeetingDocumentView: View {
           systemImage: "calendar"
         )
         Label(meeting.meetingMode, systemImage: "person.2")
-        if !meeting.participants.isEmpty {
-          Label(
-            "\(meeting.participants.count) 位参与者",
-            systemImage: "person.3"
-          )
+        // 参与者就地可编辑（顿号/逗号分隔），与桌面端 meta 行一致。
+        Label {
+          TextField("添加参与者", text: $meeting.participantsText)
+            .frame(maxWidth: 150)
+            .accessibilityLabel("参与者")
+        } icon: {
+          Image(systemName: "person.3")
         }
         Spacer()
         Label("已保存到本机", systemImage: "checkmark.circle.fill")
@@ -213,32 +218,19 @@ struct MeetingDocumentView: View {
     }
   }
 
-  /// “实时纪要”卡片：AI 纪要文本（可编辑）+ 更新频率与最近更新时间。
+  /// 「关键结论 / 会议进展」卡片：暖色圆点行（与桌面端同一视觉语言），
+  /// 其余纪要小节只读展示；决策/风险等另有可编辑卡片。
   private var liveMinutes: some View {
-    DocumentCard("实时纪要", systemImage: "doc.text") {
-      HStack {
-        Label(
-          "每 \(max(1, preferences.summaryIntervalSeconds / 60)) 分钟更新",
-          systemImage: "circle.fill"
-        )
-        .font(.caption.weight(.medium))
-        .foregroundStyle(MeetingTheme.success)
-        Spacer()
-        if let lastSummaryAt = meeting.lastSummaryAt {
-          Text("更新于 \(lastSummaryAt.formatted(date: .omitted, time: .shortened))")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-      }
-      TextEditor(text: $meeting.summaryText)
-        .font(.body)
-        .scrollContentBackground(.hidden)
-        .frame(minHeight: 180)
-        .padding(10)
-        .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 10))
-        .contentUpdateFeedback(revision: meeting.lastSummaryAt, cornerRadius: 10)
-        .accessibilityLabel("可编辑会议纪要")
-    }
+    KeyConclusionsCard(
+      title: meeting.status == .recording ? "会议进展" : "关键结论",
+      markdown: $meeting.summaryText,
+      revision: meeting.lastSummaryAt,
+      cadence: meeting.status == .recording
+        ? "每 \(max(1, preferences.summaryIntervalSeconds / 60)) 分钟更新" : nil,
+      lastUpdated: meeting.lastSummaryAt
+        .map { "更新于 \($0.formatted(date: .omitted, time: .shortened))" },
+      showsRemainingSections: true
+    )
   }
 
   /// “行动项”卡片：行动项列表（或空态）+ 手动添加按钮。
@@ -275,11 +267,11 @@ struct MeetingDocumentView: View {
     .animation(ContentMotion.content, value: meeting.orderedActionItems.map(\.id))
   }
 
-  /// “决策、问题与风险”卡片：决策/未决/风险/下一步四个可编辑小节。
+  /// “决策、问题与下一步”卡片：决策/未决/风险/下一步四个可编辑小节。
   private var decisionsAndFollowUp: some View {
-    DocumentCard("决策、问题与风险", systemImage: "signpost.right.and.left") {
+    DocumentCard("决策、问题与下一步", systemImage: "signpost.right.and.left") {
       LabeledEditor(
-        label: "关键决策",
+        label: "决策",
         placeholder: "记录已经确认的结论",
         text: $meeting.decisionsText
       )
@@ -401,14 +393,44 @@ struct ActionItemRow: View {
               .foregroundStyle(.tertiary)
           }
           Spacer()
-          Text(item.status.title)
+          // 状态胶囊菜单：未开始/进行中/已完成三档，与桌面端行动项状态选择一致。
+          Menu {
+            ForEach(ActionItemStatus.allCases, id: \.self) { status in
+              Button(status.title) {
+                withAnimation(ContentMotion.quick) { item.status = status }
+              }
+            }
+          } label: {
+            HStack(spacing: 5) {
+              Circle()
+                .fill(statusColor)
+                .frame(width: 6, height: 6)
+              Text(item.status.title)
+              Image(systemName: "chevron.down")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            }
             .font(.caption.weight(.medium))
-            .foregroundStyle(item.status == .done ? MeetingTheme.success : .secondary)
+            .foregroundStyle(statusColor)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(statusColor.opacity(0.1), in: Capsule())
+          }
+          .menuOrder(.fixed)
         }
         .foregroundStyle(.secondary)
       }
     }
     .padding(.vertical, 4)
+  }
+
+  /// 状态语义色：未开始灰、进行中琥珀、已完成绿。
+  private var statusColor: Color {
+    switch item.status {
+    case .todo: .secondary
+    case .inProgress: MeetingTheme.warning
+    case .done: MeetingTheme.success
+    }
   }
 }
 

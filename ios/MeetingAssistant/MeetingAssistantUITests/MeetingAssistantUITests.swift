@@ -90,7 +90,7 @@ final class MeetingAssistantUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["会议定调"].waitForExistence(timeout: 5))
 
     app.segmentedControls.buttons["普通纪要"].tap()
-    XCTAssertTrue(app.staticTexts["关键决策"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["关键结论"].waitForExistence(timeout: 5))
   }
 
   func testTabletWorkspaceShowsDocumentAndTranscriptTogether() throws {

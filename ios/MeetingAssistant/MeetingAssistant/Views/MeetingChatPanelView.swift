@@ -51,11 +51,42 @@ struct MeetingChatPanelView: View {
       if !isConfigured {
         setupGuidance
       } else {
+        panelHeader
         messageList
         inputBar
       }
     }
     .background(MeetingTheme.surface)
+  }
+
+  // MARK: - 面板页眉
+
+  /// 面板页眉：副标题说明回答依据；有对话时提供「清空对话」。
+  private var panelHeader: some View {
+    HStack(alignment: .firstTextBaseline) {
+      VStack(alignment: .leading, spacing: 2) {
+        Text("AI 问答")
+          .font(.headline)
+        Text("基于本场会议的转写与纪要回答")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      Spacer()
+      if !turns.isEmpty {
+        Button {
+          chatStore.clearSession(for: meeting.id)
+        } label: {
+          Image(systemName: "eraser")
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("清空这场会议的问答记录")
+      }
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 10)
+    .background(MeetingTheme.surface)
+    .overlay(alignment: .bottom) { Divider() }
   }
 
   // MARK: - 设置引导
@@ -85,16 +116,45 @@ struct MeetingChatPanelView: View {
       ScrollView {
         LazyVStack(spacing: 12) {
           if turns.isEmpty {
-            VStack(spacing: 10) {
-              Label("问点什么吧", systemImage: "bubble.left.and.bubble.right")
-                .font(.headline)
-              Text("例如：这场会议决定了什么？\n我的待办有哪些？纪要里有什么风险？")
+            VStack(spacing: 12) {
+              Label("", systemImage: "bubble.left.and.bubble.right")
+                .labelStyle(.iconOnly)
+                .font(.system(size: 28, weight: .medium))
+                .foregroundStyle(MeetingTheme.primary)
+              Text("问问这场会议的任何内容——重点、决定、待办，或者某段讨论的细节。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+              // 猜你想问：从当前纪要内容推导，点按即发送（与桌面端一致）。
+              VStack(spacing: 8) {
+                ForEach(suggestedQuestions, id: \.self) { question in
+                  Button {
+                    send(question)
+                  } label: {
+                    Text(question)
+                      .font(.subheadline)
+                      .frame(maxWidth: .infinity, alignment: .leading)
+                      .padding(.horizontal, 12)
+                      .padding(.vertical, 9)
+                      .background(
+                        MeetingTheme.surfaceRaised,
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                      )
+                      .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                          .stroke(MeetingTheme.divider)
+                      }
+                  }
+                  .buttonStyle(.plain)
+                  .accessibilityLabel("猜你想问：\(question)")
+                }
+              }
+              .accessibilityElement(children: .contain)
+              .accessibilityLabel("猜你想问")
             }
             .frame(maxWidth: .infinity)
-            .padding(.top, 60)
+            .padding(.top, 36)
+            .padding(.horizontal, 6)
           }
 
           ForEach(turns) { turn in
@@ -175,9 +235,33 @@ struct MeetingChatPanelView: View {
 
   // MARK: - 动作
 
+  /// 从当前纪要内容推导「猜你想问」：优先指向本场会议实际存在的内容
+  /// （与桌面端 ChatPanel 同一套规则）。
+  private var suggestedQuestions: [String] {
+    var questions = ["用三句话总结这场会议"]
+    if !meeting.decisionsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      questions.append("这次会议确认了哪些决定？")
+    }
+    if !meeting.orderedActionItems.isEmpty {
+      questions.append("行动项分别由谁负责？")
+    }
+    if !meeting.openQuestionsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      questions.append("还有哪些未决问题？")
+    }
+    if questions.count < 3 { questions.append("会议的重点内容是什么？") }
+    return Array(questions.prefix(4))
+  }
+
   /// 发送当前草稿；失败以 inline 错误展示（不弹窗打断）。
   private func send() {
     let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !question.isEmpty else { return }
+    send(question)
+  }
+
+  /// 发送一条问题（草稿或「猜你想问」chip）；失败以 inline 错误展示。
+  private func send(_ question: String) {
+    let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !question.isEmpty, !turns.contains(where: { $0.isStreaming }) else {
       return
     }

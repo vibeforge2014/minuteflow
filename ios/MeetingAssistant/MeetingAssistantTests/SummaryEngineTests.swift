@@ -4,6 +4,52 @@ import XCTest
 @testable import MeetingAssistant
 
 final class SummaryEngineTests: XCTestCase {
+  func testKeyConclusionRoundTripPreservesOtherSections() {
+    let markdown = """
+      ## 主题要点
+      - 讨论移动端改版
+
+      ## 关键结论
+      - 第一阶段聚焦核心任务
+      - 小流量灰度验证
+
+      ## 决策
+      - 采用方案 B
+      """
+
+    // 解析：只取关键结论小节，去掉列表前缀。
+    XCTAssertEqual(
+      MeetingRecord.keyConclusionLines(in: markdown),
+      ["第一阶段聚焦核心任务", "小流量灰度验证"]
+    )
+
+    // 编辑一行 + 追加一行：其余小节与顺序原样保留。
+    let edited = MeetingRecord.replacingKeyConclusions(
+      in: markdown,
+      with: ["第一阶段聚焦核心任务", "改写后的结论", ""]
+    )
+    XCTAssertEqual(
+      MeetingRecord.keyConclusionLines(in: edited),
+      ["第一阶段聚焦核心任务", "改写后的结论", ""]
+    )
+    XCTAssertTrue(edited.contains("## 主题要点"))
+    XCTAssertTrue(edited.contains("- 采用方案 B"))
+    XCTAssertFalse(edited.contains("小流量灰度"))
+
+    // 清空：小节被移除，其余小节不受影响。
+    let removed = MeetingRecord.replacingKeyConclusions(in: edited, with: [])
+    XCTAssertTrue(removed.contains("## 主题要点"))
+    XCTAssertTrue(removed.contains("## 决策"))
+    XCTAssertFalse(removed.contains("## 关键结论"))
+
+    // 追加到没有该小节的纪要：小节出现在末尾。
+    let appended = MeetingRecord.replacingKeyConclusions(
+      in: "## 主题要点\n- 要点",
+      with: ["新结论"]
+    )
+    XCTAssertTrue(appended.hasSuffix("## 关键结论\n- 新结论"))
+  }
+
   func testContentMotionClassifiesAppendCorrectionAndStableInsertions() {
     XCTAssertEqual(
       NaturalContentChangeClassifier.text(previous: "我们先确认目标。", next: "我们先确认目标。接下来讨论范围。"),

@@ -15,6 +15,7 @@
 		2C807D710C843F36A8785404 /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1203D3014E7CAF34ABEC53 /* RecordingCoordinator.swift */; };
 		34D322A31AFEDF0F61AE21EE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FB1DD7246CBEC8B0B7F604E9 /* Assets.xcassets */; };
 		35ECC3C3602BA30C47DD9612 /* RecorderBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 136882FDF99DDD91DD81E51C /* RecorderBar.swift */; };
+		4D1E764F0625BB88AB3F166E /* ScreenshotWalkerUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA3B317B97DD416DCAFC0E39 /* ScreenshotWalkerUITests.swift */; };
 		4F934FE8542967F934B53135 /* MeetingRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CD095BEDD72E6C12AC43B71 /* MeetingRecord.swift */; };
 		52520A3E812D2D28A4044396 /* WorkspaceViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 948C3095526F931909018B2A /* WorkspaceViews.swift */; };
 		5814D51EAD1D7CF796E19459 /* MeetingPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74F09FE8257191585C8D1310 /* MeetingPlayer.swift */; };
@@ -89,6 +90,7 @@
 		A9DE9954495756C712DD4379 /* MeetingAssistantUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingAssistantUITests.swift; sourceTree = "<group>"; };
 		AB1203D3014E7CAF34ABEC53 /* RecordingCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingCoordinator.swift; sourceTree = "<group>"; };
 		C1AD0ACF89385B40D67F4491 /* MeetingLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingLibraryView.swift; sourceTree = "<group>"; };
+		CA3B317B97DD416DCAFC0E39 /* ScreenshotWalkerUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotWalkerUITests.swift; sourceTree = "<group>"; };
 		D084F02E849022EBBA588752 /* ActionItemRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionItemRecord.swift; sourceTree = "<group>"; };
 		E121C2A23393AAD5F3FA5BD9 /* MeetingChatPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingChatPanelView.swift; sourceTree = "<group>"; };
 		E54B072E5913A6E1EA88F645 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -128,6 +130,7 @@
 			isa = PBXGroup;
 			children = (
 				A9DE9954495756C712DD4379 /* MeetingAssistantUITests.swift */,
+				CA3B317B97DD416DCAFC0E39 /* ScreenshotWalkerUITests.swift */,
 			);
 			path = MeetingAssistantUITests;
 			sourceTree = "<group>";
@@ -369,6 +372,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				6CE364CC9206C7E12D05AB45 /* MeetingAssistantUITests.swift in Sources */,
+				4D1E764F0625BB88AB3F166E /* ScreenshotWalkerUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

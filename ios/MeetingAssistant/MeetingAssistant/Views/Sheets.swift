@@ -761,7 +761,7 @@ struct OnboardingView: View {
       onboardingSectionIntro(
         "waveform",
         eyebrow: "第一项 · 语音转录",
-        title: "让声音变成可靠文字",
+        title: "先让声音变成可靠文字",
         detail: "Apple Speech 是内置路径；需要跨平台 Whisper 服务时，可在这里直接配置。"
       )
 
