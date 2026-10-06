@@ -93,11 +93,8 @@ struct PlaybackBar: View {
       .padding(.horizontal, 14)
       .padding(.vertical, 10)
       .background(MeetingTheme.surface)
-      .overlay {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .stroke(MeetingTheme.divider)
-      }
-      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+      .shadow(color: .black.opacity(0.04), radius: 10, x: 0, y: 2)
     }
     .buttonStyle(.plain)
     .padding(.horizontal, 20)
@@ -175,11 +172,8 @@ struct PlaybackBar: View {
     .padding(.horizontal, 14)
     .padding(.vertical, 10)
     .background(MeetingTheme.surface)
-    .overlay {
-      RoundedRectangle(cornerRadius: 12, style: .continuous)
-        .stroke(MeetingTheme.divider)
-    }
-    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    .shadow(color: .black.opacity(0.04), radius: 10, x: 0, y: 2)
     .padding(.horizontal, 20)
     .padding(.top, 10)
   }

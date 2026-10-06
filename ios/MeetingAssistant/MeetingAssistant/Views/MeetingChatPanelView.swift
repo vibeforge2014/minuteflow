@@ -138,12 +138,8 @@ struct MeetingChatPanelView: View {
                       .padding(.vertical, 9)
                       .background(
                         MeetingTheme.surfaceRaised,
-                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
                       )
-                      .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                          .stroke(MeetingTheme.divider)
-                      }
                   }
                   .buttonStyle(.plain)
                   .accessibilityLabel("猜你想问：\(question)")

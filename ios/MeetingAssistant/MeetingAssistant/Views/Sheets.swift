@@ -821,8 +821,8 @@ struct OnboardingView: View {
         }
       }
       .padding(18)
-      .background(.background, in: RoundedRectangle(cornerRadius: 18))
-      .overlay { RoundedRectangle(cornerRadius: 18).stroke(Color.secondary.opacity(0.12)) }
+      .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+      .shadow(color: .black.opacity(0.04), radius: 10, x: 0, y: 2)
     }
   }
 
@@ -890,8 +890,8 @@ struct OnboardingView: View {
         }
       }
       .padding(18)
-      .background(.background, in: RoundedRectangle(cornerRadius: 18))
-      .overlay { RoundedRectangle(cornerRadius: 18).stroke(Color.secondary.opacity(0.12)) }
+      .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+      .shadow(color: .black.opacity(0.04), radius: 10, x: 0, y: 2)
     }
   }
 
@@ -1015,7 +1015,7 @@ struct OnboardingView: View {
     .padding(14)
     .frame(maxWidth: .infinity, alignment: .leading)
     .background(.background, in: RoundedRectangle(cornerRadius: 16))
-    .overlay { RoundedRectangle(cornerRadius: 16).stroke(Color.secondary.opacity(0.12)) }
+    .shadow(color: .black.opacity(0.04), radius: 10, x: 0, y: 2)
   }
 
   private func onboardingSectionIntro(

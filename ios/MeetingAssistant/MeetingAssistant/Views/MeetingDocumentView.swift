@@ -47,7 +47,7 @@ struct MeetingDocumentView: View {
       // 回放条：仅有可回放本机音频时出现；紧凑「回放」操作，展开时间轴。
       PlaybackBar(meeting: meeting)
       ScrollView {
-        LazyVStack(spacing: 14) {
+        LazyVStack(spacing: 16) {
           goalAndAgenda
           personalNotes
           minutesActions
@@ -56,7 +56,7 @@ struct MeetingDocumentView: View {
           actionItems
           decisionsAndFollowUp
         }
-        .padding(20)
+        .padding(24)
         .padding(.bottom, 86)
       }
       .scrollDismissesKeyboard(.interactively)
@@ -138,14 +138,18 @@ struct MeetingDocumentView: View {
             }
           }
         } label: {
-          Label("分享", systemImage: "square.and.arrow.up")
+          Image(systemName: "square.and.arrow.up")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: 34, height: 34)
         }
-        .buttonStyle(.borderedProminent)
+        .buttonStyle(.plain)
+        .accessibilityLabel("分享或导出")
       }
-      .padding(.horizontal, 20)
+      .padding(.horizontal, 24)
       .frame(minHeight: 58)
 
-      HStack(spacing: 18) {
+      HStack(spacing: 16) {
         Label(
           MeetingFormatters.dateTime(meeting.startedAt),
           systemImage: "calendar"
@@ -160,14 +164,13 @@ struct MeetingDocumentView: View {
           Image(systemName: "person.3")
         }
         Spacer()
-        Label("已保存到本机", systemImage: "checkmark.circle.fill")
-          .foregroundStyle(MeetingTheme.success)
+        Text("已保存到本机")
+          .foregroundStyle(.tertiary)
       }
       .font(.caption)
       .foregroundStyle(.secondary)
-      .padding(.horizontal, 20)
-      .padding(.bottom, 12)
-      Divider()
+      .padding(.horizontal, 24)
+      .padding(.bottom, 16)
     }
     .background(MeetingTheme.surface)
   }
@@ -204,7 +207,7 @@ struct MeetingDocumentView: View {
         .padding(10)
         .background(
           Color(uiColor: .secondarySystemBackground),
-          in: RoundedRectangle(cornerRadius: 10)
+          in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .accessibilityLabel("我的会议记录")
     }

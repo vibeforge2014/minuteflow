@@ -377,8 +377,14 @@ struct KeyConclusionsCard: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
       HStack(alignment: .firstTextBaseline) {
-        Label(title, systemImage: "doc.text")
-          .font(.headline)
+        HStack(spacing: 7) {
+          Image(systemName: "doc.text")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(MeetingTheme.primary)
+          Text(title)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.primary)
+        }
         Spacer()
         if let cadence {
           Label(cadence, systemImage: "circle.fill")
@@ -396,9 +402,9 @@ struct KeyConclusionsCard: View {
         Text("转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。")
           .font(.subheadline)
           .foregroundStyle(.secondary)
-          .padding(12)
+          .padding(14)
           .frame(maxWidth: .infinity, alignment: .leading)
-          .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 12))
+          .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
       } else {
         VStack(alignment: .leading, spacing: 2) {
           ForEach(lines.indices, id: \.self) { index in
@@ -423,9 +429,9 @@ struct KeyConclusionsCard: View {
             .padding(.vertical, 5)
           }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
       }
 
       Button {
@@ -440,13 +446,9 @@ struct KeyConclusionsCard: View {
         RemainingSummarySections(markdown: markdown)
       }
     }
-    .padding(16)
-    .background(MeetingTheme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    .overlay {
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
-        .stroke(MeetingTheme.divider)
-    }
-    .contentUpdateFeedback(revision: revision, cornerRadius: 16)
+    .padding(18)
+    .cardSurface()
+    .contentUpdateFeedback(revision: revision, cornerRadius: 18)
   }
 
   // MARK: - 行读写

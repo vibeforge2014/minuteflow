@@ -118,16 +118,12 @@ struct RecorderBar: View {
     .frame(minHeight: compact ? 50 : 58)
     .background {
       if reduceTransparency {
-        RoundedRectangle(cornerRadius: compact ? 14 : 15)
+        RoundedRectangle(cornerRadius: compact ? 16 : 18, style: .continuous)
           .fill(MeetingTheme.surfaceRaised)
       } else {
-        RoundedRectangle(cornerRadius: compact ? 14 : 15)
+        RoundedRectangle(cornerRadius: compact ? 16 : 18, style: .continuous)
           .fill(.regularMaterial)
       }
-    }
-    .overlay {
-      RoundedRectangle(cornerRadius: compact ? 14 : 15)
-        .stroke(MeetingTheme.divider)
     }
     .shadow(color: .black.opacity(0.1), radius: 14, y: 5)
     // 录音错误提示。

@@ -30,8 +30,8 @@ enum MeetingTheme {
   static let surfaceRaised = Color(uiColor: .tertiarySystemGroupedBackground)
   /// 侧栏背景色。
   static let sidebar = Color(uiColor: .secondarySystemGroupedBackground)
-  /// 分隔线颜色（separator 32% 透明度）。
-  static let divider = Color(uiColor: .separator).opacity(0.32)
+  /// 分隔线颜色（separator 18% 透明度；极简风只保留发丝级提示）。
+  static let divider = Color(uiColor: .separator).opacity(0.18)
   /// 语义色：成功/录音中（绿色系）。
   static let success = Color(red: 0.20, green: 0.58, blue: 0.36)
   /// 语义色：警告/整理中（琥珀色系）。
@@ -44,7 +44,18 @@ enum MeetingTheme {
 
 // MARK: - 通用组件
 
-/// 文档卡片容器：图标标题 + 自定义内容，圆角表面 + 细描边（文档视图的统一外壳）。
+extension View {
+  /// 极简卡片表面：连续大圆角 + 极淡阴影分层，不用描边——
+  /// 层级靠表面色差与留白表达（现代化极简风）。
+  func cardSurface(cornerRadius: CGFloat = 18) -> some View {
+    self
+      .background(MeetingTheme.surface)
+      .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+      .shadow(color: .black.opacity(0.04), radius: 10, x: 0, y: 2)
+  }
+}
+
+/// 文档卡片容器：珊瑚图标 + 小节标题 + 自定义内容（文档视图的统一外壳）。
 struct DocumentCard<Content: View>: View {
   /// 卡片标题。
   let title: String
@@ -70,18 +81,18 @@ struct DocumentCard<Content: View>: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
-      Label(title, systemImage: systemImage)
-        .font(.headline)
-        .foregroundStyle(.primary)
+      HStack(spacing: 7) {
+        Image(systemName: systemImage)
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(MeetingTheme.primary)
+        Text(title)
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(.primary)
+      }
       content
     }
-    .padding(18)
-    .background(MeetingTheme.surface)
-    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    .overlay {
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
-        .stroke(MeetingTheme.divider)
-    }
+    .padding(20)
+    .cardSurface()
   }
 }
 
