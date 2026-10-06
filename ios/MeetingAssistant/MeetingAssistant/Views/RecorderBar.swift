@@ -96,12 +96,19 @@ struct RecorderBar: View {
         .disabled(isFinishing)
         .accessibilityIdentifier("stop-recording-button")
       } else {
+        // 开始录音是核心动作：深珊瑚大胶囊 + 加粗字重，在工具条里一眼可辨。
         Button {
           Task { await startRecording() }
         } label: {
           Label("开始录音", systemImage: "record.circle")
+            .font(.subheadline.weight(.bold))
+            .padding(.horizontal, 4)
+            .frame(minWidth: 116)
         }
         .buttonStyle(.borderedProminent)
+        .buttonBorderShape(.capsule)
+        .controlSize(.large)
+        .tint(MeetingTheme.primaryStrong)
         .disabled(recorder.isRecording)
         .accessibilityIdentifier("start-recording-button")
       }

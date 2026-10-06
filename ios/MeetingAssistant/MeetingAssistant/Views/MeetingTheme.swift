@@ -17,6 +17,9 @@ enum MeetingTheme {
   /// 主色：TuneSync 风格暖珊瑚橙（#E76F51 一线），用于主按钮、tint 与强调。
   // TuneSync-inspired palette: warm coral actions on quiet, system-native surfaces.
   static let primary = Color(red: 0.906, green: 0.435, blue: 0.318)
+  /// 填充动作色：更深的可访问珊瑚（与桌面端 --accent-strong #C65138 对齐），
+  /// 白字对比达标，用于「开始录音」这类核心填充按钮。
+  static let primaryStrong = Color(red: 0.776, green: 0.318, blue: 0.220)
   /// 主色 12% 透明度的柔和底色（选中态/软卡片）。
   static let primarySoft = primary.opacity(0.12)
   /// 页面画布底色（systemGroupedBackground）。
