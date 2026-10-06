@@ -2,7 +2,7 @@
 //  AppState.swift
 //  MeetingAssistant
 //
-//  应用全局 UI 状态容器：集中管理当前选中会议、iPhone 底部标签、检查面板标签、
+//  应用全局 UI 状态容器：集中管理当前选中会议、iPhone 底部标签、
 //  全局弹层（sheet）、搜索关键字与 Toast 提示等跨视图共享的导航/交互状态。
 //  所属层：App 装配层（@Observable 对象，经 environment 注入整个视图树）。
 //
@@ -17,22 +17,10 @@ import Observation
 final class AppState {
   // MARK: - iPhone 底部标签
 
-  /// iPhone compact 布局下 TabView 的三个主标签。
+  /// iPhone compact 布局下 TabView 的两个主标签。
   enum PhoneTab: Hashable {
     case meetings
-    case actions
     case settings
-  }
-
-  // MARK: - 检查面板标签
-
-  /// 会议详情中“转录 / AI 纪要 / AI 问答”三个检查面板的切换标签。
-  enum InspectorTab: String, CaseIterable, Identifiable {
-    case transcript = "转录"
-    case summary = "AI 纪要"
-    case chat = "AI 问答"
-
-    var id: String { rawValue }
   }
 
   // MARK: - 全局弹层
@@ -58,8 +46,6 @@ final class AppState {
   var selectedMeetingID: UUID?
   /// iPhone 底部 TabView 当前选中的标签。
   var selectedPhoneTab: PhoneTab = .meetings
-  /// 检查面板（转录 / AI 纪要）当前标签。
-  var inspectorTab: InspectorTab = .transcript
   /// 当前展示的全局 sheet；为 nil 时无弹层。
   var presentedSheet: AppSheet?
   /// 会议库搜索关键字（iPad 侧栏使用）。

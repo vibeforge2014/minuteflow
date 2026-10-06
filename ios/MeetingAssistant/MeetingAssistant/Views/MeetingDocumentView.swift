@@ -2,22 +2,18 @@
 //  MeetingDocumentView.swift
 //  MeetingAssistant
 //
-//  会议文档主视图：从上到下渲染标题栏（标题/状态/收藏/导出分享）、会议目标与
-//  议程、我的记录、实时纪要、行动项与决策跟进等文档卡片，全部字段就地可编辑。
+//  会议文档主视图（即「AI 纪要」分段）：从上到下渲染标题栏（标题/状态/收藏/导出
+//  分享）、会议目标与议程、我的记录、纪要操作行、关键结论、视觉纪要入口、行动项
+//  与决策跟进等文档卡片，全部字段就地可编辑。
 //  所属层：视图层。
 //
 
 import SwiftData
 import SwiftUI
 
-/// 会议文档视图：轻量文档式中央编辑区。
-/// 导航位置：iPad 为 NavigationSplitView 中栏（content）；iPhone 为详情页“文档”分段。
+/// 会议文档视图：轻量文档式中央编辑区，AI 纪要的唯一编辑入口。
+/// 导航位置：iPad 为三栏中栏；iPhone 为详情页「AI 纪要」分段。
 struct MeetingDocumentView: View {
-  private enum DocumentMode: String, CaseIterable, Identifiable {
-    case normal = "普通纪要"
-    case visual = "视觉纪要"
-    var id: String { rawValue }
-  }
   // MARK: - 环境与状态
 
   /// SwiftData 上下文（编辑后保存）。
@@ -26,16 +22,21 @@ struct MeetingDocumentView: View {
   @Environment(AppPreferences.self) private var preferences
   /// 回放播放器（文档页负责把本会议音频挂载上去）。
   @Environment(MeetingPlayer.self) private var player
+  /// 录音协调器（更新纪要时拼接实时转录）。
+  @Environment(RecordingCoordinator.self) private var recorder
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   /// 双向绑定的会议模型。
   @Bindable var meeting: MeetingRecord
-  /// iPad 三栏中栏显式开启切换；不能依赖中栏自身的 size class（窄列会被系统标记为 compact）。
-  var showsVisualSwitcher = false
   /// 导出成功的文件（非 nil 时弹出系统分享面板）。
   @State private var shareItem: ShareItem?
   /// 导出失败文案（alert 展示）。
   @State private var exportError: String?
-  @State private var documentMode: DocumentMode = .normal
+  /// 是否正在生成/更新纪要（普通或视觉）。
+  @State private var isSummarizing = false
+  /// 纪要生成失败文案（alert 展示）。
+  @State private var summaryError: String?
+  /// 全屏查看视觉纪要海报。
+  @State private var showsVisualPoster = false
 
   // MARK: - 视图内容
 
@@ -45,50 +46,22 @@ struct MeetingDocumentView: View {
       documentHeader
       // 回放条：仅有可回放本机音频时出现；紧凑「回放」操作，展开时间轴。
       PlaybackBar(meeting: meeting)
-      if showsVisualSwitcher {
-        Picker("纪要显示方式", selection: $documentMode) {
-          ForEach(DocumentMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+      ScrollView {
+        LazyVStack(spacing: 14) {
+          goalAndAgenda
+          personalNotes
+          minutesActions
+          liveMinutes
+          visualSummaryEntry
+          actionItems
+          decisionsAndFollowUp
         }
-        .pickerStyle(.segmented)
-        .frame(maxWidth: 280)
-        .padding(.top, 10)
+        .padding(20)
+        .padding(.bottom, 86)
       }
-      if showsVisualSwitcher, documentMode == .visual {
-        ScrollView {
-          if let visual = meeting.visualSummary {
-            VisualSummaryPoster(meeting: meeting, visual: visual)
-              .frame(maxWidth: 920)
-              .padding(20)
-              .padding(.bottom, 86)
-          } else {
-            ContentUnavailableView(
-              preferences.visualSummaryIsVerified ? "尚未生成视觉纪要" : "当前使用普通纪要",
-              systemImage: "rectangle.3.group",
-              description: Text(preferences.visualSummaryIsVerified
-                ? "生成最终纪要后会自动排成可分享的信息图"
-                : "请在设置中开启视觉纪要并通过结构验证")
-            )
-            .frame(maxWidth: .infinity, minHeight: 420)
-            .padding(20)
-          }
-        }
-      } else {
-        ScrollView {
-          LazyVStack(spacing: 14) {
-            goalAndAgenda
-            personalNotes
-            liveMinutes
-            actionItems
-            decisionsAndFollowUp
-          }
-          .padding(20)
-          .padding(.bottom, 86)
-        }
-        .scrollDismissesKeyboard(.interactively)
-      }
+      .scrollDismissesKeyboard(.interactively)
     }
     .background(MeetingTheme.canvas)
-    .animation(reduceMotion ? ContentMotion.quick : ContentMotion.view, value: documentMode)
     .navigationSplitViewColumnWidth(min: 420, ideal: 620)
     // 导出成功后弹出系统分享面板。
     .sheet(item: $shareItem) { item in
@@ -106,15 +79,34 @@ struct MeetingDocumentView: View {
     } message: {
       Text(exportError ?? "")
     }
+    // 纪要更新失败提示。
+    .alert(
+      "纪要更新失败",
+      isPresented: Binding(
+        get: { summaryError != nil },
+        set: { if !$0 { summaryError = nil } }
+      )
+    ) {
+      Button("好") { summaryError = nil }
+    } message: {
+      Text(summaryError ?? "")
+    }
+    // 视觉纪要全屏查看（含重新生成）。
+    .fullScreenCover(isPresented: $showsVisualPoster) {
+      VisualSummaryCover(
+        meeting: meeting,
+        isSummarizing: isSummarizing,
+        canRegenerate: preferences.visualSummaryIsVerified,
+        onRegenerate: { Task { await retryVisualSummary() } },
+        onDismiss: { showsVisualPoster = false }
+      )
+    }
     // 标题、参与者或笔记变化时刷新更新时间并保存。
     .onChange(of: meeting.title) { _, _ in markUpdated() }
     .onChange(of: meeting.participantsText) { _, _ in markUpdated() }
     .onChange(of: meeting.personalNotes) { _, _ in markUpdated() }
     // 关键结论卡片的就地编辑写回 summaryText 后同样落盘。
     .onChange(of: meeting.summaryText) { _, _ in markUpdated() }
-    .onChange(of: meeting.visualSummary?.generatedAt) { _, generatedAt in
-      if generatedAt != nil, showsVisualSwitcher { documentMode = .visual }
-    }
     // 挂载本会议音频到全局回放播放器（缺文件时自动卸载，不留空播放器）。
     .onAppear { player.attach(meeting: meeting) }
   }
@@ -233,6 +225,80 @@ struct MeetingDocumentView: View {
     )
   }
 
+  /// 纪要操作行：说明生成节奏并主动触发「更新纪要」（会后最终稿也是这里手动生成）。
+  private var minutesActions: some View {
+    HStack(spacing: 10) {
+      Text(
+        meeting.status == .recording
+          ? "录音中每 \(max(1, preferences.summaryIntervalSeconds / 60)) 分钟自动更新"
+          : "最终纪要由你手动更新"
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      Spacer()
+      Button {
+        Task { await summarize() }
+      } label: {
+        if isSummarizing {
+          ProgressView()
+            .controlSize(.small)
+        } else {
+          Label("更新纪要", systemImage: "sparkles")
+        }
+      }
+      .buttonStyle(.borderedProminent)
+      .controlSize(.small)
+      .disabled(isSummarizing)
+      .accessibilityIdentifier("update-summary-button")
+    }
+    .padding(.horizontal, 2)
+  }
+
+  /// 「视觉纪要」入口卡：已生成时一键全屏查看；未生成且已通过结构验证时提供生成入口。
+  /// 功能未开启且从未生成时不渲染，避免文档内堆积设置引导。
+  @ViewBuilder
+  private var visualSummaryEntry: some View {
+    if meeting.visualSummary != nil || (preferences.visualSummaryIsVerified && !meeting.summaryText.isEmpty) {
+      DocumentCard("视觉纪要", systemImage: "rectangle.3.group") {
+        if let visual = meeting.visualSummary {
+          if visual.stale {
+            Label("普通纪要已有更新，当前视觉版基于上一版本", systemImage: "exclamationmark.triangle.fill")
+              .font(.caption)
+              .foregroundStyle(MeetingTheme.warning)
+          }
+          Text("把已生成的普通纪要排成一页可分享的信息图。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Button {
+            showsVisualPoster = true
+          } label: {
+            Label("查看视觉纪要", systemImage: "rectangle.expand.vertical")
+          }
+          .buttonStyle(.borderedProminent)
+          .accessibilityIdentifier("show-visual-summary-button")
+        } else {
+          Text("把已生成的普通纪要排成一页可分享的信息图。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Button {
+            Task { await retryVisualSummary() }
+          } label: {
+            if isSummarizing {
+              ProgressView()
+                .controlSize(.small)
+            } else {
+              Label("生成视觉纪要", systemImage: "sparkles")
+            }
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.small)
+          .disabled(isSummarizing)
+          .accessibilityIdentifier("generate-visual-summary-button")
+        }
+      }
+    }
+  }
+
   /// “行动项”卡片：行动项列表（或空态）+ 手动添加按钮。
   private var actionItems: some View {
     DocumentCard("行动项", systemImage: "checkmark.square") {
@@ -312,6 +378,110 @@ struct MeetingDocumentView: View {
       )
     } catch {
       exportError = error.localizedDescription
+    }
+  }
+
+  /// 拼接定稿转录（含录音中的实时文本）与笔记生成纪要并保存；
+  /// 会后已通过视觉结构验证时顺带生成视觉版并打开海报。
+  /// - 副作用：写回 meeting 字段、保存 SwiftData；远程模式下发起网络调用。
+  private func summarize() async {
+    withAnimation(ContentMotion.quick) { isSummarizing = true }
+    defer { withAnimation(ContentMotion.quick) { isSummarizing = false } }
+    do {
+      let transcript =
+        meeting.transcriptText
+        + (recorder.activeMeetingID == meeting.id ? "\n\(recorder.liveTranscript)" : "")
+      let draft = try await SummaryService().summarize(
+        transcript: transcript,
+        notes: meeting.personalNotes,
+        preferences: preferences
+      )
+      withAnimation(ContentMotion.content) { meeting.apply(summary: draft) }
+      try modelContext.save()
+      if meeting.status == .completed && preferences.visualSummaryIsVerified,
+        let sourceDate = meeting.lastSummaryAt
+      {
+        do {
+          let visual = try await SummaryService().generateVisualSummary(
+            title: meeting.title,
+            participants: meeting.participants,
+            summary: draft,
+            sourceSummaryUpdatedAt: sourceDate,
+            preferences: preferences
+          )
+          try meeting.apply(visualSummary: visual)
+          try modelContext.save()
+          showsVisualPoster = true
+        } catch {
+          summaryError = "普通纪要已保存，但视觉版生成失败：\(error.localizedDescription)"
+        }
+      }
+    } catch {
+      summaryError = error.localizedDescription
+    }
+  }
+
+  /// 依据已保存的普通纪要单独重试视觉版；成功后打开海报。
+  private func retryVisualSummary() async {
+    guard let sourceDate = meeting.lastSummaryAt else {
+      summaryError = "请先生成普通纪要"
+      return
+    }
+    withAnimation(ContentMotion.quick) { isSummarizing = true }
+    defer { withAnimation(ContentMotion.quick) { isSummarizing = false } }
+    do {
+      let visual = try await SummaryService().generateVisualSummary(
+        title: meeting.title,
+        participants: meeting.participants,
+        summary: meeting.summaryDraft,
+        sourceSummaryUpdatedAt: sourceDate,
+        preferences: preferences
+      )
+      try meeting.apply(visualSummary: visual)
+      try modelContext.save()
+      showsVisualPoster = true
+    } catch {
+      summaryError = error.localizedDescription
+    }
+  }
+}
+
+/// 视觉纪要全屏查看：海报 + 完成关闭 + 重新生成（需通过结构验证）。
+private struct VisualSummaryCover: View {
+  @Bindable var meeting: MeetingRecord
+  let isSummarizing: Bool
+  let canRegenerate: Bool
+  let onRegenerate: () -> Void
+  let onDismiss: () -> Void
+
+  var body: some View {
+    NavigationStack {
+      ScrollView {
+        if let visual = meeting.visualSummary {
+          VisualSummaryPoster(meeting: meeting, visual: visual)
+            .frame(maxWidth: 920)
+            .padding(20)
+            .padding(.bottom, 40)
+        }
+      }
+      .navigationTitle("视觉纪要")
+      .navigationBarTitleDisplayMode(.inline)
+      .background(MeetingTheme.canvas)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("完成", action: onDismiss)
+        }
+        ToolbarItem(placement: .primaryAction) {
+          Button(action: onRegenerate) {
+            if isSummarizing {
+              ProgressView()
+            } else {
+              Label("重新生成", systemImage: "arrow.clockwise")
+            }
+          }
+          .disabled(isSummarizing || !canRegenerate)
+        }
+      }
     }
   }
 }

@@ -2,14 +2,16 @@
 //  WorkspaceViews.swift
 //  MeetingAssistant
 //
-//  自适应工作区视图：iPad 用 NavigationSplitView 组装三栏布局（会议库/文档/洞察面板），
-//  iPhone 用 TabView 组装三标签布局（会议/行动项/设置），并把会议详情组织为
-//  「文档/转录/AI 纪要」分段页。由 AppRootView 按 horizontalSizeClass 选择装配。
+//  自适应工作区视图：iPad 用 NavigationSplitView 组装三栏布局（会议库/纪要文档/AI 问答），
+//  iPhone 用 TabView 组装两标签布局（会议/设置），并把会议详情组织为
+//  「AI 纪要/转录」两段页（AI 问答为导航栏按钮弹层）。由 AppRootView 按
+//  horizontalSizeClass 选择装配。
 //
 
 import SwiftUI
 
-/// iPad 三栏工作区：侧栏会议库 + 中栏会议文档 + 详情栏洞察面板，底部安全区内放置录音条。
+/// iPad 三栏工作区：侧栏会议库 + 中栏纪要文档（AI 纪要/转录两段）+ 详情栏 AI 问答，
+/// 底部安全区内放置录音条。与 Mac 桌面端三栏同构。
 struct TabletWorkspaceView: View {
   @Environment(AppState.self) private var appState
   /// 回放播放器（会议切换时重新挂载音频）。
@@ -24,14 +26,15 @@ struct TabletWorkspaceView: View {
       MeetingLibraryView(meetings: meetings, onImport: onImport)
     } content: {
       if let meeting = selectedMeeting {
-        MeetingDocumentView(meeting: meeting, showsVisualSwitcher: true)
+        MeetingDetailTabsView(meeting: meeting)
+          .id(meeting.id)
           .navigationSplitViewColumnWidth(min: 420, ideal: 610, max: 760)
       } else {
         EmptyMeetingSelectionView()
       }
     } detail: {
       if let meeting = selectedMeeting {
-        InsightPanelView(meeting: meeting)
+        MeetingChatPanelView(meeting: meeting)
           .navigationSplitViewColumnWidth(min: 330, ideal: 390, max: 500)
       } else {
         EmptyMeetingSelectionView()
@@ -64,7 +67,7 @@ struct TabletWorkspaceView: View {
   }
 }
 
-/// iPhone 工作区：底部三标签（会议库 / 行动项总览 / 设置）。
+/// iPhone 工作区：底部两标签（会议库 / 设置）；跨会议行动项汇总从会议页工具栏进入。
 struct PhoneWorkspaceView: View {
   @Environment(AppState.self) private var appState
   let meetings: [MeetingRecord]
@@ -80,12 +83,6 @@ struct PhoneWorkspaceView: View {
           Label("会议", systemImage: "doc.text.magnifyingglass")
         }
         .tag(AppState.PhoneTab.meetings)
-
-      ActionItemsOverviewView(meetings: meetings)
-        .tabItem {
-          Label("行动项", systemImage: "checkmark.square")
-        }
-        .tag(AppState.PhoneTab.actions)
 
       NavigationStack {
         SettingsView(showsDoneButton: false)
@@ -131,6 +128,15 @@ private struct PhoneMeetingsView: View {
           Button(action: onImport) {
             Label("导入", systemImage: "square.and.arrow.down")
           }
+        }
+        ToolbarItem(placement: .primaryAction) {
+          // 跨会议行动项汇总入口；行动项本体仍编辑于每场会议的纪要文档。
+          NavigationLink {
+            ActionItemsOverviewView(meetings: meetings)
+          } label: {
+            Label("全部行动项", systemImage: "checkmark.square")
+          }
+          .accessibilityIdentifier("all-actions-button")
         }
         ToolbarItem(placement: .primaryAction) {
           Button {
@@ -192,94 +198,123 @@ private struct PhoneMeetingsView: View {
   }
 }
 
-/// iPhone 会议详情页：顶部分段切换 文档 / 转录 / AI 纪要 / AI 问答，底部常驻录音条。
-private struct PhoneMeetingDetailView: View {
-  enum Section: String, CaseIterable, Identifiable {
-    case document = "文档"
-    case transcript = "转录"
-    case summary = "AI 纪要"
-    case chat = "AI 问答"
+/// 会议详情两段：AI 纪要（合并后的可编辑纪要文档）与 转录。
+/// 默认段随会议状态：录音中先看转录，会前准备/会后整理先看纪要（与 Mac 一致）。
+enum MeetingDetailSection: String, CaseIterable, Identifiable {
+  case summary = "AI 纪要"
+  case transcript = "转录"
 
-    var id: String { rawValue }
+  var id: String { rawValue }
+
+  static func defaultSection(for status: MeetingStatus) -> MeetingDetailSection {
+    status == .recording ? .transcript : .summary
   }
+}
 
+/// 会议详情内容切换（iPhone 详情页与 iPad 中栏共用）：
+/// 顶部分段「AI 纪要 | 转录」，不包含录音条（由外层工作区放置）。
+struct MeetingDetailTabsView: View {
   let meeting: MeetingRecord
-  @State private var selectedSection: Section = .document
-  @Environment(MeetingPlayer.self) private var player
+  @State private var selectedSection: MeetingDetailSection
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  init(meeting: MeetingRecord) {
+    self.meeting = meeting
+    _selectedSection = State(initialValue: MeetingDetailSection.defaultSection(for: meeting.status))
+  }
 
   var body: some View {
     VStack(spacing: 0) {
       Picker("会议内容", selection: $selectedSection) {
-        ForEach(Section.allCases) { section in
+        ForEach(MeetingDetailSection.allCases) { section in
           Text(section.rawValue).tag(section)
         }
       }
       .pickerStyle(.segmented)
+      .accessibilityIdentifier("meeting-detail-sections")
       .padding(.horizontal)
       .padding(.vertical, 10)
       .background(MeetingTheme.surface)
 
       Group {
         switch selectedSection {
-        case .document:
+        case .summary:
           MeetingDocumentView(meeting: meeting)
         case .transcript:
           TranscriptPanelView(meeting: meeting)
-        case .summary:
-          SummaryPanelView(meeting: meeting)
-        case .chat:
-          MeetingChatPanelView(meeting: meeting)
         }
       }
       .id(selectedSection)
       .transition(.opacity)
     }
-    .navigationBarTitleDisplayMode(.inline)
     .animation(reduceMotion ? ContentMotion.quick : ContentMotion.view, value: selectedSection)
-    .navigationTitle(
-      selectedSection == .document
-        ? "会议文档" : selectedSection == .chat ? "AI 问答" : selectedSection.rawValue
-    )
-    .safeAreaInset(edge: .bottom, spacing: 6) {
-      RecorderBar(meeting: meeting, compact: true)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(MeetingTheme.canvas)
-    }
-    // 详情页出现即挂载本会议音频（文档分段同样会兜底）。
-    .onAppear { player.attach(meeting: meeting) }
   }
 }
 
-/// 行动项总览（iPhone 第二标签）：聚合所有会议里未完成的行动项，按会议分组展示。
+/// iPhone 会议详情页：两段「AI 纪要 | 转录」内容（MeetingDetailTabsView）；
+/// AI 问答经导航栏气泡按钮以弹层打开，底部常驻录音条。
+private struct PhoneMeetingDetailView: View {
+  let meeting: MeetingRecord
+  @State private var showsChat = false
+  @Environment(MeetingPlayer.self) private var player
+
+  var body: some View {
+    MeetingDetailTabsView(meeting: meeting)
+      .navigationBarTitleDisplayMode(.inline)
+      .navigationTitle("会议详情")
+      .toolbar {
+        ToolbarItem(placement: .primaryAction) {
+          Button {
+            showsChat = true
+          } label: {
+            Label("AI 问答", systemImage: "bubble.left.and.bubble.right")
+          }
+          .accessibilityIdentifier("chat-button")
+        }
+      }
+      .sheet(isPresented: $showsChat) {
+        MeetingChatPanelView(meeting: meeting)
+          .presentationDetents([.medium, .large])
+          .presentationDragIndicator(.visible)
+      }
+      .safeAreaInset(edge: .bottom, spacing: 6) {
+        RecorderBar(meeting: meeting, compact: true)
+          .padding(.horizontal, 12)
+          .padding(.vertical, 6)
+          .background(MeetingTheme.canvas)
+      }
+      // 详情页出现即挂载本会议音频（纪要分段同样会兜底）。
+      .onAppear { player.attach(meeting: meeting) }
+  }
+}
+
+/// 行动项总览：聚合所有会议里未完成的行动项，按会议分组展示；
+/// 由会议页工具栏「全部行动项」push 进入。
 struct ActionItemsOverviewView: View {
   let meetings: [MeetingRecord]
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
-    NavigationStack {
-      List {
-        if activeItems.isEmpty {
-          ContentUnavailableView(
-            "暂无行动项",
-            systemImage: "checkmark.square",
-            description: Text("会议纪要生成的行动项会集中显示在这里")
-          )
-        } else {
-          ForEach(meetingsWithActiveItems, id: \.meeting.id) { group in
-            Section(group.meeting.title) {
-              ForEach(group.items) { item in
-                ActionItemRow(item: item)
-                  .transition(ContentMotion.insertion(reduceMotion: reduceMotion))
-              }
+    List {
+      if activeItems.isEmpty {
+        ContentUnavailableView(
+          "暂无行动项",
+          systemImage: "checkmark.square",
+          description: Text("会议纪要生成的行动项会集中显示在这里")
+        )
+      } else {
+        ForEach(meetingsWithActiveItems, id: \.meeting.id) { group in
+          Section(group.meeting.title) {
+            ForEach(group.items) { item in
+              ActionItemRow(item: item)
+                .transition(ContentMotion.insertion(reduceMotion: reduceMotion))
             }
           }
         }
       }
-      .animation(ContentMotion.content, value: activeItems.map(\.item.id))
-      .navigationTitle("行动项")
     }
+    .animation(ContentMotion.content, value: activeItems.map(\.item.id))
+    .navigationTitle("行动项")
   }
 
   /** 展平所有会议中未完成的行动项为 (会议, 行动项) 对。 */

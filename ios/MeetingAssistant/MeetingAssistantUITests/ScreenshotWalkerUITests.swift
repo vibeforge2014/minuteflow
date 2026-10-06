@@ -22,48 +22,55 @@ final class ScreenshotWalkerUITests: XCTestCase {
     app.launchArguments = ["UI_TESTING"]
     app.launch()
 
-    // 1. 会议库
+    // 1. 会议库（两标签 + 行动项工具栏入口）
     XCTAssertTrue(app.navigationBars["MinuteFlow"].waitForExistence(timeout: 8))
     snap(app, "ios-library")
 
-    // 2. 进行中会议 → 文档（默认段）
+    // 2. 进行中会议 → 录音中默认落在「转录」
     let live = app.staticTexts["产品团队周会"].firstMatch
     if live.waitForExistence(timeout: 5) { live.tap() }
-    snap(app, "ios-meeting-doc")
-
-    // 3. 转录
-    let transcript = app.segmentedControls.buttons["转录"].firstMatch
-    if transcript.waitForExistence(timeout: 3) { transcript.tap() }
     snap(app, "ios-transcript")
 
-    // 4. AI 纪要（普通）→ 视觉纪要
+    // 3. AI 纪要（合并后的纪要文档：操作行/关键结论/视觉入口卡/行动项）
     let minutes = app.segmentedControls.buttons["AI 纪要"].firstMatch
     if minutes.waitForExistence(timeout: 3) { minutes.tap() }
     snap(app, "ios-minutes")
 
-    // 5. AI 问答
-    let chat = app.segmentedControls.buttons["AI 问答"].firstMatch
-    if chat.waitForExistence(timeout: 3) { chat.tap() }
-    snap(app, "ios-chat")
+    // 4. AI 问答（导航栏气泡按钮 → 弹层）
+    let chat = app.buttons["chat-button"].firstMatch
+    if chat.waitForExistence(timeout: 3) {
+      chat.tap()
+      snap(app, "ios-chat")
+      // 从顶部下拉关闭弹层（有分档 detent，普通下拉可能只收半屏）。
+      let top = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02))
+      let bottom = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92))
+      top.press(forDuration: 0.05, thenDragTo: bottom)
+      Thread.sleep(forTimeInterval: 0.8)
+    }
 
-    // 6. 回会议库 → 打开已完成会议（项目复盘）看普通/视觉纪要
+    // 5. 回会议库 → 打开已完成会议（项目复盘），默认即「AI 纪要」
     app.navigationBars.buttons.firstMatch.tap()
     Thread.sleep(forTimeInterval: 0.8)
     let done = app.staticTexts["项目复盘：移动端体验优化"].firstMatch
     if done.waitForExistence(timeout: 5) { done.tap() }
-    let minutes2 = app.segmentedControls.buttons["AI 纪要"].firstMatch
-    if minutes2.waitForExistence(timeout: 3) { minutes2.tap() }
     snap(app, "ios-minutes-completed")
-    let visual = app.segmentedControls.buttons["视觉纪要"].firstMatch
-    if visual.waitForExistence(timeout: 3) { visual.tap() }
-    snap(app, "ios-visual")
+    let visual = app.buttons["show-visual-summary-button"].firstMatch
+    if visual.waitForExistence(timeout: 3) {
+      visual.tap()
+      snap(app, "ios-visual")
+      app.buttons["完成"].firstMatch.tap()
+      Thread.sleep(forTimeInterval: 0.8)
+    }
 
-    // 7. 行动项 tab
+    // 6. 行动项总览（会议页右上角入口）
     app.navigationBars.buttons.firstMatch.tap()
     Thread.sleep(forTimeInterval: 0.8)
-    if app.tabBars.buttons["行动项"].exists {
-      app.tabBars.buttons["行动项"].tap()
+    let allActions = app.buttons["all-actions-button"].firstMatch
+    if allActions.waitForExistence(timeout: 3) {
+      allActions.tap()
       snap(app, "ios-actions")
+      app.navigationBars.buttons.firstMatch.tap()
+      Thread.sleep(forTimeInterval: 0.6)
     }
 
     // 8. 设置 + AI 总结 + 语音转录子页
