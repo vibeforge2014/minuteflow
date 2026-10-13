@@ -73,6 +73,12 @@ ALIPAY_PUBLIC_KEY_PATH=/etc/minuteflow-license/alipay_public_key.pem
 # 沙箱联调时改为 https://openapi-sandbox.dl.alipay.com
 # ALIPAY_GATEWAY=https://openapi.alipay.com
 
+# --- 折扣码（ZenSoft 管理后台生成，与 ChargePilot 共用 Supabase）---
+# 缺省时购买页隐藏折扣码输入、原价购买不受影响；支付落账后订单镜像回
+# Supabase（product='minuteflow'）供后台订单/用量统计，依赖同一组配置。
+DISCOUNT_SUPABASE_URL=https://paeonjdgfjpmuicxwrgg.supabase.co
+DISCOUNT_SUPABASE_KEY=<service_role key，仅存服务器>
+
 # 商户密钥到位后显式关闭沙箱通道
 LICENSE_MOCK_ENABLED=0
 ```

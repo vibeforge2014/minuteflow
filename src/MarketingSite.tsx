@@ -870,6 +870,9 @@ type BuyOrder = {
   type?: string;
   payload: string;
   amountFen: number;
+  discountCode?: string;
+  listAmountFen?: number;
+  discountFen?: number;
   expiresAt: string;
   licenseKey?: string;
   customerEmailMasked?: string;
@@ -894,6 +897,12 @@ function BuyPage() {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  // 折扣码（ZenSoft 管理后台生成）：仅服务端校验与计价，这里只保存应用结果。
+  const [discountsReady, setDiscountsReady] = useState(false);
+  const [discount, setDiscount] = useState<{ code: string; listAmountFen: number; amountFen: number; discountFen: number } | null>(null);
+  const [discountInput, setDiscountInput] = useState("");
+  const [discountBusy, setDiscountBusy] = useState(false);
+  const [discountError, setDiscountError] = useState("");
   // 选填购买邮箱：随订单存到服务端，用于激活码找回；本地记住，下次购买免填。
   const [email, setEmail] = useState(() => {
     try { return window.localStorage.getItem("mf:buy-email") ?? ""; } catch { return ""; }
@@ -929,6 +938,8 @@ function BuyPage() {
         if (!cancelled) {
           setChannels(payload.channels ?? { wechat: false, alipay: false, mock: false });
           if (Number.isFinite(payload.amountFen) && payload.amountFen > 0) setPriceFen(payload.amountFen);
+          // 折扣码后端未配置时隐藏输入，只按原价卖。
+          setDiscountsReady(Boolean(payload.discounts));
         }
       })
       .catch(() => {
@@ -985,6 +996,40 @@ function BuyPage() {
     return () => window.clearInterval(timer);
   }, [order]);
 
+  // 折扣码试算：服务端按当前售价复算应付金额；下单时服务端会再次校验。
+  async function applyDiscount() {
+    const code = discountInput.trim().toUpperCase();
+    if (!code) {
+      setDiscountError("请输入折扣码。");
+      return;
+    }
+    setDiscountBusy(true);
+    setDiscountError("");
+    try {
+      const response = await fetch(`${licenseApiRoot()}/api/license/quote`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ discountCode: code })
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.code || !Number.isFinite(payload?.amountFen)) {
+        setDiscountError(payload?.error ?? "折扣码校验失败，请稍后重试。");
+        return;
+      }
+      setDiscount({
+        code: String(payload.code),
+        listAmountFen: Number(payload.listAmountFen ?? priceFen),
+        amountFen: Number(payload.amountFen),
+        discountFen: Number(payload.discountFen ?? 0)
+      });
+      setDiscountInput("");
+    } catch {
+      setDiscountError("暂时无法连接折扣码服务，请稍后重试。");
+    } finally {
+      setDiscountBusy(false);
+    }
+  }
+
   async function createOrder(channel: BuyChannel) {
     setBusyChannel(channel);
     setError("");
@@ -995,7 +1040,7 @@ function BuyPage() {
       const response = await fetch(`${licenseApiRoot()}/api/license/orders`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ channel, email: trimmedEmail })
+        body: JSON.stringify({ channel, email: trimmedEmail, discountCode: discount?.code ?? "" })
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok || !payload?.orderId) {
@@ -1027,16 +1072,19 @@ function BuyPage() {
 
   const remainingMs = order?.state === "created" ? Math.max(0, Date.parse(order.expiresAt) - now) : 0;
   const remainingLabel = `${Math.floor(remainingMs / 60_000)}:${String(Math.floor((remainingMs % 60_000) / 1_000)).padStart(2, "0")}`;
-  // 售价只信服务端：订单金额优先，否则用 healthz 下发的当前售价（联调时可临时调价）。
+  // 售价只信服务端：订单金额优先，折扣码试算结果次之，最后才是 healthz 下发的当前售价。
   const formatFen = (fen: number) => `¥${(fen / 100).toFixed(fen % 100 === 0 ? 0 : 2)}`;
-  const amountLabel = formatFen(order?.amountFen ?? priceFen);
+  const amountLabel = formatFen(order?.amountFen ?? discount?.amountFen ?? priceFen);
   const channelLabel = order?.channel === "alipay" ? "支付宝" : order?.channel === "mock" ? "沙箱支付" : "微信支付";
 
   return (
     <main id="main-content" className="buy-page" tabIndex={-1}>
       <header className="buy-hero">
         <span className="section-kicker">购买 MinuteFlow</span>
-        <h1>{formatFen(priceFen)}，一次买断。</h1>
+        <h1>
+          {formatFen(discount?.amountFen ?? priceFen)}，一次买断。
+          {discount && <s className="buy-list-price" aria-label={`原价 ${formatFen(priceFen)}`}>{formatFen(priceFen)}</s>}
+        </h1>
         <p>扫码支付后立即获得激活码，可在最多 2 台你个人的设备上使用。支付由微信支付 / 支付宝安全处理，7 天内支持退款。</p>
         {channels?.mock && <span className="buy-sandbox">沙箱模式 · 商户通道联调中，支付不会产生真实扣款</span>}
       </header>
@@ -1066,6 +1114,41 @@ function BuyPage() {
               onChange={(event) => setEmail(event.target.value)}
             />
           </div>
+          {discountsReady && (discount ? (
+            <div className="buy-discount buy-discount--applied" role="status">
+              <span>
+                折扣码 <b>{discount.code}</b> 已应用，已减 {formatFen(discount.discountFen)}，应付 {formatFen(discount.amountFen)}
+              </span>
+              <button type="button" className="buy-discount-remove" onClick={() => setDiscount(null)}>取消</button>
+            </div>
+          ) : (
+            <div className="buy-discount">
+              <label htmlFor="buy-discount">折扣码（选填）</label>
+              <div className="buy-discount-row">
+                <input
+                  id="buy-discount"
+                  value={discountInput}
+                  placeholder="输入折扣码立减"
+                  maxLength={32}
+                  autoCapitalize="characters"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  aria-invalid={discountError ? true : undefined}
+                  onChange={(event) => setDiscountInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void applyDiscount();
+                    }
+                  }}
+                />
+                <button type="button" onClick={() => void applyDiscount()} disabled={discountBusy || busyChannel !== null}>
+                  {discountBusy ? "校验中…" : "使用"}
+                </button>
+              </div>
+              {discountError && <p className="buy-discount-error" role="alert">{discountError}</p>}
+            </div>
+          ))}
           <div className="buy-channels" role="group" aria-label="选择支付方式">
             <button
               type="button"

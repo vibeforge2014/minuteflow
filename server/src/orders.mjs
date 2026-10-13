@@ -10,6 +10,7 @@ import { db, nowIso, transaction } from "./db.mjs";
 import { issueLicenseForOrder, licensePlaintext } from "./licenses.mjs";
 import { createNativeOrder, queryOrderByOutTradeNo as queryWechat } from "./wechat.mjs";
 import { createPagePayUrl, createPrecreateOrder, queryOrderByOutTradeNo as queryAlipay } from "./alipay.mjs";
+import { mirrorPaidOrder, mirrorRefundedOrder, quoteDiscountCode } from "./discounts.mjs";
 
 const ORDER_DESCRIPTION = "MinuteFlow 会议助手 · 一次性买断授权";
 
@@ -34,28 +35,35 @@ export function maskEmail(email) {
   return `${head}***@${domain}`;
 }
 
-/** 创建订单并生成支付二维码。返回对外安全的订单视图。 */
-export async function createOrder(channel, customerEmail) {
+/**
+ * 创建订单并生成支付二维码。返回对外安全的订单视图。
+ * discountCode（选填）：先经 Supabase quote RPC 服务端复算实付金额再下单，
+ * 无效码抛 DiscountError（含面向用户的中文文案与状态码），绝不以客户端报价落单。
+ */
+export async function createOrder(channel, customerEmail, discountCode = "") {
   const id = randomUUID();
   const outTradeNo = newOutTradeNo();
   const expiresAt = new Date(Date.now() + config.orderTtlMs);
   const email = normalizeEmail(customerEmail);
+  const discount = discountCode ? await quoteDiscountCode(config.amountFen, discountCode) : null;
+  // 折扣订单：amount_fen 为实付，original/discount 快照供展示与镜像对账。
+  const amountFen = discount ? discount.amountFen : config.amountFen;
   let qrPayload = "";
   if (channel === "mock") {
     qrPayload = `mock://pay/${outTradeNo}`;
   } else if (channel === "wechat") {
     qrPayload = await createNativeOrder({
-      outTradeNo, description: ORDER_DESCRIPTION, amountFen: config.amountFen, expiresAt
+      outTradeNo, description: ORDER_DESCRIPTION, amountFen, expiresAt
     });
   } else if (channel === "alipay") {
     if (config.alipay.product === "face") {
       qrPayload = await createPrecreateOrder({
-        outTradeNo, subject: ORDER_DESCRIPTION, amountFen: config.amountFen, expiresAt
+        outTradeNo, subject: ORDER_DESCRIPTION, amountFen, expiresAt
       });
     } else {
       // 电脑网站支付：返回收银台跳转 URL，return_url 带订单号回购买页续轮询。
       qrPayload = createPagePayUrl({
-        outTradeNo, subject: ORDER_DESCRIPTION, amountFen: config.amountFen,
+        outTradeNo, subject: ORDER_DESCRIPTION, amountFen,
         returnUrl: `${config.publicBaseUrl}/minuteflow/buy/?order=${id}`
       });
     }
@@ -63,9 +71,11 @@ export async function createOrder(channel, customerEmail) {
     throw new Error("不支持的支付通道。");
   }
   db.prepare(`
-    INSERT INTO orders (id, channel, out_trade_no, amount_fen, state, qr_payload, expires_at, created_at, updated_at, customer_email)
-    VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)
-  `).run(id, channel, outTradeNo, config.amountFen, qrPayload, expiresAt.toISOString(), nowIso(), nowIso(), email);
+    INSERT INTO orders (id, channel, out_trade_no, amount_fen, state, qr_payload, expires_at,
+      created_at, updated_at, customer_email, discount_code, original_amount_fen, discount_amount_fen)
+    VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, channel, outTradeNo, amountFen, qrPayload, expiresAt.toISOString(), nowIso(), nowIso(), email,
+    discount?.code ?? null, discount?.listAmountFen ?? null, discount?.discountFen ?? 0);
   if (channel === "mock") {
     // 沙箱通道：3 秒后自动支付成功，联调全链路（页面轮询会看到 created → paid）。
     // 定时器必须自捕获：finalizeOrder 是同步的，抛错会击穿进程。
@@ -96,6 +106,8 @@ export function finalizeOrder(orderId, { transactionId }) {
     if (paid.customer_email && license && !license.customer_email) {
       db.prepare("UPDATE licenses SET customer_email = ? WHERE id = ?").run(paid.customer_email, license.id);
     }
+    // 镜像到 Supabase 供管理后台统计（mock 沙箱单除外；best-effort 不阻塞发码）。
+    mirrorPaidOrder(paid);
     return paid;
   });
 }
@@ -155,6 +167,12 @@ export function publicOrderView(order) {
     type: order.channel === "alipay" && order.qr_payload?.startsWith("https://") ? "redirect" : "qr",
     payload: order.qr_payload,
     amountFen: order.amount_fen,
+    // 折扣快照（无折扣订单不输出，页面按原价渲染）。
+    ...(order.discount_code ? {
+      discountCode: order.discount_code,
+      listAmountFen: order.original_amount_fen,
+      discountFen: order.discount_amount_fen
+    } : {}),
     expiresAt: order.expires_at,
     createdAt: order.created_at
   };
@@ -181,6 +199,9 @@ export function markRefunded(orderId, { refundId, amountFen, reason }) {
       INSERT INTO refunds (id, order_id, channel, refund_id, amount_fen, reason, state, created_at)
       VALUES (?, ?, ?, ?, ?, ?, 'processed', ?)
     `).run(randomUUID(), orderId, order.channel, refundId ?? "", amountFen ?? order.amount_fen, reason ?? "", nowIso());
+    const refunded = db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId);
+    // 退款状态同步镜像（best-effort），后台统计即时回落。
+    mirrorRefundedOrder(refunded);
     return db.prepare("SELECT * FROM refunds WHERE order_id = ?").get(orderId);
   });
 }

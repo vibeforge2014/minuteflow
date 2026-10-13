@@ -41,6 +41,16 @@ export const config = {
     ? env.LICENSE_MOCK_ENABLED === "1"
     : Boolean(!env.WECHAT_MCHID && !env.ALIPAY_APP_ID),
 
+  /**
+   * 折扣码（ZenSoft 管理后台生成，与 ChargePilot 共用 Supabase 的 discount_codes）。
+   * 本服务只读校验 + 回写订单镜像；service key 仅存在于服务器 env，绝不进仓库/客户端。
+   * 未配置时 quote/折扣下单优雅降级（503），微信/支付宝原价购买不受影响。
+   */
+  discounts: {
+    supabaseUrl: (env.DISCOUNT_SUPABASE_URL || "").replace(/\/+$/, ""),
+    serviceKey: env.DISCOUNT_SUPABASE_KEY || ""
+  },
+
   wechat: {
     mchid: env.WECHAT_MCHID || "",
     /** Native 下单使用的 appid（公众号 / 开放平台应用均可）。 */
@@ -89,6 +99,11 @@ export const config = {
 /** 邮件通道是否配置齐（缺任一项时找回接口降级）。 */
 export function mailReady() {
   return Boolean(config.mail.accessKeyId && config.mail.accessKeySecret && config.mail.accountName);
+}
+
+/** 折扣码后端（Supabase）是否配置齐：缺任一项时 quote 与折扣下单降级 503。 */
+export function discountsReady() {
+  return Boolean(config.discounts.supabaseUrl && config.discounts.serviceKey);
 }
 
 /** 各通道是否已配置齐真实密钥。 */

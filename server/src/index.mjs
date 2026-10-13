@@ -1,8 +1,9 @@
 /**
  * 授权/支付后端入口（node:http，零 npm 依赖，Node 22+）。
  * nginx 反代 https://zensoft.top/api/license/* → 127.0.0.1:8787：
- *   POST /api/license/orders          创建订单 {channel:"wechat"|"alipay"|"mock"}
+ *   POST /api/license/orders          创建订单 {channel:"wechat"|"alipay"|"mock", discountCode?}
  *   GET  /api/license/orders/:id      购买页轮询（paid 时携带 licenseKey）
+ *   POST /api/license/quote           折扣码试算 {discountCode}（Supabase 校验，不落单）
  *   POST /api/license/webhooks/wechat 微信支付回调（验签 + AES-GCM 解密 + 幂等落账）
  *   POST /api/license/webhooks/alipay 支付宝异步通知（表单验签 + 幂等落账）
  *   POST /api/license/verify          应用激活验证（协议与客户端 licensing.mjs 一致）
@@ -15,10 +16,11 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
-import { config, channelReady, mailReady } from "./config.mjs";
+import { config, channelReady, discountsReady, mailReady } from "./config.mjs";
 import { db, nowIso, transaction } from "./db.mjs";
 import { findLicenseByNormalizedKey, licensePlaintext, normalizeLicenseKey } from "./licenses.mjs";
 import { createOrder, getOrderView, handlePaidNotification, normalizeEmail, maskEmail } from "./orders.mjs";
+import { DiscountError, quoteDiscountCode } from "./discounts.mjs";
 import { sendMail } from "./mail.mjs";
 import { decryptResource, verifyNotifySignature as verifyWechatSignature } from "./wechat.mjs";
 import { verifyNotifySignature as verifyAlipaySignature } from "./alipay.mjs";
@@ -267,8 +269,36 @@ async function route(req, res) {
       ok: true,
       productId: config.productId,
       amountFen: config.amountFen,
-      channels: { wechat: channelReady("wechat"), alipay: channelReady("alipay"), mock: channelReady("mock") }
+      channels: { wechat: channelReady("wechat"), alipay: channelReady("alipay"), mock: channelReady("mock") },
+      // 折押码后端是否就绪：未配置时购买页隐藏折扣码输入。
+      discounts: discountsReady()
     }, cors);
+    return;
+  }
+
+  // 折扣码试算：不落单，仅供购买页在选通道前展示应付金额；下单时服务端会重新复算。
+  if (method === "POST" && pathname === "/api/license/quote") {
+    if (!allowOrderFromIp(clientIp(req))) {
+      sendJson(res, 429, { error: "操作过于频繁，请稍后再试。" }, cors);
+      return;
+    }
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const quote = await quoteDiscountCode(config.amountFen, body.discountCode ?? body.code);
+      sendJson(res, 200, {
+        code: quote.code,
+        listAmountFen: quote.listAmountFen,
+        amountFen: quote.amountFen,
+        discountFen: quote.discountFen
+      }, cors);
+    } catch (error) {
+      if (error instanceof DiscountError) {
+        sendJson(res, error.status, { error: error.message }, cors);
+        return;
+      }
+      console.error("[quote] failed:", error.message);
+      sendJson(res, 500, { error: "折扣码服务异常，请稍后重试。" }, cors);
+    }
     return;
   }
 
@@ -289,10 +319,16 @@ async function route(req, res) {
         sendJson(res, 503, { error: label }, cors);
         return;
       }
-      const view = await createOrder(channel, body.email);
-      console.log(`[order] created ${view.orderId} channel=${channel} state=${view.state}`);
+      const view = await createOrder(channel, body.email, typeof body.discountCode === "string" ? body.discountCode : "");
+      console.log(`[order] created ${view.orderId} channel=${channel} state=${view.state}`
+        + (view.discountCode ? ` discount=${view.discountCode} amount=${view.amountFen}` : ""));
       sendJson(res, 201, view, cors);
     } catch (error) {
+      // 折扣码业务错误（无效/过期/未配置）按自身状态码透出，其余按网关错误。
+      if (error instanceof DiscountError) {
+        sendJson(res, error.status, { error: error.message }, cors);
+        return;
+      }
       console.error("[order] create failed:", error.message);
       sendJson(res, 502, { error: `下单失败：${error.message}` }, cors);
     }

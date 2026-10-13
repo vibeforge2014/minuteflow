@@ -467,3 +467,179 @@ test("recover sends active keys for a matching email and stays generic for unkno
     resetRecoveryLimiters();
   }
 });
+
+// ---------------------------------------------------------------------------
+// 折扣码（Supabase quote RPC）：试算、下单复算、订单镜像、健康自检
+// ---------------------------------------------------------------------------
+// config 在 import 时读取 env（文件顶部已定型），这里直接补上折扣码后端配置
+// （与邮件用例改 config.mail 同一手法），再用 fetch 拦截器把该域名的请求替换为
+// 桩（本地服务流量原样放行）。
+config.discounts.supabaseUrl ||= "https://supabase.test";
+config.discounts.serviceKey ||= "svc-key-test";
+
+const {
+  quoteDiscountCode, normalizeDiscountCode, mirrorPaidOrder, mirrorRefundedOrder, DiscountError
+} = await import("../server/src/discounts.mjs");
+
+const realFetch = globalThis.fetch;
+const supabaseRequests = [];
+let supabaseHandler = null;
+globalThis.fetch = async (input, init) => {
+  const url = typeof input === "string" ? input : String(input);
+  if (url.startsWith(`${config.discounts.supabaseUrl}/`)) {
+    supabaseRequests.push({ url, init });
+    if (supabaseHandler) return supabaseHandler(url, init);
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }
+  return realFetch(input, init);
+};
+
+const QUOTE_ROW = {
+  discount_code_id: "d-1", discount_code: "MF20OFF",
+  original_amount_fen: 9900, amount_fen: 7920, discount_amount_fen: 1980
+};
+
+test("normalizeDiscountCode trims, uppercases and bounds user input", () => {
+  assert.equal(normalizeDiscountCode("  mf20off "), "MF20OFF");
+  assert.equal(normalizeDiscountCode(null), "");
+  assert.equal(normalizeDiscountCode("X".repeat(40)).length, 32);
+});
+
+test("quoteDiscountCode maps RPC rows and errors to readable verdicts", async () => {
+  supabaseHandler = () => new Response(JSON.stringify(QUOTE_ROW), { status: 200 });
+  const quote = await quoteDiscountCode(9900, " mf20off ");
+  assert.deepEqual(
+    { code: quote.code, amountFen: quote.amountFen, discountFen: quote.discountFen, listAmountFen: quote.listAmountFen },
+    { code: "MF20OFF", amountFen: 7920, discountFen: 1980, listAmountFen: 9900 }
+  );
+
+  supabaseHandler = () => new Response(JSON.stringify({ message: "DISCOUNT_NOT_FOUND" }), { status: 400 });
+  const missing = await quoteDiscountCode(9900, "NOPE").catch((error) => error);
+  assert.ok(missing instanceof DiscountError);
+  assert.equal(missing.status, 400);
+  assert.match(missing.message, /不存在/);
+
+  supabaseHandler = () => new Response(JSON.stringify({ message: "DISCOUNT_EXPIRED" }), { status: 400 });
+  const expired = await quoteDiscountCode(9900, "OLD").catch((error) => error);
+  assert.match(expired.message, /过期/);
+
+  // RPC 契约异常（金额缺字段）必须拒绝落单，不允许错价收款。
+  supabaseHandler = () => new Response(JSON.stringify({ discount_code: "BAD" }), { status: 200 });
+  const malformed = await quoteDiscountCode(9900, "BAD").catch((error) => error);
+  assert.ok(malformed instanceof DiscountError);
+  assert.equal(malformed.status, 502);
+
+  // 网络故障 → 502 可读错误。
+  supabaseHandler = () => Promise.reject(new Error("boom"));
+  const down = await quoteDiscountCode(9900, "MF20OFF").catch((error) => error);
+  assert.ok(down instanceof DiscountError);
+  assert.equal(down.status, 502);
+
+  // 未配置后端 → 503 降级。
+  const savedUrl = config.discounts.supabaseUrl;
+  config.discounts.supabaseUrl = "";
+  try {
+    const offline = await quoteDiscountCode(9900, "MF20OFF").catch((error) => error);
+    assert.ok(offline instanceof DiscountError);
+    assert.equal(offline.status, 503);
+  } finally {
+    config.discounts.supabaseUrl = savedUrl;
+  }
+  supabaseHandler = null;
+});
+
+test("quote endpoint validates codes without creating orders and honors discounts in healthz", async () => {
+  resetOrderRateLimiter();
+  supabaseHandler = () => new Response(JSON.stringify(QUOTE_ROW), { status: 200 });
+  const quoted = await postJson("/api/license/quote", { discountCode: "mf20off" });
+  assert.equal(quoted.status, 200);
+  assert.deepEqual(
+    { code: quoted.body.code, amountFen: quoted.body.amountFen, discountFen: quoted.body.discountFen },
+    { code: "MF20OFF", amountFen: 7920, discountFen: 1980 }
+  );
+
+  supabaseHandler = () => new Response(JSON.stringify({ message: "DISCOUNT_DISABLED" }), { status: 400 });
+  const disabled = await postJson("/api/license/quote", { discountCode: "OFF" });
+  assert.equal(disabled.status, 400);
+  assert.match(disabled.body.error, /停用/);
+
+  assert.equal((await postJson("/api/license/quote", { discountCode: "" })).status, 400);
+  supabaseHandler = null;
+
+  const health = await (await fetch(`${base}/healthz`)).json();
+  assert.equal(health.discounts, true, "配置了 Supabase 后 healthz 应上报折扣码就绪");
+});
+
+test("discounted orders price server-side, snapshot discount fields, and still issue licenses", async () => {
+  resetOrderRateLimiter();
+  supabaseRequests.length = 0;
+  supabaseHandler = () => new Response(JSON.stringify(QUOTE_ROW), { status: 200 });
+  const created = await postJson("/api/license/orders", { channel: "mock", discountCode: "mf20off", email: "buyer@example.com" });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.amountFen, 7920, "实付金额必须是服务端复算的折后价");
+  assert.equal(created.body.discountCode, "MF20OFF");
+  assert.equal(created.body.listAmountFen, 9900);
+  assert.equal(created.body.discountFen, 1980);
+
+  const row = db.prepare("SELECT * FROM orders WHERE id = ?").get(created.body.orderId);
+  assert.equal(row.amount_fen, 7920);
+  assert.equal(row.original_amount_fen, 9900);
+  assert.equal(row.discount_amount_fen, 1980);
+  assert.equal(row.discount_code, "MF20OFF");
+
+  let paid = null;
+  for (let attempt = 0; attempt < 20 && !paid; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const view = await (await fetch(`${base}/api/license/orders/${created.body.orderId}`)).json();
+    if (view.state === "paid") paid = view;
+  }
+  assert.ok(paid, "折扣单同样走 mock 自动落账");
+  assert.match(paid.licenseKey, /^MF-/);
+  assert.equal(paid.amountFen, 7920);
+
+  // 无效码：按 DiscountError 的状态码透出可读错误，而不是笼统 502。
+  supabaseHandler = () => new Response(JSON.stringify({ message: "DISCOUNT_NOT_APPLICABLE" }), { status: 400 });
+  const rejected = await postJson("/api/license/orders", { channel: "mock", discountCode: "CPONLY" });
+  assert.equal(rejected.status, 400);
+  assert.match(rejected.body.error, /不适用/);
+  supabaseHandler = null;
+});
+
+test("paid and refunded real-channel orders mirror to Supabase; mock sandbox never mirrors", async () => {
+  supabaseRequests.length = 0;
+  const paidOrder = {
+    channel: "wechat", out_trade_no: "MFTEST1", amount_fen: 7920,
+    original_amount_fen: 9900, discount_amount_fen: 1980, discount_code: "MF20OFF",
+    customer_email: "buyer@example.com", paid_at: "2026-10-14T00:00:00.000Z",
+    updated_at: "2026-10-14T00:00:01.000Z"
+  };
+  mirrorPaidOrder(paidOrder);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(supabaseRequests.length, 1);
+  const mirrorCall = supabaseRequests[0];
+  assert.ok(mirrorCall.url.endsWith("/rest/v1/wechat_orders"));
+  assert.equal(mirrorCall.init.headers.prefer, "return=minimal, resolution=ignore-duplicates");
+  const mirrorBody = JSON.parse(mirrorCall.init.body);
+  assert.deepEqual(
+    { product: mirrorBody.product, status: mirrorBody.status, amount_fen: mirrorBody.amount_fen, plan: mirrorBody.plan },
+    { product: "minuteflow", status: "paid", amount_fen: 7920, plan: "lifetime" }
+  );
+
+  mirrorRefundedOrder({ channel: "alipay", out_trade_no: "MFTEST2", updated_at: "2026-10-14T01:00:00.000Z" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(supabaseRequests.length, 2);
+  assert.ok(supabaseRequests[1].url.includes("/rest/v1/alipay_orders?out_trade_no=eq.MFTEST2"));
+  assert.equal(supabaseRequests[1].init.method, "PATCH");
+
+  // 沙箱 mock 单不镜像，避免污染真实用量统计。
+  supabaseRequests.length = 0;
+  mirrorPaidOrder({ ...paidOrder, channel: "mock" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(supabaseRequests.length, 0);
+
+  // 镜像失败绝不抛出（best-effort）。
+  supabaseHandler = () => new Response("err", { status: 500 });
+  assert.doesNotThrow(() => mirrorPaidOrder(paidOrder));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  supabaseHandler = null;
+});
