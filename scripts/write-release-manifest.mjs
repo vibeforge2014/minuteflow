@@ -11,7 +11,10 @@
  *   （可选 --published-at ISO；--arch 仅 macOS 支持，默认 arm64；
  *    可选 --sha256 64 位十六进制——安装包已在别处算好校验和（如 CI 附加资产
  *    工作流）且本地网络拉不动大文件时，直接传入而不读取 --setup 文件本体，
- *    此时路径仅用于推导资产文件名。）
+ *    此时路径仅用于推导资产文件名；
+ *    可选 --asset-source site|github，默认 site——assetUrl 指向官网
+ *    zensoft.top/minuteflow/dl/<tag>/ 由 sync-release-assets 工作流同步的
+ *    安装包；github 用于回退或资产尚未同步到官网时。）
  */
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -46,7 +49,14 @@ if (sha256Override && !/^[0-9a-f]{64}$/.test(sha256Override)) {
 const sha256 = sha256Override
   || createHash("sha256").update(readFileSync(packagePath)).digest("hex");
 const tag = `v${version}`;
-const assetUrl = `https://github.com/vibeforge2014/minuteflow/releases/download/${tag}/${encodeURIComponent(fileName)}`;
+// 资产地址默认指向官网 dl/（sync-release-assets 同步）；github 保留为兜底源。
+const assetSource = String(args.get("--asset-source") || "site");
+if (assetSource !== "site" && assetSource !== "github") {
+  throw new Error("--asset-source must be site or github");
+}
+const assetUrl = assetSource === "github"
+  ? `https://github.com/vibeforge2014/minuteflow/releases/download/${tag}/${encodeURIComponent(fileName)}`
+  : `https://zensoft.top/minuteflow/dl/${tag}/${encodeURIComponent(fileName)}`;
 const manifest = {
   schemaVersion: 1,
   version,
