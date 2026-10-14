@@ -1,0 +1,174 @@
+name: Sync release assets to zensoft.top
+
+# 把 GitHub Release 的安装包同步到官网下载目录 /minuteflow/dl/<tag>/，
+# 并把两个更新清单（latest-macos.json / latest-windows.json）的 assetUrl
+# 改写为官网地址。发布（release published）自动触发；也可手动补同步历史版本。
+# 下载侧仍保留 GitHub Releases 兜底：清单 assetUrl 可用 --asset-source github
+# 临时回退，redirect 页对两种地址都信任。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without leading v, e.g. 0.1.26（留空则取最新发布）"
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: sync-release-assets
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Resolve release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          tag=""
+          if [ -n "$INPUT_VERSION" ]; then tag="v${INPUT_VERSION#v}"; fi
+          if [ -z "$tag" ] && [ -n "$RELEASE_TAG" ]; then tag="$RELEASE_TAG"; fi
+          if [ -z "$tag" ]; then
+            tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName')"
+          fi
+          test -n "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Syncing $tag"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release \
+            --pattern '*.dmg' --pattern '*Setup*.exe' --pattern '*.sha256' --pattern '*SHA256*'
+          ls -la release
+
+      - name: Verify checksums
+        run: |
+          set -euo pipefail
+          cd release
+          dmg="$(find . -maxdepth 1 -name '*.dmg' -print -quit)"
+          exe="$(find . -maxdepth 1 -name '*Setup*.exe' -print -quit)"
+          if [ -z "$dmg" ] || [ -z "$exe" ]; then
+            echo "::error::Release must contain a .dmg and a *Setup*.exe asset"
+            exit 1
+          fi
+          if [ -f "${exe}.sha256" ]; then
+            expected="$(awk '{print $1}' "${exe}.sha256")"
+            actual="$(sha256sum "$exe" | awk '{print $1}')"
+            [ "$expected" = "$actual" ] || { echo "::error::Windows installer checksum mismatch"; exit 1; }
+          else
+            echo "::warning::No .sha256 sidecar for the Windows installer"
+          fi
+          sums="$(find . -maxdepth 1 -iname '*SHA256*.txt' -print -quit)"
+          if [ -n "$sums" ]; then
+            grep " $(basename "$dmg")$" "$sums" | sha256sum -c - \
+              || { echo "::error::DMG checksum mismatch"; exit 1; }
+          else
+            echo "::warning::No SHA256SUMS file for the DMG"
+          fi
+          echo "Checksums verified."
+
+      - name: Upload to zensoft.top
+        id: upload
+        env:
+          SSH_KEY: ${{ secrets.ZENSOFT_SSH_KEY }}
+          SSH_HOST: ${{ secrets.ZENSOFT_SSH_HOST }}
+          SSH_USER: ${{ secrets.ZENSOFT_SSH_USER }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SSH_KEY" ]; then
+            echo "::error::ZENSOFT_SSH_* 密钥未配置，无法同步安装包"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          SSH_CMD="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new $SSH_USER@$SSH_HOST"
+          $SSH_CMD "mkdir -p /var/www/zensoft/sites/minuteflow/dl/$TAG"
+          # 按版本目录整体覆盖（幂等），不 --delete：旧版本安装包保留供回滚。
+          rsync -az -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
+            release/ "$SSH_USER@$SSH_HOST:/var/www/zensoft/sites/minuteflow/dl/$TAG/"
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          for f in release/*; do echo "$(basename "$f") $(stat -c%s "$f")" >> "$GITHUB_OUTPUT"; done
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Verify public URLs
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          fail=0
+          while read -r name size; do
+            case "$name" in
+              *.dmg|*.exe) ;;
+              *) continue ;;
+            esac
+            headers="$(curl -sSI --max-time 60 "https://zensoft.top/minuteflow/dl/$TAG/$name")"
+            status="$(head -1 <<<"$headers" | awk '{print $2}')"
+            length="$(tr -d '\r' <<<"$headers" | awk 'tolower($1)=="content-length:" {print $2}' | tail -1)"
+            if [ "$status" = "200" ] && [ "$length" = "$size" ]; then
+              echo "OK  $name ($size bytes)"
+            else
+              echo "::error::$name → HTTP $status, content-length $length (expected $size)"
+              fail=1
+            fi
+          done <<< "${{ steps.upload.outputs.files }}"
+          exit $fail
+
+      - name: Update website manifests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          dmg="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          exe="$(find release -maxdepth 1 -name '*Setup*.exe' -print -quit)"
+          published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # release 事件下 checkout 的是 tag 提交，先切回 main 再写清单，
+          # 避免把清单提交到发布提交上。release/ 是未跟踪目录，切换不受影响。
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          node scripts/write-release-manifest.mjs \
+            --version "$VERSION" --dmg "$dmg" --published-at "$published_at"
+          node scripts/write-release-manifest.mjs \
+            --version "$VERSION" --setup "$exe" --published-at "$published_at"
+          if git diff --quiet -- public/releases/; then
+            echo "清单已是最新。"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/releases/latest-macos.json public/releases/latest-windows.json
+          git commit -m "官网安装包地址指向 zensoft.top dl/ $TAG"
+          for attempt in 1 2 3; do
+            if git push origin main; then exit 0; fi
+            git pull --rebase origin main || true
+            sleep 5
+          done
+          echo "::error::无法推送清单更新（与 main 冲突），请手动重跑本工作流"
+          exit 1

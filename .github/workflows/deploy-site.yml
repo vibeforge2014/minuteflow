@@ -58,5 +58,7 @@ jobs:
           echo "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key" dist/client/ \
+          # dl/ 是 sync-release-assets 同步的安装包目录（数百 MB、按版本不可变），
+          # 必须排除在 --delete 之外，否则每次站点部署都会删光安装包。
+          rsync -az --delete --exclude 'dl/' -e "ssh -i ~/.ssh/deploy_key" dist/client/ \
             "$SSH_USER@$SSH_HOST:/var/www/zensoft/sites/minuteflow/"

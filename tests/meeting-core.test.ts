@@ -1646,6 +1646,18 @@ describe("desktop online updates", () => {
     }, { platform: "win32" })).toThrow("受信任");
   });
 
+  it("accepts the site-hosted dl/ asset URLs used by sync-release-assets", () => {
+    const manifest = validateUpdateManifest({
+      ...updateManifest,
+      assetUrl: "https://zensoft.top/minuteflow/dl/v0.2.0/MinuteFlow-0.2.0-macOS-arm64.dmg"
+    });
+    expect(manifest.assetUrl).toBe("https://zensoft.top/minuteflow/dl/v0.2.0/MinuteFlow-0.2.0-macOS-arm64.dmg");
+    expect(() => validateUpdateManifest({
+      ...windowsManifest,
+      assetUrl: "https://zensoft.top/minuteflow/dl/v0.2.0/MinuteFlow-Setup-0.2.0-Windows-x64.exe"
+    }, { platform: "win32" })).not.toThrow();
+  });
+
   it("detects a newer compatible macOS release from the website manifest", async () => {
     const result = await checkForAppUpdate({
       currentVersion: "0.1.1",
