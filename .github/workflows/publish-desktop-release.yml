@@ -13,7 +13,7 @@ on:
         type: string
 
 permissions:
-  actions: read
+  actions: write
   contents: write
 
 jobs:
@@ -102,3 +102,9 @@ jobs:
           git add public/releases/latest-macos.json
           git commit -m "更新 macOS 官网更新清单 ${RELEASE_TAG}"
           git push origin main
+
+      # GITHUB_TOKEN 的推送不会触发新的 workflow（防递归），显式派发站点部署。
+      - name: Trigger site deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run deploy-site.yml --repo "$GITHUB_REPOSITORY"

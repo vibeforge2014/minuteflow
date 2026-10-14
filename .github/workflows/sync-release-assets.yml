@@ -17,7 +17,7 @@ on:
         type: string
 
 permissions:
-  actions: read
+  actions: write
   contents: write
 
 concurrency:
@@ -188,3 +188,10 @@ jobs:
           done
           echo "::error::无法推送清单更新（与 main 冲突），请手动重跑本工作流"
           exit 1
+
+      # GITHUB_TOKEN 的推送不会触发新的 workflow（防递归），所以必须显式
+      # 派发站点部署，否则 dl/ 清单只会躺在仓库里不上站。
+      - name: Trigger site deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run deploy-site.yml --repo "$GITHUB_REPOSITORY"
