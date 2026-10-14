@@ -48,8 +48,11 @@ type SiteRoute = "home" | "specs" | "pricing" | "buy" | "recover" | "terms" | "p
 /** 演示区块的三个阶段：会中记录 / 会中整理 / 会后行动。 */
 type DemoMode = "record" | "organize" | "act";
 
-/** 桌面版下载地址（GitHub Releases 最新版）。 */
-const desktopReleaseUrl = "https://github.com/vibeforge2014/minuteflow/releases/latest";
+/** 桌面版下载入口：按访客系统跳官网稳定下载页（安装包由 zensoft.top dl/ 自有承接）。 */
+function desktopDownloadHref(): string {
+  const windows = /Windows/i.test(navigator.userAgent) && !/Macintosh/i.test(navigator.userAgent);
+  return siteHref(windows ? "/downloads/windows/latest/" : "/downloads/macos/latest/");
+}
 
 /** 三阶段演示的文案数据（LandingPage 的记录/整理/行动切换器使用）。 */
 const featureDemo: Record<DemoMode, {
@@ -237,7 +240,7 @@ function SiteHeader({
           )}
           <a href={siteHref("/#/specs")} onClick={() => setMenuOpen(false)} aria-current={route === "specs" ? "page" : undefined}>规格</a>
           <a href={siteHref("/pricing/")} onClick={() => setMenuOpen(false)} aria-current={route === "pricing" ? "page" : undefined}>定价</a>
-          <a href={desktopReleaseUrl} target="_blank" rel="noreferrer" onClick={() => setMenuOpen(false)}>
+          <a href={desktopDownloadHref()} target="_blank" rel="noreferrer" onClick={() => setMenuOpen(false)}>
             下载 <ArrowUpRight size={13} />
           </a>
           <a
@@ -295,7 +298,7 @@ function LandingPage() {
             从开会到行动，不必再切换工具。
           </p>
           <div className="hero__actions">
-            <a className="site-button site-button--primary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">
+            <a className="site-button site-button--primary" href={desktopDownloadHref()} target="_blank" rel="noreferrer">
               <Desktop size={17} weight="bold" /> 下载桌面版
             </a>
           </div>
@@ -481,7 +484,7 @@ function LandingPage() {
         <h2>下一场会议，<br />让结果自然留下来。</h2>
         <p>下载桌面版即可开始记录，会议内容默认只保存在你的设备。</p>
         <div className="hero__actions">
-          <a className="site-button site-button--primary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">
+          <a className="site-button site-button--primary" href={desktopDownloadHref()} target="_blank" rel="noreferrer">
             <Desktop size={17} weight="bold" /> 下载桌面版
           </a>
         </div>
@@ -771,7 +774,7 @@ function SpecsPage() {
                 <span>准备好亲自看看了吗？</span>
                 <strong>打开一场示例会议，体验完整工作流。</strong>
               </div>
-              <a className="site-button site-button--primary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">
+              <a className="site-button site-button--primary" href={desktopDownloadHref()} target="_blank" rel="noreferrer">
                 下载桌面版 <ArrowUpRight size={16} weight="bold" />
               </a>
             </div>
@@ -1377,7 +1380,7 @@ function PricingContent() {
       <div><span>MinuteFlow 桌面版</span><h2><b>¥99</b> 人民币</h2><p>一次性购买 · 非订阅 · 不自动续费</p></div>
       <ul><li><Check size={18} weight="bold" /> 完整桌面会议工作台</li><li><Check size={18} weight="bold" /> 本地录音、笔记与会议库</li><li><Check size={18} weight="bold" /> 自带模型或配置第三方 AI 服务</li><li><Check size={18} weight="bold" /> 7 天退款申请期</li></ul>
       <a className="site-button site-button--primary" href={siteHref("/buy/")}>立即购买 <ArrowUpRight size={16} /></a>
-      <a className="price-card__secondary" href={desktopReleaseUrl} target="_blank" rel="noreferrer">先下载试用（免费版可录音与记笔记）</a>
+      <a className="price-card__secondary" href={desktopDownloadHref()} target="_blank" rel="noreferrer">先下载试用（免费版可录音与记笔记）</a>
     </section>
     <section><h2>付款与交付</h2><p>价格为人民币 99 元，支持微信支付与支付宝扫码付款，由绍兴市臻书科技有限公司（zensoft.top）直接收款。付款成功后，购买页会立即显示激活码；在应用中输入激活码即完成授权，无需注册账户。</p></section>
     <section><h2>授权范围</h2><p>购买后获得 MinuteFlow 桌面版的个人使用授权，可在最多 2 台你个人拥有的设备上激活使用。授权不包含第三方模型、云端转写或 API 的使用费用；如果你自行配置此类服务，相关费用由对应服务商收取。</p></section>
@@ -1439,7 +1442,7 @@ function SiteFooter() {
         <a href={siteHref("/terms/")}>服务条款</a>
         <a href={siteHref("/privacy/")}>隐私政策</a>
         <a href={siteHref("/refund/")}>退款政策</a>
-        <a href={desktopReleaseUrl} target="_blank" rel="noreferrer">下载桌面版</a>
+        <a href={desktopDownloadHref()} target="_blank" rel="noreferrer">下载桌面版</a>
         <a href="https://github.com/vibeforge2014/minuteflow" target="_blank" rel="noreferrer">
           <GithubLogo size={16} /> GitHub
         </a>

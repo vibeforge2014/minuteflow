@@ -45,7 +45,8 @@ export const MODEL_DOWNLOAD_SOURCES = {
  * 说话人分离/声纹模型（group "diarization"，与 Whisper 目录共用下载设施）。
  * 摘要来源：官方 release 的 checksum.txt（eres2netv2），以及与官方 tar 包逐字节
  * 比对过的维护者 HF 镜像（pyannote segmentation int8）。分离模型走 HF 官方+镜像双源；
- * 嵌入模型官方源是 GitHub Release（无同文件 HF 镜像），mirror 源不适用时自动跳过。
+ * 嵌入模型官方源是 GitHub Release（无同文件 HF 镜像），镜像由官网 dl/models/
+ * 自有承接（sync-static-assets 工作流上传，sha256 与官方一致）。
  */
 const DIARIZATION_URLS = {
   segmentation: {
@@ -53,7 +54,8 @@ const DIARIZATION_URLS = {
     mirror: "https://hf-mirror.com/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx?download=true"
   },
   embedding: {
-    official: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx"
+    official: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx",
+    mirror: "https://zensoft.top/minuteflow/dl/models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx"
   }
 };
 

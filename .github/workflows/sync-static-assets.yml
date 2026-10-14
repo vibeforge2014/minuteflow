@@ -1,0 +1,60 @@
+name: Sync static assets to zensoft.top
+
+# 把应用内按需下载的第三方静态资产镜像到官网 dl/models/（国内直连 GitHub/HF
+# 不稳定）。目前承接：声纹嵌入模型 3dspeaker eres2netv2（electron/services/
+# local-models.mjs 的 mirror 源指向这里）。文件 sha256 必须与目录内摘要一致，
+# 官方源文件更新时同步更新两处。手动触发，可重复执行（幂等覆盖）。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-static-assets
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download and verify models
+        env:
+          EMBEDDING_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx
+          EMBEDDING_SHA256: bf1a75b9930474cf3389ef415e6e5d38ca96fea4a3a00f7e301d080a58ee2239
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          curl -fsSL --retry 3 -o models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx "$EMBEDDING_URL"
+          echo "$EMBEDDING_SHA256  models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx" | sha256sum -c -
+          ls -la models
+
+      - name: Upload to zensoft.top
+        env:
+          SSH_KEY: ${{ secrets.ZENSOFT_SSH_KEY }}
+          SSH_HOST: ${{ secrets.ZENSOFT_SSH_HOST }}
+          SSH_USER: ${{ secrets.ZENSOFT_SSH_USER }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SSH_KEY" ]; then
+            echo "::error::ZENSOFT_SSH_* 密钥未配置"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          SSH_CMD="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new $SSH_USER@$SSH_HOST"
+          $SSH_CMD "mkdir -p /var/www/zensoft/sites/minuteflow/dl/models"
+          rsync -az -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
+            models/ "$SSH_USER@$SSH_HOST:/var/www/zensoft/sites/minuteflow/dl/models/"
+          size="$(stat -c%s models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx)"
+          headers="$(curl -sSI --max-time 60 "https://zensoft.top/minuteflow/dl/models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx")"
+          status="$(head -1 <<<"$headers" | awk '{print $2}')"
+          length="$(tr -d '\r' <<<"$headers" | awk 'tolower($1)=="content-length:" {print $2}' | tail -1)"
+          if [ "$status" != "200" ] || [ "$length" != "$size" ]; then
+            echo "::error::模型镜像校验失败：HTTP $status, content-length $length（期望 $size）"
+            exit 1
+          fi
+          echo "模型镜像就绪（$size 字节）。"
