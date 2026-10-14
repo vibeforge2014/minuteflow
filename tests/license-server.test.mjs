@@ -506,12 +506,20 @@ test("normalizeDiscountCode trims, uppercases and bounds user input", () => {
 });
 
 test("quoteDiscountCode maps RPC rows and errors to readable verdicts", async () => {
-  supabaseHandler = () => new Response(JSON.stringify(QUOTE_ROW), { status: 200 });
+  // PostgREST 对返回集合的 RPC 一律回 JSON 数组（即使只有一行），mock 必须与现实一致。
+  supabaseHandler = () => new Response(JSON.stringify([QUOTE_ROW]), { status: 200 });
   const quote = await quoteDiscountCode(9900, " mf20off ");
   assert.deepEqual(
     { code: quote.code, amountFen: quote.amountFen, discountFen: quote.discountFen, listAmountFen: quote.listAmountFen },
     { code: "MF20OFF", amountFen: 7920, discountFen: 1980, listAmountFen: 9900 }
   );
+
+  // 空数组（未抛错的未命中）按「不存在」处理，而不是 502。
+  supabaseHandler = () => new Response(JSON.stringify([]), { status: 200 });
+  const emptyHit = await quoteDiscountCode(9900, "VOID").catch((error) => error);
+  assert.ok(emptyHit instanceof DiscountError);
+  assert.equal(emptyHit.status, 400);
+  assert.match(emptyHit.message, /不存在/);
 
   supabaseHandler = () => new Response(JSON.stringify({ message: "DISCOUNT_NOT_FOUND" }), { status: 400 });
   const missing = await quoteDiscountCode(9900, "NOPE").catch((error) => error);

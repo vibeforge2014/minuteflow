@@ -87,7 +87,12 @@ export async function quoteDiscountCode(listAmountFen, rawCode) {
     throw new DiscountError("折扣码校验失败，请稍后重试。", 502);
   }
 
-  const row = await response.json().catch(() => null);
+  const payload = await response.json().catch(() => null);
+  // PostgREST 对返回集合的 RPC 一律回 JSON 数组（即使只有一行）。
+  const row = Array.isArray(payload) ? payload[0] : payload;
+  if (Array.isArray(payload) && payload.length === 0) {
+    throw new DiscountError(RPC_ERRORS.DISCOUNT_NOT_FOUND, 400);
+  }
   const amountFen = Number(row?.amount_fen);
   const discountFen = Number(row?.discount_amount_fen);
   if (!Number.isInteger(amountFen) || amountFen <= 0 || amountFen >= listAmountFen
