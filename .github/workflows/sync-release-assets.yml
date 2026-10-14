@@ -131,6 +131,26 @@ jobs:
           for f in release/*; do echo "$(basename "$f") $(stat -c%s "$f")" >> "$GITHUB_OUTPUT"; done
           echo "EOF" >> "$GITHUB_OUTPUT"
 
+      - name: Upload to Cloudflare R2
+        env:
+          R2_S3_ENDPOINT: ${{ secrets.R2_S3_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          # R2 对新版本 aws cli 的默认 CRC32 校验偶有不兼容，退回按需计算。
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_supported
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_supported
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$R2_S3_ENDPOINT" ]; then
+            echo "R2_S3_ENDPOINT 未配置，跳过 R2 上传（源站 dl/ 继续承接）。"
+            exit 0
+          fi
+          aws s3 cp release/ "s3://minuteflow-releases/$TAG/" --recursive \
+            --endpoint-url "$R2_S3_ENDPOINT" --content-type "application/octet-stream"
+          echo "R2 同步完成：s3://minuteflow-releases/$TAG/"
+
       - name: Verify public URLs
         env:
           TAG: ${{ steps.tag.outputs.tag }}
@@ -159,6 +179,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
           VERSION: ${{ steps.tag.outputs.version }}
+          R2_S3_ENDPOINT: ${{ secrets.R2_S3_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_supported
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_supported
         run: |
           set -euo pipefail
           dmg="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
@@ -173,6 +199,14 @@ jobs:
             --version "$VERSION" --dmg "$dmg" --published-at "$published_at"
           node scripts/write-release-manifest.mjs \
             --version "$VERSION" --setup "$exe" --published-at "$published_at"
+          # R2 的 Worker 对 /releases/* 只缓存 60 秒，清单必须每次同步进 R2，
+          # 否则 Worker 上线后清单会停留在旧版本。
+          if [ -n "$R2_S3_ENDPOINT" ]; then
+            aws s3 cp public/releases/latest-macos.json "s3://minuteflow-releases/releases/" \
+              --endpoint-url "$R2_S3_ENDPOINT" --content-type "application/json"
+            aws s3 cp public/releases/latest-windows.json "s3://minuteflow-releases/releases/" \
+              --endpoint-url "$R2_S3_ENDPOINT" --content-type "application/json"
+          fi
           if git diff --quiet -- public/releases/; then
             echo "清单已是最新。"
             exit 0

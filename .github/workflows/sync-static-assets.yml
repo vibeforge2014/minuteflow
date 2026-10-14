@@ -58,3 +58,21 @@ jobs:
             exit 1
           fi
           echo "模型镜像就绪（$size 字节）。"
+
+      - name: Upload to Cloudflare R2
+        env:
+          R2_S3_ENDPOINT: ${{ secrets.R2_S3_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_supported
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_supported
+        run: |
+          set -euo pipefail
+          if [ -z "$R2_S3_ENDPOINT" ]; then
+            echo "R2_S3_ENDPOINT 未配置，跳过 R2 上传（源站继续承接）。"
+            exit 0
+          fi
+          aws s3 cp models/ s3://minuteflow-releases/models/ --recursive \
+            --endpoint-url "$R2_S3_ENDPOINT" --content-type "application/octet-stream"
+          echo "R2 模型同步完成。"

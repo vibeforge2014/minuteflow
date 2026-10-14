@@ -1,0 +1,16 @@
+# MinuteFlow 下载 Worker —— zensoft.top/minuteflow/{dl,releases}/* 由 R2 承接。
+# 部署：npx wrangler deploy（R2 启用、桶 minuteflow-releases 回填完成后再上线，
+# 否则会在源站仍能服务时抢先返回 404）。账户 ID 非机密，可入库。
+name = "minuteflow-dl"
+main = "minuteflow-dl.js"
+compatibility_date = "2026-01-01"
+account_id = "a0734b8cd7df6c3fb7f81b62618a4573"
+
+routes = [
+  { pattern = "zensoft.top/minuteflow/dl/*", zone_name = "zensoft.top" },
+  { pattern = "zensoft.top/minuteflow/releases/*", zone_name = "zensoft.top" },
+]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "minuteflow-releases"
