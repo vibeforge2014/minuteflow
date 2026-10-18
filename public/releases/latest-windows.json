@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.27",
+  "version": "0.1.28",
   "platform": "win32",
   "architectures": [
     "x64"
   ],
-  "publishedAt": "2026-10-18T13:33:03Z",
+  "publishedAt": "2026-10-18T16:27:51Z",
   "minimumSystemVersion": "10.0.19045",
-  "notes": "MinuteFlow 0.1.27 已发布。包含最新的功能改进、兼容性优化与问题修复。",
+  "notes": "MinuteFlow 0.1.28 已发布。包含最新的功能改进、兼容性优化与问题修复。",
   "downloadUrl": "../downloads/windows/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.27",
-  "assetUrl": "https://zensoft.top/minuteflow/dl/v0.1.27/MinuteFlow-Setup-0.1.27-Windows-x64.exe",
-  "sha256": "daaf5bc36fd5877820a279251506e4880583e46fbfda4508ea33892ec008fffb"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.28",
+  "assetUrl": "https://zensoft.top/minuteflow/dl/v0.1.28/MinuteFlow-Setup-0.1.28-Windows-x64.exe",
+  "sha256": "81bb47f5f48cec910356c14caaf25d36d1119f122c7b25db2e1ab007499516a0"
 }
