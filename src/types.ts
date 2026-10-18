@@ -438,6 +438,20 @@ export interface AppUpdateInfo {
 export type MacUpdateInfo = AppUpdateInfo;
 
 /**
+ * 应用内更新下载进度：下载 → 校验 → 打开安装程序。
+ * cancelled/error 带可读原因；done 表示安装包已交给系统打开。
+ */
+export interface AppUpdateDownloadProgress {
+  status: "downloading" | "verifying" | "opening" | "done" | "cancelled" | "error";
+  version: string;
+  receivedBytes: number;
+  totalBytes: number;
+  /** 0-1；服务器未返回总大小时为 0。 */
+  fraction: number;
+  message?: string;
+}
+
+/**
  * 应用更新检查结果：idle/available/up-to-date/unsupported/error 五种状态及当前版本信息。
  */
 export interface AppUpdateCheckResult {
@@ -575,6 +589,8 @@ export interface ImportJob {
   diarizationComplete?: boolean;
   /** 用户主动跳过说话人识别：转写保留、直接进入纪要阶段。 */
   diarizationSkipped?: boolean;
+  /** 重新转录已有会议：清空旧逐字稿后从归档录音重建（旧稿随任务存档）。 */
+  retranscribe?: boolean;
   summaryComplete?: boolean;
   /** waiting_for_network 期间累计的自动续跑次数；成功一块后清零。 */
   transcriptionRetryAttempts?: number;
@@ -778,6 +794,8 @@ export interface MeetingAPI {
     cancel(id: string): Promise<ImportJob>;
     /** 跳过说话人识别：保留已完成的转写并继续生成纪要。 */
     skipDiarization(id: string): Promise<ImportJob>;
+    /** 重新转录会议：用已归档录音重跑转写/识别/纪要（无录音或正在录音时报可读错误）。 */
+    retranscribe(meetingId: string): Promise<ImportJob>;
     /** 从队列移除终态/等待态任务记录（进行中任务需先取消；不影响已创建的会议）。 */
     remove(id: string): Promise<{ removed: true }>;
     onJobUpdated(callback: (job: ImportJob) => void): () => void;
@@ -809,6 +827,10 @@ export interface MeetingAPI {
     getState(): Promise<AppUpdateCheckResult>;
     check(): Promise<AppUpdateCheckResult>;
     openDownload(): Promise<{ opened: true }>;
+    /** 在应用内下载并打开经校验的安装包（不静默替换当前应用）。 */
+    download(): Promise<{ opened: boolean; path: string; fileName: string }>;
+    cancelDownload(): Promise<{ cancelled: boolean }>;
+    onDownloadProgress(callback: (progress: AppUpdateDownloadProgress) => void): () => void;
     onAvailable(callback: (result: AppUpdateCheckResult) => void): () => void;
   };
   /** 系统能力：平台标识、权限查询/申请路由到系统设置、系统睡眠/唤醒事件订阅。 */

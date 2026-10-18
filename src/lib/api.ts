@@ -563,6 +563,53 @@ const browserApi: MeetingAPI = {
       saveBrowserImportJob(job);
       return job;
     },
+    async retranscribe(meetingId) {
+      const meetings = loadBrowserMeetings();
+      const meeting = meetings.find((item) => item.id === meetingId);
+      if (!meeting) throw new Error("会议不存在，可能已被删除。");
+      if (meeting.status === "recording" || meeting.status === "paused") {
+        throw new Error("这场会议正在录音，请先结束录音再重新转录。");
+      }
+      const busy = loadBrowserImportJobs().find((job) => job.meetingId === meetingId
+        && !["complete", "cancelled", "failed"].includes(job.status));
+      if (busy) throw new Error("这场会议已有处理中的任务，请等它完成或先暂停。");
+      const now = new Date().toISOString();
+      const job: ImportJob = {
+        id: crypto.randomUUID(), meetingId, type: "import", title: meeting.title,
+        sourceName: `${meeting.title}（重新转录）`, retranscribe: true,
+        status: "queued", stage: "transcribing", progress: 0.2, language: "auto",
+        diarizationEnabled: true, autoSummarize: true,
+        totalChunks: 12, completedChunks: 0, createdAt: now, updatedAt: now
+      };
+      saveBrowserImportJob(job);
+      // 预览没有真实音频：用定时器把任务推进到完成，并把纪要标记为待更新；
+      // 会议文档由存储层在本地的快照负责，重载页面即可看到一致的终态。
+      const advance = (patch: Partial<ImportJob>) => {
+        const latest = loadBrowserImportJobs().find((item) => item.id === job.id);
+        if (!latest || ["cancelled", "failed"].includes(latest.status)) return;
+        saveBrowserImportJob({ ...latest, ...patch, updatedAt: new Date().toISOString() });
+      };
+      window.setTimeout(() => advance({ status: "transcribing", completedChunks: 4, progress: 0.45 }), 1400);
+      window.setTimeout(() => advance({ completedChunks: 9, progress: 0.62 }), 2800);
+      window.setTimeout(() => advance({
+        status: "diarizing", stage: "diarizing", transcriptionComplete: true,
+        completedChunks: 12, progress: 0.73,
+        diarizationStartedAt: new Date().toISOString(), diarizationPhase: "preparing"
+      }), 4200);
+      window.setTimeout(() => advance({
+        status: "summarizing", stage: "summarizing", diarizationComplete: true,
+        diarizationPhase: undefined, diarizationStartedAt: undefined, progress: 0.85
+      }), 6400);
+      window.setTimeout(() => {
+        advance({ status: "complete", stage: "complete", summaryComplete: true, progress: 1 });
+        const fresh = loadBrowserMeetings();
+        const target = fresh.find((item) => item.id === meetingId);
+        if (target) saveBrowserMeetings(fresh.map((item) => item.id === meetingId
+          ? { ...item, summary: { ...item.summary, stale: true }, updatedAt: new Date().toISOString() }
+          : item));
+      }, 7800);
+      return job;
+    },
     async remove(id) {
       const current = loadBrowserImportJobs().find((job) => job.id === id);
       if (!current) throw new Error("导入任务不存在。");
@@ -725,6 +772,12 @@ const browserApi: MeetingAPI = {
       window.open("https://zensoft.top/minuteflow/downloads/macos/latest/", "_blank", "noopener,noreferrer");
       return { opened: true } as const;
     },
+    async download() {
+      // 浏览器预览无法安装桌面应用：明确报错，而不是假装下载成功。
+      throw new Error("浏览器预览无法安装桌面更新，请在 macOS 或 Windows 应用中使用。");
+    },
+    async cancelDownload() { return { cancelled: false }; },
+    onDownloadProgress() { return () => {}; },
     onAvailable() { return () => {}; }
   },
   system: {

@@ -43,6 +43,7 @@ import type {
   ModelDownloadProgress,
   ModelProfile,
   AppUpdateCheckResult,
+  AppUpdateDownloadProgress,
   VoiceprintPerson
 } from "../types";
 
@@ -348,6 +349,9 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const [switchBusy, setSwitchBusy] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<AppUpdateCheckResult | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  /** 应用内下载安装包：进度来自主进程推送，失败原因与「已打开安装程序」共用同一份状态。 */
+  const [downloadState, setDownloadState] = useState<AppUpdateDownloadProgress | null>(null);
+  const [downloadBusy, setDownloadBusy] = useState(false);
   /** 授权卡片：停用的内联二次确认、忙碌态与失败文案（成功即整卡切换状态，无需文案）。 */
   const [deactivateConfirm, setDeactivateConfirm] = useState(false);
   const [deactivateBusy, setDeactivateBusy] = useState(false);
@@ -459,6 +463,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
       });
     });
   }, [open, tab]);
+  // 安装包下载进度由主进程推送；对话框打开期间持续订阅，关闭设置不打断下载本身。
+  useEffect(() => api.updates.onDownloadProgress(setDownloadState), []);
   // 服务地址/协议/端点变化后旧列表作废；切预设/切档案（editorGeneration）同样重置。
   useEffect(() => {
     setModelList(null);
@@ -710,7 +716,38 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     }
   };
 
-  /** 打开官网下载页（未签名阶段不自动安装，只引导到稳定下载地址）。 */
+  /** 应用内下载更新：主进程负责下载、SHA-256 校验并打开安装程序。 */
+  const downloadUpdate = async () => {
+    setDownloadBusy(true);
+    setDownloadState({
+      status: "downloading",
+      version: updateState?.update?.version || "",
+      receivedBytes: 0, totalBytes: 0, fraction: 0
+    });
+    try {
+      await api.updates.download();
+    } catch (error) {
+      setDownloadState((current) => ({
+        status: current?.status === "cancelled" ? "cancelled" : "error",
+        version: current?.version || updateState?.update?.version || "",
+        receivedBytes: current?.receivedBytes || 0,
+        totalBytes: current?.totalBytes || 0,
+        fraction: current?.fraction || 0,
+        message: error instanceof Error ? error.message : "下载安装包失败。"
+      }));
+    } finally {
+      setDownloadBusy(false);
+    }
+  };
+  const cancelUpdateDownload = async () => {
+    try {
+      await api.updates.cancelDownload();
+    } catch {
+      // 取消失败不影响主进程的下载状态；错误会在下载通道里回到这里。
+    }
+  };
+
+  /** 打开官网下载页：应用内下载不可用时的稳定兜底。 */
   const openUpdateDownload = async () => {
     try {
       await api.updates.openDownload();
@@ -724,11 +761,30 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     }
   };
 
+  const downloadPercent = Math.round((downloadState?.fraction || 0) * 100);
+  const downloadSize = downloadState?.totalBytes
+    ? `${(downloadState.receivedBytes / 1024 / 1024).toFixed(0)} / ${(downloadState.totalBytes / 1024 / 1024).toFixed(0)} MB`
+    : "";
+  /** 下载进度的可读文案：区分下载、校验、打开与完成。 */
+  const downloadLabel = !downloadState
+    ? ""
+    : downloadState.status === "downloading"
+      ? `正在下载安装包 ${downloadPercent}%${downloadSize ? `（${downloadSize}）` : ""}`
+      : downloadState.status === "verifying"
+        ? "正在校验安装包…"
+        : downloadState.status === "opening"
+          ? "正在打开安装程序…"
+          : downloadState.status === "done"
+            ? api.system.platform === "win32"
+              ? "安装包已打开：按安装程序提示完成升级，应用会自动重启。"
+              : "安装包已打开：把 MinuteFlow 拖入“应用程序”即可完成升级。"
+            : downloadState.message || (downloadState.status === "cancelled" ? "已取消下载。" : "下载安装包失败。");
+
   /** 安装提示按平台区分：macOS 拖入应用程序，Windows 直接运行安装程序。 */
   const updateInstallHint = api.system.platform === "win32"
-    ? "应用只接受 HTTPS 官网清单和官方发布地址。下载 MinuteFlow-Setup.exe 后直接运行，安装程序会自动完成升级。"
+    ? "更新只接受 HTTPS 官网清单和官方安装包；下载完成后会先校验 SHA-256，再打开 MinuteFlow-Setup.exe 完成升级。"
     : api.system.platform === "darwin"
-      ? "应用只接受 HTTPS 官网清单和官方发布地址。下载完成后，请打开 DMG 并将新版本拖入“应用程序”。"
+      ? "更新只接受 HTTPS 官网清单和官方安装包；下载完成后会先校验 SHA-256，再打开 DMG，把 MinuteFlow 拖入“应用程序”即可。"
       : "应用只接受 HTTPS 官网清单和官方发布地址。";
 
   return (
@@ -1070,7 +1126,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
             {tab === "updates" && (
               <div className="update-settings">
                 <div className="settings-section-heading">
-                  <div><h3>软件更新</h3><p>从MinuteFlow官网检查新版本，并在浏览器中直接下载安装包。</p></div>
+                  <div><h3>软件更新</h3><p>从官网检查新版本，在应用内下载并校验安装包后再安装。</p></div>
                 </div>
                 <div className={`update-card update-card--${updateState?.status || "idle"}`}>
                   <div className="update-card__icon">
@@ -1099,15 +1155,34 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                     )}
                   </div>
                 </div>
+                {downloadState && (
+                  <div className={`update-progress update-progress--${downloadState.status}`} role="status" aria-live="polite">
+                    <div className="update-progress__track">
+                      <span style={{ width: `${downloadState.status === "downloading" ? downloadPercent : downloadState.status === "cancelled" ? 0 : 100}%` }} />
+                    </div>
+                    <small>{downloadLabel}</small>
+                  </div>
+                )}
                 <div className="update-actions">
                   <button className="button" disabled={checkingUpdate} onClick={checkUpdate}>
                     <ArrowClockwise size={16} className={checkingUpdate ? "spin" : ""} />
                     {checkingUpdate ? "正在检查" : "检查更新"}
                   </button>
                   {updateState?.status === "available" && (
-                    <button className="button button--primary" onClick={openUpdateDownload}>
-                      <DownloadSimple size={16} />从官网下载
-                    </button>
+                    <>
+                      <button
+                        className="button button--primary"
+                        disabled={downloadBusy || downloadState?.status === "downloading"}
+                        onClick={downloadUpdate}
+                      >
+                        <DownloadSimple size={16} />
+                        {downloadState?.status === "downloading" ? `正在下载 ${downloadPercent}%` : "下载并安装"}
+                      </button>
+                      {downloadState?.status === "downloading" && (
+                        <button className="text-button" onClick={cancelUpdateDownload}>取消下载</button>
+                      )}
+                      <button className="text-button" onClick={openUpdateDownload}>从官网下载</button>
+                    </>
                   )}
                 </div>
                 <div className="update-security-note">

@@ -7,7 +7,8 @@
  * 网络与子进程调用均以 vi.fn()/vi.stubGlobal() 模拟，不产生真实请求。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { markdown, subtitle } from "../electron/services/formatters.mjs";
@@ -54,7 +55,10 @@ import {
   checkForAppUpdate,
   compareVersions,
   compareSystemVersions,
+  downloadUpdateInstaller,
   normalizeGitHubRelease,
+  resolveUpdateAsset,
+  sha256File,
   updateManifestUrls,
   validateUpdateManifest
 } from "../electron/services/updates.mjs";
@@ -64,13 +68,16 @@ import { simplifyChinese, simplifySummary } from "../src/lib/chinese";
 import { derivePermissionSetupPhase, finishPermissionSetup, isMicrophonePermissionError, isScreenPermissionError, shouldOpenPermissionSetup, shouldRequestMicrophone } from "../src/lib/permissions";
 import { lockSummaryField, mergeSummaryRevision, removeSummaryListItem, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { buildBasicKeyPoints, KEY_POINT_MAX_CHARS } from "../electron/services/chinese.mjs";
-import { cancelImport, normalizeImportChunkSegments, removeImportJob, retryImport, wakeImportQueue } from "../electron/services/import-queue.mjs";
+import { cancelImport, enqueueRetranscription, normalizeImportChunkSegments, removeImportJob, retryImport, wakeImportQueue } from "../electron/services/import-queue.mjs";
 import {
   describeDiarizationPhase,
   describeImportProcessing,
   describeImportProgressDetail,
   isActiveImportJob,
-  isRetryableImportJob
+  isRetryableImportJob,
+  mergeImportJob,
+  mergeImportJobs,
+  selectMeetingImportJob
 } from "../src/lib/import-status";
 import type { ImportJob } from "../src/types";
 import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "../electron/services/chunk-planning.mjs";
@@ -142,6 +149,7 @@ vi.mock("@ffmpeg-installer/ffmpeg", () => ({
   default: { path: process.execPath }
 }));
 import {
+  deleteJob,
   deleteVoiceprintPerson,
   listMeetings,
   listModelProfiles,
@@ -151,6 +159,7 @@ import {
   loadMeeting,
   normalizeExclusiveModelProfiles,
   openDatabase,
+  saveAudioAsset,
   saveJob,
   saveMeeting,
   saveModelProfile,
@@ -1800,6 +1809,78 @@ describe("desktop online updates", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(result).toMatchObject({ status: "unsupported" });
   });
+
+  it("picks only the platform installer from official HTTPS URLs", () => {
+    expect(resolveUpdateAsset(updateManifest, "darwin")).toEqual({
+      url: updateManifest.assetUrl,
+      fileName: "app.dmg"
+    });
+    expect(resolveUpdateAsset(windowsManifest, "win32").fileName).toBe("MinuteFlow-Setup.exe");
+    // 下载页地址不是安装包：不能拿它做应用内下载。
+    expect(() => resolveUpdateAsset({
+      ...updateManifest, assetUrl: "", downloadUrl: "https://zensoft.top/minuteflow/downloads/macos/latest/"
+    }, "darwin")).toThrow("可下载的安装包地址");
+    // 非官方宿主必须被拒绝。
+    expect(() => resolveUpdateAsset({
+      ...updateManifest, assetUrl: "https://evil.example.com/app.dmg"
+    }, "darwin")).toThrow("可下载的安装包地址");
+    // 平台与扩展名不匹配（Windows 的 exe 不能当 macOS 安装包）。
+    expect(() => resolveUpdateAsset(windowsManifest, "darwin")).toThrow("可下载的安装包地址");
+  });
+
+  it("downloads the installer and verifies its sha256 before exposing it", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "minuteflow-update-download-"));
+    const payload = Buffer.from("signed-notarized-installer");
+    const digest = createHash("sha256").update(payload).digest("hex");
+    const progress: number[] = [];
+    const fetchImpl = vi.fn(async () => new Response(payload, {
+      status: 200,
+      headers: { "content-length": String(payload.length) }
+    }));
+    const result = await downloadUpdateInstaller({
+      update: { ...updateManifest, sha256: digest },
+      platform: "darwin",
+      directory,
+      fetchImpl,
+      onProgress: ({ receivedBytes }) => progress.push(receivedBytes)
+    });
+    expect(result).toMatchObject({ fileName: "app.dmg", sizeBytes: payload.length, verified: true });
+    expect(await sha256File(result.path)).toBe(digest);
+    expect(progress.at(-1)).toBe(payload.length);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("deletes the partial download when the digest does not match", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "minuteflow-update-bad-digest-"));
+    const fetchImpl = async () => new Response(Buffer.from("tampered"), {
+      status: 200,
+      headers: { "content-length": "8" }
+    });
+    await expect(downloadUpdateInstaller({
+      update: { ...updateManifest, sha256: "0".repeat(64) },
+      platform: "darwin",
+      directory,
+      fetchImpl
+    })).rejects.toThrow("SHA-256 不匹配");
+    expect(await readdir(directory)).toEqual([]);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("refuses to expose an installer when the manifest has no digest", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "minuteflow-update-no-digest-"));
+    const fetchImpl = async () => new Response(Buffer.from("payload"), {
+      status: 200,
+      headers: { "content-length": "7" }
+    });
+    await expect(downloadUpdateInstaller({
+      update: { ...updateManifest, sha256: "" },
+      platform: "darwin",
+      directory,
+      fetchImpl
+    })).rejects.toThrow("缺少安装包校验值");
+    expect(await readdir(directory)).toEqual([]);
+    await rm(directory, { recursive: true, force: true });
+  });
 });
 
 describe("visual summary schema and capability gates", () => {
@@ -2455,6 +2536,135 @@ describe("导入任务的进度与可操作性文案", () => {
     expect(next.diarizationPhase).toBeUndefined();
     expect(next.diarizationStartedAt).toBeUndefined();
     expect(next.diarizationAudioDurationMs).toBeUndefined();
+  });
+});
+
+describe("重新转录已有会议", () => {
+  const retranscribeMeeting = (id: string, overrides: Partial<Meeting> = {}): Meeting => ({
+    id,
+    title: "在线转写失败的重录会议",
+    scheduledAt: new Date().toISOString(),
+    durationSeconds: 1200,
+    status: "complete",
+    mode: "online",
+    favorite: false,
+    participants: ["我", "刘婷"],
+    tags: [],
+    goals: [],
+    notes: ["这条笔记必须保留"],
+    notesMarkdown: "这条笔记必须保留",
+    transcript: [segment(`${id}-old`, 0, 4_000, "旧的失败转写", "final")],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    summary: { topics: [], keyPoints: [], decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: [], stale: false },
+    ...overrides
+  } as Meeting);
+
+  it("没有归档录音的会议给出可读错误，不入队", async () => {
+    const id = `retrans-no-audio-${process.pid}`;
+    saveMeeting(retranscribeMeeting(id));
+    await expect(enqueueRetranscription(id)).rejects.toThrow("没有已归档的录音文件");
+    expect(loadJob(`retrans-no-audio-job-${process.pid}`) ?? null).toBeNull();
+  });
+
+  it("入队后清空旧逐字稿、保留笔记，并把旧稿与录音资产挂到任务上", async () => {
+    const id = `retrans-queued-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    saveMeeting(retranscribeMeeting(id));
+    const dir = await mkdtemp(path.join(tmpdir(), "mf-retrans-"));
+    const audioPath = path.join(dir, "session.wav");
+    await writeFile(audioPath, "fake-pcm");
+    const asset = saveAudioAsset({
+      meetingId: id, track: "mixed", sourceType: "recording",
+      originalName: "在线会议.m4a", mimeType: "audio/mp4", path: audioPath, byteLength: 8
+    });
+    // 入队是同步落库 + 立即返回；异步队列要等 microtask 之后才会领取任务，
+    // 这里的同步断言先于任何管线副作用执行。
+    const job = await enqueueRetranscription(id);
+    try {
+      expect(job.status).toBe("queued");
+      expect(job.retranscribe).toBe(true);
+      expect(job.archivedPath).toBe(audioPath);
+      expect(job.audioAssetId).toBe(asset.id);
+      expect(job.sourceType).toBe("recording");
+      expect(job.previousTranscript?.map((item) => item.text)).toEqual(["旧的失败转写"]);
+      const stored = loadMeeting(id);
+      expect(stored?.transcript).toEqual([]);
+      expect(stored?.notes).toEqual(["这条笔记必须保留"]);
+      expect(stored?.summary.stale).toBe(true);
+      expect(stored?.status).toBe("complete");
+    } finally {
+      // 后台队列可能在断言间隙已领取该任务（状态不再是 queued），
+      // 这里直接删任务行，不经过「先取消再删除」的交互约束。
+      deleteJob(job.id);
+    }
+  });
+
+  it("正在录音的会议拒绝重新转录", async () => {
+    const id = `retrans-live-${process.pid}`;
+    saveMeeting(retranscribeMeeting(id, { status: "recording" }));
+    await expect(enqueueRetranscription(id)).rejects.toThrow("正在录音");
+  });
+});
+
+describe("会议任务选择与快照合并", () => {
+  /** 构造仅含判断所需字段的任务；updatedAt 是排序与去重的唯一依据。 */
+  const makeJob = (id: string, overrides: Partial<ImportJob> = {}) => ({
+    id,
+    meetingId: "meeting-job-select",
+    type: "import",
+    title: "会议",
+    status: "transcribing",
+    stage: "transcribing",
+    progress: 0.4,
+    createdAt: "2026-10-18T00:00:00.000Z",
+    updatedAt: "2026-10-18T00:00:00.000Z",
+    ...overrides
+  } as ImportJob);
+
+  it("同一会议有历史完成任务时，进行中的重新转录仍然是被展示的那条", () => {
+    const completed = makeJob("job-old", {
+      status: "complete", stage: "complete", updatedAt: "2026-10-18T01:00:00.000Z"
+    });
+    const active = makeJob("job-retranscribe", {
+      status: "transcribing", retranscribe: true, updatedAt: "2026-10-18T02:00:00.000Z"
+    });
+    expect(selectMeetingImportJob([active, completed], "meeting-job-select")?.id).toBe(active.id);
+  });
+
+  it("已完成旧任务的更新时间更晚时，也不能顶掉进行中的任务（处理中按钮不闪回）", () => {
+    const completed = makeJob("job-old", {
+      status: "complete", stage: "complete", updatedAt: "2026-10-18T05:00:00.000Z"
+    });
+    const active = makeJob("job-retranscribe", {
+      status: "queued", stage: "transcribing", retranscribe: true, updatedAt: "2026-10-18T04:00:00.000Z"
+    });
+    expect(selectMeetingImportJob([completed, active], "meeting-job-select")?.id).toBe(active.id);
+    expect(describeImportProcessing(selectMeetingImportJob([completed, active], "meeting-job-select"))).toBeTruthy();
+  });
+
+  it("没有进行中任务时展示最新的完成任务，其它会议的任务不参与", () => {
+    const first = makeJob("job-a", { status: "complete", updatedAt: "2026-10-18T01:00:00.000Z" });
+    const second = makeJob("job-b", { status: "complete", updatedAt: "2026-10-18T03:00:00.000Z" });
+    const other = makeJob("job-other", { meetingId: "another-meeting", updatedAt: "2026-10-18T06:00:00.000Z" });
+    expect(selectMeetingImportJob([first, other, second], "meeting-job-select")?.id).toBe(second.id);
+    expect(selectMeetingImportJob([other], "meeting-job-select")).toBeUndefined();
+    expect(selectMeetingImportJob([first], undefined)).toBeUndefined();
+  });
+
+  it("推送合并不会让较旧的快照覆盖较新的状态，列表回填也不会丢掉刚推送的任务", () => {
+    const latest = makeJob("job-merge", {
+      status: "diarizing", stage: "diarizing", updatedAt: "2026-10-18T02:00:00.000Z"
+    });
+    const stale = makeJob("job-merge", {
+      status: "transcribing", stage: "transcribing", updatedAt: "2026-10-18T01:30:00.000Z"
+    });
+    expect(mergeImportJob([latest], stale)).toEqual([latest]);
+    // 启动回填（旧列表）晚于推送到达时，进行中的任务必须继续留在状态里。
+    const backfill = mergeImportJobs([latest], [makeJob("job-history", {
+      status: "complete", updatedAt: "2026-10-18T00:30:00.000Z"
+    })]);
+    expect(backfill.map((job) => job.id)).toEqual(["job-merge", "job-history"]);
+    expect(mergeImportJob(backfill, latest)).toEqual(backfill);
   });
 });
 

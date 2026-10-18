@@ -66,10 +66,12 @@ interface TranscriptViewProps {
   onCancelImport?(id: string): void;
   /** 跳过说话人识别，保留转写继续生成纪要。 */
   onSkipDiarization?(id: string): void;
+  /** 重新转录：用已归档录音重跑转写/识别/纪要（在线转写失败后的会后补救路径）。 */
+  onRetranscribe?(): void;
   onConfigureTranscription?(): void;
 }
 
-export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction, jumpTarget, summaryBusy, onGenerateSummary, onOpenSummary, transcriptionFailure, transcriptionIsLocal = false, onUseLocalWhisper, onChooseTranscriptionService, onDismissTranscriptionFailure, onRetryImport, onCancelImport, onSkipDiarization, onConfigureTranscription }: TranscriptViewProps) {
+export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction, jumpTarget, summaryBusy, onGenerateSummary, onOpenSummary, transcriptionFailure, transcriptionIsLocal = false, onUseLocalWhisper, onChooseTranscriptionService, onDismissTranscriptionFailure, onRetryImport, onCancelImport, onSkipDiarization, onRetranscribe, onConfigureTranscription }: TranscriptViewProps) {
   /** 正在重命名的说话人 id（显示浮层输入框）。 */
   const [speakerEditor, setSpeakerEditor] = useState<string | null>(null);
   /** 改名时是否把这个人注册进本机声纹簿（默认勾选，可显式关闭）。 */
@@ -572,6 +574,15 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
             {!importJob && stage === "review" && emptyActionLabel && onEmptyAction && (
               <button className="button button--secondary button--small" onClick={onEmptyAction}>
                 {emptyActionLabel}
+              </button>
+            )}
+            {!importJob && stage === "review" && onRetranscribe && (
+              <button
+                className="button button--secondary button--small"
+                title="用已归档的录音重新转写这场会议；笔记与手动锁定的纪要内容会保留"
+                onClick={onRetranscribe}
+              >
+                <ArrowClockwise size={15} />从录音重新转录
               </button>
             )}
           </div>

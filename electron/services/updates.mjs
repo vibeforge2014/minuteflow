@@ -3,10 +3,18 @@
  * 从官网更新清单（JSON manifest）与 GitHub Releases 兜底拉取最新版本信息，
  * 校验版本号与下载地址（仅 allow-list 的 HTTPS 宿主），产出统一的更新状态对象。
  * 主要导出：compareVersions、isOfficialHttpsUrl、validateUpdateManifest、
- * normalizeGitHubRelease、checkForAppUpdate、updateManifestUrls。
- * 被 main.mjs 的 updates:get-state / updates:check / updates:open-download 通道调用。
- * 副作用：网络请求。更新从不静默安装，只引导用户跳转官方下载页。
+ * normalizeGitHubRelease、checkForAppUpdate、updateManifestUrls、
+ * resolveUpdateAsset、sha256File、downloadUpdateInstaller。
+ * 被 main.mjs 的 updates:* 通道调用。
+ * 副作用：网络请求与写盘。应用内只下载并打开经 SHA-256 校验的安装包，
+ * 从不静默替换正在运行的应用。
  */
+import { createHash } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdir, rename, rm } from "node:fs/promises";
+import path from "node:path";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 // Public update sources, tried in order, selected per desktop platform. The
 // official product site (deployed to the operator's own server via rsync) is
 // primary; the GitHub API is the resilient fallback that always reflects the
@@ -338,4 +346,118 @@ export async function checkForAppUpdate({
 export function updateManifestUrls(platform) {
   const sources = MANIFEST_SOURCES[platform];
   return sources ? [...sources] : [];
+}
+
+/** 各平台应用内更新可接受的安装包扩展名。 */
+const UPDATE_ASSET_EXTENSIONS = { darwin: [".dmg"], win32: [".exe"] };
+
+/** 安装包体积上限：防止被篡改的清单把磁盘写满（当前产物约 300–550 MB）。 */
+const MAX_UPDATE_BYTES = 1_536 * 1024 * 1024;
+
+/**
+ * 从已校验的更新信息里挑出应用内可下载的安装包地址。
+ * 优先 assetUrl（官网直链），GitHub 兜底时两者相同；只有 HTTPS 官方宿主、
+ * 且扩展名与当前平台匹配的地址才会被接受，下载页 URL 不会被误当成安装包。
+ * @returns {{ url: string, fileName: string }}
+ */
+export function resolveUpdateAsset(update, platform) {
+  const extensions = UPDATE_ASSET_EXTENSIONS[platform];
+  if (!extensions) throw new Error("当前平台暂不支持应用内下载更新。");
+  for (const candidate of [update?.assetUrl, update?.downloadUrl]) {
+    if (!candidate || !isOfficialHttpsUrl(candidate)) continue;
+    const url = new URL(candidate);
+    const pathname = url.pathname.toLowerCase();
+    const extension = extensions.find((value) => pathname.endsWith(value));
+    if (!extension) continue;
+    const rawName = decodeURIComponent(url.pathname.split("/").filter(Boolean).pop() || "");
+    // 文件名只用于本地落盘：拒绝路径分隔符等字符，异常时回退到统一命名。
+    const fileName = /^[A-Za-z0-9._-]+$/.test(rawName)
+      ? rawName
+      : `MinuteFlow-${update.version}${extension}`;
+    return { url: url.href, fileName };
+  }
+  throw new Error("更新清单没有提供可下载的安装包地址。");
+}
+
+/** 计算文件 SHA-256（流式，避免把几百 MB 安装包读进内存）。 */
+export async function sha256File(filePath) {
+  const hash = createHash("sha256");
+  await new Promise((resolve, reject) => {
+    createReadStream(filePath)
+      .on("data", (chunk) => hash.update(chunk))
+      .on("end", resolve)
+      .on("error", reject);
+  });
+  return hash.digest("hex");
+}
+
+/**
+ * 下载更新安装包到本地目录，并在清单带 sha256 时强制校验。
+ * 写入 `.part` 临时文件，校验通过后才原子改名；任何失败都会删除残片。
+ * @returns {Promise<{path: string, fileName: string, sizeBytes: number, verified: boolean}>}
+ */
+export async function downloadUpdateInstaller({
+  update,
+  platform,
+  directory,
+  signal,
+  onProgress,
+  fetchImpl = globalThis.fetch
+}) {
+  const { url, fileName } = resolveUpdateAsset(update, platform);
+  await mkdir(directory, { recursive: true });
+  const destination = path.join(directory, fileName);
+  const partial = `${destination}.part`;
+  const response = await fetchImpl(url, {
+    redirect: "follow",
+    signal,
+    headers: { Accept: "application/octet-stream" }
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`下载安装包失败：更新服务返回 HTTP ${response.status}。`);
+  }
+  const totalBytes = Number(response.headers.get("content-length")) || 0;
+  if (totalBytes > MAX_UPDATE_BYTES) throw new Error("安装包体积异常，已停止下载。");
+  let receivedBytes = 0;
+  let lastReportedAt = 0;
+  const report = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastReportedAt < 140) return;
+    lastReportedAt = now;
+    onProgress?.({
+      receivedBytes,
+      totalBytes,
+      fraction: totalBytes ? Math.min(1, receivedBytes / totalBytes) : 0
+    });
+  };
+  const counter = new Transform({
+    transform(chunk, _encoding, callback) {
+      receivedBytes += chunk.length;
+      if (receivedBytes > MAX_UPDATE_BYTES) {
+        callback(new Error("安装包体积异常，已停止下载。"));
+        return;
+      }
+      report();
+      callback(null, chunk);
+    }
+  });
+  try {
+    report(true);
+    await pipeline(Readable.fromWeb(response.body), counter, createWriteStream(partial), { signal });
+    report(true);
+    const expected = String(update.sha256 || "").toLowerCase();
+    // 没有校验值就不安装：官方清单始终带 sha256，缺失说明清单不完整或来源异常。
+    if (!expected) {
+      throw new Error("更新清单缺少安装包校验值，无法安全安装；请改从官网下载。");
+    }
+    if (await sha256File(partial) !== expected) {
+      throw new Error("安装包校验失败（SHA-256 不匹配），已删除下载内容。");
+    }
+    await rm(destination, { force: true });
+    await rename(partial, destination);
+    return { path: destination, fileName, sizeBytes: receivedBytes, verified: true };
+  } catch (error) {
+    await rm(partial, { force: true }).catch(() => {});
+    throw error;
+  }
 }

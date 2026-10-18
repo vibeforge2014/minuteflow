@@ -5,7 +5,8 @@
  *
  * 所属层：渲染层纯工具函数。
  * 主要导出：describeImportProcessing、describeImportProgressDetail、
- * describeDiarizationPhase、isActiveImportJob、isRetryableImportJob。
+ * describeDiarizationPhase、isActiveImportJob、isRetryableImportJob、
+ * mergeImportJob、mergeImportJobs、selectMeetingImportJob。
  */
 import type { ImportJob } from "../types";
 import { formatDuration } from "./format";
@@ -26,6 +27,41 @@ export function isActiveImportJob(job?: ImportJob) {
 
 export function isRetryableImportJob(job?: ImportJob) {
   return Boolean(job && RETRYABLE_IMPORT_STATUSES.includes(job.status));
+}
+
+function jobTimestamp(job: ImportJob) {
+  return job.updatedAt || job.createdAt || "";
+}
+
+/** 合并单个任务快照：同 id 保留更新时间较新的那份，其余按更新时间倒序。 */
+export function mergeImportJob(current: ImportJob[], job: ImportJob) {
+  const existing = current.find((item) => item.id === job.id);
+  const next = existing && jobTimestamp(existing) > jobTimestamp(job)
+    ? current
+    : [job, ...current.filter((item) => item.id !== job.id)];
+  return [...next].sort((left, right) => jobTimestamp(right).localeCompare(jobTimestamp(left)));
+}
+
+/**
+ * 合并一批任务快照（如启动时回填的列表）：逐条按 id 合并。
+ * 直接替换整个列表会丢掉刚经推送到达、尚未写进这批快照的新状态。
+ */
+export function mergeImportJobs(current: ImportJob[], incoming: ImportJob[]) {
+  return incoming.reduce((jobs, job) => mergeImportJob(jobs, job), current);
+}
+
+/**
+ * 选出「当前会议真正需要展示」的任务。
+ * 同一会议可能同时存在历史完成任务和正在进行的重新转录：已完成的旧任务
+ * 一旦按时间排到前面（或列表短暂滞后），界面会误判为「没有在处理」，
+ * 让「重新转录」按钮在处理过程中闪回。进行中的任务必须永远优先。
+ */
+export function selectMeetingImportJob(jobs: ImportJob[], meetingId?: string) {
+  if (!meetingId) return undefined;
+  const candidates = jobs
+    .filter((job) => job.meetingId === meetingId)
+    .sort((left, right) => jobTimestamp(right).localeCompare(jobTimestamp(left)));
+  return candidates.find(isActiveImportJob) ?? candidates[0];
 }
 
 /** 说话人分离子阶段 → 用户能理解的“正在做什么”。 */

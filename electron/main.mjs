@@ -88,6 +88,7 @@ import {
 } from "./services/local-models.mjs";
 import {
   checkForAppUpdate,
+  downloadUpdateInstaller,
   isOfficialHttpsUrl
 } from "./services/updates.mjs";
 import {
@@ -104,6 +105,7 @@ import {
   configureImportQueue,
   describeImportFiles,
   enqueueImports,
+  enqueueRetranscription,
   listImportJobs,
   removeImportJob,
   retryImport,
@@ -126,6 +128,8 @@ protocol.registerSchemesAsPrivileged([{ scheme: "minuteflow-media", privileges: 
 let mainWindow;
 let permissionHelperWindow;
 let latestUpdateCheck;
+// 应用内更新下载的取消句柄：同一时间只允许一个安装包在下载。
+let activeUpdateDownload = null;
 // 录音会话的运行时状态（文件句柄 + 串行写队列 + 首个错误），键为 `${sessionId}:${track}`。
 // 仅存在于内存中；崩溃重启后由 database 的 markInterruptedRecordings 兜底为 interrupted 状态。
 const recordingFiles = new Map();
@@ -1295,6 +1299,8 @@ function registerIpc() {
   trustedHandle("imports:cancel", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return cancelImport(id); });
   // imports:skip-diarization — 跳过说话人识别，保留已完成的转写并继续生成纪要（付费功能）。
   trustedHandle("imports:skip-diarization", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return skipImportDiarization(id); });
+  // imports:retranscribe — 对已归档录音的会议重新转写并重建纪要（付费功能），如在线转写失败后改用本地模型。
+  trustedHandle("imports:retranscribe", async (_event, meetingId) => { await requireLicense(); assertUuid(meetingId, "会议 ID"); return enqueueRetranscription(meetingId); });
   // imports:remove — 从队列移除终态/等待态任务记录（付费功能）；进行中任务需先取消。
   trustedHandle("imports:remove", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return removeImportJob(id); });
   // exports:save — 导出会议为 md/txt/json/srt/vtt/docx/pdf/zip（付费功能），导出菜单调用。
@@ -1317,7 +1323,7 @@ function registerIpc() {
   // updates:check — 手动触发一次更新检查，设置页"检查更新"按钮调用。
   trustedHandle("updates:check", () => runUpdateCheck());
   // updates:open-download — 打开官网下载页；下载地址必须再次通过 allow-list HTTPS 校验，
-  // 更新从不静默安装，只跳转官方稳定链接。
+  // 作为应用内下载失败时的兜底入口保留。
   trustedHandle("updates:open-download", async () => {
     if (latestUpdateCheck?.status !== "available" || !latestUpdateCheck.update?.downloadUrl) {
       throw new Error("请先检查更新。");
@@ -1327,6 +1333,66 @@ function registerIpc() {
     }
     await shell.openExternal(latestUpdateCheck.update.downloadUrl);
     return { opened: true };
+  });
+  // updates:download — 在应用内下载官方安装包：仅接受清单里的 HTTPS 官方直链，
+  // 有 sha256 时强制校验，完成后打开安装程序。不静默替换正在运行的应用。
+  trustedHandle("updates:download", async () => {
+    const state = latestUpdateCheck;
+    if (state?.status !== "available" || !state.update) throw new Error("请先检查更新。");
+    if (activeUpdateDownload) throw new Error("安装包正在下载，请稍候。");
+    const controller = new AbortController();
+    activeUpdateDownload = controller;
+    const update = state.update;
+    const sendProgress = (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send("updates:download-progress", payload);
+      }
+    };
+    sendProgress({ status: "downloading", version: update.version, receivedBytes: 0, totalBytes: 0, fraction: 0 });
+    try {
+      const installer = await downloadUpdateInstaller({
+        update,
+        platform: process.platform,
+        directory: path.join(app.getPath("userData"), "updates", update.version),
+        signal: controller.signal,
+        onProgress: (progress) => sendProgress({ status: "downloading", version: update.version, ...progress })
+      });
+      sendProgress({
+        status: "verifying", version: update.version,
+        receivedBytes: installer.sizeBytes, totalBytes: installer.sizeBytes, fraction: 1
+      });
+      sendProgress({
+        status: "opening", version: update.version,
+        receivedBytes: installer.sizeBytes, totalBytes: installer.sizeBytes, fraction: 1
+      });
+      // shell.openPath 对 DMG 会挂载并打开 Finder，对 Setup.exe 会启动安装程序。
+      const openError = await shell.openPath(installer.path);
+      sendProgress({
+        status: openError ? "error" : "done", version: update.version,
+        receivedBytes: installer.sizeBytes, totalBytes: installer.sizeBytes, fraction: 1,
+        message: openError || ""
+      });
+      if (openError) throw new Error(`安装包已下载，但无法自动打开：${openError}`);
+      return { opened: true, path: installer.path, fileName: installer.fileName };
+    } catch (error) {
+      const cancelled = controller.signal.aborted;
+      const message = cancelled
+        ? "已取消下载。"
+        : error instanceof Error ? error.message : "下载安装包失败。";
+      sendProgress({
+        status: cancelled ? "cancelled" : "error", version: update.version,
+        receivedBytes: 0, totalBytes: 0, fraction: 0, message
+      });
+      throw new Error(message);
+    } finally {
+      activeUpdateDownload = null;
+    }
+  });
+  // updates:cancel-download — 中止正在进行的安装包下载并清理临时文件。
+  trustedHandle("updates:cancel-download", () => {
+    const cancelled = Boolean(activeUpdateDownload);
+    activeUpdateDownload?.abort();
+    return { cancelled };
   });
   // licensing:get-status — 查询授权状态（refresh=true 强制走一次远程验证），授权页/付费墙调用。
   trustedHandle("licensing:get-status", (_event, refresh = false) => getLicenseStatus({ refresh }));

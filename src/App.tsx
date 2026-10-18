@@ -42,7 +42,7 @@ import { api } from "./lib/api";
 import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Meeting } from "./types";
 import { BrandMark } from "./components/BrandMark";
 import { buildRecordingReadiness, deriveWorkspaceStage, isLocalTranscriptionTransport, shouldAutoOpenRightPanel, type WorkspaceStage } from "./lib/workspace";
-import { describeImportProcessing } from "./lib/import-status";
+import { describeImportProcessing, mergeImportJob, mergeImportJobs, selectMeetingImportJob } from "./lib/import-status";
 import type { SystemPermissionStatus } from "./types";
 import { finishPermissionSetup, shouldOpenPermissionSetup } from "./lib/permissions";
 
@@ -88,6 +88,9 @@ export function App() {
   const [importOpen, setImportOpen] = useState(false);
   const [importCandidates, setImportCandidates] = useState<ImportCandidate[]>([]);
   const [importJobs, setImportJobs] = useState<ImportJob[]>([]);
+  // 任务列表是否已从主进程回填：回填前无法判断“这场会议是否正在处理”，
+  // 重新转录入口必须等它完成，否则页面重载/重挂载时会先闪出一次按钮。
+  const [importJobsLoaded, setImportJobsLoaded] = useState(false);
   /** 从导入抽屉去配置模型：关闭设置后回到原流程，而不是让用户重新找入口。 */
   const settingsReturnRef = useRef<"import" | null>(null);
   const [playbackMs, setPlaybackMs] = useState(0);
@@ -102,6 +105,8 @@ export function App() {
   const failedImports = useRef(new Set<string>());
   const previousWorkspaceRef = useRef<{ meetingId: string; stage: WorkspaceStage } | null>(null);
   const autoLayoutKeyRef = useRef("");
+  // 重新转录的 IPC 在途标记：双击不会创建第二条任务，也不会弹「已有处理中的任务」。
+  const retranscribeRequestRef = useRef(false);
 
   /** 统一的提示入口：可附带直达动作（如更新提示一键打开软件更新）。 */
   const notify = useCallback((message: string, action?: { label: string; run: () => void }) => {
@@ -139,12 +144,13 @@ export function App() {
   // 导入队列：先回填历史任务，再订阅主进程推送的任务更新；任务完成时提示一次并刷新会议列表。
   useEffect(() => {
     api.imports.list().then((jobs) => {
-      setImportJobs(jobs);
+      // 回填与推送可能并发：按 id 合并，避免较旧的列表快照覆盖刚到的任务状态。
+      setImportJobs((current) => mergeImportJobs(current, jobs));
       jobs.filter((job) => job.status === "complete").forEach((job) => completedImports.current.add(job.id));
       jobs.filter((job) => job.status === "failed").forEach((job) => failedImports.current.add(job.id));
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => setImportJobsLoaded(true));
     return api.imports.onJobUpdated((job) => {
-      setImportJobs((current) => [job, ...current.filter((item) => item.id !== job.id)].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)));
+      setImportJobs((current) => mergeImportJob(current, job));
       if (job.status === "complete" && !completedImports.current.has(job.id)) {
         completedImports.current.add(job.id);
         notify(`「${job.title}」的转写与纪要已就绪。`, {
@@ -236,8 +242,8 @@ export function App() {
   const setSearch = useMeetingStore((state) => state.setSearch);
   const searching = search.trim().length > 0;
   const meetingImportJob = useMemo(
-    () => meeting ? importJobs.find((job) => job.meetingId === meeting.id) : undefined,
-    [importJobs, meeting]
+    () => selectMeetingImportJob(importJobs, meeting?.id),
+    [importJobs, meeting?.id]
   );
   useEffect(() => {
     setPlayerOpen(false);
@@ -480,6 +486,37 @@ export function App() {
     }
   }, [notify]);
 
+  /**
+   * 重新转录当前会议：清空旧逐字稿，用已归档录音重跑转写/识别/纪要。
+   * 典型场景是录音时在线转写不可用，会后换本地 Whisper 补跑整场；
+   * 无归档录音、正在录音或已有任务在处理时，主进程会给出可读的错误原因。
+   */
+  const handleRetranscribe = async () => {
+    const target = meeting;
+    if (!target) return;
+    if (recorder.phase !== "idle" && recorder.recordingMeetingId === target.id) {
+      notify("这场会议正在录音，请先结束后再重新转录。");
+      return;
+    }
+    if (!requirePremium("重新转录会议录音", () => void handleRetranscribe())) return;
+    if (target.transcript.length > 0 && !window.confirm(
+      "重新转录会清空当前逐字稿，从已归档的录音重新识别并生成纪要；你的笔记和手动锁定的纪要内容会保留。继续吗？"
+    )) return;
+    if (retranscribeRequestRef.current) return;
+    retranscribeRequestRef.current = true;
+    try {
+      const job = await api.imports.retranscribe(target.id);
+      // 立刻按返回的任务快照抬高「处理中」状态：不等推送到达，按钮就不会在启动瞬间闪回。
+      setImportJobs((current) => mergeImportJob(current, job));
+      setImportOpen(true);
+      notify("已开始重新转录；可随时暂停、跳过识别或查看进度。");
+    } catch (error) {
+      notify((error instanceof Error ? error.message : "无法开始重新转录。").replace(/^Error invoking remote method '[^']+':\s*/, ""));
+    } finally {
+      retranscribeRequestRef.current = false;
+    }
+  };
+
   // 会议文档统一变更入口：整份替换，由 store 负责乐观更新 + 持久化。
   const handleMeetingChange = (next: Meeting) => {
     updateMeeting(next.id, () => next);
@@ -676,6 +713,7 @@ export function App() {
               onRetryImport={(id) => void retryImportJob(id)}
               onCancelImport={(id) => void cancelImportJob(id)}
               onSkipDiarization={(id) => void skipImportDiarizationJob(id)}
+              onRetranscribe={importJobsLoaded ? () => void handleRetranscribe() : undefined}
               playbackMs={playbackMs}
               onSeek={(ms) => {
                 // 没有可用音频（未录制/文件缺失）时不打开播放器，避免出现一个必然报错的空播放器。

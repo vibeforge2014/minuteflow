@@ -19,6 +19,7 @@ import {
   createMeeting,
   deleteJob,
   listJobs,
+  listMeetingAudioAssets,
   listModelProfiles,
   listVoiceprintSamples,
   loadJob,
@@ -322,10 +323,90 @@ export function listImportJobs() {
   return listJobs("import");
 }
 
+/** 处理中/排队中的任务状态：同一会议同时只允许一条，避免两轮转录互相覆盖。 */
+const ACTIVE_JOB_STATUSES = ["queued", "copying", "preparing", "transcribing", "diarizing", "summarizing", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool", "waiting_for_network"];
+
+/**
+ * 重新转录一场已有会议（imports:retranscribe 通道调用）：
+ * 复用导入流水线处理该会议已归档的录音——清空旧逐字稿（原文随任务存档），
+ * 重新转写 → 说话人识别 → 生成纪要；笔记与手动锁定的纪要内容由既有合并逻辑保留。
+ * 典型场景：录音时在线转写不可用/大面积失败，会后换本地 Whisper 重跑整场。
+ */
+export async function enqueueRetranscription(meetingId, options = {}) {
+  const meeting = loadMeeting(meetingId);
+  if (!meeting) throw new Error("会议不存在，可能已被删除。");
+  if (meeting.status === "recording" || meeting.status === "paused") {
+    throw new Error("这场会议正在录音，请先结束录音再重新转录。");
+  }
+  const busy = listImportJobs().find((job) => job.meetingId === meetingId && ACTIVE_JOB_STATUSES.includes(job.status));
+  if (busy) throw new Error("这场会议已有处理中的任务，请等它完成或先暂停。");
+  // 只认 mixed 轨归档录音（live 录音与导入产物都落在这里），并确认文件仍可读——
+  // 超过保留期被清理的录音会走到明确的「无法重新转录」提示，而不是排进队列后失败。
+  const asset = listMeetingAudioAssets(meetingId)
+    .filter((candidate) => candidate.track === "mixed" && candidate.path)
+    .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))[0];
+  if (!asset) throw new Error("这场会议没有已归档的录音文件，无法重新转录。");
+  try {
+    await stat(asset.path);
+  } catch {
+    throw new Error("这场会议的录音文件已不在磁盘上（可能已按保留策略清理），无法重新转录。");
+  }
+  const now = new Date().toISOString();
+  // 旧逐字稿先收进任务里（previousTranscript），失败/重跑都有据可查；会议侧立即清空，
+  // 转录块写入时 retained 自然为空，新结果从零重建，不会与旧段落叠加。
+  const job = publish(saveJob({
+    id: randomUUID(),
+    meetingId,
+    type: "import",
+    status: "queued",
+    stage: "transcribing",
+    progress: 0.2,
+    retranscribe: true,
+    archivedPath: asset.path,
+    audioAssetId: asset.id,
+    playbackPath: asset.playbackPath,
+    playbackReady: true,
+    sourceType: asset.sourceType || "recording",
+    sourceName: asset.originalName || `${meeting.title}（重新转录）`,
+    mimeType: asset.mimeType,
+    sizeBytes: asset.byteLength,
+    durationMs: asset.durationMs,
+    title: meeting.title,
+    language: options.language || "auto",
+    sttProfileId: options.sttProfileId,
+    llmProfileId: options.llmProfileId,
+    diarizationEnabled: options.diarizationEnabled !== false,
+    autoSummarize: options.autoSummarize !== false,
+    previousTranscript: meeting.transcript,
+    chunkingVersion: TRANSCRIPTION_PLAN_VERSION,
+    chunkDurationMs: TRANSCRIPTION_CHUNK_MS,
+    chunkOverlapMs: TRANSCRIPTION_OVERLAP_MS,
+    paragraphingVersion: PARAGRAPHING_VERSION,
+    createdAt: now,
+    updatedAt: now
+  }));
+  publishMeeting(saveMeeting({
+    ...meeting,
+    transcript: [],
+    summary: { ...meeting.summary, stale: true },
+    updatedAt: now
+  }));
+  void runQueue();
+  return job;
+}
+
 /** 重试失败任务：状态复位为 queued 并重新驱动队列（imports:retry 通道调用）。 */
 export function retryImport(id) {
   const job = loadJob(id);
   if (!job) throw new Error("导入任务不存在。");
+  // 同一会议只允许一条任务在跑：重试历史任务前先确认没有另一条（例如重新转录）已在进行，
+  // 否则两条流水线会先后写同一场会议的逐字稿，界面也会在两条任务间跳来跳去。
+  const busy = job.meetingId
+    ? listImportJobs().find((candidate) => candidate.id !== id
+      && candidate.meetingId === job.meetingId
+      && ACTIVE_JOB_STATUSES.includes(candidate.status))
+    : undefined;
+  if (busy) throw new Error("这场会议已有处理中的任务，请等它完成或先暂停。");
   // 重试是干净的一轮：清掉上一轮的网络退避计数与说话人分离进度，
   // 避免 UI 继续显示旧的“已用时间/阶段”。
   const next = patchJob(id, {
@@ -619,7 +700,8 @@ async function processJob(initial) {
         meeting = publishMeeting(saveMeeting({
           ...meeting,
           durationSeconds: Math.max(0, Math.round(durationMs / 1000)),
-          status: "draft",
+          // 重新转录的会议已是会后状态：保持 complete，不要把它打回草稿。
+          ...(job.retranscribe ? {} : { status: "draft" }),
           transcript: groupTranscriptSegments([...retained, ...chunkSegments]),
           summary: { ...meeting.summary, stale: retained.length + chunkSegments.length > 0 }
         }));
@@ -636,7 +718,9 @@ async function processJob(initial) {
       if (isJobCancelled(job.id, controller)) return;
       saveAudioAsset({
         id: job.audioAssetId, meetingId: job.meetingId, path: job.archivedPath,
-        playbackPath: job.playbackPath, track: "mixed", sourceType: "import",
+        playbackPath: job.playbackPath, track: "mixed",
+        // 重新转录沿用录音资产原本的类型与文件名，不能把它改标成导入产物。
+        sourceType: job.retranscribe ? (job.sourceType || "recording") : "import",
         originalName: job.sourceName, mimeType: job.mimeType,
         byteLength: job.sizeBytes, durationMs
       });

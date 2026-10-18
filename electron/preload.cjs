@@ -94,6 +94,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     retry: (id) => invoke("imports:retry", id),
     cancel: (id) => invoke("imports:cancel", id),
     skipDiarization: (id) => invoke("imports:skip-diarization", id),
+    retranscribe: (meetingId) => invoke("imports:retranscribe", meetingId),
     remove: (id) => invoke("imports:remove", id),
     onJobUpdated: (callback) => {
       const listener = (_event, job) => callback(job);
@@ -130,6 +131,13 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     getState: () => invoke("updates:get-state"),
     check: () => invoke("updates:check"),
     openDownload: () => invoke("updates:open-download"),
+    download: () => invoke("updates:download"),
+    cancelDownload: () => invoke("updates:cancel-download"),
+    onDownloadProgress: (callback) => {
+      const listener = (_event, progress) => callback(progress);
+      ipcRenderer.on("updates:download-progress", listener);
+      return () => ipcRenderer.removeListener("updates:download-progress", listener);
+    },
     onAvailable: (callback) => {
       const listener = (_event, result) => callback(result);
       ipcRenderer.on("updates:available", listener);

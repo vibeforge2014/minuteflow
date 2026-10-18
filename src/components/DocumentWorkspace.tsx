@@ -61,6 +61,8 @@ interface DocumentWorkspaceProps {
   onCancelImport?(id: string): void;
   /** 跳过说话人识别：转写已就绪时先用现有发言人占位继续生成纪要。 */
   onSkipDiarization?(id: string): void;
+  /** 重新转录：用已归档录音重跑转写/识别/纪要（在线转写失败后的会后补救路径）。 */
+  onRetranscribe?(): void;
   /** 当前播放位置（毫秒），转写视图中用于歌词式高亮。 */
   playbackMs?: number;
   /** 点击转写时间戳时请求播放器跳转。 */
@@ -99,6 +101,7 @@ export function DocumentWorkspace({
   onRetryImport,
   onCancelImport,
   onSkipDiarization,
+  onRetranscribe,
   playbackMs = 0,
   onSeek,
   emptyActionLabel,
@@ -338,6 +341,7 @@ export function DocumentWorkspace({
             onRetryImport={onRetryImport}
             onCancelImport={onCancelImport}
             onSkipDiarization={onSkipDiarization}
+            onRetranscribe={onRetranscribe}
             onConfigureTranscription={onConfigureTranscription}
           />
         </div>
@@ -483,6 +487,15 @@ export function DocumentWorkspace({
                   <ArrowClockwise size={16} />{meeting.summary.stale ? "更新纪要" : hasOrdinarySummary ? "重新生成纪要" : "生成最终纪要"}
                 </button>
               ))}
+              {!processingStatus && onRetranscribe && meeting.status !== "recording" && meeting.status !== "paused" && (
+                <button
+                  className="button button--secondary"
+                  title="放弃当前逐字稿，用已归档的录音重新转写并生成纪要；笔记与手动锁定的内容会保留"
+                  onClick={onRetranscribe}
+                >
+                  <ArrowClockwise size={16} />重新转录
+                </button>
+              )}
             </div>
           </section>
         )}
