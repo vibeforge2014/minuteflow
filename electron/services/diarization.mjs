@@ -100,7 +100,7 @@ const DIARIZATION_WORKER_TIMEOUT_MS = 30 * 60_000;
  * fork diarization-worker 并等待一条结果消息；调用方取消（signal abort）或
  * worker 异常退出/超时都会立即落定 Promise 并回收子进程。
  */
-function runDiarizationWorker(request, signal) {
+function runDiarizationWorker(request, { signal, onProgress } = {}) {
   return new Promise((resolve, reject) => {
     let child;
     try {
@@ -127,6 +127,12 @@ function runDiarizationWorker(request, signal) {
     if (signal?.aborted) return onAbort();
     signal?.addEventListener("abort", onAbort, { once: true });
     child.on("message", (message) => {
+      if (settled) return;
+      // 进度帧没有 ok 字段：先转给调用方，Promise 仍挂起等待最终结果。
+      if (message?.progress) {
+        onProgress?.(message.progress);
+        return;
+      }
       if (message?.ok) finish(resolve, message.turns);
       else finish(reject, new Error(message?.error || "说话人分离失败。"));
     });
@@ -168,7 +174,7 @@ export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
     voiceprintSamples,
     voiceprintThreshold: profile.options?.voiceprintThreshold,
     voiceprintMargin: profile.options?.voiceprintMargin
-  }, options.signal);
+  }, { signal: options.signal, onProgress: options.onProgress });
 }
 
 /**

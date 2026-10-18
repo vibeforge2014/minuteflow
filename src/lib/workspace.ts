@@ -14,6 +14,14 @@ import type {
 export type RecorderPhase = "idle" | "starting" | "recording" | "paused" | "stopping";
 export type WorkspaceStage = "prepare" | "live" | "review";
 
+/** 本地 Whisper 的四种运行时（whisper.cpp / Python / CT2 / MLX）在 UI 上统一为一个选项。 */
+export function isLocalTranscriptionTransport(transport: string | undefined) {
+  return transport === "whisper-cpp"
+    || transport === "whisper-python"
+    || transport === "faster-whisper"
+    || transport === "mlx-whisper";
+}
+
 export interface RecordingReadinessItem {
   id: "capture" | "microphone" | "transcription";
   label: string;

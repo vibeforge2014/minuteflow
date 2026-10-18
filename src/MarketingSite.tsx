@@ -879,6 +879,8 @@ type BuyOrder = {
   expiresAt: string;
   licenseKey?: string;
   customerEmailMasked?: string;
+  // 支付落账后异步发信：只有服务端确认发出才是 true。
+  emailSent?: boolean;
 };
 
 /** 授权后端地址：生产与官网同域（nginx /api/license），本地联调直连 8787。 */
@@ -899,6 +901,8 @@ function BuyPage() {
   const [busyChannel, setBusyChannel] = useState<BuyChannel | null>(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  // 每个订单只盯一次发信结果，避免重试中的 setOrder 重新触发轮询。
+  const emailWatchRef = useRef<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   // 折扣码（ZenSoft 管理后台生成）：仅服务端校验与计价，这里只保存应用结果。
   const [discountsReady, setDiscountsReady] = useState(false);
@@ -990,6 +994,31 @@ function BuyPage() {
       cancelled = true;
       window.clearInterval(timer);
     };
+  }, [order]);
+
+  // 服务端发信失败会自行重试（5s/20s）：付款页短暂补拍，让提示反映真实结果。
+  useEffect(() => {
+    if (!order || order.state !== "paid" || !order.customerEmailMasked || order.emailSent) return;
+    if (emailWatchRef.current === order.orderId) return;
+    emailWatchRef.current = order.orderId;
+    let attempts = 0;
+    const timer = window.setInterval(async () => {
+      attempts += 1;
+      try {
+        const response = await fetch(`${licenseApiRoot()}/api/license/orders/${order.orderId}`);
+        if (response.ok) {
+          const view = await response.json();
+          if (view.state === "paid") {
+            setOrder(view);
+            if (view.emailSent) window.clearInterval(timer);
+          }
+        }
+      } catch {
+        // 网络抖动：等待下一拍。
+      }
+      if (attempts >= 6) window.clearInterval(timer);
+    }, 4_000);
+    return () => window.clearInterval(timer);
   }, [order]);
 
   // 倒计时心跳（created 状态下每秒刷新剩余时间）。
@@ -1265,7 +1294,11 @@ function BuyPage() {
             <strong>支付成功</strong>
             <code className="buy-license__key">{order.licenseKey || "激活码生成中…请稍后刷新"}</code>
             {order.customerEmailMasked && (
-              <p className="buy-license__sent">激活码已同时发送至 {order.customerEmailMasked}，请查收（别忘检查垃圾箱）。</p>
+              <p className="buy-license__sent">
+                {order.emailSent
+                  ? <>激活码已发送至 {order.customerEmailMasked}，请查收（别忘检查垃圾箱）。</>
+                  : <>激活码暂未发出。请先复制本页激活码；也可以稍后到 <a href={siteHref("/recover/")}>找回激活码</a> 页用购买邮箱重发。</>}
+              </p>
             )}
             <button type="button" className="site-button site-button--primary" onClick={() => void copyLicenseKey()}>
               {copied ? <><Check size={16} weight="bold" /> 已复制</> : <><Copy size={16} weight="bold" /> 复制激活码</>}

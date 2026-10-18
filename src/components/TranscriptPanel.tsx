@@ -8,12 +8,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
+  ArrowClockwise,
   ArrowsMerge,
+  CaretDown,
   CheckCircle,
+  Check,
+  Copy,
   FingerprintSimple,
   MagicWand,
   PencilSimple,
   Trash,
+  WarningCircle,
   X
 } from "@phosphor-icons/react";
 import type { ImportJob, Meeting, VoiceprintPerson } from "../types";
@@ -21,8 +26,15 @@ import { api } from "../lib/api";
 import { findPlayingSegment } from "../lib/workspace";
 import { mergeSpeakerLabels } from "../lib/transcript";
 import { classifyTextChange } from "../lib/content-motion";
+import type { LiveTranscriptionFailure } from "../services/recording";
 import { useEnteringItemIds } from "../hooks/useContentMotion";
 import { useExitPresence } from "../hooks/useExitPresence";
+import { ImportProcessingMeta } from "./ImportProcessingMeta";
+import {
+  describeImportProcessing,
+  isActiveImportJob,
+  isRetryableImportJob
+} from "../lib/import-status";
 import { useStreamingTranscript } from "../hooks/useStreamingTranscript";
 import type { WorkspaceStage } from "../lib/workspace";
 
@@ -40,11 +52,28 @@ interface TranscriptViewProps {
   onEmptyAction?(): void;
   /** 关键结论回链：跳到该时刻所在段落并短暂高亮（nonce 变化触发一次性定位）。 */
   jumpTarget?: { ms: number; nonce: number } | null;
+  summaryBusy?: boolean;
+  onGenerateSummary?(): void;
+  onOpenSummary?(): void;
+  /** 实时转写连续失败后的持久提示；录音结束后也保留，直到用户处理或忽略。 */
+  transcriptionFailure?: LiveTranscriptionFailure | null;
+  transcriptionIsLocal?: boolean;
+  onUseLocalWhisper?(): void;
+  onChooseTranscriptionService?(): void;
+  onDismissTranscriptionFailure?(): void;
+  /** 导入任务可恢复操作：失败/取消后重试，处理中暂停。 */
+  onRetryImport?(id: string): void;
+  onCancelImport?(id: string): void;
+  /** 跳过说话人识别，保留转写继续生成纪要。 */
+  onSkipDiarization?(id: string): void;
+  onConfigureTranscription?(): void;
 }
 
-export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction, jumpTarget }: TranscriptViewProps) {
+export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction, jumpTarget, summaryBusy, onGenerateSummary, onOpenSummary, transcriptionFailure, transcriptionIsLocal = false, onUseLocalWhisper, onChooseTranscriptionService, onDismissTranscriptionFailure, onRetryImport, onCancelImport, onSkipDiarization, onConfigureTranscription }: TranscriptViewProps) {
   /** 正在重命名的说话人 id（显示浮层输入框）。 */
   const [speakerEditor, setSpeakerEditor] = useState<string | null>(null);
+  /** 改名时是否把这个人注册进本机声纹簿（默认勾选，可显式关闭）。 */
+  const [rememberVoice, setRememberVoice] = useState(true);
   const [managerOpen, setManagerOpen] = useState(false);
   const [mergeSource, setMergeSource] = useState("");
   const [mergeTarget, setMergeTarget] = useState("");
@@ -84,6 +113,9 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   // 切换会议时重置窗口化计数。
   useEffect(() => {
     setVisibleCount(200);
+    setAutoScroll(true);
+    setManagerOpen(false);
+    setSpeakerEditor(null);
     setEditingSegmentId(null);
     setVoiceprintMessage("");
     refreshVoiceprints();
@@ -104,14 +136,14 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   // 回放进行中改由下方的“跟随回放”效果接管，两条跟随互斥。
   useEffect(() => {
     const list = listRef.current;
-    if (!list || !autoScroll || playingSegment || meeting.transcript.length === 0) return;
+    if (!list || !autoScroll || playingSegment || meeting.transcript.length === 0 || (stage !== "live" && !importActive)) return;
     // 刚发生回链/回放定位的程序性滚动短时间内不参与“跟随尾部”，避免两股滚动互相拉扯。
     if (performance.now() < followGuardUntil.current) return;
     list.scrollTo({
       top: list.scrollHeight,
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
     });
-  }, [tailSignature, autoScroll, visibleCount, playingSegment]);
+  }, [tailSignature, autoScroll, visibleCount, playingSegment, stage, importActive]);
 
   // 回放跟随（歌词式）：播放进入新段落时把该段滚到列表上部约 1/3 处；
   // 段落已在可视上中部时不重复滚动，减少无谓位移。正在播放的段落落在
@@ -181,8 +213,11 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     setAutoScroll(distanceFromBottom < 64);
   };
 
-  /** 重命名说话人：批量替换其全部段落的显示名，并把纪要标记为过期（stale）。 */
-  const renameSpeaker = (speakerId: string, name: string) => {
+  /**
+   * 重命名说话人：批量替换其全部段落的显示名，并把纪要标记为过期（stale）。
+   * 默认同时从本机音频注册声纹；用户可以在浮层里显式关闭“记住声音”。
+   */
+  const renameSpeaker = (speakerId: string, name: string, remember = true) => {
     onChange({
       ...meeting,
       transcript: meeting.transcript.map((segment) =>
@@ -190,6 +225,10 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
       summary: { ...meeting.summary, stale: true }
     });
     setSpeakerEditor(null);
+    if (!remember) {
+      setVoiceprintMessage(`姓名已应用到全部片段；没有记住声纹，下次分离不会自动使用「${name}」。`);
+      return;
+    }
     setLearningSpeakerId(speakerId);
     setVoiceprintMessage(`正在从本地音频记住“${name}”…`);
     void api.voiceprints.enroll({ meetingId: meeting.id, speakerId, name }).then((result) => {
@@ -199,6 +238,12 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
       const message = error instanceof Error ? error.message : String(error);
       setVoiceprintMessage(`姓名已修改，但暂未记住声纹：${message.replace(/^Error invoking remote method '[^']+':\s*/, "")}`);
     }).finally(() => setLearningSpeakerId(null));
+  };
+
+  /** 打开改名浮层时默认勾选“记住声音”，用户每次都可以改。 */
+  const openSpeakerEditor = (speakerId: string) => {
+    setRememberVoice(true);
+    setSpeakerEditor(speakerId);
   };
 
   /** 删除本地声纹不会改动历史逐字稿，只影响后续自动识别。 */
@@ -239,8 +284,9 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   return (
     <>
       <div className="speaker-strip">
+        <span className="speaker-strip__label">发言人</span>
         {speakers.slice(0, 3).map(([id, name]) => (
-          <button key={id} onClick={() => setSpeakerEditor(id)}>
+          <button key={id} onClick={() => openSpeakerEditor(id)}>
             <span className={`speaker-dot speaker-dot--${speakerColor(id)}`} />{name}
             {voiceprints.some((person) => person.name === name) && (
               <FingerprintSimple size={12} weight="fill" aria-label="已保存在本地声纹簿" />
@@ -348,7 +394,87 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
         </section>
       )}
       {voiceprintMessage && <p className="voiceprint-message" aria-live="polite">{voiceprintMessage}</p>}
-      {meeting.transcript.length > 0 && (
+      {transcriptionFailure && (
+        <section className="transcription-failure content-status-enter" role="alert">
+          <span className="transcription-failure__icon"><WarningCircle size={19} weight="fill" /></span>
+          <div className="transcription-failure__body">
+            <strong>{transcriptionIsLocal ? "本地转写暂时没有结果" : "在线转写暂时不可用"}</strong>
+            <p>
+              {transcriptionIsLocal
+                ? "本机模型可能尚未下载完成或正在加载。"
+                : "网络、密钥或服务额度可能有问题。"}
+              连续 {transcriptionFailure.consecutive} 次转写没有结果，录音和音频存档不受影响。
+              {stage === "live"
+                ? transcriptionIsLocal
+                  ? "可更换在线服务，或重新检查本地模型。"
+                  : "改用本地 Whisper 后从下一段开始生效，无需停止录音。"
+                : transcriptionIsLocal
+                  ? "可更换在线服务，或重新检查本地模型；设置会用于下一场会议。"
+                  : "可在下一场会议前改用本地 Whisper，避免再次中断。"}
+            </p>
+            {transcriptionFailure.message && (
+              <small title={transcriptionFailure.message}>{transcriptionFailure.message}</small>
+            )}
+            <div className="transcription-failure__actions">
+              <button type="button" className="button button--small button--primary" onClick={onUseLocalWhisper}>
+                {transcriptionIsLocal ? "检查本地 Whisper" : "改用本地 Whisper"}
+              </button>
+              <button type="button" className="button button--small" onClick={onChooseTranscriptionService}>
+                {transcriptionIsLocal ? "改用在线服务" : "更换转写服务"}
+              </button>
+              <button type="button" className="text-button" onClick={onDismissTranscriptionFailure}>暂时忽略</button>
+            </div>
+          </div>
+          <button type="button" className="icon-button transcription-failure__dismiss" aria-label="关闭转写失败提示" onClick={onDismissTranscriptionFailure}>
+            <X size={15} />
+          </button>
+        </section>
+      )}
+      {importJob && (isActiveImportJob(importJob) || [
+        "failed", "cancelled", "waiting_for_network", "waiting_for_model",
+        "waiting_for_summary_model", "waiting_for_audio_tool"
+      ].includes(importJob.status)) ? (
+        <section
+          className={`transcript-import-status transcript-import-status--${importJob.status} content-status-enter`}
+          aria-live="polite"
+        >
+          <div className="transcript-import-status__head">
+            <strong>
+              {importJob.status === "cancelled"
+                ? "处理已停止，可继续未完成的阶段"
+                : describeImportProcessing(importJob)}
+            </strong>
+            <div className="transcript-import-status__actions">
+              {isRetryableImportJob(importJob) && onRetryImport && (
+                <button type="button" className="text-button" onClick={() => onRetryImport(importJob.id)}>
+                  <ArrowClockwise size={13} />
+                  {importJob.status === "waiting_for_network" ? "立即重试" : "重试"}
+                </button>
+              )}
+              {["waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(importJob.status)
+                && onConfigureTranscription && (
+                  <button type="button" className="text-button" onClick={onConfigureTranscription}>配置模型</button>
+                )}
+              {importJob.status === "diarizing" && onSkipDiarization && (
+                <button type="button" className="text-button" onClick={() => onSkipDiarization(importJob.id)}>
+                  跳过识别，生成纪要
+                </button>
+              )}
+              {isActiveImportJob(importJob) && onCancelImport && (
+                <button
+                  type="button"
+                  className="text-button"
+                  title="暂停后可随时继续，已完成的转写不会丢失"
+                  onClick={() => onCancelImport(importJob.id)}
+                >
+                  <X size={13} />暂停处理
+                </button>
+              )}
+            </div>
+          </div>
+          <ImportProcessingMeta job={importJob} compact />
+        </section>
+      ) : meeting.transcript.length > 0 && (
         <p className="transcript-hint content-status-enter" key={transcriptStatus}>{transcriptStatus}</p>
       )}
       <div
@@ -359,29 +485,44 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
         ref={listRef}
         onScroll={handleTranscriptScroll}
       >
+        <TranscriptOverview
+          key={meeting.id}
+          summary={meeting.summary}
+          busy={summaryBusy}
+          onRefresh={onGenerateSummary}
+          onOpen={onOpenSummary}
+        />
+        {meeting.transcript.length > 0 && (
+          <div className="transcript-feed-heading"><span>会议原文</span><small>{stage === "live" ? "实时转录" : `${meeting.transcript.length} 段发言`}</small></div>
+        )}
         {meeting.transcript.length > visibleCount && (
           <button className="load-earlier" onClick={() => setVisibleCount((value) => value + 200)}>
             加载更早的 {Math.min(200, meeting.transcript.length - visibleCount)} 条
           </button>
         )}
-        {meeting.transcript.length ? visibleSegments.map((segment) => {
+        {meeting.transcript.length ? visibleSegments.map((segment, index) => {
           const enteringIndex = enteringSequence.indexOf(segment.id);
+          const previous = visibleSegments[index - 1];
+          const continuation = previous?.speakerId === segment.speakerId && segment.startMs - previous.endMs < 1500;
           return (
             // is-playing：当前播放位置命中的段落整行高亮；data-segment-id 供回放跟随定位。
             <article
-              className={`transcript-item transcript-item--${segment.status} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${jumpHighlightId === segment.id ? "is-jump-highlight" : ""} ${enteringIndex >= 0 ? "content-motion-enter" : ""}`}
+              className={`transcript-item transcript-item--${segment.status} ${continuation ? "is-continuation" : ""} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${jumpHighlightId === segment.id ? "is-jump-highlight" : ""} ${enteringIndex >= 0 ? "content-motion-enter" : ""}`}
               data-segment-id={segment.id}
               key={segment.id}
               style={enteringIndex >= 0 ? { animationDelay: `${Math.min(enteringIndex, 2) * 40}ms` } : undefined}
             >
-            <button className="transcript-time" onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
-            <div>
-              <button className={`speaker-name speaker-name--${speakerColor(segment.speakerId)}`} onClick={() => setSpeakerEditor(segment.speakerId)}>
+            <div className="transcript-item__meta">
+              <button className={`speaker-name speaker-name--${speakerColor(segment.speakerId)}`} onClick={() => openSpeakerEditor(segment.speakerId)}>
                 {segment.speakerName}
                 {voiceprints.some((person) => person.name === segment.speakerName) && (
                   <FingerprintSimple size={11} weight="fill" aria-label="已保存在本地声纹簿" />
                 )}
               </button>
+              <button className="transcript-time" aria-label={`定位到 ${formatTranscriptTime(segment.startMs)}`} onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
+            </div>
+            <div className="transcript-bubble">
+            <div className="transcript-bubble__content">
               {editingSegmentId === segment.id ? (
                 <textarea
                   autoFocus
@@ -416,7 +557,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
                   <PencilSimple size={14} />
                 </button>
               )}
-              <CheckCircle size={16} className="transcript-check" weight="duotone" />
+            </div>
             </div>
             </article>
           );
@@ -436,7 +577,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           </div>
         )}
       </div>
-      {meeting.transcript.length > 0 && <button
+      {meeting.transcript.length > 0 && (!autoScroll || stage === "live" || importActive || playingSegment) && <button
         className={`follow-control ${autoScroll ? "is-active" : ""}`}
         aria-pressed={autoScroll}
         onClick={() => {
@@ -462,17 +603,83 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
         <div className="speaker-popover">
           <PencilSimple size={16} />
           <input
+            className="speaker-popover__input"
             autoFocus
             defaultValue={speakers.find(([id]) => id === speakerEditor)?.[1] ?? ""}
             onKeyDown={(event) => {
-              if (event.key === "Enter") renameSpeaker(speakerEditor, event.currentTarget.value.trim() || "未命名发言人");
+              if (event.key === "Enter") {
+                renameSpeaker(
+                  speakerEditor,
+                  event.currentTarget.value.trim() || "未命名发言人",
+                  rememberVoice
+                );
+              }
               if (event.key === "Escape") setSpeakerEditor(null);
             }}
           />
           <small>回车应用到该发言人的全部片段</small>
+          <label className="speaker-popover__remember">
+            <input
+              type="checkbox"
+              checked={rememberVoice}
+              onChange={(event) => setRememberVoice(event.target.checked)}
+            />
+            <span>
+              让本机记住这个声音，下次自动命名
+              <small>声纹只保存在这台设备，可随时在发言人管理里删除。</small>
+            </span>
+          </label>
         </div>
       )}
     </>
+  );
+}
+
+/** 概览只摘录已有纪要，不改写原文，也不会因打开转录页触发模型请求。 */
+function TranscriptOverview({ summary, busy, onRefresh, onOpen }: {
+  summary: Meeting["summary"];
+  busy?: boolean;
+  onRefresh?(): void;
+  onOpen?(): void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const points = summary.keyPoints.filter((point) => point.trim());
+  const text = points.join("\n");
+  useEffect(() => { setCopyState("idle"); }, [text]);
+
+  return (
+    <section className={`transcript-overview ${summary.stale ? "is-stale" : ""}`} aria-label="会议概览">
+      <header>
+        <h2><MagicWand size={17} weight="duotone" />会议概览</h2>
+        <div className="transcript-overview__actions">
+          {onRefresh && <button className="icon-button" disabled={busy} title="更新纪要" aria-label="更新会议概览" onClick={onRefresh}>
+            <ArrowClockwise size={17} className={busy ? "spin" : ""} />
+          </button>}
+          {points.length > 0 && <button className="icon-button" title="复制概览" aria-label="复制会议概览" onClick={async () => {
+            try { await navigator.clipboard.writeText(text); setCopyState("copied"); }
+            catch { setCopyState("failed"); }
+          }}>{copyState === "copied" ? <Check size={17} /> : <Copy size={17} />}</button>}
+          {onOpen && <button className="transcript-overview__open" onClick={onOpen}>查看纪要</button>}
+        </div>
+      </header>
+      {points.length ? <>
+        <p>{points.slice(0, 2).join(" ")}</p>
+        {points.length > 2 && <>
+          <div className={`transcript-overview__expansion ${expanded ? "is-expanded" : ""}`} inert={!expanded}>
+            <div id="transcript-overview-more"><p>{points.slice(2).join(" ")}</p></div>
+          </div>
+          <button className="transcript-overview__toggle" aria-expanded={expanded} aria-controls="transcript-overview-more" onClick={() => setExpanded((value) => !value)}>
+            {expanded ? "收起概览" : "展开概览"}<CaretDown size={13} />
+          </button>
+        </>}
+      </> : <p className="transcript-overview__empty">{busy ? "正在整理会议概览…" : "还没有会议概览，生成纪要后会在这里呈现重点。"}</p>}
+      <footer>
+        <span>{busy ? "正在更新…" : points.length ? summary.generationMode === "local" ? "本机基础归纳 · 纪要摘录" : "AI 纪要摘录" : "原文会持续保留在下方"}</span>
+        {summary.stale && !busy && <span className="transcript-overview__stale">有新内容 · 待更新</span>}
+        <span role="status">{copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败，请重试" : ""}</span>
+      </footer>
+    </section>
   );
 }
 
@@ -513,7 +720,7 @@ function importTranscriptStatus(job: ImportJob | undefined, segmentCount: number
     return `转录服务暂时不可达，稍后将自动从第 ${(job.completedChunks || 0) + 1} 段断点继续（已等待 ${job.transcriptionRetryAttempts || 1} 次）。`;
   }
   if (job.status === "failed") return `转录暂停：${job.error || "处理失败"}`;
-  if (job.status === "cancelled") return "导入处理已取消，已有转录仍会保留。";
+  if (job.status === "cancelled") return "处理已暂停，已有转录仍会保留，可随时继续未完成的阶段。";
   if (job.status === "transcribing" || job.stage === "transcribing") {
     return job.totalChunks
       ? `正在转录第 ${Math.min((job.completedChunks || 0) + 1, job.totalChunks)}/${job.totalChunks} 段，约每 10 秒音频持续追加。`

@@ -62,7 +62,7 @@ async function ensureWave(filePath, sherpaOnnx, ffmpegPath) {
 }
 
 /** 一次完整的离线分离：分段聚类 → 簇心合并 → （有声纹簿时）自动命名。 */
-async function diarize(request) {
+async function diarize(request, reportProgress) {
   const { audioFilePath, ffmpegPath, segmentationModel, embeddingModel } = request;
   let sherpaOnnx;
   try {
@@ -70,8 +70,12 @@ async function diarize(request) {
   } catch {
     throw new Error("未安装 sherpa-onnx-node 运行时，请重新安装应用或改用手动发言人标签。");
   }
+  // 阶段进度：sherpa 的 process() 是同步原生调用、内部不回调，但进入长推理前
+  // 先发一帧「analyzing」，父进程即可显示真实的“分析中”状态与已用时间。
+  reportProgress({ phase: "preparing" });
   const waveAsset = await ensureWave(audioFilePath, sherpaOnnx, ffmpegPath);
   try {
+    reportProgress({ phase: "loading" });
     const diarizer = new sherpaOnnx.OfflineSpeakerDiarization({
       segmentation: { pyannote: { model: segmentationModel } },
       embedding: { model: embeddingModel },
@@ -87,12 +91,17 @@ async function diarize(request) {
     if (diarizer.sampleRate !== wave.sampleRate) {
       throw new Error(`说话人模型需要 ${diarizer.sampleRate}Hz 音频，实际为 ${wave.sampleRate}Hz。`);
     }
+    reportProgress({
+      phase: "analyzing",
+      audioDurationMs: Math.round((wave.samples.length / Math.max(1, wave.sampleRate)) * 1000)
+    });
     const rawTurns = diarizer.process(wave.samples).map((turn) => ({
       startMs: Math.round((turn.start ?? turn.startSeconds ?? 0) * 1000),
       endMs: Math.round((turn.end ?? turn.endSeconds ?? 0) * 1000),
       speakerId: `speaker-${Number(turn.speaker ?? turn.speakerId ?? 0) + 1}`
     }));
     // 阈值聚类在真实嘈杂音频上常把同一人劈成多个簇：算出簇心后做后处理合并。
+    reportProgress({ phase: "refining" });
     const centroidEmbeddings = computeClusterCentroids(sherpaOnnx, embeddingModel, wave, rawTurns);
     const turns = mergeDiarizationClusters(rawTurns, centroidEmbeddings);
     const samples = (request.voiceprintSamples ?? []).map((sample) => ({
@@ -101,6 +110,7 @@ async function diarize(request) {
     }));
     if (!samples.length) return turns;
 
+    reportProgress({ phase: "naming" });
     const identified = new Map();
     const claimedNames = new Set();
     const candidates = [];
@@ -135,7 +145,9 @@ async function diarize(request) {
 
 process.parentPort.on("message", (event) => {
   const { id, ...request } = event.data ?? {};
-  diarize(request)
+  // 进度帧与结果帧共用 id；父进程按 message.progress 区分，不会误当结果。
+  const reportProgress = (progress) => process.parentPort.postMessage({ id, progress });
+  diarize(request, reportProgress)
     .then((turns) => process.parentPort.postMessage({ id, ok: true, turns }))
     .catch((error) => process.parentPort.postMessage({
       id, ok: false, error: error instanceof Error ? error.message : String(error ?? "说话人分离失败。")

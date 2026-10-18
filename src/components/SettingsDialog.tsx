@@ -317,7 +317,10 @@ const invalidateVisualVerification = (options: ModelProfile["options"]): ModelPr
 /** 设置页标签：五个标签页（软件更新仅桌面端展示）。 */
 export type SettingsTab = "llm" | "transcription" | "general" | "storage" | "updates";
 
-export function SettingsDialog({ open, initialTab, onClose, licenseStatus, onLicenseStatusChange }: { open: boolean; initialTab?: SettingsTab; onClose(): void; licenseStatus: LicenseStatus | null; onLicenseStatusChange(status: LicenseStatus): void }) {
+/** 打开设置时的定位意图：直接把编辑器切到对应表单，而不是让用户自己在目录里找。 */
+export type SettingsFocus = "local-whisper" | "online-transcription";
+
+export function SettingsDialog({ open, initialTab, initialFocus, onClose, licenseStatus, onLicenseStatusChange }: { open: boolean; initialTab?: SettingsTab; initialFocus?: SettingsFocus; onClose(): void; licenseStatus: LicenseStatus | null; onLicenseStatusChange(status: LicenseStatus): void }) {
   const profiles = useMeetingStore((state) => state.profiles);
   const setProfiles = useMeetingStore((state) => state.setProfiles);
   const preferences = useMeetingStore((state) => state.preferences);
@@ -415,6 +418,34 @@ export function SettingsDialog({ open, initialTab, onClose, licenseStatus, onLic
       options: { ...emptyProfile.options, ...(preset.options ?? {}) }
     });
   }, [editing, open, profiles, tab]);
+
+  // 深链定位（转写失败横幅 / 引导里的「去配置」）：跳过目录浏览，直接把编辑器切到
+  // 对应表单。本地已有同类档案时优先复用并标记为启用——保存即生效，不会凭空多一份副本。
+  useEffect(() => {
+    if (!open || !initialFocus) return;
+    setTab("transcription");
+    const saved = initialFocus === "local-whisper"
+      ? profiles.find((profile) => profile.kind === "stt" && isLocalWhisperTransport(profile.transport))
+      : profiles.find((profile) => profile.kind === "stt" && profile.transport === "openai-audio");
+    if (saved) {
+      setEditing({
+        ...normalizeLegacyProviderProfile(saved),
+        ...(initialFocus === "local-whisper" ? { enabled: true } : {})
+      });
+    } else {
+      const preset = initialFocus === "local-whisper" ? providerPresets.whisper : providerPresets.openaiWhisper;
+      setEditing({
+        ...emptyProfile,
+        ...preset,
+        options: { ...emptyProfile.options, ...(preset.options ?? {}) }
+      });
+    }
+    setApiKey("");
+    setStatus(null);
+    setEditorGeneration((value) => value + 1);
+    // profiles 只在打开瞬间用于挑选可复用档案；后续 loadProfiles 刷新不应覆盖用户选择。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialFocus]);
 
   // 进入「软件更新」页时读取主进程缓存的更新状态（启动时已静默检查过一次）。
   useEffect(() => {
@@ -741,7 +772,7 @@ export function SettingsDialog({ open, initialTab, onClose, licenseStatus, onLic
                         <button className={editing?.name === "Ollama" ? "is-selected" : ""} onClick={() => startPreset("ollama")}><span className="profile-icon">OL</span><span><strong>Ollama</strong><small>数据留在本机 · 需要已安装服务</small></span>{editing?.name === "Ollama" && <CheckCircle size={16} weight="fill" />}</button>
                       </>
                     ) : (
-                      <button className={isLocalWhisperTransport(editing?.transport) ? "is-selected" : ""} onClick={() => startPreset("whisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>本地 Whisper</strong><small>自动适配 GGML/GGUF、.pt、CT2 与 MLX</small></span>{isLocalWhisperTransport(editing?.transport) && <CheckCircle size={16} weight="fill" />}</button>
+                      <button className={isLocalWhisperTransport(editing?.transport) ? "is-selected" : ""} onClick={() => startPreset("whisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>本地 Whisper<em className="model-catalog__tag">离线</em></strong><small>无需联网 · 音频不出本机</small></span>{isLocalWhisperTransport(editing?.transport) && <CheckCircle size={16} weight="fill" />}</button>
                     )}
                   </div>
                   {tab === "llm" ? (
@@ -756,7 +787,7 @@ export function SettingsDialog({ open, initialTab, onClose, licenseStatus, onLic
                       <button
                         className={editing?.transport === "openai-audio" ? "is-selected" : ""}
                         onClick={() => startPreset("openaiWhisper")}
-                      ><span className="profile-icon"><CloudArrowDown size={18} /></span><span><strong>在线语音转录</strong><small>OpenAI 兼容音频接口 · 无需下载模型</small></span>{editing?.transport === "openai-audio" && <CheckCircle size={16} weight="fill" />}</button>
+                      ><span className="profile-icon"><CloudArrowDown size={18} /></span><span><strong>在线语音转录</strong><small>配置好即可用 · 网络或额度异常时可随时切回本地</small></span>{editing?.transport === "openai-audio" && <CheckCircle size={16} weight="fill" />}</button>
                     </div>
                     <div className="model-catalog__section"><span>说话人分离</span>
                       <button className={editing?.transport === "sherpa-onnx" ? "is-selected" : ""} onClick={() => startPreset("sherpa")}><span className="profile-icon"><FingerprintSimple size={18} /></span><span><strong>本地声纹识别</strong><small>多人会议区分发言人 · 数据不出本机</small></span>{editing?.transport === "sherpa-onnx" && <CheckCircle size={16} weight="fill" />}</button>
@@ -795,9 +826,31 @@ export function SettingsDialog({ open, initialTab, onClose, licenseStatus, onLic
                     <div className="profile-editor-heading">
                       <span className="profile-editor-heading__icon">{editing.kind === "stt" ? <Waveform size={24} /> : editing.kind === "diarization" ? <FingerprintSimple size={24} /> : <Sparkle size={24} />}</span>
                       <div><h2>{editing.name}</h2><p>{editing.kind === "stt" ? "将会议音频转换为可编辑的中文与多语言文本。" : editing.kind === "diarization" ? "在多人会议中区分不同发言人，并按声纹簿自动套用姓名。" : "用于会议总结、行动项提取与内容整理。"}</p></div>
+                      {editing.id && !editing.enabled && (
+                        <button type="button" className="button button--small profile-editor-heading__enable" onClick={() => void toggleActiveProfile(editing)}>设为正在使用</button>
+                      )}
                     </div>
                     <div className="profile-editor-divider" />
                   <div className="profile-editor">
+                    {tab === "transcription" && editing.kind === "stt" && (
+                      isLocalWhisperTransport(editing.transport) ? (
+                        <div className="transcription-alternative">
+                          <span>
+                            <strong>需要更高准确率？可改用在线服务</strong>
+                            <small>在线 Whisper 通常更快、更准，但受网络和额度影响；本地 Whisper 始终可离线使用。</small>
+                          </span>
+                          <button type="button" className="button button--small" onClick={() => startPreset("openaiWhisper")}>改用在线服务</button>
+                        </div>
+                      ) : (
+                        <div className="transcription-alternative">
+                          <span>
+                            <strong>在线服务不可用？改用本地 Whisper</strong>
+                            <small>音频不离开这台电脑，无需联网；首次使用需下载模型。保存配置后，正在进行的录音从下一段自动生效。</small>
+                          </span>
+                          <button type="button" className="button button--small button--primary" onClick={() => startPreset("whisper")}>改用本地 Whisper</button>
+                        </div>
+                      )
+                    )}
                     <div className="form-grid">
                       <label className="field"><span>服务商</span>
                         <select value={activePresetKey} onChange={(event) => {

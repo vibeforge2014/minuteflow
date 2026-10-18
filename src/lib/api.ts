@@ -522,7 +522,17 @@ const browserApi: MeetingAPI = {
     async retry(id) {
       const current = loadBrowserImportJobs().find((job) => job.id === id);
       if (!current) throw new Error("导入任务不存在。");
-      const job = { ...current, status: "queued" as const, error: undefined, updatedAt: new Date().toISOString() };
+      const job = {
+        ...current,
+        status: "queued" as const,
+        progress: 0,
+        error: undefined,
+        transcriptionRetryAttempts: 0,
+        diarizationPhase: undefined,
+        diarizationStartedAt: undefined,
+        diarizationAudioDurationMs: undefined,
+        updatedAt: new Date().toISOString()
+      };
       saveBrowserImportJob(job);
       return job;
     },
@@ -533,10 +543,30 @@ const browserApi: MeetingAPI = {
       saveBrowserImportJob(job);
       return job;
     },
+    async skipDiarization(id) {
+      const current = loadBrowserImportJobs().find((job) => job.id === id);
+      if (!current) throw new Error("导入任务不存在。");
+      if (current.diarizationComplete || current.diarizationSkipped) return current;
+      // 浏览器演示没有后台 worker：跳过即把断点推进到纪要阶段，与桌面语义一致。
+      const job = {
+        ...current,
+        diarizationSkipped: true,
+        diarizationComplete: true,
+        diarizationPhase: undefined,
+        diarizationStartedAt: undefined,
+        diarizationAudioDurationMs: undefined,
+        status: "summarizing" as const,
+        stage: "summarizing" as const,
+        progress: Math.max(current.progress, 0.8),
+        updatedAt: new Date().toISOString()
+      };
+      saveBrowserImportJob(job);
+      return job;
+    },
     async remove(id) {
       const current = loadBrowserImportJobs().find((job) => job.id === id);
       if (!current) throw new Error("导入任务不存在。");
-      if (!["complete", "cancelled", "failed", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(current.status)) {
+      if (!["complete", "cancelled", "failed", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool", "waiting_for_network"].includes(current.status)) {
         throw new Error("任务正在处理中，请先取消再删除。");
       }
       localStorage.setItem(importJobsKey, JSON.stringify(loadBrowserImportJobs().filter((job) => job.id !== id)));
@@ -546,7 +576,8 @@ const browserApi: MeetingAPI = {
       importListeners.add(callback);
       return () => importListeners.delete(callback);
     },
-    onMeetingUpdated() { return () => {}; }
+    onMeetingUpdated() { return () => {}; },
+    onOpenMeeting() { return () => {}; }
   },
   exports: {
     // 无系统保存框，用 Blob + <a download> 触发浏览器下载。

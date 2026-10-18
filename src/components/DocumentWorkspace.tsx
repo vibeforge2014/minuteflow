@@ -41,7 +41,10 @@ import { useMeetingStore } from "../store/meetingStore";
 import type { RecordingReadiness, WorkspaceStage } from "../lib/workspace";
 import { VisualSummaryView } from "./VisualSummaryView";
 import { TranscriptView, formatTranscriptTime } from "./TranscriptPanel";
+import { ImportProcessingMeta } from "./ImportProcessingMeta";
+import { isActiveImportJob, isRetryableImportJob } from "../lib/import-status";
 import type { ContentChangeKind } from "../lib/content-motion";
+import type { LiveTranscriptionFailure } from "../services/recording";
 import { useEnteringItemIds, useSummaryContentMotion } from "../hooks/useContentMotion";
 
 interface DocumentWorkspaceProps {
@@ -53,6 +56,11 @@ interface DocumentWorkspaceProps {
   processingStatus?: string;
   /** 导入任务（转写视图顶部的即时状态行）。 */
   importJob?: ImportJob;
+  /** 重试/取消后台导入处理；失败后可直接在会后文档里恢复。 */
+  onRetryImport?(id: string): void;
+  onCancelImport?(id: string): void;
+  /** 跳过说话人识别：转写已就绪时先用现有发言人占位继续生成纪要。 */
+  onSkipDiarization?(id: string): void;
   /** 当前播放位置（毫秒），转写视图中用于歌词式高亮。 */
   playbackMs?: number;
   /** 点击转写时间戳时请求播放器跳转。 */
@@ -63,6 +71,13 @@ interface DocumentWorkspaceProps {
   onChange(meeting: Meeting): void;
   onStartRecording(): Promise<void>;
   onConfigureTranscription(): void;
+  /** 实时转写连续失败（重试耗尽）：在转写视图顶部展示可操作的持久横幅。 */
+  transcriptionFailure?: LiveTranscriptionFailure | null;
+  /** 当前转写是否为本机 Whisper，决定横幅里的主行动文案。 */
+  transcriptionIsLocal?: boolean;
+  onUseLocalWhisper?(): void;
+  onChooseTranscriptionService?(): void;
+  onDismissTranscriptionFailure?(): void;
   onOpenPermissions(): void;
   /** 手动触发 AI 总结（录音中为滚动增量，会后为终稿）。 */
   onGenerateSummary(): void;
@@ -81,6 +96,9 @@ export function DocumentWorkspace({
   recentlyFinalized,
   processingStatus,
   importJob,
+  onRetryImport,
+  onCancelImport,
+  onSkipDiarization,
   playbackMs = 0,
   onSeek,
   emptyActionLabel,
@@ -88,6 +106,11 @@ export function DocumentWorkspace({
   onChange,
   onStartRecording,
   onConfigureTranscription,
+  transcriptionFailure,
+  transcriptionIsLocal = false,
+  onUseLocalWhisper,
+  onChooseTranscriptionService,
+  onDismissTranscriptionFailure,
   onOpenPermissions,
   onGenerateSummary,
   onCancelSummary,
@@ -304,6 +327,18 @@ export function DocumentWorkspace({
             jumpTarget={transcriptJump}
             emptyActionLabel={emptyActionLabel}
             onEmptyAction={onEmptyAction}
+            summaryBusy={summaryBusy || Boolean(processingStatus)}
+            onGenerateSummary={onGenerateSummary}
+            onOpenSummary={() => { setSummaryView("normal"); setWorkspaceView("document"); }}
+            transcriptionFailure={transcriptionFailure}
+            transcriptionIsLocal={transcriptionIsLocal}
+            onUseLocalWhisper={onUseLocalWhisper}
+            onChooseTranscriptionService={onChooseTranscriptionService}
+            onDismissTranscriptionFailure={onDismissTranscriptionFailure}
+            onRetryImport={onRetryImport}
+            onCancelImport={onCancelImport}
+            onSkipDiarization={onSkipDiarization}
+            onConfigureTranscription={onConfigureTranscription}
           />
         </div>
       ) : (
@@ -347,8 +382,13 @@ export function DocumentWorkspace({
                   {item.id === "microphone" && readiness.microphoneNeedsAttention && (
                     <button className="text-button" onClick={onOpenPermissions}>查看授权</button>
                   )}
-                  {item.id === "transcription" && !readiness.hasTranscription && (
-                    <button className="text-button" onClick={onConfigureTranscription}>配置转写</button>
+                  {item.id === "transcription" && (
+                    <div className="readiness-item__actions">
+                      <button className="text-button" onClick={onUseLocalWhisper}>本地 Whisper</button>
+                      <button className="text-button" onClick={onConfigureTranscription}>
+                        {readiness.hasTranscription ? "更换服务" : "在线服务"}
+                      </button>
+                    </div>
                   )}
                 </div>
               ))}
@@ -375,10 +415,23 @@ export function DocumentWorkspace({
         {stage === "review" && (
           <section className={`review-hero ${recentlyFinalized || processingStatus ? "is-fresh" : ""}`}>
             <div>
-              <span className="eyebrow">{processingStatus ? "录音处理中" : "会后整理"}</span>
+              <span className="eyebrow">{processingStatus
+                ? importJob?.status === "cancelled"
+                  ? "处理已暂停"
+                  : importJob?.status === "failed"
+                    ? "处理失败"
+                    : importJob?.status === "diarizing"
+                      ? "识别发言人"
+                      : "录音处理中"
+                : "会后整理"}</span>
               <h1>{processingStatus || (recentlyFinalized ? "录音已安全保存" : "把讨论收束成清晰结果")}</h1>
+              {importJob && processingStatus && <ImportProcessingMeta job={importJob} />}
               <p>{processingStatus
-                ? "处理会在后台继续，你可以先补充笔记或查看已经出现的转写。"
+                ? importJob?.status === "failed" || importJob?.status === "cancelled"
+                  ? "已完成的转写和音频都已保存；继续处理会从当前阶段接着跑。"
+                  : importJob?.status === "diarizing"
+                    ? "转写已经完整可读，正在本机识别不同发言人。可以先看转写，或跳过这一步直接生成纪要。"
+                    : "处理会在后台继续，你也可以先补充笔记或查看已经出现的转写；长阶段可随时暂停。"
                 : meeting.summary.stale
                   ? "转写或笔记有了新内容，更新纪要后再确认行动项。"
                   : summaryView === "visual" && meeting.summary.visualSummary && !meeting.summary.visualSummary.stale
@@ -388,6 +441,32 @@ export function DocumentWorkspace({
                     : "录音和个人记录已保留；需要时再生成最终纪要。"}</p>
             </div>
             <div className="review-hero__side">
+              {importJob?.status === "diarizing" && (
+                <>
+                  <button className="button button--secondary" onClick={() => setWorkspaceView("transcript")}>
+                    <NotePencil size={16} />先看转写
+                  </button>
+                  {onSkipDiarization && (
+                    <button className="button button--secondary" onClick={() => onSkipDiarization(importJob.id)}>
+                      <CaretRight size={16} />跳过识别，生成纪要
+                    </button>
+                  )}
+                </>
+              )}
+              {importJob && isActiveImportJob(importJob) && onCancelImport && (
+                <button
+                  className="button button--secondary"
+                  title="暂停后可随时继续，已完成的转写不会丢失"
+                  onClick={() => onCancelImport(importJob.id)}
+                >
+                  <XCircle size={16} />暂停处理
+                </button>
+              )}
+              {importJob && !isActiveImportJob(importJob) && isRetryableImportJob(importJob) && onRetryImport && (
+                <button className="button button--primary" onClick={() => onRetryImport(importJob.id)}>
+                  <ArrowClockwise size={16} />重试处理
+                </button>
+              )}
               <div className="summary-view-switch" role="tablist" aria-label="纪要显示方式">
                 <button role="tab" aria-selected={summaryView === "normal"} className={summaryView === "normal" ? "is-active" : ""} onClick={() => setSummaryView("normal")}>
                   <FileText size={15} />普通纪要

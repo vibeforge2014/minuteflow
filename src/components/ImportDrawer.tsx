@@ -8,6 +8,8 @@ import { ArrowClockwise, Check, FileAudio, GearSix, Pause, Trash, WarningCircle,
 import { useEffect, useMemo, useState } from "react";
 import type { ImportCandidate, ImportJob, ModelProfile } from "../types";
 import { useEnteringItemIds } from "../hooks/useContentMotion";
+import { formatDuration } from "../lib/format";
+import { ImportProcessingMeta } from "./ImportProcessingMeta";
 
 interface Props {
   open: boolean;
@@ -22,6 +24,8 @@ interface Props {
   onEnqueue(items: ImportCandidate[], options: { language: string; sttProfileId?: string; llmProfileId?: string; diarizationEnabled: boolean; autoSummarize: boolean }): Promise<void>;
   onRetry(id: string): void;
   onCancel(id: string): void;
+  /** 说话人识别耗时过长时跳过，先用现有转写继续生成纪要。 */
+  onSkipDiarization(id: string): void;
   /** 从队列移除终态/等待态任务记录（不影响已创建的会议）。 */
   onRemove(id: string): void;
   onOpenMeeting(id: string): void;
@@ -34,7 +38,7 @@ const statusText: Record<ImportJob["status"], string> = {
   diarizing: "识别发言人", summarizing: "生成纪要", waiting_for_model: "等待配置转录",
   waiting_for_summary_model: "等待配置总结", waiting_for_audio_tool: "等待音频组件",
   waiting_for_network: "等待网络，自动续跑",
-  complete: "已完成", cancelled: "已取消，可继续", failed: "处理失败"
+  complete: "已完成", cancelled: "已暂停，可继续", failed: "处理失败"
 };
 
 export function ImportDrawer(props: Props) {
@@ -45,9 +49,18 @@ export function ImportDrawer(props: Props) {
   const [sttProfileId, setSttProfileId] = useState(sttProfiles[0]?.id || "");
   const [llmProfileId, setLlmProfileId] = useState(llmProfiles[0]?.id || "");
   const [diarizationEnabled, setDiarizationEnabled] = useState(true);
+  // 自动纪要曾经被硬编码为 true：想先自己看转写的人没有办法关掉模型调用。
+  const [autoSummarize, setAutoSummarize] = useState(true);
   const [busy, setBusy] = useState(false);
   const enteringCandidates = useEnteringItemIds("import-candidates", props.candidates.map((file) => file.sourcePath));
   const enteringJobs = useEnteringItemIds("import-jobs", props.jobs.map((job) => job.id));
+  // 队列是 FIFO：排队顺位按创建时间计算，和处理 worker 的取用顺序一致。
+  const queuedOrder = useMemo(() => {
+    const queued = props.jobs
+      .filter((job) => job.status === "queued")
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    return new Map(queued.map((job, index) => [job.id, index + 1]));
+  }, [props.jobs]);
 
   // 档案列表后加载（如刚打开设置保存了新档案）时，把空选择补默认值。
   useEffect(() => { if (!sttProfileId && sttProfiles[0]?.id) setSttProfileId(sttProfiles[0].id); }, [sttProfileId, sttProfiles]);
@@ -93,10 +106,20 @@ export function ImportDrawer(props: Props) {
             <label>转录模型<select value={sttProfileId} onChange={(event) => setSttProfileId(event.target.value)}><option value="">稍后配置</option>{sttProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
             <label>总结模型<select value={llmProfileId} onChange={(event) => setLlmProfileId(event.target.value)}><option value="">稍后配置</option>{llmProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
             <label className="import-check"><input type="checkbox" checked={diarizationEnabled} onChange={(event) => setDiarizationEnabled(event.target.checked)} />识别不同发言人</label>
+            <label className="import-check"><input type="checkbox" checked={autoSummarize} onChange={(event) => setAutoSummarize(event.target.checked)} />转录后自动生成纪要</label>
           </div>
+          <p className="import-expectation">
+            {(() => {
+              const totalMs = props.candidates.reduce((sum, file) => sum + (file.durationMs || 0), 0);
+              if (!props.candidates.length) return "";
+              return totalMs > 0
+                ? `音频合计约 ${formatDuration(totalMs / 1000)}，会在后台分段转录${autoSummarize ? "并生成纪要" : ""}；处理时长取决于录音长度与模型，期间可继续使用其他会议。`
+                : `${props.candidates.length} 个文件会按顺序在后台处理；归档后会显示时长与转录进度。`;
+            })()}
+          </p>
           {!sttProfiles.length && <button className="import-model-hint" onClick={props.onConfigure}><GearSix size={16} /><span><strong>尚未配置转录模型</strong>音频仍会先安全归档，配置后自动继续。</span></button>}
           <button className="button button--primary import-submit" disabled={busy || props.candidates.some((item) => !item.title.trim())} onClick={async () => {
-            setBusy(true); try { await props.onEnqueue(props.candidates, { language, sttProfileId: sttProfileId || undefined, llmProfileId: llmProfileId || undefined, diarizationEnabled, autoSummarize: true }); } finally { setBusy(false); }
+            setBusy(true); try { await props.onEnqueue(props.candidates, { language, sttProfileId: sttProfileId || undefined, llmProfileId: llmProfileId || undefined, diarizationEnabled, autoSummarize }); } finally { setBusy(false); }
           }}>{busy ? "正在加入…" : `导入并后台处理 ${props.candidates.length} 个文件`}</button>
           {props.candidates.some((item) => !item.title.trim()) && (
             // 提交按钮因标题为空被禁用时，明确告诉用户缺什么，而不是只留一个灰按钮。
@@ -113,13 +136,14 @@ export function ImportDrawer(props: Props) {
           <article className={`import-job import-job--${job.status} ${enteringJobs.has(job.id) ? "content-motion-enter" : ""}`} key={job.id} onClick={() => job.meetingId && props.onOpenMeeting(job.meetingId)}>
             <div className="import-job__top"><span className="import-job__state content-status-enter" key={job.status}>{job.status === "complete" ? <Check size={14} weight="bold" /> : job.status === "cancelled" ? <Pause size={14} /> : <FileAudio size={14} />}{statusText[job.status]}</span><time>{new Date(job.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time></div>
             <h3>{job.title}</h3><p>{job.sourceName}</p>
-            <div className="import-progress"><i style={{ width: `${Math.max(3, job.progress * 100)}%` }} /></div>
+            <ImportProcessingMeta job={job} compact showDetail={!job.error} queuePosition={queuedOrder.get(job.id)} />
             {job.error && <p className="import-job__error content-motion-enter">{job.error}</p>}
             <div className="import-job__actions" onClick={(event) => event.stopPropagation()}>
               {/* 行内操作按钮阻止冒泡，避免触发整行「打开会议」。 */}
               {["failed", "cancelled", "waiting_for_network"].includes(job.status) && <button onClick={() => props.onRetry(job.id)}><ArrowClockwise size={14} />{job.status === "waiting_for_network" ? "立即重试" : "重试当前阶段"}</button>}
               {["waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(job.status) && <button onClick={props.onConfigure}><GearSix size={14} />配置</button>}
-              {!['complete', 'cancelled', 'failed'].includes(job.status) && <button onClick={() => props.onCancel(job.id)}>取消</button>}
+              {job.status === "diarizing" && <button onClick={() => props.onSkipDiarization(job.id)}>跳过识别</button>}
+              {!['complete', 'cancelled', 'failed'].includes(job.status) && <button onClick={() => props.onCancel(job.id)}>暂停</button>}
               {["complete", "cancelled", "failed", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool", "waiting_for_network"].includes(job.status) && <button className="import-job__remove" onClick={() => props.onRemove(job.id)}><Trash size={14} />删除</button>}
             </div>
           </article>

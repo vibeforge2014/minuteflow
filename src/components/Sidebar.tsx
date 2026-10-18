@@ -29,6 +29,8 @@ interface SidebarProps {
   onImport(): void;
   /** 进行中的导入任务数（导入按钮角标）。 */
   importCount?: number;
+  /** 处理失败的导入任务数：用红色角标提示“有任务需要处理”，而不是静默消失。 */
+  importIssueCount?: number;
   /** 行内星标：收藏/取消收藏某个会议。 */
   onToggleFavorite(id: string): void;
   /** 行内删除：软删除移入最近删除（可恢复）。 */
@@ -37,7 +39,7 @@ interface SidebarProps {
   onSettings(): void;
 }
 
-export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, importCount = 0, onToggleFavorite, onDeleteMeeting, onTrash, onSettings }: SidebarProps) {
+export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, importCount = 0, importIssueCount = 0, onToggleFavorite, onDeleteMeeting, onTrash, onSettings }: SidebarProps) {
   const search = useMeetingStore((state) => state.search);
   const setSearch = useMeetingStore((state) => state.setSearch);
   // 收藏置顶 + 时间分组（搜索时退回纯时间分组），meetings/搜索状态变化时才重算。
@@ -138,7 +140,16 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, impor
       </div>
 
       <nav className="sidebar-actions" aria-label="辅助功能">
-        <button onClick={onImport}><FileArrowUp size={18} />导入录音{importCount > 0 && <span className="sidebar-task-count">{importCount}</span>}</button>
+        <button onClick={onImport}>
+          <FileArrowUp size={18} />
+          导入录音
+          {importCount > 0 && <span className="sidebar-task-count" title={`${importCount} 项正在后台处理`}>{importCount}</span>}
+          {importIssueCount > 0 && (
+            <span className="sidebar-task-count is-issue" title={`${importIssueCount} 项导入失败，点击查看并重试`}>
+              {importIssueCount}
+            </span>
+          )}
+        </button>
         <button onClick={onTrash}><Trash size={18} />最近删除</button>
         <button onClick={onSettings}><GearSix size={18} />设置</button>
       </nav>

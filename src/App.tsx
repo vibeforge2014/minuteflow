@@ -23,8 +23,9 @@ import { Sidebar } from "./components/Sidebar";
 import { DocumentWorkspace } from "./components/DocumentWorkspace";
 import { ChatPanel } from "./components/ChatPanel";
 import { RecorderBar } from "./components/RecorderBar";
+import { RecordingDock } from "./components/RecordingDock";
 import { NewMeetingDialog } from "./components/NewMeetingDialog";
-import { SettingsDialog, type SettingsTab } from "./components/SettingsDialog";
+import { SettingsDialog, type SettingsFocus, type SettingsTab } from "./components/SettingsDialog";
 import { ExportMenu } from "./components/ExportMenu";
 import { Toast } from "./components/Toast";
 import { EmptyState } from "./components/EmptyState";
@@ -40,7 +41,8 @@ import { useExitPresence } from "./hooks/useExitPresence";
 import { api } from "./lib/api";
 import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Meeting } from "./types";
 import { BrandMark } from "./components/BrandMark";
-import { buildRecordingReadiness, deriveWorkspaceStage, shouldAutoOpenRightPanel, type WorkspaceStage } from "./lib/workspace";
+import { buildRecordingReadiness, deriveWorkspaceStage, isLocalTranscriptionTransport, shouldAutoOpenRightPanel, type WorkspaceStage } from "./lib/workspace";
+import { describeImportProcessing } from "./lib/import-status";
 import type { SystemPermissionStatus } from "./types";
 import { finishPermissionSetup, shouldOpenPermissionSetup } from "./lib/permissions";
 
@@ -70,6 +72,8 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 打开设置时的初始页（如更新提示直达「软件更新」）；undefined 表示沿用上次页。 */
   const [settingsTab, setSettingsTab] = useState<SettingsTab>();
+  /** 打开设置时的定位意图：直达本地 Whisper 或在线转写表单，而不是让用户自己找。 */
+  const [settingsFocus, setSettingsFocus] = useState<SettingsFocus>();
   const [trashOpen, setTrashOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [permissionsOpen, setPermissionsOpen] = useState(false);
@@ -84,6 +88,8 @@ export function App() {
   const [importOpen, setImportOpen] = useState(false);
   const [importCandidates, setImportCandidates] = useState<ImportCandidate[]>([]);
   const [importJobs, setImportJobs] = useState<ImportJob[]>([]);
+  /** 从导入抽屉去配置模型：关闭设置后回到原流程，而不是让用户重新找入口。 */
+  const settingsReturnRef = useRef<"import" | null>(null);
   const [playbackMs, setPlaybackMs] = useState(0);
   const [seekToMs, setSeekToMs] = useState<number | null>(null);
   const [playerAvailable, setPlayerAvailable] = useState(false);
@@ -91,8 +97,9 @@ export function App() {
   const [permissionStatus, setPermissionStatus] = useState<SystemPermissionStatus | null>(null);
   const [continueRecordingOpen, setContinueRecordingOpen] = useState(false);
   const [recentlyFinalizedId, setRecentlyFinalizedId] = useState<string | null>(null);
-  // 已提示过“导入完成”的任务 id 集合：防止事件订阅重放历史任务时重复弹 Toast。
+  // 已提示过“导入完成/失败”的任务 id 集合：防止事件订阅重放历史任务时重复弹 Toast。
   const completedImports = useRef(new Set<string>());
+  const failedImports = useRef(new Set<string>());
   const previousWorkspaceRef = useRef<{ meetingId: string; stage: WorkspaceStage } | null>(null);
   const autoLayoutKeyRef = useRef("");
 
@@ -101,10 +108,19 @@ export function App() {
     setToast(action ? { message, action } : { message });
   }, []);
 
-  /** 打开设置，可选直达某个标签页。 */
-  const openSettings = useCallback((tab?: SettingsTab) => {
+  /** 打开设置，可选直达某个标签页与具体配置表单。 */
+  const openSettings = useCallback((tab?: SettingsTab, focus?: SettingsFocus) => {
     setSettingsTab(tab);
+    setSettingsFocus(focus);
     setSettingsOpen(true);
+  }, []);
+
+  /** 打开某场导入生成的会议（Toast 动作与系统通知共用）：必要时先清掉过滤。 */
+  const openImportedMeeting = useCallback((meetingId: string) => {
+    const store = useMeetingStore.getState();
+    if (store.search.trim()) void store.setSearch("");
+    store.selectMeeting(meetingId);
+    setImportOpen(false);
   }, []);
 
   // 启动时加载会议/模型/偏好，并拉取一次授权状态（付费墙开关）。
@@ -125,16 +141,34 @@ export function App() {
     api.imports.list().then((jobs) => {
       setImportJobs(jobs);
       jobs.filter((job) => job.status === "complete").forEach((job) => completedImports.current.add(job.id));
+      jobs.filter((job) => job.status === "failed").forEach((job) => failedImports.current.add(job.id));
     }).catch(() => {});
     return api.imports.onJobUpdated((job) => {
       setImportJobs((current) => [job, ...current.filter((item) => item.id !== job.id)].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)));
       if (job.status === "complete" && !completedImports.current.has(job.id)) {
         completedImports.current.add(job.id);
-        notify(`“${job.title}”已完成导入，可从左侧「导入录音」打开它，或直接在会议库中查看。`);
+        notify(`「${job.title}」的转写与纪要已就绪。`, {
+          label: "打开会议",
+          run: () => openImportedMeeting(job.meetingId)
+        });
         void refreshMeetings();
       }
+      if (job.status === "failed") {
+        if (!failedImports.current.has(job.id)) {
+          failedImports.current.add(job.id);
+          notify(`「${job.title}」处理失败：${job.error || "未知原因"}。可打开任务队列重试。`);
+        }
+      } else {
+        // 失败后重试再次失败时仍要提醒，因此离开 failed 就复位一次。
+        failedImports.current.delete(job.id);
+      }
     });
-  }, [refreshMeetings]);
+  }, [notify, openImportedMeeting, refreshMeetings]);
+
+  // 点击系统通知：回到应用并直接打开对应的会议（失败任务会停在文档里的重试入口）。
+  useEffect(() => api.imports.onOpenMeeting((meetingId) => {
+    if (meetingId) openImportedMeeting(meetingId);
+  }), [openImportedMeeting]);
 
   // 导入分段完成后主进程直接推送会议快照；只合并后台拥有的字段，避免覆盖用户正在写的笔记。
   useEffect(() => api.imports.onMeetingUpdated((updatedMeeting) => {
@@ -158,12 +192,36 @@ export function App() {
   }, [forceMacPermissionPreview, loading, preferences.onboardingCompleted, preferences.permissionSetupResume, preferences.systemPermissionsCompleted]);
 
   // 付费功能守卫：已授权直接放行；未授权则记住触发原因并弹出门槛（¥99 一次性购买）对话框。
-  const requirePremium = (reason: string) => {
+  // resume 是“买完就该继续做的那一步”：激活成功后由关闭回调接续，不必让用户重走入口。
+  const pendingPremiumActionRef = useRef<(() => void) | null>(null);
+  const licenseStatusRef = useRef<LicenseStatus | null>(licenseStatus);
+  useEffect(() => {
+    licenseStatusRef.current = licenseStatus;
+  }, [licenseStatus]);
+  const requirePremium = (reason: string, resume?: () => void) => {
     if (licenseStatus?.state === "licensed") return true;
+    pendingPremiumActionRef.current = resume ?? null;
     setPaywallReason(reason);
     setPaywallOpen(true);
     return false;
   };
+
+  /** 打开导出菜单（付费墙激活后可从这里继续）。 */
+  const openExportMenu = useCallback(() => {
+    setMoreOpen(false);
+    setExportOpen(true);
+  }, []);
+
+  /** 付费墙关闭：已授权则继续被打断的动作；未购买则丢弃，避免下次误触发。 */
+  const handlePaywallClose = useCallback(() => {
+    const resume = pendingPremiumActionRef.current;
+    pendingPremiumActionRef.current = null;
+    setPaywallOpen(false);
+    if (resume && licenseStatusRef.current?.state === "licensed") {
+      // 等 200ms 的退场动画走完再执行，避免录音条/抽屉与对话框重叠出现。
+      window.setTimeout(resume, 220);
+    }
+  }, []);
 
   const meeting = useMemo(
     () => meetings.find((item) => item.id === selectedId),
@@ -189,10 +247,17 @@ export function App() {
   }, [meeting?.id]);
   // 录音生命周期 hook：传入当前会议，返回 phase/elapsed/levels/queue 等驱动 RecorderBar 的状态。
   const recorder = useMeetingRecorder(meeting);
+  // 录音态只属于发起录音的那场会议：切到别的会议时不能把它伪装成「会议进行中」。
+  const selectedIsRecording = Boolean(meeting && recorder.recordingMeetingId === meeting.id);
+  const selectedRecorderPhase = selectedIsRecording ? recorder.phase : "idle";
+  const dockPhase = recorder.phase === "idle" ? null : recorder.phase;
+  const recordingElsewhere = Boolean(
+    dockPhase && recorder.recordingMeetingId && recorder.recordingMeetingId !== meeting?.id
+  );
   const workspaceStage = meeting
-    ? meetingImportJob && recorder.phase === "idle"
+    ? meetingImportJob && selectedRecorderPhase === "idle"
       ? "review"
-      : deriveWorkspaceStage(meeting.status, recorder.phase)
+      : deriveWorkspaceStage(meeting.status, selectedRecorderPhase)
     : null;
   const importProcessingStatus = useMemo(
     () => describeImportProcessing(meetingImportJob),
@@ -202,6 +267,8 @@ export function App() {
     () => profiles.find((profile) => profile.kind === "stt" && profile.enabled),
     [profiles]
   );
+  /** 当前转写是否跑在本机：失败提示据此把「改用本地 Whisper」换成「检查本地模型」。 */
+  const transcriptionIsLocal = isLocalTranscriptionTransport(transcriptionProfile?.transport);
   const recordingReadiness = useMemo(() => meeting ? buildRecordingReadiness({
     mode: meeting.mode,
     microphone: permissionStatus?.microphone ?? null,
@@ -267,6 +334,24 @@ export function App() {
     }
   }, [recorder.warning]);
 
+  // 首次转写失败时补一个带动作的 Toast：用户可能正停在纪要页，看不到转写视图里的
+  // 持久横幅。每个失败周期只在「出现」时提示一次；忽略横幅后 hook 会抑制后续失败回调，
+  // 切换转写档案也不会让同一周期重复弹提示。
+  const notifiedTranscriptionFailure = useRef(false);
+  useEffect(() => {
+    const failure = recorder.transcriptionFailure;
+    if (!failure) {
+      notifiedTranscriptionFailure.current = false;
+      return;
+    }
+    if (notifiedTranscriptionFailure.current) return;
+    notifiedTranscriptionFailure.current = true;
+    notify("实时转写暂时不可用，录音仍在继续。", {
+      label: transcriptionIsLocal ? "检查本地 Whisper" : "改用本地 Whisper",
+      run: () => openSettings("transcription", "local-whisper")
+    });
+  }, [notify, openSettings, recorder.transcriptionFailure, transcriptionIsLocal]);
+
   // Flush the recorder when the window closes so the last audio chunk is not
   // lost; the main-process before-quit handler is the backstop.
   // 中文补充：窗口关闭前冲刷录音器，确保最后一个音频块落盘；主进程的 before-quit 是兜底。
@@ -291,7 +376,13 @@ export function App() {
     setNewMeetingOpen(false);
     // 一键开会：对刚创建的会议立即启动录音（先过付费墙；启动仍会做真实麦克风校验）。
     if (options?.startRecording) {
-      if (requirePremium("录音、实时转写与自动纪要")) void recorder.start(created);
+      if (recorder.phase !== "idle") {
+        notify(`「${recorder.recordingMeeting?.title ?? "另一场会议"}」正在录音，请先结束当前录音再开始新的。`);
+        return created;
+      }
+      if (requirePremium("录音、实时转写与自动纪要", () => void recorder.start(created))) {
+        await recorder.start(created);
+      }
     } else {
       notify("会议已创建，可以开始录音。");
     }
@@ -325,24 +416,69 @@ export function App() {
   }, [continueRecordingOpen, exportOpen, importOpen, moreOpen]);
 
   // 导入入口（文件选择器 / 拖拽）：先过付费墙，再把候选文件交给右侧确认抽屉，确认后才入队归档。
-  const handleImport = async () => {
-    if (!requirePremium("导入录音并自动处理")) return;
+  // 把“过墙”与“真正选文件”拆开，激活成功后可以从选文件这一步继续，而不是再弹一次付费墙。
+  const pickImportFiles = async () => {
     const files = await api.imports.choose();
     if (!files.length) return;
     setImportCandidates((current) => [...current, ...files]);
     setImportOpen(true);
   };
-
-  // 拖拽导入走 IPC 把 File 转成主进程可读的候选描述（浏览器兜底实现则直接读 File 元信息）。
-  const handleDrop = async (event: React.DragEvent) => {
-    event.preventDefault();
-    if (!event.dataTransfer.files.length || !requirePremium("导入录音并自动处理")) return;
+  const applyDroppedFiles = async (dropped: File[]) => {
     try {
-      const files = await api.imports.fromDropped(Array.from(event.dataTransfer.files));
+      const files = await api.imports.fromDropped(dropped);
       setImportCandidates((current) => [...current, ...files]);
       setImportOpen(true);
     } catch (error) { notify(error instanceof Error ? error.message : "无法读取拖入的文件。"); }
   };
+  const handleImport = async () => {
+    if (!requirePremium("导入录音并自动处理", () => void pickImportFiles())) return;
+    await pickImportFiles();
+  };
+
+  // 拖拽导入走 IPC 把 File 转成主进程可读的候选描述（浏览器兜底实现则直接读 File 元信息）。
+  const handleDrop = async (event: React.DragEvent) => {
+    event.preventDefault();
+    const dropped = Array.from(event.dataTransfer.files);
+    if (!dropped.length) return;
+    if (!requirePremium("导入录音并自动处理", () => void applyDroppedFiles(dropped))) return;
+    await applyDroppedFiles(dropped);
+  };
+
+  /**
+   * 重试导入任务：失败、取消或等待网络时从持久化断点续跑。
+   * 主进程会推送任务更新；这里同时乐观合并返回值，浏览器预览也能立即看到状态。
+   */
+  const retryImportJob = useCallback(async (id: string) => {
+    try {
+      const job = await api.imports.retry(id);
+      if (job) setImportJobs((current) => [job, ...current.filter((item) => item.id !== id)]);
+      notify("已重新加入处理队列，会从已完成的阶段继续。");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "重试导入任务失败，请稍后再试。");
+    }
+  }, [notify]);
+
+  /** 暂停导入任务：中止在途转录/说话人分离，已完成的转写内容保留，可随时继续。 */
+  const cancelImportJob = useCallback(async (id: string) => {
+    try {
+      const job = await api.imports.cancel(id);
+      if (job) setImportJobs((current) => [job, ...current.filter((item) => item.id !== id)]);
+      notify("已暂停处理；已完成的转写和录音文件都会保留，可随时继续。");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "暂停导入任务失败，请稍后再试。");
+    }
+  }, [notify]);
+
+  /** 跳过说话人识别：转写已经可用时先出纪要，不再等待长耗时的分离。 */
+  const skipImportDiarizationJob = useCallback(async (id: string) => {
+    try {
+      const job = await api.imports.skipDiarization(id);
+      if (job) setImportJobs((current) => [job, ...current.filter((item) => item.id !== id)]);
+      notify("已跳过发言人识别，正在用现有转写生成纪要。");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "跳过发言人识别失败，请稍后再试。");
+    }
+  }, [notify]);
 
   // 会议文档统一变更入口：整份替换，由 store 负责乐观更新 + 持久化。
   const handleMeetingChange = (next: Meeting) => {
@@ -389,6 +525,7 @@ export function App() {
         onNew={() => setNewMeetingOpen(true)}
         onImport={handleImport}
         importCount={importJobs.filter((job) => !["complete", "cancelled", "failed"].includes(job.status)).length}
+        importIssueCount={importJobs.filter((job) => job.status === "failed").length}
         onToggleFavorite={handleToggleFavorite}
         onDeleteMeeting={handleDeleteMeeting}
         onTrash={() => setTrashOpen(true)}
@@ -439,10 +576,7 @@ export function App() {
                 )}
                 <div className="export-wrap">
                   <button className="button button--primary button--small" aria-expanded={exportOpen} onClick={() => {
-                    if (requirePremium("导出会议文档与完整备份")) {
-                      setMoreOpen(false);
-                      setExportOpen((value) => !value);
-                    }
+                    if (requirePremium("导出会议文档与完整备份", openExportMenu)) openExportMenu();
                   }}>
                     <Export size={16} /> 导出
                   </button>
@@ -539,6 +673,9 @@ export function App() {
               recentlyFinalized={recentlyFinalizedId === meeting.id}
               processingStatus={importProcessingStatus}
               importJob={meetingImportJob}
+              onRetryImport={(id) => void retryImportJob(id)}
+              onCancelImport={(id) => void cancelImportJob(id)}
+              onSkipDiarization={(id) => void skipImportDiarizationJob(id)}
               playbackMs={playbackMs}
               onSeek={(ms) => {
                 // 没有可用音频（未录制/文件缺失）时不打开播放器，避免出现一个必然报错的空播放器。
@@ -554,17 +691,27 @@ export function App() {
               onEmptyAction={workspaceStage === "review" ? () => setContinueRecordingOpen(true) : undefined}
               onChange={handleMeetingChange}
               onStartRecording={async () => {
-                if (requirePremium("录音、实时转写与自动纪要")) await recorder.start();
+                if (recorder.phase !== "idle") {
+                  notify(`「${recorder.recordingMeeting?.title ?? "另一场会议"}」正在录音，请先结束当前录音。`);
+                  return;
+                }
+                if (requirePremium("录音、实时转写与自动纪要", () => void recorder.start())) return;
+                await recorder.start();
               }}
               onConfigureTranscription={() => openSettings("transcription")}
+              transcriptionFailure={selectedIsRecording ? recorder.transcriptionFailure : null}
+              transcriptionIsLocal={transcriptionIsLocal}
+              onUseLocalWhisper={() => openSettings("transcription", "local-whisper")}
+              onChooseTranscriptionService={() => openSettings("transcription", "online-transcription")}
+              onDismissTranscriptionFailure={recorder.dismissTranscriptionFailure}
               onOpenPermissions={() => setPermissionsOpen(true)}
               onGenerateSummary={() => {
                 // final 由 hook 按会议状态自动推导：录音/暂停中为滚动增量，会后为终稿总结。
-                if (requirePremium("生成 AI 会议纪要")) void recorder.generateSummary();
+                if (requirePremium("生成 AI 会议纪要", () => void recorder.generateSummary())) void recorder.generateSummary();
               }}
               onCancelSummary={() => void recorder.cancelSummary()}
               onRetryVisualSummary={() => {
-                if (requirePremium("生成视觉会议纪要")) void recorder.generateVisualSummary();
+                if (requirePremium("生成视觉会议纪要", () => void recorder.generateVisualSummary())) void recorder.generateVisualSummary();
               }}
               summaryBusy={recorder.summaryBusy}
             />
@@ -577,8 +724,11 @@ export function App() {
                 levels={recorder.levels}
                 queue={recorder.queue}
                 transcriptionReady={recordingReadiness?.hasTranscription ?? false}
+                transcriptionFailed={Boolean(recorder.transcriptionFailure)}
+                onFixTranscription={() => openSettings("transcription", "local-whisper")}
                 onStart={async () => {
-                  if (requirePremium("录音、实时转写与自动纪要")) await recorder.start();
+                  if (requirePremium("录音、实时转写与自动纪要", () => void recorder.start())) return;
+                  await recorder.start();
                 }}
                 onPause={recorder.pause}
                 onStop={recorder.stop}
@@ -605,6 +755,21 @@ export function App() {
         )}
       </main>
 
+      {/* 录音中切到别的会议：保持录音可见可停，点「回到录音」跳回原会议。 */}
+      {recordingElsewhere && dockPhase && recorder.recordingMeeting && (
+        <RecordingDock
+          title={recorder.recordingMeeting.title}
+          phase={dockPhase}
+          elapsed={recorder.elapsed}
+          onOpen={() => {
+            if (searching) void setSearch("");
+            selectMeeting(recorder.recordingMeeting!.id);
+          }}
+          onPause={() => void recorder.pause()}
+          onStop={() => void recorder.stop()}
+        />
+      )}
+
       {/* 菜单遮罩：导出/更多菜单打开时拦截外部点击，点任意空白处即收起菜单。 */}
       {(exportOpen || moreOpen) && (
         <div
@@ -630,10 +795,15 @@ export function App() {
         onClose={() => setNewMeetingOpen(false)}
         onCreate={handleCreate}
       />
-      <SettingsDialog open={settingsOpen} initialTab={settingsTab} licenseStatus={licenseStatus} onLicenseStatusChange={setLicenseStatus} onClose={() => {
+      <SettingsDialog open={settingsOpen} initialTab={settingsTab} initialFocus={settingsFocus} licenseStatus={licenseStatus} onLicenseStatusChange={setLicenseStatus} onClose={() => {
         setSettingsOpen(false);
         // 首次配置期间从设置返回时继续留在向导当前步骤，不提前写入完成标记。
         if (!preferences.onboardingCompleted) setOnboardingOpen(true);
+        // 从导入抽屉进入设置：保存/关闭后回到抽屉，候选文件与任务队列都还在。
+        if (settingsReturnRef.current === "import") {
+          settingsReturnRef.current = null;
+          setImportOpen(true);
+        }
       }} />
       <DeletedMeetingsDialog
         open={trashOpen}
@@ -647,9 +817,9 @@ export function App() {
           await updatePreferences({ ...preferences, onboardingCompleted: true });
           setOnboardingOpen(false);
         }}
-        onConfigureModels={(tab) => {
+        onConfigureModels={(tab, focus) => {
           setOnboardingOpen(false);
-          openSettings(tab);
+          openSettings(tab, focus);
         }}
       />
       <SystemPermissionsDialog
@@ -685,7 +855,8 @@ export function App() {
               <button className="button" onClick={() => setContinueRecordingOpen(false)}>取消</button>
               <button className="button button--primary" onClick={async () => {
                 setContinueRecordingOpen(false);
-                if (requirePremium("继续录音、实时转写与自动纪要")) await recorder.start();
+                if (requirePremium("继续录音、实时转写与自动纪要", () => void recorder.start())) return;
+                await recorder.start();
               }}>
                 继续录音
               </button>
@@ -698,7 +869,7 @@ export function App() {
         reason={paywallReason}
         status={licenseStatus}
         onStatusChange={setLicenseStatus}
-        onClose={() => setPaywallOpen(false)}
+        onClose={handlePaywallClose}
       />
       <ImportDrawer
         open={importOpen}
@@ -718,8 +889,9 @@ export function App() {
           // 转写进度现在在中央列「转写」视图：选中会议后按 live 阶段默认展示，无需再动右栏。
           notify(`${jobs.length} 个录音已归档并加入后台队列。`);
         }}
-        onRetry={(id) => void api.imports.retry(id)}
-        onCancel={(id) => void api.imports.cancel(id)}
+        onRetry={(id) => void retryImportJob(id)}
+        onCancel={(id) => void cancelImportJob(id)}
+        onSkipDiarization={(id) => void skipImportDiarizationJob(id)}
         onRemove={async (id) => {
           try {
             await api.imports.remove(id);
@@ -729,7 +901,11 @@ export function App() {
           }
         }}
         onOpenMeeting={(id) => { selectMeeting(id); setImportOpen(false); }}
-        onConfigure={() => { setImportOpen(false); openSettings(); }}
+        onConfigure={() => {
+          settingsReturnRef.current = "import";
+          setImportOpen(false);
+          openSettings();
+        }}
       />
 
       {/* 错误与操作反馈分成两条独立 Toast 叠放：store 错误（警告样式）不再吞掉
@@ -762,20 +938,4 @@ function formatDuration(seconds: number) {
   const minutes = Math.floor((seconds % 3600) / 60);
   const remaining = seconds % 60;
   return [hours, minutes, remaining].map((value) => String(value).padStart(2, "0")).join(":");
-}
-
-function describeImportProcessing(job: ImportJob | undefined) {
-  if (!job || job.status === "complete" || job.status === "cancelled") return undefined;
-  if (job.status === "failed") return "录音处理已暂停，可在导入队列中重试";
-  if (job.status === "waiting_for_model") return "录音已归档，等待配置转写模型";
-  if (job.status === "waiting_for_audio_tool") return "录音已归档，等待音频组件恢复";
-  if (job.status === "transcribing" || job.stage === "transcribing") {
-    return job.totalChunks
-      ? `正在转写第 ${Math.min((job.completedChunks || 0) + 1, job.totalChunks)}/${job.totalChunks} 段`
-      : "正在生成第一段转写";
-  }
-  if (job.status === "diarizing") return "转写完成，正在识别发言人";
-  if (job.status === "summarizing") return "转写完成，正在整理会议纪要";
-  if (job.status === "copying" || job.stage === "copying") return "正在安全归档录音";
-  return "录音已加入处理队列";
 }

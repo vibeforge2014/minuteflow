@@ -93,6 +93,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     list: () => invoke("imports:list"),
     retry: (id) => invoke("imports:retry", id),
     cancel: (id) => invoke("imports:cancel", id),
+    skipDiarization: (id) => invoke("imports:skip-diarization", id),
     remove: (id) => invoke("imports:remove", id),
     onJobUpdated: (callback) => {
       const listener = (_event, job) => callback(job);
@@ -103,6 +104,11 @@ contextBridge.exposeInMainWorld("meetingAPI", {
       const listener = (_event, meeting) => callback(meeting);
       ipcRenderer.on("imports:meeting-updated", listener);
       return () => ipcRenderer.removeListener("imports:meeting-updated", listener);
+    },
+    onOpenMeeting: (callback) => {
+      const listener = (_event, meetingId) => callback(meetingId);
+      ipcRenderer.on("imports:open-meeting", listener);
+      return () => ipcRenderer.removeListener("imports:open-meeting", listener);
     }
   },
   exports: {

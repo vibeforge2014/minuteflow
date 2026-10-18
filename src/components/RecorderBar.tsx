@@ -31,6 +31,9 @@ interface RecorderBarProps {
   queue: number;
   /** 本次会议是否配置了可用的实时转写档案。 */
   transcriptionReady: boolean;
+  /** 实时转写连续失败：徽标转为「转写异常 · 去修复」，点击直达本地 Whisper 配置。 */
+  transcriptionFailed?: boolean;
+  onFixTranscription?(): void;
   onStart(): Promise<void>;
   onPause(): Promise<void>;
   onStop(): Promise<void>;
@@ -45,6 +48,8 @@ export function RecorderBar({
   levels,
   queue,
   transcriptionReady,
+  transcriptionFailed = false,
+  onFixTranscription,
   onStart,
   onPause,
   onStop,
@@ -118,10 +123,23 @@ export function RecorderBar({
         <>
           <Level label="麦克风" icon={<Microphone size={18} />} value={levels.microphone} />
           {meeting.mode === "online" && <Level label="系统声音" icon={<SpeakerHigh size={18} />} value={levels.system} />}
-          <span className={`transcription-status ${transcriptionReady ? "is-ready" : "is-limited"}`} aria-live="polite">
-            {transcriptionReady ? <CheckCircle size={14} weight="fill" /> : <WarningCircle size={14} weight="fill" />}
-            {transcriptionReady ? queue > 0 ? `转写处理中 ${queue}` : "实时转写正常" : "仅录音"}
-          </span>
+          {transcriptionFailed && transcriptionReady ? (
+            <button
+              type="button"
+              className="transcription-status is-error"
+              aria-live="polite"
+              title="实时转写连续失败，点击改用本地 Whisper 或检查本地模型"
+              onClick={onFixTranscription}
+            >
+              <WarningCircle size={14} weight="fill" />
+              转写异常 · 去修复
+            </button>
+          ) : (
+            <span className={`transcription-status ${transcriptionReady ? "is-ready" : "is-limited"}`} aria-live="polite">
+              {transcriptionReady ? <CheckCircle size={14} weight="fill" /> : <WarningCircle size={14} weight="fill" />}
+              {transcriptionReady ? queue > 0 ? `转写处理中 ${queue}` : "实时转写正常" : "仅录音"}
+            </span>
+          )}
           {silentMic && (
             <span className="recorder-warning" role="alert">
               <WarningCircle size={14} weight="fill" />未检测到麦克风声音，请检查输入设备

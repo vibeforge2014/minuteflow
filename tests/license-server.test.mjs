@@ -373,6 +373,37 @@ test("order email is stored, propagated to the license, and masked in the public
   assert.equal(invalid.status, 201);
 });
 
+test("paid orders automatically email the activation key once", async () => {
+  resetOrderRateLimiter();
+  const created = await postJson("/api/license/orders", { channel: "mock", email: "delivery@example.com" });
+  assert.equal(created.status, 201);
+
+  const saved = { ...config.mail };
+  Object.assign(config.mail, { accessKeyId: "test-ak", accessKeySecret: "test-sk", accountName: "noreply@test" });
+  const sent = [];
+  setMailTransportForTest(async (payload) => { sent.push(payload); return { RequestId: "delivery" }; });
+  try {
+    let paid = null;
+    for (let attempt = 0; attempt < 20 && !paid; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const view = await (await fetch(`${base}/api/license/orders/${created.body.orderId}`)).json();
+      if (view.state === "paid") paid = view;
+    }
+    assert.ok(paid, "mock 订单应自动落账");
+    assert.equal(sent.length, 1, "支付成功后应自动发送一封激活码邮件");
+    assert.equal(sent[0].to, "delivery@example.com");
+    assert.ok(sent[0].html.includes(paid.licenseKey), "邮件正文应包含激活码");
+    assert.equal(paid.emailSent, true);
+
+    // 再次轮询/重复回调不能重复发送。
+    await (await fetch(`${base}/api/license/orders/${created.body.orderId}`)).json();
+    assert.equal(sent.length, 1);
+  } finally {
+    setMailTransportForTest(null);
+    Object.assign(config.mail, saved);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 反激活释放：腾出设备槽位、幂等、限流
 // ---------------------------------------------------------------------------

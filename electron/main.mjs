@@ -15,6 +15,7 @@ import {
   dialog,
   ipcMain,
   nativeImage,
+  Notification,
   powerMonitor,
   protocol,
   screen,
@@ -106,6 +107,7 @@ import {
   listImportJobs,
   removeImportJob,
   retryImport,
+  skipImportDiarization,
   wakeImportQueue
 } from "./services/import-queue.mjs";
 import {
@@ -134,6 +136,35 @@ let preferenceWriteQueue = Promise.resolve();
 // File paths the renderer obtained from a native dialog within this session.
 // imports:enqueue may only read paths explicitly chosen or dropped this session.
 const recentImportPaths = new Set();
+// 导入任务的上一状态：只在“完成/失败”这一次跃迁上发系统通知，避免重复打扰。
+const lastImportStatus = new Map();
+
+/**
+ * 后台导入结束提醒：窗口未聚焦时才发系统通知（聚焦时渲染层已有 Toast）。
+ * 点击通知回到主窗口并打开对应会议，失败任务则停在会后文档的重试入口。
+ */
+function notifyImportOutcome(job) {
+  const previous = lastImportStatus.get(job.id);
+  lastImportStatus.set(job.id, job.status);
+  if (previous === job.status) return;
+  if (job.status !== "complete" && job.status !== "failed") return;
+  if (!Notification.isSupported()) return;
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()) return;
+  const notification = new Notification({
+    title: job.status === "complete" ? "录音处理完成" : "录音处理失败",
+    body: job.status === "complete"
+      ? `「${job.title}」的转写与纪要已就绪。`
+      : `「${job.title}」处理失败：${(job.error || "未知原因").slice(0, 100)}`
+  });
+  notification.on("click", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send("imports:open-meeting", job.meetingId);
+  });
+  notification.show();
+}
 
 // Last-resort handlers so an unawaited rejection (e.g. a progress callback
 // firing after the window closed) is logged instead of swallowed silently.
@@ -1262,6 +1293,8 @@ function registerIpc() {
   trustedHandle("imports:retry", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return retryImport(id); });
   // imports:cancel — 取消进行中/排队的导入任务（付费功能）：中止 AbortController 并杀掉子进程。
   trustedHandle("imports:cancel", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return cancelImport(id); });
+  // imports:skip-diarization — 跳过说话人识别，保留已完成的转写并继续生成纪要（付费功能）。
+  trustedHandle("imports:skip-diarization", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return skipImportDiarization(id); });
   // imports:remove — 从队列移除终态/等待态任务记录（付费功能）；进行中任务需先取消。
   trustedHandle("imports:remove", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return removeImportJob(id); });
   // exports:save — 导出会议为 md/txt/json/srt/vtt/docx/pdf/zip（付费功能），导出菜单调用。
@@ -1411,6 +1444,8 @@ function registerIpc() {
 }
 
 app.whenReady().then(async () => {
+  // Windows 通知需要稳定的 AppUserModelID，否则系统会把通知归到 electron.exe。
+  if (process.platform === "win32") app.setAppUserModelId("com.meetingassistant.desktop");
   // Resolve any existing Keychain-backed credentials once at app startup so
   // recording and finalization never become the first surprise access point.
   warmSecretCache();
@@ -1454,6 +1489,7 @@ app.whenReady().then(async () => {
   configureImportQueue({
     notify: (job) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("imports:job-updated", job);
+      notifyImportOutcome(job);
     },
     notifyMeeting: (meeting) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("imports:meeting-updated", meeting);

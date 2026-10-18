@@ -14,6 +14,23 @@ import type { AudioTrackKind, Meeting, ModelProfile, TranscriptSegment, Transcri
 /** 可直接采集的轨道类型（"mixed" 仅用于已落盘的合成产物，不能采集）。 */
 type CaptureTrack = Exclude<AudioTrackKind, "mixed">;
 
+/**
+ * 停止录音时等待在途转写的宽限期。远程转录客户端超时是 330 秒，不能让它
+ * 决定“停止”何时生效；超过宽限期先完成录音收尾，迟到结果直接丢弃
+ * （音频已完整归档，可稍后从录音补转）。
+ */
+const STOP_TRANSCRIPTION_GRACE_MS = 8_000;
+
+/** 实时转写连续失败的聚合状态；成功转写一块后自动恢复。 */
+export interface LiveTranscriptionFailure {
+  /** 最近一次失败的原因（已是可读中文，或网关原文）。 */
+  message: string;
+  /** 连续失败（重试耗尽）的音频块数。 */
+  consecutive: number;
+  /** 最近失败块在会议内的起始毫秒，用于提示「从第 N 分钟起未转写」。 */
+  atMs: number;
+}
+
 /** 录音过程中向上层（UI/hook）回调的事件集合。 */
 interface RecordingCallbacks {
   /** 每帧输入电平（0-1，麦克风/系统各一路），驱动录音条波形动画。 */
@@ -28,6 +45,10 @@ interface RecordingCallbacks {
   onTranscriptionQueue(size: number): void;
   /** 非致命告警（如系统音频不可用、写盘失败），UI 以 Toast 呈现但不中断录音。 */
   onWarning(message: string): void;
+  /** 实时转写重试耗尽：UI 应展示可切换「本地 Whisper / 其他在线服务」的持久提示。 */
+  onTranscriptionFailure?(failure: LiveTranscriptionFailure): void;
+  /** 实时转写恢复成功（此前处于失败状态），UI 可收起失败提示。 */
+  onTranscriptionRecovered?(): void;
 }
 
 /** 一条已绑定的采集轨道：流、归档录制器、块序号与在途落盘任务集合。 */
@@ -59,6 +80,19 @@ const supportedMimeType = () => [
   "audio/webm",
   "audio/mp4"
 ].find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
+
+/**
+ * 4xx 配置类失败（密钥错误、端点不存在、模型名无效、文件被拒）重试也不会成功：
+ * 主进程的错误文案带「转录模型请求失败：<status>」，据此跳过 1.5s/5s/15s 退避，
+ * 让用户尽快看到「改用本地 Whisper」的提示。
+ */
+function isTerminalTranscriptionFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  // 本地模型缺失/未选择同样是配置问题，直接提示，不必等三轮退避。
+  if (message.includes("本地模型尚未就绪") || message.includes("请先选择")) return true;
+  const status = Number(/转录模型请求失败：(\d{3})/.exec(message)?.[1] ?? 0);
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
 
 /** 用统一编码与码率创建录制器（归档 96kbps / 转写块 64kbps 由调用方指定）。 */
 function createAudioRecorder(stream: MediaStream, audioBitsPerSecond: number) {
@@ -96,9 +130,15 @@ export class MeetingRecorder {
   /** 电平表 rAF 句柄，stop 时取消。 */
   private analyserFrame = 0;
   private transcriptionQueue = 0;
-  /** 在途转录请求；正常停止会等待它们成功或明确失败后再持久化会议。 */
+  /** 在途转录请求；停止时只在有限宽限期内等待，网关挂起不能拖住录音收尾。 */
   private pendingTranscriptions = new Set<Promise<void>>();
+  /** 停止时仍有转写请求未返回：随后到达的结果直接丢弃，避免写入已收尾的会议。 */
+  private discardLateTranscriptions = false;
+  /** 正在采集的 8 秒独立转写块；停止时立即停掉，不必等满 8 秒。 */
+  private standaloneRecorders = new Set<MediaRecorder>();
   private transcriptionStates = new Map<CaptureTrack, TrackTranscriptionState>();
+  /** 连续失败块数；任一块成功即归零，用于避免整场录音只弹一次或每块都弹。 */
+  private transcriptionFailureStreak = 0;
   /** 用户在启动过程中取消（start 会被 reject）。 */
   private startCancelled = false;
   /** 挂起的 getUserMedia/getDisplayMedia 的取消句柄。 */
@@ -367,10 +407,23 @@ export class MeetingRecorder {
             break;
           } catch (error) {
             failure = error;
+            // 4xx 配置错误（密钥/端点/模型名）不会因重试恢复，立即触发失败提示。
+            if (isTerminalTranscriptionFailure(error)) break;
           }
         }
+        // 停止时宽限期已过：这次请求的结果不再写回会议（录音文件已完整归档）。
+        if (this.discardLateTranscriptions) return;
         if (failure !== undefined) {
-          this.callbacks.onWarning(failure instanceof Error ? failure.message : "转录任务失败");
+          this.transcriptionFailureStreak += 1;
+          this.callbacks.onTranscriptionFailure?.({
+            message: failure instanceof Error ? failure.message : "转录任务失败",
+            consecutive: this.transcriptionFailureStreak,
+            atMs: startMs
+          });
+        } else if (this.transcriptionFailureStreak > 0) {
+          // 服务恢复：仅在同一条录音内从失败转成功时通知一次，UI 收起提示。
+          this.transcriptionFailureStreak = 0;
+          this.callbacks.onTranscriptionRecovered?.();
         }
         state.completed.set(sequence, {
           provisionalId: provisional.id,
@@ -387,8 +440,14 @@ export class MeetingRecorder {
     }
   }
 
+  /** 录音进行中切换转写档案：下一个 8 秒块即用新档案，无需中断录音。 */
+  updateSttProfile(profile: ModelProfile | undefined) {
+    this.sttProfile = profile;
+  }
+
   /** 只提交从 nextCommit 开始的连续完成结果；较晚窗口先返回时暂存在 completed 中。 */
   private commitCompletedTranscriptions(track: CaptureTrack) {
+    if (this.discardLateTranscriptions) return;
     const state = this.transcriptionStates.get(track);
     if (!state) return;
     while (state.completed.has(state.nextCommit)) {
@@ -407,11 +466,13 @@ export class MeetingRecorder {
       const chunks: BlobPart[] = [];
       const recorder = createAudioRecorder(stream, 64_000);
       let timeout = 0;
+      this.standaloneRecorders.add(recorder);
       recorder.addEventListener("dataavailable", (event) => {
         if (event.data.size) chunks.push(event.data);
       });
       recorder.addEventListener("stop", () => {
         window.clearTimeout(timeout);
+        this.standaloneRecorders.delete(recorder);
         resolve(chunks.length ? new Blob(chunks, { type: recorder.mimeType }) : null);
       }, { once: true });
       recorder.start();
@@ -471,6 +532,8 @@ export class MeetingRecorder {
    */
   async abort() {
     this.stopTranscription = true;
+    this.discardLateTranscriptions = true;
+    this.stopStandaloneRecorders();
     cancelAnimationFrame(this.analyserFrame);
     const stops = this.bindings.map((binding) => new Promise<void>((resolve) => {
       if (binding.archive.state === "inactive") return resolve();
@@ -496,6 +559,8 @@ export class MeetingRecorder {
    */
   async stop(durationSeconds: number) {
     this.stopTranscription = true;
+    // 立即停掉正在采集的 8 秒转写块：否则收尾还要白等它自然结束。
+    this.stopStandaloneRecorders();
     cancelAnimationFrame(this.analyserFrame);
     const stops = this.bindings.map((binding) => new Promise<void>((resolve) => {
       if (binding.archive.state === "inactive") return resolve();
@@ -503,17 +568,46 @@ export class MeetingRecorder {
       binding.archive.stop();
     }));
     await Promise.all(stops);
+    // 音频块必须先全部落盘（AGENTS.md 的硬性要求），这一等待不设上限。
     await Promise.allSettled(this.bindings.flatMap((binding) => Array.from(binding.pendingWrites)));
     for (const binding of this.bindings) {
       for (const track of binding.stream.getTracks()) track.stop();
     }
     await this.audioContext?.close().catch(() => {});
     await Promise.allSettled(this.transcriptionLoops);
-    await Promise.allSettled(Array.from(this.pendingTranscriptions));
+    // 转写请求不参与“录音是否保存成功”的判定：远程网关最长可挂 330 秒，
+    // 停止操作只等一个短宽限期，过期就先收尾并丢弃迟到结果。
+    const transcriptionsSettled = await this.settlePendingTranscriptions(STOP_TRANSCRIPTION_GRACE_MS);
+    if (!transcriptionsSettled) {
+      this.discardLateTranscriptions = true;
+      this.callbacks.onWarning("录音已保存；仍有转写请求未及时返回，本次收尾已跳过等待。需要时可在会后从录音重新转写。");
+    }
     return api.recordings.stop({
       meetingId: this.meeting.id,
       sessionId: this.sessionId,
       durationSeconds
     });
+  }
+
+  /** 停止仍在采集的独立转写块（停止事件会立刻生成一个不完整块，随后被丢弃）。 */
+  private stopStandaloneRecorders() {
+    for (const recorder of this.standaloneRecorders) {
+      if (recorder.state === "inactive") continue;
+      try { recorder.stop(); } catch { /* 已停止或已释放 */ }
+    }
+  }
+
+  /** 等待在途转写收尾，但最多等 timeoutMs；返回是否全部结束。 */
+  private async settlePendingTranscriptions(timeoutMs: number) {
+    const pending = Array.from(this.pendingTranscriptions);
+    if (!pending.length) return true;
+    let timer: number | undefined;
+    const timeout = new Promise<false>((resolve) => {
+      timer = window.setTimeout(() => resolve(false), timeoutMs);
+    });
+    const settled = Promise.allSettled(pending).then(() => true as const);
+    const completed = await Promise.race([settled, timeout]);
+    if (timer !== undefined) window.clearTimeout(timer);
+    return completed;
   }
 }

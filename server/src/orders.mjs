@@ -5,9 +5,10 @@
  * - 全部状态变迁在事务内完成，重复通知天然幂等。
  */
 import { randomUUID } from "node:crypto";
-import { config } from "./config.mjs";
+import { config, mailReady } from "./config.mjs";
 import { db, nowIso, transaction } from "./db.mjs";
 import { issueLicenseForOrder, licensePlaintext } from "./licenses.mjs";
+import { licenseEmailHtml, sendMail } from "./mail.mjs";
 import { createNativeOrder, queryOrderByOutTradeNo as queryWechat } from "./wechat.mjs";
 import { createPagePayUrl, createPrecreateOrder, queryOrderByOutTradeNo as queryAlipay } from "./alipay.mjs";
 import { mirrorPaidOrder, mirrorRefundedOrder, quoteDiscountCode } from "./discounts.mjs";
@@ -92,7 +93,7 @@ export async function createOrder(channel, customerEmail, discountCode = "") {
 
 /** 订单落账 + 签发激活码（事务内幂等：回调/查单/mock 三条来源可安全并发）。 */
 export function finalizeOrder(orderId, { transactionId }) {
-  return transaction(() => {
+  const paid = transaction(() => {
     const order = db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId);
     if (!order) throw new Error("订单不存在。");
     if (order.state === "paid" || order.state === "refunded") {
@@ -100,16 +101,82 @@ export function finalizeOrder(orderId, { transactionId }) {
     }
     db.prepare("UPDATE orders SET state = 'paid', transaction_id = ?, paid_at = ?, updated_at = ? WHERE id = ?")
       .run(transactionId, nowIso(), nowIso(), orderId);
-    const paid = db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId);
-    const license = issueLicenseForOrder(paid);
+    const paidOrder = db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId);
+    const license = issueLicenseForOrder(paidOrder);
     // 发码时把购买邮箱带到 license（找回邮件按 licenses.customer_email 检索）。
-    if (paid.customer_email && license && !license.customer_email) {
-      db.prepare("UPDATE licenses SET customer_email = ? WHERE id = ?").run(paid.customer_email, license.id);
+    if (paidOrder.customer_email && license && !license.customer_email) {
+      db.prepare("UPDATE licenses SET customer_email = ? WHERE id = ?").run(paidOrder.customer_email, license.id);
     }
     // 镜像到 Supabase 供管理后台统计（mock 沙箱单除外；best-effort 不阻塞发码）。
-    mirrorPaidOrder(paid);
-    return paid;
+    mirrorPaidOrder(paidOrder);
+    return paidOrder;
   });
+  // 支付成功页承诺“激活码同时发送到邮箱”，因此这里必须真正发一次；
+  // 不阻塞回调/查单响应，失败最多重试两次，仍失败则用户可在找回页重发。
+  if (paid?.state === "paid") scheduleLicenseEmail(paid.id);
+  return paid;
+}
+
+const licenseEmailInFlight = new Set();
+/** 当前订单的首次送达任务：轮询落到 paid 时等它落定，成功页才能拿到真实 emailSent。 */
+const licenseEmailTasks = new Map();
+
+function scheduleLicenseEmail(orderId, attempt = 0) {
+  if (!mailReady()) return null;
+  const existing = licenseEmailTasks.get(orderId);
+  if (existing) return existing;
+  const task = Promise.resolve()
+    .then(() => sendLicenseEmailForOrder(orderId, attempt))
+    .finally(() => {
+      if (licenseEmailTasks.get(orderId) === task) licenseEmailTasks.delete(orderId);
+    });
+  licenseEmailTasks.set(orderId, task);
+  return task;
+}
+
+/** 等待首次送达尝试（重试在后台继续，不阻塞轮询）。 */
+export async function waitForLicenseEmail(orderId) {
+  await licenseEmailTasks.get(orderId)?.catch(() => {});
+}
+
+/**
+ * 支付成功后把激活码发到购买邮箱（幂等：license_email_sent_at 写成功时间）。
+ * 失败不上抛支付流程；5s/20s 各重试一次，最终失败留日志并由找回接口兜底。
+ */
+export async function sendLicenseEmailForOrder(orderId, attempt = 0) {
+  if (!mailReady() || licenseEmailInFlight.has(orderId)) return false;
+  licenseEmailInFlight.add(orderId);
+  try {
+    const order = db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId);
+    if (!order || order.state !== "paid" || !order.customer_email || !order.license_id) return false;
+    if (order.license_email_sent_at) return false;
+    const license = db.prepare("SELECT * FROM licenses WHERE id = ?").get(order.license_id);
+    if (!license || license.state !== "active") return false;
+    const key = licensePlaintext(license);
+    if (!key) throw new Error("激活码解密失败，无法发送邮件。");
+    await sendMail({
+      to: order.customer_email,
+      subject: "MinuteFlow 激活码",
+      html: licenseEmailHtml({
+        email: order.customer_email,
+        licenses: [{ key, issuedAt: license.issued_at }],
+        intro: "感谢购买 MinuteFlow。以下是你的激活码，请妥善保存；购买成功页也可以随时复制。"
+      })
+    });
+    db.prepare("UPDATE orders SET license_email_sent_at = ?, updated_at = ? WHERE id = ? AND license_email_sent_at IS NULL")
+      .run(nowIso(), nowIso(), orderId);
+    console.log(`[delivery] license email sent for order ${orderId.slice(0, 8)} to ${maskEmail(order.customer_email)}`);
+    return true;
+  } catch (error) {
+    console.error(`[delivery] license email failed for order ${orderId.slice(0, 8)}:`, error.message);
+    if (attempt < 2) {
+      const timer = setTimeout(() => scheduleLicenseEmail(orderId, attempt + 1), attempt === 0 ? 5_000 : 20_000);
+      timer.unref?.();
+    }
+    return false;
+  } finally {
+    licenseEmailInFlight.delete(orderId);
+  }
 }
 
 /** 处理一条支付成功通知（已通过通道验签）。按通道 + 事件 id 幂等。 */
@@ -153,6 +220,12 @@ export async function getOrderView(orderId) {
       // 查单失败不影响轮询响应，等待下一次轮询或 webhook 重投。
     }
   }
+  if (order.state === "paid") {
+    // 首次轮询等邮件发送尝试结束（最多 10s，与 DirectMail 超时一致），
+    // 让购买成功页能准确区分“已发送”和“发送可能延迟”。
+    await waitForLicenseEmail(order.id);
+    order = db.prepare("SELECT * FROM orders WHERE id = ?").get(order.id) ?? order;
+  }
   return publicOrderView(order);
 }
 
@@ -180,7 +253,11 @@ export function publicOrderView(order) {
     const license = db.prepare("SELECT * FROM licenses WHERE order_id = ?").get(order.id);
     view.licenseKey = license?.state === "active" ? licensePlaintext(license) : "";
     // 脱敏邮箱：成功页提示「激活码已发送至 q***@126.com」，不回传完整地址。
-    if (license?.customer_email) view.customerEmailMasked = maskEmail(license.customer_email);
+    if (license?.customer_email) {
+      view.customerEmailMasked = maskEmail(license.customer_email);
+      // 邮件是支付落账后的异步副作用：页面据此区分“已发送”和“可能稍后到达”。
+      view.emailSent = Boolean(order.license_email_sent_at);
+    }
   }
   return view;
 }

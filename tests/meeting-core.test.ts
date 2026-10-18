@@ -65,6 +65,14 @@ import { derivePermissionSetupPhase, finishPermissionSetup, isMicrophonePermissi
 import { lockSummaryField, mergeSummaryRevision, removeSummaryListItem, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { buildBasicKeyPoints, KEY_POINT_MAX_CHARS } from "../electron/services/chinese.mjs";
 import { cancelImport, normalizeImportChunkSegments, removeImportJob, retryImport, wakeImportQueue } from "../electron/services/import-queue.mjs";
+import {
+  describeDiarizationPhase,
+  describeImportProcessing,
+  describeImportProgressDetail,
+  isActiveImportJob,
+  isRetryableImportJob
+} from "../src/lib/import-status";
+import type { ImportJob } from "../src/types";
 import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "../electron/services/chunk-planning.mjs";
 import { plannedCharacters, punctuationCut, typewriterStep } from "../src/lib/typewriter";
 import {
@@ -2387,6 +2395,66 @@ describe("模型档案单选「正在使用」", () => {
     const remaining = db.prepare("SELECT id FROM model_profiles WHERE kind = 'llm' AND enabled = 1 AND id LIKE 'usability-%' ORDER BY name").all();
     expect(remaining.length).toBe(1);
     expect(remaining[0].id).toBe("usability-p1"); // 名称序：服务 A
+  });
+});
+
+describe("导入任务的进度与可操作性文案", () => {
+  const base = (overrides: Partial<ImportJob> = {}): ImportJob => ({
+    id: "diar-job",
+    meetingId: "diar-meeting",
+    type: "import",
+    title: "周会录音",
+    sourceName: "weekly.mp3",
+    status: "diarizing",
+    stage: "diarizing",
+    progress: 0.73,
+    language: "auto",
+    diarizationEnabled: true,
+    autoSummarize: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides
+  });
+
+  it("把说话人分离描述成阶段 + 音频规模 + 真实已用时间", () => {
+    const job = base({
+      diarizationPhase: "analyzing",
+      diarizationStartedAt: new Date(Date.now() - 65_000).toISOString(),
+      diarizationAudioDurationMs: 34 * 60_000
+    });
+    expect(describeImportProcessing(job)).toBe("转写完成，正在识别发言人");
+    const detail = describeImportProgressDetail(job) ?? "";
+    expect(detail).toContain("分析音频");
+    expect(detail).toContain("音频 34:00");
+    expect(detail).toContain("已用 01:05");
+    expect(detail).toContain("不上传音频");
+    expect(describeDiarizationPhase("naming")).toBe("匹配声纹");
+  });
+
+  it("处理中的任务可停止，失败/取消/网络等待可重试", () => {
+    expect(isActiveImportJob(base())).toBe(true);
+    expect(isRetryableImportJob(base())).toBe(false);
+    expect(isRetryableImportJob(base({ status: "failed" }))).toBe(true);
+    expect(isRetryableImportJob(base({ status: "cancelled" }))).toBe(true);
+    expect(isRetryableImportJob(base({ status: "waiting_for_network" }))).toBe(true);
+    expect(isActiveImportJob(base({ status: "complete" }))).toBe(false);
+  });
+
+  it("重试会清掉上一轮分离的耗时/阶段字段，避免界面继续显示旧进度", () => {
+    saveJob(base({
+      id: "diar-retry-progress",
+      status: "failed",
+      diarizationPhase: "analyzing",
+      diarizationStartedAt: new Date(Date.now() - 120_000).toISOString(),
+      diarizationAudioDurationMs: 600_000,
+      error: "说话人分离超时，请稍后重试。"
+    }));
+    const next = retryImport("diar-retry-progress");
+    expect(next.status).toBe("queued");
+    expect(next.error).toBeUndefined();
+    expect(next.diarizationPhase).toBeUndefined();
+    expect(next.diarizationStartedAt).toBeUndefined();
+    expect(next.diarizationAudioDurationMs).toBeUndefined();
   });
 });
 

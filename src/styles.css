@@ -420,6 +420,9 @@ button {
 }
 
 .sidebar-task-count { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; display: grid; place-items: center; border-radius: 999px; background: #f6d9d0; color: #a74431; font-size: 11px; font-weight: 700; }
+/* 失败角标与前一个角标并排：进行中数量靠右，失败数紧贴其左侧。 */
+.sidebar-task-count + .sidebar-task-count { margin-left: 4px; }
+.sidebar-task-count.is-issue { background: #fdeaea; color: #b3312f; box-shadow: inset 0 0 0 1px #f3c9c7; }
 
 .meeting-player { margin: 8px 28px 0; padding: 9px 14px 8px; border: 1px solid #eadfd7; border-radius: 10px; background: #fffaf6; box-shadow: 0 4px 14px rgba(101, 65, 47, .05); }
 .meeting-player__timeline { display: grid; grid-template-columns: 42px 1fr 42px; align-items: center; gap: 9px; color: #8f857d; font-size: 11px; }.meeting-player__timeline time:last-child { text-align: right; }
@@ -458,6 +461,8 @@ button {
 .import-model-hint { width: 100%; margin-top: 12px; padding: 10px 12px; display: flex; gap: 9px; align-items: center; text-align: left; border: 1px solid #f0cabc; border-radius: 11px; background: #fff3ee; color: #a34834; }
 .import-model-hint span { display: grid; gap: 2px; font-size: 11px; }.import-model-hint strong { font-size: 12px; }
 .import-submit { width: 100%; justify-content: center; margin-top: 14px; }
+/* 导入预期：说明后台处理节奏与耗时变量，避免把“导入”理解成一次性等待。 */
+.import-expectation { margin: 12px 4px 0; padding: 9px 11px; border-radius: 9px; background: #faf7f4; color: #82766c; font-size: 10px; line-height: 1.6; }
 .import-duplicate-note { margin: 9px 4px 0; color: #999087; text-align: center; font-size: 10px; }
 .import-title-hint {
   display: flex;
@@ -479,10 +484,33 @@ button {
 .import-job h3 { margin: 8px 0 3px; font-size: 13px; }.import-job > p { margin: 0; color: #8c837b; font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .import-progress { height: 4px; margin-top: 11px; overflow: hidden; border-radius: 99px; background: #eee9e4; }.import-progress i { display: block; height: 100%; border-radius: inherit; background: #d8664d; transition: width 250ms var(--ease-in-out-ui), background-color var(--motion-fast) ease; }
 .import-job--complete .import-progress i { background: #4d9877; }.import-job--cancelled .import-progress i { background: #a7a099; }
+/* 说话人分离没有细粒度百分比：保留阶段进度底色，叠一道循环扫光表示仍在工作。 */
+.import-progress.is-indeterminate { position: relative; }
+.import-progress.is-indeterminate::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .62), transparent);
+  transform: translateX(-100%);
+  animation: import-progress-sheen 1.5s ease-in-out infinite;
+}
+.import-progress.is-failed i { background: #c05244; }
+@keyframes import-progress-sheen {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+.import-processing-meta { margin-top: 11px; display: flex; flex-direction: column; gap: 5px; }
+.import-processing-meta.is-compact { margin-top: 9px; }
+.import-processing-meta .import-progress { margin-top: 0; }
+.import-processing-meta__detail { color: #8c837b; font-size: 10px; line-height: 1.5; }
 .import-job .import-job__error { margin-top: 8px; color: #ad443a; white-space: normal; }
 .import-job__actions { display: flex; gap: 7px; margin-top: 9px; }.import-job__actions:empty { display: none; }.import-job__actions button { display: flex; align-items: center; gap: 4px; padding: 5px 8px; border: 0; border-radius: 7px; background: #f5f0eb; color: #625950; font-size: 10px; }.import-job__actions button.import-job__remove:hover { color: var(--red); background: rgba(229, 64, 67, 0.1); }
 @keyframes import-slide-in { from { transform: translateX(24px); opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .import-drawer { animation: none; }.import-job { transition: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .import-drawer { animation: none; }
+  .import-job { transition: none; }
+  .import-progress.is-indeterminate::after { animation: none; opacity: .35; }
+}
 
 .sidebar-actions button:hover {
   background: #eeeeef;
@@ -1566,6 +1594,65 @@ button {
   font-size: 10px;
 }
 
+/* 实时转写失败的持久横幅：比 Toast 更持久、带直接行动（改用本地 Whisper / 更换服务）。
+   录音继续，所以语气是「处理一下」而非阻断式错误。 */
+.transcription-failure {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  margin: 0 16px 12px;
+  padding: 13px 14px;
+  border: 1px solid #f0d3c5;
+  border-radius: 12px;
+  background: #fff8f4;
+  box-shadow: 0 4px 14px rgba(120, 70, 45, .05);
+}
+
+.transcription-failure__icon {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  color: #b95338;
+  background: #fbe7dd;
+  border-radius: 9px;
+}
+
+.transcription-failure__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.transcription-failure__body strong { color: #4a2f25; font-size: 12px; }
+.transcription-failure__body p { margin: 0; color: #7d6257; font-size: 10.5px; line-height: 1.65; }
+.transcription-failure__body small {
+  overflow: hidden;
+  color: #9a7d70;
+  font-size: 9.5px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transcription-failure__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+  flex-wrap: wrap;
+}
+
+.transcription-failure__dismiss {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  color: #a68e83;
+}
+
 .voiceprint-message {
   margin: 3px 16px 7px;
   padding: 7px 9px;
@@ -1802,7 +1889,7 @@ button {
   box-shadow: 0 12px 32px rgba(22, 26, 35, 0.13);
 }
 
-.speaker-popover input {
+.speaker-popover__input {
   border: 0;
   border-bottom: 1px solid var(--blue);
   font-size: 12px;
@@ -1811,6 +1898,36 @@ button {
 .speaker-popover small {
   grid-column: 2;
   color: #999ea7;
+  font-size: 9px;
+}
+
+/* 声纹注册披露：默认勾选、可关闭；说明只存本机，避免“偷偷学声音”的观感。 */
+.speaker-popover__remember {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 8px;
+  padding-top: 9px;
+  border-top: 1px solid #f0ece8;
+  color: #5f5852;
+  font-size: 11px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.speaker-popover__remember > input {
+  margin: 2px 0 0;
+  accent-color: var(--accent-strong);
+}
+
+.speaker-popover__remember span {
+  display: grid;
+  gap: 1px;
+}
+
+.speaker-popover__remember small {
+  grid-column: auto;
   font-size: 9px;
 }
 
@@ -1867,6 +1984,129 @@ button {
   background: var(--red);
   box-shadow: 0 0 0 5px rgba(229, 64, 67, 0.1);
   animation: recording-pulse 1.8s infinite;
+}
+
+/* 后台录音坞：录音中切走会议时的全局入口，固定在视口底部。 */
+.recording-dock {
+  position: fixed;
+  z-index: 70;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: min(620px, calc(100vw - 48px));
+  min-height: 60px;
+  padding: 10px 12px 10px 18px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid #f0e3db;
+  border-radius: 18px;
+  box-shadow: 0 18px 48px rgba(45, 34, 27, 0.16), 0 2px 8px rgba(45, 34, 27, 0.05);
+  backdrop-filter: blur(18px);
+  animation: recording-dock-in var(--motion-dialog) var(--ease-emphasized);
+}
+
+@keyframes recording-dock-in {
+  from { opacity: 0; transform: translate(-50%, 10px) scale(0.98); }
+}
+
+.recording-dock__dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 5px rgba(231, 111, 81, 0.14);
+  animation: recording-pulse 1.8s infinite;
+}
+
+.recording-dock__dot.is-paused {
+  background: #b7afa8;
+  box-shadow: 0 0 0 5px rgba(120, 110, 100, 0.1);
+  animation: none;
+}
+
+.recording-dock__meta {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.recording-dock__meta span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.recording-dock__meta strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recording-dock__time {
+  flex: 0 0 auto;
+  color: var(--accent-strong);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.recording-dock__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.recording-dock__open {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 11px;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--accent-soft);
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: transform var(--motion-fast) var(--ease-out-ui), background var(--motion-fast) var(--ease-out-ui);
+}
+
+.recording-dock__open:hover { background: #f9e6da; }
+.recording-dock__open:active { transform: scale(0.97); }
+
+.recording-dock__stop.is-armed {
+  color: #fff;
+  background: var(--red);
+}
+
+.recording-dock__stop.is-armed:hover { background: #cf3538; }
+
+@media (max-width: 720px) {
+  .recording-dock {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    width: auto;
+    transform: none;
+    animation: none;
+  }
+  .recording-dock__open { padding: 0 9px; }
+  .recording-dock__open span { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .recording-dock { animation: none; }
+  .recording-dock__dot { animation: none; }
 }
 
 .audio-level {
@@ -1929,6 +2169,19 @@ button {
 
 .transcription-status.is-ready { color: #46755d; background: #eef7f1; }
 .transcription-status.is-limited { color: #946417; background: #fff7df; }
+
+/* 录音条上的失败徽标同时是「去修复」按钮，直达本地 Whisper 配置。 */
+button.transcription-status {
+  border: 0;
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out-ui), transform 90ms var(--ease-out-ui);
+}
+
+.transcription-status.is-error { color: #a7422f; background: #fdece7; }
+button.transcription-status.is-error:hover { background: #fbe0d7; }
+button.transcription-status.is-error:active { transform: scale(.97); }
 
 .recorder-warning {
   display: flex;
@@ -3023,7 +3276,8 @@ html[data-surface="permission-helper"] #root {
 }
 
 .onboarding-model-step__choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 22px 0 12px; }
-.onboarding-model-step__choices article {
+.onboarding-model-step__choices > article,
+.onboarding-model-step__choices > .setup-choice {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -3032,7 +3286,21 @@ html[data-surface="permission-helper"] #root {
   border: 1px solid #e7e9ed;
   border-radius: 10px;
 }
-.onboarding-model-step__choices article > span { color: #737985; }
+.onboarding-model-step__choices > .setup-choice {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--ease-out-ui),
+    background-color var(--motion-fast) var(--ease-out-ui),
+    transform 100ms var(--ease-out-ui);
+}
+.onboarding-model-step__choices > .setup-choice:hover { border-color: #e8c7bd; background: #fffaf7; }
+.onboarding-model-step__choices > .setup-choice:active { transform: scale(.985); }
+.onboarding-model-step__choices > article > span,
+.onboarding-model-step__choices > .setup-choice > span { color: #737985; }
 .onboarding-model-step__choices strong { display: flex; align-items: center; gap: 6px; color: #363b43; font-size: 10px; }
 .onboarding-model-step__choices em { padding: 2px 5px; color: var(--accent-strong); background: var(--accent-soft); border-radius: 5px; font-size: 7px; font-style: normal; }
 .onboarding-model-step__choices small { display: block; margin-top: 3px; color: #858a93; font-size: 9px; line-height: 1.45; }
@@ -3610,6 +3878,19 @@ html[data-surface="permission-helper"] #root {
 .model-catalog__section small { color: #96908c; font-size: 8px; }
 .model-catalog__section > button > svg { color: var(--green); }
 
+/* 「本地 Whisper」的离线标签：把关键取舍（不联网）放在目录第一眼。 */
+.model-catalog__tag {
+  margin-left: 6px;
+  padding: 1px 5px;
+  color: #a64d39;
+  background: #fcf1e9;
+  border-radius: 5px;
+  font-size: 7px;
+  font-style: normal;
+  font-weight: 750;
+  vertical-align: 1px;
+}
+
 /* 已保存档案行：一张完整卡片 = 主体按钮（图标+两行文字）+ 右侧「正在使用」单选开关（同类互斥，见 database.saveModelProfile）。
    开关状态本身即「使用中」，不再另设徽标，避免挤占名称列。 */
 .model-catalog__row {
@@ -3901,6 +4182,9 @@ html[data-surface="permission-helper"] #root {
   gap: 13px;
 }
 
+/* 深链打开一份尚未启用的已有档案时，标题栏给出一步到位的启用动作。 */
+.profile-editor-heading__enable { margin-left: auto; flex: none; }
+
 .profile-editor-heading__icon {
   width: 44px;
   height: 44px;
@@ -3919,6 +4203,29 @@ html[data-surface="permission-helper"] #root {
 }
 
 .profile-editor-heading p { font-size: 10px; }
+
+/* 在线/本地 Whisper 的一键互切提示：让「换一种转写方式」不再藏在目录里。 */
+.transcription-alternative {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid #f0ddd3;
+  border-radius: 11px;
+  background: linear-gradient(135deg, #fffaf7 0%, #fdf3ee 100%);
+}
+
+.transcription-alternative > span {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.transcription-alternative strong { color: #5b4439; font-size: 11.5px; }
+.transcription-alternative small { color: #927e74; font-size: 9.5px; line-height: 1.55; }
+.transcription-alternative > button { flex: none; }
 
 .profile-editor-divider {
   height: 1px;
@@ -5314,6 +5621,8 @@ html[data-surface="permission-helper"] #root {
 .readiness-item strong { display: block; margin-top: 3px; color: #403934; font-size: 12px; }
 .readiness-item p { margin: 5px 0 0; color: #8c827a; font-size: 9px; line-height: 1.45; }
 .readiness-item > .text-button { grid-column: 2; width: fit-content; margin: 2px 0 0; padding-left: 0; }
+.readiness-item__actions { grid-column: 2; display: flex; align-items: center; gap: 10px; margin-top: 2px; flex-wrap: wrap; }
+.readiness-item__actions .text-button { margin: 0; padding-left: 0; }
 
 .preparation-start {
   width: 100%;
@@ -5378,6 +5687,8 @@ html[data-surface="permission-helper"] #root {
 
 .review-hero.is-fresh { border-color: #d9e9de; background: #f6fbf7; }
 .review-hero .button { flex: 0 0 auto; min-height: 40px; }
+.review-hero .import-processing-meta { max-width: 520px; margin-top: 12px; }
+.review-hero .import-processing-meta__detail { font-size: 11px; }
 /* 会后整理右侧工具位：形态切换（普通/视觉）与生成按钮上下同组，右对齐。 */
 .review-hero__side {
   flex: 0 0 auto;
@@ -5758,11 +6069,106 @@ html[data-surface="permission-helper"] #root {
 }
 
 .workspace-transcript .speaker-strip {
-  padding: 2px 0 10px;
+  flex-shrink: 0;
+  padding: 2px 4px 10px;
 }
+
+.speaker-strip__label { flex-shrink: 0; color: #92877e; font-size: 11px; margin-right: 4px; }
+.workspace-transcript .speaker-strip button { font-size: 11px; padding: 5px 9px; background: #f1eeeb; }
+.workspace-transcript .speaker-strip .speaker-merge { margin-left: auto; color: #8b6250 !important; background: #f5e9e2 !important; }
+.workspace-transcript .transcript-hint { flex-shrink: 0; margin: 0 4px 14px; font-size: 11px; color: #978d85; }
+.workspace-transcript .transcription-failure { flex-shrink: 0; margin: 0 4px 14px; }
+/* 导入任务状态条：把“转写完成 → 识别发言人”的长阶段变成可读、可停止、可重试的块。 */
+.transcript-import-status {
+  flex-shrink: 0;
+  margin: 0 4px 14px;
+  padding: 11px 12px;
+  border: 1px solid #eadfd8;
+  border-radius: 11px;
+  background: #fff9f5;
+}
+.transcript-import-status--failed { border-color: #f0d3c5; background: #fff8f4; }
+.transcript-import-status__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.transcript-import-status__head strong { min-width: 0; color: #4a3f38; font-size: 12px; font-weight: 650; }
+.transcript-import-status__actions { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
+.transcript-import-status__actions .text-button { display: inline-flex; align-items: center; gap: 3px; margin: 0; padding: 0; font-size: 11px; }
+.transcript-import-status .import-processing-meta { margin-top: 8px; }
 
 .workspace-transcript .transcript-list {
   flex: 1;
+  padding: 0 4px 70px;
+  scrollbar-gutter: stable;
+}
+
+.transcript-overview {
+  padding: 18px 20px 12px;
+  margin-bottom: 28px;
+  border-radius: 16px;
+  background: #fbefe8;
+  color: #66564c;
+}
+.transcript-overview header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.transcript-overview h2 { display: flex; align-items: center; gap: 8px; margin: 0; color: #634b3e; font-size: 15px; font-weight: 650; }
+.transcript-overview h2 svg { color: var(--accent-strong); }
+.transcript-overview__actions { display: flex; align-items: center; gap: 2px; }
+.transcript-overview__actions .icon-button { width: 28px; height: 28px; color: #9b7967; }
+.transcript-overview__open { border: 0; padding: 5px 7px; border-radius: 6px; background: transparent; color: #9c543d; font-size: 11px; white-space: nowrap; }
+.transcript-overview__open:hover { background: #f3dfd2; }
+.transcript-overview p { margin: 0; font-size: 14px; line-height: 1.9; overflow-wrap: anywhere; white-space: pre-wrap; }
+.transcript-overview__empty { color: #9b8476; }
+.transcript-overview__expansion { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 240ms var(--ease-emphasized), opacity 160ms ease; }
+.transcript-overview__expansion.is-expanded { grid-template-rows: 1fr; opacity: 1; }
+.transcript-overview__expansion > div { min-height: 0; overflow: hidden; }
+.transcript-overview__expansion p { padding-top: 8px; }
+.transcript-overview__toggle { display: flex; align-items: center; gap: 5px; margin: 10px auto 0; padding: 4px 10px; border: 0; border-radius: 999px; background: #f3dfd2; color: #9a6b53; font-size: 10px; }
+.transcript-overview__toggle svg { transition: transform 240ms var(--ease-emphasized); }
+.transcript-overview__toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.transcript-overview footer { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(152, 105, 77, .1); color: #a0897b; font-size: 10px; }
+.transcript-overview footer [role="status"] { margin-left: auto; }
+.transcript-overview__stale { color: #ae6f34; }
+.transcript-feed-heading { display: flex; align-items: baseline; justify-content: space-between; margin: 0 2px 20px; color: #81756b; font-size: 12px; font-weight: 600; }
+.transcript-feed-heading small { color: #a1978e; font-size: 10px; font-weight: 400; }
+
+.workspace-transcript .transcript-item { display: block; padding: 0; margin-bottom: 22px; border: 0; border-radius: 12px; }
+.transcript-item__meta { display: flex; align-items: center; gap: 9px; min-height: 26px; margin: 0 0 7px 2px; }
+.workspace-transcript .speaker-name { display: inline-flex; align-items: center; gap: 5px; margin: 0; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 550; }
+.workspace-transcript .speaker-name--blue { background: #eaf0fb; }
+.workspace-transcript .speaker-name--orange { background: #fcf0e4; }
+.workspace-transcript .speaker-name--purple { background: #f1eafa; }
+.workspace-transcript .speaker-name--green { background: #e9f3ec; }
+.workspace-transcript .transcript-time { align-self: center; font-size: 11px; font-variant-numeric: tabular-nums; }
+.transcript-bubble { display: flex; align-items: flex-start; gap: 10px; padding: 16px 14px 16px 18px; background: #f3f1ee; border-radius: 3px 14px 14px; transition: background-color 160ms ease, box-shadow 160ms ease; }
+.transcript-bubble__content { flex: 1; min-width: 0; }
+.workspace-transcript .transcript-copy, .workspace-transcript .transcript-editor { color: #554d46; font-size: 14px; line-height: 1.85; overflow-wrap: anywhere; }
+.workspace-transcript .transcript-item--provisional .transcript-copy { color: #9c9086; }
+.workspace-transcript .transcript-item__actions { flex: 0 0 24px; }
+.workspace-transcript .transcript-item.is-playing, .workspace-transcript .transcript-item.is-jump-highlight { background: transparent; box-shadow: none; }
+.workspace-transcript .transcript-item.is-playing .transcript-bubble,
+.workspace-transcript .transcript-item.is-jump-highlight .transcript-bubble { background: #fff0e7; box-shadow: inset 3px 0 var(--accent); }
+.workspace-transcript .transcript-item.is-continuation { margin-top: -14px; }
+.workspace-transcript .is-continuation .transcript-item__meta { justify-content: flex-end; min-height: 18px; margin-bottom: 4px; }
+.workspace-transcript .is-continuation .speaker-name { display: none; }
+.workspace-transcript .is-continuation .transcript-bubble { border-top-left-radius: 14px; }
+.workspace-transcript .follow-control { bottom: 34px; font-size: 11px; backdrop-filter: blur(14px); }
+.transcript-overview button:active { transform: scale(.96); }
+
+@media (max-width: 720px) {
+  .workspace-transcript { width: calc(100% - 24px); }
+  .transcript-overview { padding: 14px 14px 10px; }
+  .transcript-overview header { gap: 6px; }
+  .transcript-overview h2 { font-size: 14px; gap: 5px; }
+  .transcript-overview__actions { gap: 0; }
+  .transcript-overview__actions .icon-button { width: 26px; }
+  .transcript-bubble { padding: 13px 10px 13px 14px; gap: 4px; }
+  .workspace-transcript .transcript-edit { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .transcript-overview__expansion { transition: opacity 100ms ease; }
+  .transcript-overview__toggle svg { transition: none; }
+  .transcript-overview button:active { transform: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .workspace-transcript .follow-control { background: #fff; backdrop-filter: none; }
 }
 
 /* —— 右栏 AI 问答 —— */

@@ -21,7 +21,7 @@ import { db, nowIso, transaction } from "./db.mjs";
 import { findLicenseByNormalizedKey, licensePlaintext, normalizeLicenseKey } from "./licenses.mjs";
 import { createOrder, getOrderView, handlePaidNotification, normalizeEmail, maskEmail } from "./orders.mjs";
 import { DiscountError, quoteDiscountCode } from "./discounts.mjs";
-import { sendMail } from "./mail.mjs";
+import { licenseEmailHtml, sendMail } from "./mail.mjs";
 import { decryptResource, verifyNotifySignature as verifyWechatSignature } from "./wechat.mjs";
 import { verifyNotifySignature as verifyAlipaySignature } from "./alipay.mjs";
 
@@ -143,24 +143,14 @@ export function resetRecoveryLimiters() {
 
 /** 找回邮件正文：全部 active 激活码 + 签发日期 + 支持邮箱。 */
 function recoveryEmailHtml(email, licenses) {
-  const rows = licenses.map((license) => {
-    const key = licensePlaintext(license) || "（读取失败，请回复本邮件人工处理）";
-    return `<tr><td style="padding:8px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;letter-spacing:.5px;color:#b3502f;font-weight:600;">${key}</td><td style="padding:8px 12px;color:#6b625c;">${license.issued_at.slice(0, 10)}</td></tr>`;
-  }).join("");
-  return `
-<div style="max-width:520px;margin:0 auto;padding:24px;font-family:-apple-system,'PingFang SC','Helvetica Neue',sans-serif;color:#2a2320;">
-  <h2 style="margin:0 0 4px;font-size:18px;">MinuteFlow 激活码找回</h2>
-  <p style="margin:0 0 16px;color:#6b625c;font-size:13px;">应 ${email} 的请求发送。若非本人操作请忽略本邮件。</p>
-  <table style="border-collapse:collapse;width:100%;background:#fdf6f2;border:1px solid #f3ddd2;border-radius:8px;">
-    <tr><th align="left" style="padding:8px 12px;color:#9a8f88;font-size:12px;font-weight:500;">激活码</th><th align="left" style="padding:8px 12px;color:#9a8f88;font-size:12px;font-weight:500;">签发日期</th></tr>
-    ${rows}
-  </table>
-  <p style="margin:16px 0 0;font-size:13px;line-height:1.7;color:#4a423d;">
-    在 MinuteFlow 桌面应用「解锁 → 输入激活码」中粘贴即可。每个激活码最多绑定 2 台设备；
-    换设备时先在「设置 → 通用 → 授权」停用本机。如有问题联系
-    <a href="mailto:xhdp123@126.com" style="color:#b3502f;">xhdp123@126.com</a>。
-  </p>
-</div>`;
+  return licenseEmailHtml({
+    email,
+    licenses: licenses.map((license) => ({
+      key: licensePlaintext(license),
+      issuedAt: license.issued_at
+    })),
+    intro: `应 ${email} 的请求发送。若非本人操作请忽略本邮件。`
+  });
 }
 
 function clientIp(req) {

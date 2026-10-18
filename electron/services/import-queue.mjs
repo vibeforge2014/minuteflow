@@ -64,6 +64,8 @@ function transcribeLocal(profile, audio, fileName, language, signal) {
 // 运行中的任务取消器与子进程句柄：cancelImport 借此中止在途转录/转码。
 const activeControllers = new Map();
 const activeProcesses = new Map();
+// 说话人识别的独立中止器：跳过识别只终止这个阶段，不取消整条导入任务。
+const activeDiarizationSkips = new Map();
 // 单 worker 门闩：同一时刻只有一个 runQueue 循环在消费队列，保证任务串行、互不抢占。
 let running = false;
 // 任务状态变化回调，由 main.mjs 注入（转发为 imports:job-updated 推送）。
@@ -226,6 +228,29 @@ function patchJob(id, patch) {
 }
 
 /**
+ * 任务是否已被用户取消：AbortController 立即生效，任务表可能稍后才被读取。
+ * 长阶段（特别是说话人分离）在每个 await 之后都用它确认，避免取消后继续写库、
+ * 甚至把 cancelled 覆盖成 summarizing/complete。
+ */
+function isJobCancelled(jobId, controller) {
+  return controller.signal.aborted || loadJob(jobId)?.status === "cancelled";
+}
+
+/** 合并任务取消与“跳过本阶段”两个信号（AbortSignal.any 的兼容兜底）。 */
+function combineAbortSignals(...signals) {
+  if (typeof AbortSignal.any === "function") return AbortSignal.any(signals);
+  const controller = new AbortController();
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
+  }
+  return controller.signal;
+}
+
+/**
  * 生成导入确认抽屉所需的文件描述（大小、类型、修改时间等），
  * 由 imports:choose / imports:describe-dropped 通道调用。文件不存在会抛错。
  */
@@ -301,7 +326,18 @@ export function listImportJobs() {
 export function retryImport(id) {
   const job = loadJob(id);
   if (!job) throw new Error("导入任务不存在。");
-  const next = patchJob(id, { status: "queued", error: undefined, transcriptionRetryAttempts: 0 });
+  // 重试是干净的一轮：清掉上一轮的网络退避计数与说话人分离进度，
+  // 避免 UI 继续显示旧的“已用时间/阶段”。
+  const next = patchJob(id, {
+    status: "queued",
+    // 复位进度：否则排队期间仍显示上一轮失败时的 73%/88%，看起来像卡住。
+    progress: 0,
+    error: undefined,
+    transcriptionRetryAttempts: 0,
+    diarizationPhase: undefined,
+    diarizationStartedAt: undefined,
+    diarizationAudioDurationMs: undefined
+  });
   void runQueue();
   return next;
 }
@@ -313,6 +349,23 @@ export function cancelImport(id) {
   activeControllers.get(id)?.abort();
   activeProcesses.get(id)?.kill("SIGTERM");
   return patchJob(id, { status: "cancelled", error: undefined });
+}
+
+/**
+ * 跳过说话人识别（imports:skip-diarization）：保留已完成转写与现有发言人占位，
+ * 直接进入纪要阶段。只中止分离 worker，不影响整条任务的断点。
+ */
+export function skipImportDiarization(id) {
+  const job = loadJob(id);
+  if (!job) throw new Error("导入任务不存在。");
+  if (job.diarizationComplete || job.diarizationSkipped) return job;
+  if (job.status !== "diarizing") {
+    // 尚未进入该阶段（排队/转录中）：记下意图，流水线走到这里时直接跳过。
+    return patchJob(id, { diarizationSkipped: true });
+  }
+  const next = patchJob(id, { diarizationSkipped: true, diarizationPhase: "skipping" });
+  activeDiarizationSkips.get(id)?.abort();
+  return next;
 }
 
 /** 可删除状态：终态 + 可恢复等待态；进行中（含排队）任务必须先取消，避免与 worker 竞争。 */
@@ -402,6 +455,8 @@ async function processJob(initial) {
       await mkdir(directory, { recursive: true });
       const archivedPath = path.join(directory, `import-${job.id}${extension}`);
       await copyFile(job.sourcePath, archivedPath);
+      // 取消可能发生在复制期间：不要再用 queued 覆盖 cancelled 状态。
+      if (isJobCancelled(job.id, controller)) return;
       const fileStat = await stat(archivedPath);
       const asset = saveAudioAsset({
         meetingId: job.meetingId,
@@ -439,6 +494,7 @@ async function processJob(initial) {
         }
         throw error;
       }
+      if (isJobCancelled(job.id, controller)) return;
       saveAudioAsset({ id: job.audioAssetId, meetingId: job.meetingId, path: job.archivedPath, playbackPath, track: "mixed", sourceType: "import", originalName: job.sourceName, mimeType: "audio/mp4", byteLength: job.sizeBytes });
       job = patchJob(job.id, { playbackPath, playbackReady: true, status: "queued", stage: "transcribing", progress: 0.28 });
     }
@@ -453,6 +509,7 @@ async function processJob(initial) {
     }
     if (LOCAL_TRANSCRIPTION_TRANSPORTS.includes(sttProfile.transport)) {
       const resolution = await resolveLocalProfile(sttProfile);
+      if (isJobCancelled(job.id, controller)) return;
       sttProfile = resolution.profile;
       if (resolution.readiness.status !== "ready") {
         patchJob(job.id, { status: "waiting_for_model", stage: "transcribing", progress: Math.max(job.progress, 0.28), error: `${resolution.readiness.message}请在转录设置中下载模型后重试。` });
@@ -486,8 +543,10 @@ async function processJob(initial) {
         : null;
       if (!chunkBoundaries && chunkingVersion >= 3 && !(job.completedChunks > 0)) {
         const silenceMidpoints = await detectSilenceMidpoints(job.id, bundledFfmpeg, job.archivedPath, controller.signal, durationMs);
+        if (isJobCancelled(job.id, controller)) return;
         chunkBoundaries = planTranscriptionChunkBoundaries(durationMs, silenceMidpoints);
       }
+      if (isJobCancelled(job.id, controller)) return;
       const useAdaptiveBoundaries = Boolean(chunkBoundaries);
       const totalChunks = useAdaptiveBoundaries
         ? chunkBoundaries.length
@@ -574,6 +633,7 @@ async function processJob(initial) {
         ({ job, meeting } = await maybeUpdateRollingSummary(job, meeting, profiles, controller.signal));
         await rm(chunkPath, { force: true }).catch(() => {});
       }
+      if (isJobCancelled(job.id, controller)) return;
       saveAudioAsset({
         id: job.audioAssetId, meetingId: job.meetingId, path: job.archivedPath,
         playbackPath: job.playbackPath, track: "mixed", sourceType: "import",
@@ -586,27 +646,81 @@ async function processJob(initial) {
         completedChunks: totalChunks, currentChunkStartMs: undefined, currentChunkEndMs: undefined
       });
     }
-    if (controller.signal.aborted) return;
+    if (isJobCancelled(job.id, controller)) return;
 
-    if (job.diarizationEnabled && !job.diarizationComplete && meeting.transcript.length) {
+    if (job.diarizationEnabled && !job.diarizationComplete && !job.diarizationSkipped && meeting.transcript.length) {
       meeting = loadMeeting(job.meetingId) || meeting;
       // 说话人分离（可选）：配置了 diarization 档案才执行，按时间中点把轮次套到转录段上。
       const profile = profiles.find((candidate) => candidate.kind === "diarization" && candidate.enabled);
+      let skipped = false;
       if (profile) {
-        job = patchJob(job.id, { status: "diarizing", stage: "diarizing", progress: 0.73 });
-        const turns = await diarizeWithSherpa(profile, job.archivedPath, {
-          expectedSpeakers: -1,
-          voiceprints: listVoiceprintSamples()
+        job = patchJob(job.id, {
+          status: "diarizing",
+          stage: "diarizing",
+          progress: 0.73,
+          // 长推理没有细粒度百分比；记录开始时间与阶段，界面显示真实已用时间。
+          diarizationStartedAt: new Date().toISOString(),
+          diarizationPhase: "preparing",
+          diarizationAudioDurationMs: job.durationMs,
+          error: undefined
         });
-        meeting = publishMeeting(saveMeeting({
-          ...meeting,
-          transcript: groupTranscriptSegments(applyDiarization(meeting.transcript, turns))
-        }));
+        // 跳过识别有独立信号：只终止分离 worker，转录断点与任务本身继续。
+        const skipController = new AbortController();
+        activeDiarizationSkips.set(job.id, skipController);
+        try {
+          const turns = await diarizeWithSherpa(profile, job.archivedPath, {
+            expectedSpeakers: -1,
+            voiceprints: listVoiceprintSamples(),
+            // 取消必须能终止 worker：否则 34 分钟音频的分离会继续跑几分钟。
+            signal: combineAbortSignals(controller.signal, skipController.signal),
+            onProgress: (progress) => {
+              if (!progress?.phase || isJobCancelled(job.id, controller)) return;
+              const current = loadJob(job.id);
+              if (!current || current.status !== "diarizing" || current.diarizationSkipped) return;
+              const patch = {};
+              if (current.diarizationPhase !== progress.phase) patch.diarizationPhase = progress.phase;
+              if (progress.audioDurationMs && current.diarizationAudioDurationMs !== progress.audioDurationMs) {
+                patch.diarizationAudioDurationMs = progress.audioDurationMs;
+              }
+              if (Object.keys(patch).length) patchJob(job.id, patch);
+            }
+          });
+          if (isJobCancelled(job.id, controller)) return;
+          meeting = publishMeeting(saveMeeting({
+            ...meeting,
+            transcript: groupTranscriptSegments(applyDiarization(meeting.transcript, turns))
+          }));
+        } catch (error) {
+          // 只有“空闲跳过”信号被触发时才降级为跳过；任务级取消仍按取消处理。
+          if (!skipController.signal.aborted || controller.signal.aborted) throw error;
+          skipped = true;
+        } finally {
+          activeDiarizationSkips.delete(job.id);
+        }
       }
-      job = patchJob(job.id, { diarizationComplete: true, stage: "summarizing", progress: 0.8 });
+      if (isJobCancelled(job.id, controller)) return;
+      job = patchJob(job.id, {
+        diarizationComplete: true,
+        // 用户主动跳过时打标，避免界面把“未识别”误读为识别失败。
+        ...(skipped || job.diarizationSkipped ? { diarizationSkipped: true } : {}),
+        diarizationPhase: undefined,
+        diarizationStartedAt: undefined,
+        diarizationAudioDurationMs: undefined,
+        stage: "summarizing",
+        progress: 0.8
+      });
+    } else if (job.diarizationSkipped && !job.diarizationComplete) {
+      // 跳过发生在排队/转录阶段：流水线走到这里时直接结项，不再进入分离。
+      job = patchJob(job.id, {
+        diarizationComplete: true,
+        diarizationPhase: undefined,
+        diarizationStartedAt: undefined,
+        diarizationAudioDurationMs: undefined
+      });
     }
 
     if (job.autoSummarize && !job.summaryComplete) {
+      if (isJobCancelled(job.id, controller)) return;
       meeting = loadMeeting(job.meetingId) || meeting;
       // 最终总结：有 LLM 时生成在线终稿；未配置或调用失败时使用本机基础纪要，
       // 不让已经完成的转录因缺少总结服务停在等待态。
@@ -641,6 +755,7 @@ async function processJob(initial) {
       } else {
         summary = summarizeLocally(input);
       }
+      if (isJobCancelled(job.id, controller)) return;
       const sourceThroughMs = meeting.transcript.reduce((maximum, segment) => Math.max(maximum, segment.endMs || 0), 0);
       const updatedAt = new Date().toISOString();
       const ordinarySummary = {
@@ -667,12 +782,14 @@ async function processJob(initial) {
           // 视觉阶段是增强能力；失败不得把已完成的普通纪要或导入任务标记为失败。
         }
       }
+      if (isJobCancelled(job.id, controller)) return;
       meeting = publishMeeting(saveMeeting({
         ...meeting,
         summary: ordinarySummary
       }));
       job = patchJob(job.id, { summaryComplete: true, progress: 0.98 });
     } else if (!job.autoSummarize) {
+      if (isJobCancelled(job.id, controller)) return;
       const summary = summarizeLocally({
         title: meeting.title, goals: meeting.goals, notes: meeting.notes,
         transcript: meeting.transcript, previousSummary: meeting.summary
@@ -687,12 +804,16 @@ async function processJob(initial) {
       }));
     }
 
+    // 取消可能发生在最后一步之后：绝不能把用户已取消的任务重新标成 complete。
+    if (isJobCancelled(job.id, controller)) return;
     meeting = loadMeeting(job.meetingId) || meeting;
     publishMeeting(saveMeeting({ ...meeting, status: "complete" }));
     patchJob(job.id, { status: "complete", stage: "complete", progress: 1, error: undefined });
   } catch (error) {
     const current = loadJob(initial.id);
-    if (current?.status !== "cancelled") {
+    // AbortController 已取消时，即使状态刚被重试改回 queued，也不能把旧一轮的
+    // 取消异常写成 failed。
+    if (!controller.signal.aborted && current?.status !== "cancelled") {
       patchJob(initial.id, {
         status: "failed",
         error: error instanceof Error ? error.message : "导入处理失败。"
@@ -701,6 +822,7 @@ async function processJob(initial) {
   } finally {
     activeControllers.delete(initial.id);
     activeProcesses.delete(initial.id);
+    activeDiarizationSkips.delete(initial.id);
   }
 }
 

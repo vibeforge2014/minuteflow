@@ -81,6 +81,13 @@ try {
   // 列已存在（SQLite 报 duplicate column name）。
 }
 
+// 激活码送达邮件：支付成功后自动发送一次；写成功时间保证回调/查单/mock 并发只发一封。
+try {
+  db.exec("ALTER TABLE orders ADD COLUMN license_email_sent_at TEXT");
+} catch {
+  // 列已存在。
+}
+
 // 折扣码快照：下单时服务端复算，amount_fen 存实付、original_amount_fen 存原价，
 // 与 Supabase 订单表列名保持一致，方便镜像与对账。
 try {

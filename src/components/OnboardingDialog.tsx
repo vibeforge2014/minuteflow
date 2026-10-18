@@ -23,7 +23,7 @@ import {
   isOnboardingTranscriptionReady,
   LOCAL_WHISPER_TRANSPORTS
 } from "../lib/onboarding";
-import type { SettingsTab } from "./SettingsDialog";
+import type { SettingsFocus, SettingsTab } from "./SettingsDialog";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useExitPresence } from "../hooks/useExitPresence";
 
@@ -36,7 +36,7 @@ export function OnboardingDialog({
   open: boolean;
   profiles: ModelProfile[];
   onComplete(): Promise<void>;
-  onConfigureModels(tab: Extract<SettingsTab, "transcription" | "llm">): void;
+  onConfigureModels(tab: Extract<SettingsTab, "transcription" | "llm">, focus?: SettingsFocus): void;
 }) {
   const [step, setStep] = useState(0);
   const transcriptionProfile = useMemo(
@@ -87,10 +87,10 @@ export function OnboardingDialog({
                 ? `${LOCAL_WHISPER_TRANSPORTS.has(transcriptionProfile.transport) ? "在本机完成转写" : "通过你选择的服务转写"} · ${transcriptionProfile.model || "自动模型"}`
                 : "你仍可继续，但会议只会保存录音，无法自动生成文字稿。"}
               actionLabel={transcriptionProfile ? "检查或更换 Whisper" : "去配置 Whisper"}
-              onConfigure={() => onConfigureModels("transcription")}
+              onConfigure={() => onConfigureModels("transcription", "local-whisper")}
             >
-              <SetupChoice icon={<Cpu size={20} />} title="本地 Whisper" description="下载后离线运行，适合重视隐私的会议。" recommended />
-              <SetupChoice icon={<Cloud size={20} />} title="在线 Whisper" description="使用 OpenAI 或兼容接口，适合轻量设备。" />
+              <SetupChoice icon={<Cpu size={20} />} title="本地 Whisper" description="推荐。不用联网、音频不出本机；首次使用需下载模型。" recommended onClick={() => onConfigureModels("transcription", "local-whisper")} />
+              <SetupChoice icon={<Cloud size={20} />} title="在线 Whisper" description="填好服务地址和密钥即可用，适合不方便下载模型的设备。" onClick={() => onConfigureModels("transcription", "online-transcription")} />
             </ModelSetupStep>
           )}
           {step === 2 && (
@@ -177,16 +177,24 @@ function ModelSetupStep({ icon, eyebrow, title, description, ready, readyTitle, 
   </div>;
 }
 
-function SetupChoice({ icon, title, description, recommended = false }: {
+function SetupChoice({ icon, title, description, recommended = false, onClick }: {
   icon: React.ReactNode;
   title: string;
   description: string;
   recommended?: boolean;
+  onClick?(): void;
 }) {
-  return <article aria-label={`${title}${recommended ? "，推荐" : ""}`}>
+  const content = <>
     <span>{icon}</span>
     <div><strong>{title}{recommended && <em>推荐</em>}</strong><small>{description}</small></div>
-  </article>;
+  </>;
+  const label = `${title}${recommended ? "，推荐" : ""}`;
+  // 两个选项都是真实入口：点「本地 Whisper」直接落到本地模型下载/选择，
+  // 点「在线 Whisper」直接落到在线表单，不再要求用户先进入设置自己找。
+  if (onClick) {
+    return <button type="button" className="setup-choice" aria-label={`${label}，打开配置`} onClick={onClick}>{content}</button>;
+  }
+  return <article aria-label={label}>{content}</article>;
 }
 
 function ReadyStep({ transcriptionProfile, summaryProfile }: {

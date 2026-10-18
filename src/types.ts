@@ -570,6 +570,12 @@ export interface ImportJob {
   totalChunks?: number;
   /** 已完成并落盘的分段数。 */
   completedChunks?: number;
+  /** 阶段断点：任务重启/重试时从这里继续，不重复已完成的阶段。 */
+  transcriptionComplete?: boolean;
+  diarizationComplete?: boolean;
+  /** 用户主动跳过说话人识别：转写保留、直接进入纪要阶段。 */
+  diarizationSkipped?: boolean;
+  summaryComplete?: boolean;
   /** waiting_for_network 期间累计的自动续跑次数；成功一块后清零。 */
   transcriptionRetryAttempts?: number;
   /** 当前正在处理的音频时间区间。 */
@@ -585,6 +591,12 @@ export interface ImportJob {
   lastSummaryThroughMs?: number;
   lastSummaryCompletedChunks?: number;
   lastSummaryAt?: string;
+  /** 说话人分离开始时间（ISO）；界面据此显示真实已用时间。 */
+  diarizationStartedAt?: string;
+  /** 说话人分离子阶段；长推理期间仍能给出“在做什么”。 */
+  diarizationPhase?: "preparing" | "loading" | "analyzing" | "refining" | "naming" | "skipping";
+  /** 说话人分离实际处理的音频时长（毫秒）。 */
+  diarizationAudioDurationMs?: number;
   language: string;
   sttProfileId?: string;
   llmProfileId?: string;
@@ -764,11 +776,15 @@ export interface MeetingAPI {
     list(): Promise<ImportJob[]>;
     retry(id: string): Promise<ImportJob>;
     cancel(id: string): Promise<ImportJob>;
+    /** 跳过说话人识别：保留已完成的转写并继续生成纪要。 */
+    skipDiarization(id: string): Promise<ImportJob>;
     /** 从队列移除终态/等待态任务记录（进行中任务需先取消；不影响已创建的会议）。 */
     remove(id: string): Promise<{ removed: true }>;
     onJobUpdated(callback: (job: ImportJob) => void): () => void;
     /** 导入队列每完成一个音频分段后推送最新会议快照。 */
     onMeetingUpdated(callback: (meeting: Meeting) => void): () => void;
+    /** 点击系统通知时要求打开对应会议（仅桌面端触发）。 */
+    onOpenMeeting(callback: (meetingId: string) => void): () => void;
   };
   /** 导出：把会议另存为指定格式（主进程弹出系统保存框）。 */
   exports: {
