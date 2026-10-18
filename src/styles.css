@@ -2659,15 +2659,43 @@ html[data-surface="permission-helper"] #root {
 
 .paywall-dialog {
   position: relative;
+  display: flex;
+  flex-direction: column;
   width: min(520px, calc(100vw - 40px));
-  padding: 30px;
-  overflow: visible;
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  overflow: hidden;
   border-radius: 20px;
   box-shadow: 0 34px 110px rgba(13, 17, 25, 0.34);
-  animation: wall-materialize 280ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: paywall-materialize 300ms var(--ease-emphasized) both;
 }
 
-.paywall-close { position: absolute; top: 14px; right: 14px; }
+/* 内容在对话框内部滚动，关闭按钮与圆角外框保持固定。 */
+.paywall-scroll {
+  min-height: 0;
+  padding: 30px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+/* 付费墙自己的进/退场：只做位移与透明度（不做 blur 滤镜动画），
+   退场沿入场方向收回，与其它对话框的空间连续性一致。 */
+.modal-backdrop.is-closing .paywall-dialog {
+  animation: paywall-recede 170ms var(--ease-emphasized) both;
+}
+
+@keyframes paywall-materialize {
+  from { opacity: 0; transform: translateY(14px) scale(0.972); }
+}
+
+@keyframes paywall-recede {
+  to { opacity: 0; transform: translateY(8px) scale(0.988); }
+}
+
+.paywall-close { position: absolute; z-index: 2; top: 14px; right: 14px; background: rgba(255, 255, 255, 0.92); }
+.paywall-close:disabled { opacity: 0.4; pointer-events: none; }
 .paywall-hero { text-align: center; }
 .paywall-mark { margin: 0 auto 14px; }
 .paywall-hero h2 { margin: 7px auto 10px; max-width: 390px; font-size: 24px; line-height: 1.22; letter-spacing: -0.035em; }
@@ -2677,32 +2705,128 @@ html[data-surface="permission-helper"] #root {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin: 24px 0 15px;
-  padding: 17px 19px;
+  margin: 20px 0 13px;
+  padding: 15px 18px;
   color: white;
   background: #20242c;
   border-radius: 13px;
+  transition: background-color 240ms var(--ease-emphasized), box-shadow 240ms var(--ease-emphasized);
+}
+
+.paywall-price.is-discounted {
+  background: #2a2320;
+  box-shadow: inset 0 0 0 1px rgba(231, 111, 81, 0.38);
 }
 
 .paywall-price > div { display: flex; align-items: baseline; gap: 9px; }
 .paywall-price b { font-size: 28px; letter-spacing: -0.04em; }
+.paywall-price s { color: #9ba1ab; font-size: 12px; text-underline-offset: 2px; }
 .paywall-price span { color: #b9bec7; font-size: 9px; }
-.paywall-price em { padding: 5px 7px; color: #f2a18b; background: rgba(231, 111, 81, 0.14); border-radius: 6px; font-size: 9px; font-style: normal; }
-.paywall-features { display: grid; gap: 9px; margin: 0 0 18px; padding: 0 4px; list-style: none; }
+.paywall-price em { padding: 5px 7px; color: #f2a18b; background: rgba(231, 111, 81, 0.14); border-radius: 6px; font-size: 9px; font-style: normal; transition: color 200ms ease, background-color 200ms ease; }
+.paywall-price.is-discounted em { color: #ffc9b9; background: rgba(231, 111, 81, 0.2); }
+
+.paywall-features { display: grid; gap: 8px; margin: 0 0 14px; padding: 0 4px; list-style: none; }
 .paywall-features li { display: flex; align-items: center; gap: 8px; color: #555b64; font-size: 10px; }
 .paywall-features svg { color: var(--accent-strong); }
-.activation-box { margin-bottom: 14px; padding: 13px; background: #f7f8f9; border: 1px solid #e5e7ea; border-radius: 11px; }
-.activation-box label { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; color: #656b74; font-size: 10px; font-weight: 650; }
-.activation-box > div { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
-.activation-box input { min-width: 0; height: 34px; padding: 0 10px; border: 1px solid #dcdfe4; border-radius: 7px; font: inherit; font-size: 11px; }
-.activation-box .activation-recover { margin-top: 8px; color: #98664f; font-size: 10px; }
-.activation-box .activation-recover:hover { color: var(--accent-strong); }
-.paywall-error { margin: 0 0 12px; padding: 9px 10px; color: #a74531; background: #fff3ef; border-radius: 8px; font-size: 10px; }
+
+/* 折扣码：未应用时是一行轻量入口，应用后变成可撤销的状态条。 */
+.paywall-discount-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  margin: -2px 0 12px;
+  padding: 6px 8px;
+  color: #98664f;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 150ms ease, background-color 150ms ease;
+}
+
+.paywall-discount-entry:hover,
+.paywall-discount-entry.is-active { color: var(--accent-strong); background: #fff5f1; }
+.paywall-discount-entry:disabled { opacity: 0.5; cursor: default; }
+
+.paywall-discount-applied {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: -2px 0 12px;
+  padding: 8px 10px;
+  color: #2f6b48;
+  background: #f0f8f2;
+  border-radius: 8px;
+  font-size: 10px;
+  animation: paywall-note-in 200ms var(--ease-emphasized) both;
+}
+
+.paywall-discount-applied > span { flex: 1; }
+.paywall-discount-applied b { font-weight: 700; letter-spacing: 0.02em; }
+.paywall-discount-applied .text-button { color: #65756a; font-size: 9.5px; }
+
+/* 面板展开/收起用栅格轨道过渡，内容高度变化平滑且不打断布局。 */
+.paywall-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 280ms var(--ease-emphasized), opacity 180ms ease;
+}
+
+.paywall-reveal.is-open { grid-template-rows: 1fr; opacity: 1; }
+.paywall-reveal > div { min-height: 0; overflow: hidden; }
+
+.paywall-field { margin-bottom: 12px; padding: 12px; background: #faf8f6; border: 1px solid #ebe5e0; border-radius: 11px; }
+.paywall-field label { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; color: #65605c; font-size: 10px; font-weight: 650; }
+.paywall-field-row { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
+.paywall-field input {
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  background: white;
+  border: 1px solid #ded9d4;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+.paywall-field input::placeholder { color: #a8a29d; letter-spacing: 0; }
+.paywall-field input:focus { outline: none; border-color: #e3a08d; box-shadow: 0 0 0 3px rgba(231, 111, 81, 0.13); }
+.paywall-field input[aria-invalid="true"] { border-color: #e0a08e; background: #fffbfa; }
+.paywall-field-hint { margin: 6px 0 0; color: #9a948f; font-size: 9px; line-height: 1.5; }
+.paywall-inline-error { margin: 8px 0 0; color: #a74531; font-size: 9.5px; line-height: 1.45; animation: paywall-note-in 180ms ease-out both; }
+.paywall-field .activation-recover { margin-top: 8px; padding-left: 0; color: #98664f; font-size: 10px; }
+.paywall-field .activation-recover:hover { color: var(--accent-strong); }
+
+.paywall-success {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 2px 0 12px;
+  padding: 10px 12px;
+  color: #2f6b48;
+  background: #eff8f1;
+  border-radius: 9px;
+  font-size: 10.5px;
+  font-weight: 600;
+  animation: paywall-note-in 220ms var(--ease-emphasized) both;
+}
+
+@keyframes paywall-note-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+
+.paywall-error { margin: 0 0 12px; padding: 9px 10px; color: #a74531; background: #fff3ef; border-radius: 8px; font-size: 10px; animation: paywall-note-in 180ms ease-out both; }
 .paywall-config-note { margin: 0 0 12px; padding: 9px 10px; color: #776039; background: #fff9ec; border-radius: 8px; font-size: 10px; line-height: 1.45; }
 .paywall-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.paywall-actions .paywall-buy { grid-column: 1 / -1; height: 40px; }
+.paywall-actions .paywall-buy { grid-column: 1 / -1; height: 38px; }
 .paywall-actions .text-button { justify-content: center; }
-.paywall-dialog > footer { display: flex; align-items: center; justify-content: center; gap: 5px; margin: 18px -8px -8px; color: #92969e; font-size: 9px; }
+.paywall-dialog footer { display: flex; align-items: center; justify-content: center; gap: 5px; margin: 14px -8px -6px; color: #92969e; font-size: 9px; }
 
 .floating-unlock {
   position: fixed;
@@ -5992,7 +6116,7 @@ html[data-surface="permission-helper"] #root {
   .permission-wall__list article,
   .permission-wall__stage,
   .permission-helper__app,
-  .paywall-dialog,
+  .paywall-reveal,
   .floating-unlock,
   .record-dot,
   .live-context > span i,
@@ -6007,6 +6131,7 @@ html[data-surface="permission-helper"] #root {
 
   /* 新的空间动效：去掉位移，只保留极短淡入淡出；栅格轨道与按压缩放同样归零/瞬时。 */
   .dialog:not(.permission-wall):not(.paywall-dialog),
+  .paywall-dialog,
   .modal-backdrop.is-closing .dialog {
     animation: content-fade-enter 140ms ease-out both !important;
     transform: none !important;

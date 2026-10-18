@@ -1000,6 +1000,52 @@ function BuyPage() {
   }, [order]);
 
   // 折扣码试算：服务端按当前售价复算应付金额；下单时服务端会再次校验。
+  async function requestQuote(code: string) {
+    const response = await fetch(`${licenseApiRoot()}/api/license/quote`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ discountCode: code })
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload?.code || !Number.isFinite(payload?.amountFen)) {
+      throw new Error(payload?.error ?? "折扣码校验失败，请稍后重试。");
+    }
+    return {
+      code: String(payload.code),
+      listAmountFen: Number(payload.listAmountFen ?? priceFen),
+      amountFen: Number(payload.amountFen),
+      discountFen: Number(payload.discountFen ?? 0)
+    };
+  }
+
+  // 从桌面付费墙带 ?discount= 进入时自动套用，用户落地即看到折后应付金额。
+  useEffect(() => {
+    const fromApp = new URLSearchParams(window.location.search).get("discount");
+    const code = String(fromApp ?? "").trim().toUpperCase();
+    if (!code) return undefined;
+    let cancelled = false;
+    setDiscountInput(code);
+    setDiscountBusy(true);
+    setDiscountError("");
+    requestQuote(code)
+      .then((quote) => {
+        if (cancelled) return;
+        setDiscount(quote);
+        setDiscountInput("");
+      })
+      .catch((caught: unknown) => {
+        if (!cancelled) setDiscountError(caught instanceof Error ? caught.message : "折扣码校验失败，请稍后重试。");
+      })
+      .finally(() => {
+        if (!cancelled) setDiscountBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // 仅在落地时执行一次；priceFen 变化不应重复套用同一折扣码。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function applyDiscount() {
     const code = discountInput.trim().toUpperCase();
     if (!code) {
@@ -1009,25 +1055,10 @@ function BuyPage() {
     setDiscountBusy(true);
     setDiscountError("");
     try {
-      const response = await fetch(`${licenseApiRoot()}/api/license/quote`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ discountCode: code })
-      });
-      const payload = await response.json().catch(() => null);
-      if (!response.ok || !payload?.code || !Number.isFinite(payload?.amountFen)) {
-        setDiscountError(payload?.error ?? "折扣码校验失败，请稍后重试。");
-        return;
-      }
-      setDiscount({
-        code: String(payload.code),
-        listAmountFen: Number(payload.listAmountFen ?? priceFen),
-        amountFen: Number(payload.amountFen),
-        discountFen: Number(payload.discountFen ?? 0)
-      });
+      setDiscount(await requestQuote(code));
       setDiscountInput("");
-    } catch {
-      setDiscountError("暂时无法连接折扣码服务，请稍后重试。");
+    } catch (caught) {
+      setDiscountError(caught instanceof Error ? caught.message : "折扣码校验失败，请稍后重试。");
     } finally {
       setDiscountBusy(false);
     }

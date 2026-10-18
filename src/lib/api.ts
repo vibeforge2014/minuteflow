@@ -608,8 +608,10 @@ const browserApi: MeetingAPI = {
   },
   licensing: {
     // ?preview=desktop 的本地预览视为已授权，方便完整走通付费功能；正式激活必须回到桌面端。
+    // ?preview=desktop&paywall=1 保留未授权态，用于付费墙的视觉与交互验收。
     async getStatus() {
-      const previewLicensed = new URLSearchParams(window.location.search).get("preview") === "desktop";
+      const params = new URLSearchParams(window.location.search);
+      const previewLicensed = params.get("preview") === "desktop" && params.get("paywall") !== "1";
       return {
         state: previewLicensed ? "licensed" as const : "unlicensed" as const,
         productId: "minuteflow-desktop",
@@ -632,8 +634,37 @@ const browserApi: MeetingAPI = {
         insecureStorage: false
       };
     },
-    async openCheckout() {
-      window.open("https://zensoft.top/minuteflow/pricing/", "_blank", "noopener,noreferrer");
+    async quoteDiscount(discountCode: string) {
+      // 浏览器预览经 Vite dev 代理直连官网试算接口（生产静态预览不启用此路径），
+      // 价格仍由服务端裁决。
+      try {
+        const response = await fetch("/api/license/quote", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ discountCode }),
+          signal: AbortSignal.timeout(12_000)
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload?.code || !Number.isFinite(payload?.amountFen)) {
+          throw new Error(payload?.error ?? "折扣码校验失败，请稍后重试。");
+        }
+        return {
+          code: String(payload.code),
+          listAmountFen: Number(payload.listAmountFen ?? payload.amountFen),
+          amountFen: Number(payload.amountFen),
+          discountFen: Number(payload.discountFen ?? 0)
+        };
+      } catch (error) {
+        if (error instanceof Error && error.name === "TimeoutError") throw new Error("折扣码校验超时，请稍后重试。");
+        if (error instanceof Error && error.message !== "Failed to fetch") throw error;
+        throw new Error("暂时无法连接折扣码服务，请稍后重试。");
+      }
+    },
+    async openCheckout(discountCode?: string) {
+      const url = new URL("https://zensoft.top/minuteflow/buy/");
+      const code = String(discountCode ?? "").trim().toUpperCase();
+      if (code) url.searchParams.set("discount", code);
+      window.open(url.toString(), "_blank", "noopener,noreferrer");
       return { opened: true as const };
     },
     async openRecover() {

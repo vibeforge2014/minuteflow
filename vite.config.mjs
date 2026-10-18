@@ -23,6 +23,14 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     allowedHosts: ["terminal.local"],
+    // 浏览器预览付费墙的折扣码试算走同源代理，避免把 localhost 之外的 CORS 细节带进渲染层。
+    proxy: {
+      "/api/license": {
+        target: "https://zensoft.top",
+        changeOrigin: true,
+        secure: true
+      }
+    },
     watch: {
       ignored: ["**/.build/**", "**/artifacts/**", "**/release/**", "**/out/**", "**/dist/**", "**/ios/**"],
     },

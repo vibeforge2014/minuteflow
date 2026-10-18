@@ -465,9 +465,11 @@ export async function requireLicense() {
 /**
  * 返回购买页地址（licensing:open-checkout）：优先配置值，缺省官网购买页；
  * 地址必须能解析为 URL 且为 HTTPS，否则报错（不允许把用户带去非加密页面）。
+ * 已校验的折扣码随 `?discount=` 带到购买页，页面打开后自动套用并复算价格。
+ * @param {string} [discountCode] 付费墙里已通过服务端试算的折扣码
  * @returns {Promise<string>} 购买页 URL
  */
-export async function checkoutUrl() {
+export async function checkoutUrl(discountCode = "") {
   const config = await getConfig();
   const candidate = config.checkoutUrl || "https://zensoft.top/minuteflow/buy/";
   let url;
@@ -477,7 +479,54 @@ export async function checkoutUrl() {
     throw new Error("购买地址配置无效，请联系 xhdp123@126.com。");
   }
   if (url.protocol !== "https:") throw new Error("购买地址必须使用 HTTPS。");
+  const code = String(discountCode || "").trim().toUpperCase();
+  if (code) url.searchParams.set("discount", code);
   return url.toString();
+}
+
+/**
+ * 折扣码试算（licensing:quote-discount）：只把折扣码交给授权服务按当前售价复算
+ * 应付金额，不创建订单。价格始终以服务端返回为准，客户端不自行计算。
+ * @param {string} rawCode 用户输入的折扣码
+ * @returns {Promise<{code: string, listAmountFen: number, amountFen: number, discountFen: number}>}
+ */
+export async function quoteDiscount(rawCode) {
+  const code = String(rawCode || "").trim().toUpperCase();
+  if (!code) throw new Error("请输入折扣码。");
+  const config = await getConfig();
+  if (!config.verificationUrl) throw new Error("折扣码服务尚未配置，请按原价购买。");
+  let url;
+  try {
+    const base = new URL(config.verificationUrl);
+    base.pathname = base.pathname.replace(/\/verify\/?$/, "/quote");
+    if (base.pathname.endsWith("/verify")) throw new Error("bad endpoint");
+    url = base;
+  } catch {
+    throw new Error("折扣码服务地址无效，请按原价购买。");
+  }
+  if (url.protocol !== "https:") throw new Error("折扣码服务必须使用 HTTPS。");
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ discountCode: code }),
+      signal: AbortSignal.timeout(12_000)
+    });
+  } catch {
+    throw new Error("暂时无法连接折扣码服务，请稍后重试。");
+  }
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(payload?.error || "折扣码校验失败，请稍后重试。");
+  if (!payload?.code || !Number.isFinite(payload?.amountFen)) {
+    throw new Error("折扣码校验失败，请稍后重试。");
+  }
+  return {
+    code: String(payload.code),
+    listAmountFen: Number(payload.listAmountFen ?? payload.amountFen),
+    amountFen: Number(payload.amountFen),
+    discountFen: Number(payload.discountFen ?? 0)
+  };
 }
 
 /**

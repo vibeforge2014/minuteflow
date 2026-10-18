@@ -116,7 +116,8 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     getStatus: (refresh = false) => invoke("licensing:get-status", refresh),
     activate: (licenseKey) => invoke("licensing:activate", licenseKey),
     deactivate: () => invoke("licensing:deactivate"),
-    openCheckout: () => invoke("licensing:open-checkout"),
+    quoteDiscount: (discountCode) => invoke("licensing:quote-discount", discountCode),
+    openCheckout: (discountCode) => invoke("licensing:open-checkout", discountCode),
     openRecover: () => invoke("licensing:open-recover")
   },
   updates: {

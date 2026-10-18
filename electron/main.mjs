@@ -92,6 +92,7 @@ import {
 import {
   activateLicense,
   checkoutUrl,
+  quoteDiscount,
   recoverUrl,
   deactivateLicense,
   getLicenseStatus,
@@ -1300,11 +1301,14 @@ function registerIpc() {
   trustedHandle("licensing:activate", (_event, licenseKey) => activateLicense(licenseKey));
   // licensing:deactivate — 停用本机授权（删除密钥并保留设备标识），授权管理页调用。
   trustedHandle("licensing:deactivate", () => deactivateLicense());
-  // licensing:open-checkout — 打开购买页（系统浏览器），付费墙"购买"按钮调用。
-  trustedHandle("licensing:open-checkout", async () => {
-    await shell.openExternal(await checkoutUrl());
+  // licensing:open-checkout — 打开购买页（系统浏览器），付费墙"购买"按钮调用；
+  // 已试算通过的折扣码随地址带去，页面自动套用。
+  trustedHandle("licensing:open-checkout", async (_event, discountCode) => {
+    await shell.openExternal(await checkoutUrl(discountCode));
     return { opened: true };
   });
+  // licensing:quote-discount — 折扣码试算（服务端复算价格，不创建订单）。
+  trustedHandle("licensing:quote-discount", (_event, discountCode) => quoteDiscount(discountCode));
   // licensing:open-recover — 打开激活码找回页（系统浏览器），付费墙"忘记激活码"链接调用。
   trustedHandle("licensing:open-recover", async () => {
     await shell.openExternal(await recoverUrl());

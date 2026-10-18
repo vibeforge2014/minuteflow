@@ -405,6 +405,14 @@ export interface LicenseStatus {
   insecureStorage: boolean;
 }
 
+/** 折扣码试算结果（金额单位：分，全部来自服务端，客户端不自行计价）。 */
+export interface DiscountQuote {
+  code: string;
+  listAmountFen: number;
+  amountFen: number;
+  discountFen: number;
+}
+
 /**
  * 桌面更新清单条目：从官网校验过的 JSON 更新 manifest 中读取的单条版本信息
  * （macOS DMG / Windows 安装程序，含 sha256 与最低系统版本）。
@@ -775,7 +783,10 @@ export interface MeetingAPI {
     getStatus(refresh?: boolean): Promise<LicenseStatus>;
     activate(licenseKey: string): Promise<LicenseStatus>;
     deactivate(): Promise<LicenseStatus>;
-    openCheckout(): Promise<{ opened: true }>;
+    /** 折扣码试算：服务端复算应付金额，不下单。 */
+    quoteDiscount(discountCode: string): Promise<DiscountQuote>;
+    /** 打开官网购买页；已试算的折扣码会随地址带入并自动套用。 */
+    openCheckout(discountCode?: string): Promise<{ opened: true }>;
     openRecover(): Promise<{ opened: true }>;
   };
   updates: {
