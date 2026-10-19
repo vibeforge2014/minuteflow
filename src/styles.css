@@ -713,14 +713,14 @@ button {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #8c929b;
+  color: #7c828b;
   font-size: 11px;
 }
 
 .participants-editor {
   width: min(220px, 40vw);
   padding: 1px 3px;
-  color: #8c929b;
+  color: #7c828b;
   background: transparent;
   border: 0;
   border-radius: 4px;
@@ -962,7 +962,7 @@ button {
   align-items: center;
   gap: 6px;
   padding: 3px 7px;
-  color: #8a8f97;
+  color: #7c736c;
   background: #f5f6f7;
   border-radius: 999px;
   font-size: 10px;
@@ -975,6 +975,10 @@ button {
   background: var(--green);
   border-radius: 50%;
 }
+
+/* 尚未生成不是健康状态：圆点回落为中性灰，避免绿色被读成“已就绪”。 */
+.summary-cadence.is-empty { color: #8a8079; background: #f7f4f1; }
+.summary-cadence.is-empty i { background: #c3bab2; }
 
 .text-button {
   display: inline-flex;
@@ -1000,13 +1004,22 @@ button {
   background: #fff0f0;
 }
 
+/* 纪要过期只保留这一处就地说明；不再铺满整条黄色横幅。 */
 .summary-stale {
-  margin: 5px 0 9px 24px;
-  padding: 8px 10px;
-  color: #8a621a;
-  background: #fff8e7;
-  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 9px 24px;
+  color: #96702c;
   font-size: 11px;
+}
+
+.summary-stale::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #e0a33e;
 }
 
 /* 关键结论：暖色文档卡内的一组结论行。结论没有先后语义，用圆点引导而不是编号，
@@ -1158,7 +1171,8 @@ button {
   font-weight: 650;
 }
 
-/* 「添加结论」ghost 按钮：卡片 hover/聚焦时浮现，与行锁同一透明度语言。 */
+/* 「添加结论」ghost 按钮：常驻但压低存在感，hover/聚焦时提亮。
+   不再整块隐藏——隐藏按钮仍占高度，会在卡片底部留出一条无解释的空白。 */
 .summary-point-add {
   display: inline-flex;
   align-items: center;
@@ -1171,7 +1185,7 @@ button {
   color: #8f959d;
   font-size: 12.5px;
   cursor: pointer;
-  opacity: 0;
+  opacity: .55;
   transition: opacity var(--motion-fast) ease, background-color var(--motion-fast) ease, color var(--motion-fast) ease;
 }
 
@@ -1213,7 +1227,6 @@ button {
 .text-button:not(:disabled):active,
 .icon-button:active,
 .panel-tabs button:active,
-.summary-view-switch button:active,
 .note-mode-switch button:active,
 .editor-toolbar button:active,
 .settings-nav button:active,
@@ -1224,19 +1237,29 @@ button {
 .new-meeting:active,
 .readiness-item ~ .preparation-start:active,
 .meeting-row-wrap:active .meeting-row:not(.is-selected),
-.summary-view-switch button:active,
 .import-subsection-heading button:active {
   transform: scale(0.97);
 }
 
-.section-empty {
-  padding: 14px;
-  color: #a0a5ad;
-  border: 1px dashed #dfe1e5;
-  border-radius: 7px;
+/* 统一空态：一条无边框的 ghost 行（说明 + 可选添加动作），
+   不再用虚线框或空表头占位——空内容不该长得像一张没填完的表。 */
+.section-empty-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 2px 0 0 24px;
+  padding: 8px 12px;
+  border-radius: 9px;
+  background: #faf8f6;
+  color: #7b726b;
   font-size: 12px;
-  text-align: center;
+  line-height: 1.5;
 }
+
+.section-empty-row .text-button { flex: none; padding: 2px 4px; color: var(--accent-strong); }
+.section-empty-row .text-button:hover { background: rgba(231, 111, 81, .08); }
+.action-table .section-empty-row { margin-left: 0; }
 
 .action-table {
   margin-left: 24px;
@@ -1253,7 +1276,7 @@ button {
 }
 
 .action-table__head {
-  color: #9297a0;
+  color: #7c828b;
   border-bottom: 1px solid var(--line);
 }
 
@@ -1330,45 +1353,54 @@ button {
   color: #7e838b;
 }
 
+/* 决策/问题/风险/下一步：四格是同一份文档的并列段落，不是四张卡片。
+   用发丝线分隔，条目直接写在纸面上——去掉「卡片里再嵌白框」的双层描边。 */
 .summary-detail-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 0;
   margin-left: 24px;
 }
 
 .summary-detail {
-  min-height: 82px;
-  padding: 10px;
-  background: #fafafb;
-  border: 1px solid #eceef1;
-  border-radius: 7px;
+  min-height: 0;
+  padding: 14px 18px;
+  background: transparent;
+  border: 0;
 }
 
+.summary-detail:nth-child(odd) { border-right: 1px solid #f1ebe6; }
+.summary-detail:nth-child(n + 3) { border-top: 1px solid #f1ebe6; }
+.summary-detail:first-child { padding-left: 0; }
+.summary-detail:nth-child(3) { padding-left: 0; }
+
 .summary-detail h3 {
-  margin: 0 0 6px;
-  color: #666c75;
-  font-size: 11px;
+  margin: 0 0 7px;
+  color: #7c6f66;
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .summary-detail textarea {
   width: 100%;
-  min-height: 40px;
+  min-height: 0;
   display: block;
-  margin: 3px 0;
-  padding: 4px 5px;
-  resize: vertical;
-  color: #41464e;
-  background: white;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  font-size: 12px;
-  line-height: 1.55;
+  margin: 0;
+  padding: 3px 5px;
+  resize: none;
+  overflow: hidden;
+  color: #3c4149;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 
 .summary-detail textarea:hover,
 .summary-detail textarea:focus {
-  border-color: #dfe3e9;
+  background: #faf7f4;
+  outline: none;
 }
 
 /* 纪要条目的锁定/解锁标记：锁定后 AI 重新生成不覆盖，图标点亮为主题色。 */
@@ -1403,7 +1435,9 @@ button {
 /* 关键结论行内的锁在 .summary-point__actions 容器中对齐，不再单独偏移。 */
 
 .summary-detail > span {
-  color: #a1a6ae;
+  display: block;
+  margin-bottom: 1px;
+  color: #8f857c;
   font-size: 11px;
 }
 
@@ -5340,59 +5374,6 @@ html[data-surface="permission-helper"] #root {
 .meeting-document--review .document-section--notes { order: 4; }
 .meeting-document--review .document-section--goals { order: 5; }
 
-/* —— 普通纪要 / 视觉纪要：收在会后整理横幅右侧与生成按钮同组，
-   样式与中央视图胶囊同语言（无描边分段控件），不再单独占一行 —— */
-.summary-view-switch {
-  display: inline-flex;
-  gap: 2px;
-  padding: 3px;
-  border: none;
-  border-radius: 999px;
-  background: rgba(60, 39, 29, .055);
-}
-
-.summary-view-switch button {
-  position: relative;
-  min-height: 28px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 13px;
-  border: 0;
-  border-radius: 999px;
-  color: #80766f;
-  background: transparent;
-  font-size: 12px;
-  font-weight: 650;
-  transition:
-    color var(--motion-fast) var(--ease-out-ui),
-    background-color var(--motion-fast) var(--ease-out-ui),
-    box-shadow var(--motion-fast) var(--ease-out-ui);
-}
-
-.summary-view-switch button:not(.is-active):hover {
-  color: #6f645b;
-  background: rgba(60, 39, 29, .045);
-}
-
-.summary-view-switch button.is-active {
-  color: #a54833;
-  background: white;
-  box-shadow:
-    0 1px 2px rgba(60, 39, 29, .1),
-    0 2px 8px rgba(60, 39, 29, .06);
-}
-
-.summary-view-switch button > span {
-  position: absolute;
-  top: 5px;
-  right: 5px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
 .meeting-document--visual > .document-section { display: none; }
 
 /* 普通纪要 ↔ 视觉纪要：同一个文档对象的形态切换，轻缩放淡入表达“变换”而非换页。 */
@@ -5763,29 +5744,133 @@ html[data-surface="permission-helper"] #root {
 .live-context > div { min-width: 0; display: flex; gap: 6px; overflow: hidden; }
 .live-context > div span { min-width: 0; padding: 4px 8px; overflow: hidden; color: #756a63; background: rgba(255,255,255,.82); border-radius: 999px; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 会后整理文档头：标题就是会议名，状态只占一行，操作收成一条横向工具行。
+   低频维护动作（重新转录）进「更多」菜单，避免与「更新纪要」抢注意力。 */
 .review-hero {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
+  gap: 24px;
   margin: 3px 0 10px;
-  padding: 20px 21px;
-  border: 1px solid #e5e7e4;
+  padding: 16px 20px;
+  border: 1px solid #ece3dc;
   border-radius: 14px;
-  background: #fafbf9;
+  background: linear-gradient(145deg, #fffdfb 0%, #fdf7f3 100%);
+}
+
+/* 会议标题已在文档顶栏作为可编辑标题常驻，正文不再复述一遍大标题。
+   保留一个屏幕阅读器标题，让文档仍有明确的 heading 层级。 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .review-hero.is-fresh { border-color: #d9e9de; background: #f6fbf7; }
-.review-hero .button { flex: 0 0 auto; min-height: 40px; }
+
+.review-hero__main { flex: 1 1 auto; min-width: 0; }
+
+.review-hero__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+.review-hero .eyebrow { display: block; }
+
+.review-hero p { max-width: 58ch; }
+.review-hero__head + p { margin: 9px 0 0; }
+
+.review-hero .button { flex: 0 0 auto; min-height: 36px; }
+
 .review-hero .import-processing-meta { max-width: 520px; margin-top: 12px; }
 .review-hero .import-processing-meta__detail { font-size: 11px; }
-/* 会后整理右侧工具位：形态切换（普通/视觉）与生成按钮上下同组，右对齐。 */
+
+/* 普通 / 视觉纪要是同一条文档的两种呈现，不是第二层导航：
+   用安静的文字切换表达，避免与顶部「AI 纪要 | 转写」形成两个同形分段控件。 */
+.review-hero__view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #8a7d74;
+  font-size: 11px;
+  font-weight: 550;
+  transition: background-color var(--motion-fast) var(--ease-out-ui), color var(--motion-fast) var(--ease-out-ui);
+}
+
+.review-hero__view-toggle:hover { color: var(--accent-strong); background: rgba(231, 111, 81, .08); }
+.review-hero__view-toggle:active { transform: scale(.97); }
+
+.review-hero__view-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* 会后整理右侧工具位：主操作 + 更多，横向一排；处理中可换行的上下文按钮同样放这里。 */
 .review-hero__side {
   flex: 0 0 auto;
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.review-hero__more { position: relative; }
+
+.review-hero__more-button {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  color: #8a7d74;
+}
+
+.review-hero__more-button:hover { color: #4a4544; background: rgba(60, 39, 29, .06); }
+
+.review-hero__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  width: 244px;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid #eadfd8;
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(31, 36, 43, .12);
+  animation: content-fade-enter 120ms ease-out both;
+}
+
+.review-hero__menu button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #373230;
+  font-size: 12px;
+  text-align: left;
+}
+
+.review-hero__menu button:hover { background: #fff6f1; }
+
+.review-hero__menu small {
+  display: block;
+  padding: 4px 9px 6px;
+  color: #9a918a;
+  font-size: 9.5px;
+  line-height: 1.55;
 }
 
 .summary-lock { opacity: 0; transition: opacity 120ms ease, color 120ms ease, background 120ms ease; }
@@ -6047,11 +6132,8 @@ html[data-surface="permission-helper"] #root {
 
   .readiness-grid { grid-template-columns: 1fr; }
   .readiness-item { min-height: 0; }
-  .review-hero { align-items: flex-start; flex-direction: column; }
-  .review-hero .button { width: 100%; }
-  .review-hero__side { width: 100%; align-items: stretch; }
-  .review-hero__side .summary-view-switch { width: 100%; }
-  .review-hero__side .summary-view-switch button { flex: 1; justify-content: center; }
+  .review-hero { align-items: stretch; flex-direction: column; gap: 14px; }
+  .review-hero__side { width: 100%; justify-content: flex-start; }
   .document-header__title input { max-width: min(48vw, 340px); }
   .recorder-bar { min-height: 78px; flex-basis: 78px; padding-inline: 12px; }
   .transcription-status { display: none; }
@@ -6090,14 +6172,23 @@ html[data-surface="permission-helper"] #root {
 /* —— 中央工作区视图切换（AI 纪要 / 转写）与会话右栏 —— */
 
 /* 视图切换是浮在文档滚动内容上的半透明胶囊：滚动长纪要时标签始终可达（空间连续性）。
+   胶囊坐在一条白色渐隐带上：内容从带子下方淡出，不再被胶囊直接压住一截。
    不用描边成形——靠「中性暖灰轨道 + 白色滑块」的填充对比（Apple 分段控件语言），
    硬边框在暖色纸面上会显脏。 */
-.workspace-view-switch {
+.workspace-view-switch-band {
   position: sticky;
-  top: 6px;
+  top: 0;
   z-index: 6;
+  display: flex;
+  justify-content: center;
+  margin-top: -6px;
+  padding: 10px 0 16px;
+  background: linear-gradient(180deg, #fff 68%, rgba(255, 255, 255, 0));
+  pointer-events: none;
+}
+
+.workspace-view-switch {
   width: fit-content;
-  margin: 16px auto 14px;
   display: flex;
   gap: 2px;
   padding: 3px;
@@ -6107,6 +6198,7 @@ html[data-surface="permission-helper"] #root {
   -webkit-backdrop-filter: blur(14px) saturate(1.3);
   backdrop-filter: blur(14px) saturate(1.3);
   box-shadow: 0 1px 2px rgba(60, 39, 29, .04);
+  pointer-events: auto;
 }
 
 .workspace-view-switch button {
@@ -6743,8 +6835,7 @@ html[data-surface="permission-helper"] #root {
   }
 
   .panel-tabs button,
-  .panel-tabs button::after,
-  .summary-view-switch button {
+  .panel-tabs button::after {
     transform: none !important;
     transition-duration: 140ms !important;
   }

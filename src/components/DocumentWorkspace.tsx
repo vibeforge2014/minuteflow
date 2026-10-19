@@ -24,6 +24,7 @@ import {
   Plus,
   Sparkle,
   Target,
+  DotsThree,
   Trash,
   WarningCircle,
   XCircle
@@ -130,7 +131,37 @@ export function DocumentWorkspace({
     || meeting.summary.openQuestions.length > 0
     || meeting.summary.risks.length > 0
     || meeting.summary.nextSteps.length > 0;
+  /** 「已整理 …」按全部纪要字段计数：只报结论与行动项会与页面上的决策/问题内容自相矛盾。 */
+  const summaryParts = ([
+    [meeting.summary.keyPoints.length, "条结论"],
+    [meeting.summary.actionItems.length, "个行动项"],
+    [meeting.summary.decisions.length, "条决策"],
+    [meeting.summary.openQuestions.length, "个未决问题"],
+    [meeting.summary.risks.length, "条风险"],
+    [meeting.summary.nextSteps.length, "条下一步"]
+  ] as Array<[number, string]>).filter(([count]) => count > 0).map(([count, unit]) => `${count} ${unit}`);
   const [summaryView, setSummaryView] = useState<"normal" | "visual">("normal");
+  /** 会后文档头「更多」菜单：重新转录等低频维护动作收在这里，避免与主操作抢注意力。 */
+  const [heroMenuOpen, setHeroMenuOpen] = useState(false);
+  const heroMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!heroMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!heroMenuRef.current?.contains(event.target as Node)) setHeroMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setHeroMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [heroMenuOpen]);
+  useEffect(() => {
+    setHeroMenuOpen(false);
+  }, [meeting.id]);
   /** 中央列视图：AI 纪要文档 / 转写。会前只展示文档（还没有转写内容）。 */
   const [workspaceView, setWorkspaceView] = useState<"document" | "transcript">(
     stage === "live" ? "transcript" : "document"
@@ -294,28 +325,49 @@ export function DocumentWorkspace({
       }, `action:${id}`)
     });
 
+  /** 手动新增一条行动项并锁定；空态与列表尾部共用同一个入口。 */
+  const addActionItem = () => {
+    const id = crypto.randomUUID();
+    onChange({
+      ...meeting,
+      summary: lockSummaryField({
+        ...meeting.summary,
+        actionItems: [...meeting.summary.actionItems, {
+          id,
+          title: "新的行动项",
+          owner: "待确认",
+          dueDate: "待确认",
+          status: "todo",
+          done: false
+        }]
+      }, `action:${id}`)
+    });
+  };
+
   return (
     <div className="document-scroll">
       {showViewSwitch && (
-        <div className="workspace-view-switch" role="tablist" aria-label="中央工作区内容">
-          <button
-            role="tab"
-            id="summary-view-tab"
-            aria-selected={workspaceView === "document"}
-            className={workspaceView === "document" ? "is-active" : ""}
-            onClick={() => setWorkspaceView("document")}
-          >
-            <FileText size={14} />AI 纪要
-          </button>
-          <button
-            role="tab"
-            id="transcript-tab"
-            aria-selected={workspaceView === "transcript"}
-            className={workspaceView === "transcript" ? "is-active" : ""}
-            onClick={() => setWorkspaceView("transcript")}
-          >
-            <NotePencil size={14} />转写
-          </button>
+        <div className="workspace-view-switch-band">
+          <div className="workspace-view-switch" role="tablist" aria-label="中央工作区内容">
+            <button
+              role="tab"
+              id="summary-view-tab"
+              aria-selected={workspaceView === "document"}
+              className={workspaceView === "document" ? "is-active" : ""}
+              onClick={() => setWorkspaceView("document")}
+            >
+              <FileText size={14} />AI 纪要
+            </button>
+            <button
+              role="tab"
+              id="transcript-tab"
+              aria-selected={workspaceView === "transcript"}
+              className={workspaceView === "transcript" ? "is-active" : ""}
+              onClick={() => setWorkspaceView("transcript")}
+            >
+              <NotePencil size={14} />转写
+            </button>
+          </div>
         </div>
       )}
       {workspaceView === "transcript" && showViewSwitch ? (
@@ -350,6 +402,7 @@ export function DocumentWorkspace({
         key={`${meeting.id}-${summaryView}`}
         className={`meeting-document meeting-document--${stage} ${summaryView === "visual" ? "meeting-document--visual" : ""}`}
       >
+        {stage !== "prepare" && <h1 className="sr-only">{meeting.title}</h1>}
         <div className="document-date document-date--workspace-meta">
           {formatMeetingDate(meeting.scheduledAt)}
           <span>·</span>
@@ -418,17 +471,31 @@ export function DocumentWorkspace({
 
         {stage === "review" && (
           <section className={`review-hero ${recentlyFinalized || processingStatus ? "is-fresh" : ""}`}>
-            <div>
-              <span className="eyebrow">{processingStatus
-                ? importJob?.status === "cancelled"
-                  ? "处理已暂停"
-                  : importJob?.status === "failed"
-                    ? "处理失败"
-                    : importJob?.status === "diarizing"
-                      ? "识别发言人"
-                      : "录音处理中"
-                : "会后整理"}</span>
-              <h1>{processingStatus || (recentlyFinalized ? "录音已安全保存" : "把讨论收束成清晰结果")}</h1>
+            <div className="review-hero__main">
+              <div className="review-hero__head">
+                <span className="eyebrow">{processingStatus
+                  ? importJob?.status === "cancelled"
+                    ? "处理已暂停"
+                    : importJob?.status === "failed"
+                      ? "处理失败"
+                      : importJob?.status === "diarizing"
+                        ? "识别发言人"
+                        : "录音处理中"
+                  : "会后整理"}</span>
+                {!processingStatus && (
+                  <button
+                    className="review-hero__view-toggle"
+                    onClick={() => setSummaryView(summaryView === "visual" ? "normal" : "visual")}
+                    aria-label={summaryView === "visual" ? "切换到普通纪要" : "切换到视觉纪要"}
+                  >
+                    {summaryView === "visual" ? <FileText size={14} /> : <Sparkle size={14} />}
+                    {summaryView === "visual" ? "普通纪要" : "视觉纪要"}
+                    {summaryView === "normal" && meeting.summary.visualSummary && !meeting.summary.visualSummary.stale && (
+                      <i className="review-hero__view-dot" aria-hidden="true" />
+                    )}
+                  </button>
+                )}
+              </div>
               {importJob && processingStatus && <ImportProcessingMeta job={importJob} />}
               <p>{processingStatus
                 ? importJob?.status === "failed" || importJob?.status === "cancelled"
@@ -436,13 +503,15 @@ export function DocumentWorkspace({
                   : importJob?.status === "diarizing"
                     ? "转写已经完整可读，正在本机识别不同发言人。可以先看转写，或跳过这一步直接生成纪要。"
                     : "处理会在后台继续，你也可以先补充笔记或查看已经出现的转写；长阶段可随时暂停。"
-                : meeting.summary.stale
-                  ? "转写或笔记有了新内容，更新纪要后再确认行动项。"
-                  : summaryView === "visual" && meeting.summary.visualSummary && !meeting.summary.visualSummary.stale
+                : summaryView === "visual"
+                  ? meeting.summary.visualSummary && !meeting.summary.visualSummary.stale
                     ? "视觉版已基于普通纪要生成；切回普通纪要可以继续编辑结论与行动项。"
+                    : "生成普通纪要后，可以进一步生成视觉版。"
                   : hasOrdinarySummary
-                    ? `已整理 ${meeting.summary.keyPoints.length} 条结论和 ${meeting.summary.actionItems.length} 个行动项。`
-                    : "录音和个人记录已保留；需要时再生成最终纪要。"}</p>
+                    ? `已整理 ${summaryParts.join("、")}。`
+                    : recentlyFinalized
+                      ? "录音已安全保存；需要时再生成最终纪要。"
+                      : "录音和个人记录已保留；需要时再生成最终纪要。"}</p>
             </div>
             <div className="review-hero__side">
               {importJob?.status === "diarizing" && (
@@ -471,15 +540,6 @@ export function DocumentWorkspace({
                   <ArrowClockwise size={16} />重试处理
                 </button>
               )}
-              <div className="summary-view-switch" role="tablist" aria-label="纪要显示方式">
-                <button role="tab" aria-selected={summaryView === "normal"} className={summaryView === "normal" ? "is-active" : ""} onClick={() => setSummaryView("normal")}>
-                  <FileText size={15} />普通纪要
-                </button>
-                <button role="tab" aria-selected={summaryView === "visual"} className={summaryView === "visual" ? "is-active" : ""} onClick={() => setSummaryView("visual")}>
-                  <Sparkle size={15} />视觉纪要
-                  {meeting.summary.visualSummary && !meeting.summary.visualSummary.stale && <span />}
-                </button>
-              </div>
               {!processingStatus && (summaryBusy ? (
                 <button className="button button--secondary" onClick={onCancelSummary}><XCircle size={16} />取消生成</button>
               ) : (
@@ -488,13 +548,25 @@ export function DocumentWorkspace({
                 </button>
               ))}
               {!processingStatus && onRetranscribe && meeting.status !== "recording" && meeting.status !== "paused" && (
-                <button
-                  className="button button--secondary"
-                  title="放弃当前逐字稿，用已归档的录音重新转写并生成纪要；笔记与手动锁定的内容会保留"
-                  onClick={onRetranscribe}
-                >
-                  <ArrowClockwise size={16} />重新转录
-                </button>
+                <div className="review-hero__more" ref={heroMenuRef}>
+                  <button
+                    className="icon-button review-hero__more-button"
+                    aria-label="更多纪要操作"
+                    aria-haspopup="menu"
+                    aria-expanded={heroMenuOpen}
+                    onClick={() => setHeroMenuOpen((open) => !open)}
+                  >
+                    <DotsThree size={20} weight="bold" />
+                  </button>
+                  {heroMenuOpen && (
+                    <div className="review-hero__menu" role="menu" aria-label="更多纪要操作">
+                      <button role="menuitem" onClick={() => { setHeroMenuOpen(false); onRetranscribe(); }}>
+                        <ArrowClockwise size={14} />重新转录
+                      </button>
+                      <small>放弃当前逐字稿，用已归档录音重新转写；笔记与手动锁定的内容会保留。</small>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           </section>
@@ -585,8 +657,8 @@ export function DocumentWorkspace({
           icon={<FileText size={20} weight="duotone" />}
           title={stage === "live" ? "会议进展" : "关键结论"}
           badge={
-            <span className="summary-cadence">
-              <i /> {meeting.summary.keyPoints.length
+            <span className={`summary-cadence ${hasOrdinarySummary ? "" : "is-empty"}`}>
+              <i /> {hasOrdinarySummary
                 ? meeting.summary.generationMode === "local" ? "本机基础归纳" : "AI 自动整理"
                 : "尚未生成"}{stage === "live" ? ` · 约每 ${formatInterval(summaryIntervalSeconds)}` : ""}
             </span>
@@ -745,15 +817,20 @@ export function DocumentWorkspace({
               );
             })()
           ) : (
-            <div className="section-empty">转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。</div>
+            <div className="section-empty-row">
+              <span>转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。</span>
+              <button className="text-button" onClick={addKeyPoint}><Plus size={13} />手动添加</button>
+            </div>
           )}
         </DocumentSection>
 
         <DocumentSection kind="actions" icon={<CheckSquare size={20} weight="duotone" />} title="行动项">
           <div className="action-table">
-            <div className="action-table__head">
-              <span>任务</span><span>负责人</span><span>截止时间</span><span>状态</span>
-            </div>
+            {meeting.summary.actionItems.length > 0 && (
+              <div className="action-table__head">
+                <span>任务</span><span>负责人</span><span>截止时间</span><span>状态</span>
+              </div>
+            )}
             {meeting.summary.actionItems.length ? meeting.summary.actionItems.map((item) => {
               const actionLocked = meeting.summary.manualLocks?.includes(`action:${item.id}`) ?? false;
               return (
@@ -806,30 +883,16 @@ export function DocumentWorkspace({
               </div>
               );
             }) : (
-              <div className="section-empty">暂无行动项。</div>
+              <div className="section-empty-row">
+                <span>生成纪要后会自动归纳行动项，也可以先手动添加。</span>
+                <button className="text-button" onClick={addActionItem}><Plus size={13} />添加行动项</button>
+              </div>
             )}
-            <button
-              className="text-button action-add"
-              onClick={() => {
-                const id = crypto.randomUUID();
-                onChange({
-                  ...meeting,
-                  summary: lockSummaryField({
-                    ...meeting.summary,
-                    actionItems: [...meeting.summary.actionItems, {
-                      id,
-                      title: "新的行动项",
-                      owner: "待确认",
-                      dueDate: "待确认",
-                      status: "todo",
-                      done: false
-                    }]
-                  }, `action:${id}`)
-                });
-              }}
-            >
-              <Plus size={14} />添加行动项
-            </button>
+            {meeting.summary.actionItems.length > 0 && (
+              <button className="text-button action-add" onClick={addActionItem}>
+                <Plus size={14} />添加行动项
+              </button>
+            )}
           </div>
         </DocumentSection>
 
@@ -882,7 +945,7 @@ function EditableSummaryList({
           >
             <textarea
               aria-label={`编辑${title} ${index + 1}`}
-              rows={2}
+              rows={Math.max(1, Math.ceil(value.length / 34))}
               value={value}
               onChange={(event) => onChange(
                 values.map((item, itemIndex) => itemIndex === index ? event.target.value : item),
