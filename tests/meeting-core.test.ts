@@ -66,6 +66,7 @@ import { groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments, s
 import { groupLibraryMeetings, splitHighlight } from "../src/lib/library";
 import { simplifyChinese, simplifySummary } from "../src/lib/chinese";
 import {
+  describeRuntimeMemory,
   formatHardwareLine,
   formatModelBytes,
   ollamaGuidance,
@@ -2761,5 +2762,11 @@ describe("设备感知模型推荐", () => {
     expect(formatModelBytes(6.1 * GB)).toBe("6.1 GB");
     expect(formatModelBytes(812 * 1024 ** 2)).toBe("812 MB");
     expect(formatModelBytes(0)).toBe("未知大小");
+  });
+
+  it("describeRuntimeMemory 在卡片上标注运行内存估算", () => {
+    expect(describeRuntimeMemory(3.1 * GB)).toBe("运行约占 4.3 GB 内存");
+    expect(describeRuntimeMemory(148 * 1024 ** 2)).toBe("运行约占 207 MB 内存");
+    expect(describeRuntimeMemory(0)).toBe("");
   });
 });

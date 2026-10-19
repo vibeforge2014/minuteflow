@@ -35,6 +35,7 @@ import { useMeetingStore } from "../store/meetingStore";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useExitPresence } from "../hooks/useExitPresence";
 import {
+  describeRuntimeMemory,
   formatHardwareLine,
   formatModelBytes,
   ollamaGuidance,
@@ -1720,7 +1721,7 @@ function LocalModelManager({
           {tooHeavy && <em className="is-heavy">内存不足</em>}
           <strong>{model.name}</strong>
           <small>{guidance}</small>
-          <span>{model.format} · {formatBytes(model.sizeBytes)} · {model.license}{tooHeavy && minRamGB ? ` · 建议 ${minRamGB}GB 内存以上` : ""}</span>
+          <span>{model.format} · {formatBytes(model.sizeBytes)} · {model.license}{describeRuntimeMemory(model.sizeBytes) && ` · ${describeRuntimeMemory(model.sizeBytes)}`}{tooHeavy && minRamGB ? ` · 建议 ${minRamGB}GB 内存以上` : ""}</span>
         </div>
         {model.installed && model.localPath ? (
           <button className="button button--small" disabled={busy} onClick={async () => {

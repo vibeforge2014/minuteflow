@@ -42,6 +42,18 @@ export function whisperModelFit(modelId: string, memoryGB: number): "best" | "ok
 }
 
 /**
+ * 模型运行占用相对磁盘体积的放大系数：量化权重本身≈文件体积，
+ * 再加上 KV 缓存与中间激活的余量。Ollama 适配判定与卡片文案共用。
+ */
+export const MODEL_RUNTIME_FACTOR = 1.4;
+
+/** 卡片里的运行内存估算文案：「运行约占 4.3 GB 内存」；体积未知返回空串不显示。 */
+export function describeRuntimeMemory(sizeBytes: number): string {
+  if (!sizeBytes || sizeBytes <= 0) return "";
+  return `运行约占 ${formatModelBytes(sizeBytes * MODEL_RUNTIME_FACTOR)} 内存`;
+}
+
+/**
  * Ollama 模型与设备的匹配度：文件体积 × 运行放大系数（KV 缓存等）不超过
  * 可用预算（物理内存的 60%，给系统留余量）才算舒服。
  * best=预算的七成以内；ok=预算内；heavy=超出预算；体积未知返回 unknown。
@@ -52,7 +64,7 @@ export function ollamaModelFit(
 ): "best" | "ok" | "heavy" | "unknown" {
   if (!sizeBytes || sizeBytes <= 0 || memoryBytes <= 0) return "unknown";
   const budget = memoryBytes * 0.6;
-  const runtimeBytes = sizeBytes * 1.4;
+  const runtimeBytes = sizeBytes * MODEL_RUNTIME_FACTOR;
   if (runtimeBytes <= budget * 0.7) return "best";
   return runtimeBytes <= budget ? "ok" : "heavy";
 }
