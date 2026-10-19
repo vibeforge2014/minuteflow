@@ -1,15 +1,18 @@
 import UIKit
 import XCTest
 
-/// 截图漫步：仅当 SCREENSHOT_WALK=1 时执行（`npm`/shell 端到端对比用），
-/// 正常测试运行不会触发。逐屏导航并把 PNG 写到宿主 /tmp/shots。
+/// 截图漫步：仅当 SCREENSHOT_WALK=1（iPhone）或 ipad 时执行（`npm`/shell 端到端对比用），
+/// 正常测试运行不会触发。逐屏导航并把 PNG 写到宿主 SHOT_DIR（默认 /tmp/shots）。
 final class ScreenshotWalkerUITests: XCTestCase {
-  private let outDir = "/tmp/shots"
+  private var outDir: String {
+    ProcessInfo.processInfo.environment["SHOT_DIR"] ?? "/tmp/shots"
+  }
 
   private func snap(_ app: XCUIApplication, _ name: String) {
     // 等待界面稳定后再截图（系统转场动画）。
     Thread.sleep(forTimeInterval: 1.2)
     let shot = XCUIScreen.main.screenshot()
+    try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
     try? shot.pngRepresentation.write(to: URL(fileURLWithPath: "\(outDir)/\(name).png"))
   }
 
@@ -138,6 +141,42 @@ final class ScreenshotWalkerUITests: XCTestCase {
           }
         }
       }
+    }
+  }
+
+  /// iPad 三栏工作区：横屏展示会议库 + 纪要/转录 + AI 问答常驻栏。
+  /// 与 iPhone 流程分开，避免窄屏断言误伤。
+  func testWalkScreensIPad() throws {
+    guard ProcessInfo.processInfo.environment["SCREENSHOT_WALK"] == "ipad" else {
+      throw XCTSkip("仅 iPad 截图漫步模式运行")
+    }
+    continueAfterFailure = true
+    XCUIDevice.shared.orientation = .landscapeLeft
+    let app = XCUIApplication()
+    app.launchArguments = ["UI_TESTING"]
+    app.launch()
+
+    let live = app.staticTexts["产品团队周会"].firstMatch
+    XCTAssertTrue(live.waitForExistence(timeout: 10))
+    snap(app, "ios-library")
+
+    live.tap()
+    snap(app, "ios-transcript")
+
+    let minutes = app.segmentedControls.buttons["AI 纪要"].firstMatch
+    if minutes.waitForExistence(timeout: 5) { minutes.tap() }
+    snap(app, "ios-minutes")
+
+    let done = app.staticTexts["项目复盘：移动端体验优化"].firstMatch
+    if done.waitForExistence(timeout: 5) { done.tap() }
+    snap(app, "ios-minutes-completed")
+
+    let visual = app.buttons["show-visual-summary-button"].firstMatch
+    if visual.waitForExistence(timeout: 5) {
+      visual.tap()
+      snap(app, "ios-visual")
+      let close = app.buttons["完成"].firstMatch
+      if close.waitForExistence(timeout: 3) { close.tap() }
     }
   }
 }
