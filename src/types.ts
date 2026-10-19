@@ -382,6 +382,16 @@ export interface SystemPermissionStatus {
 }
 
 /**
+ * 本机硬件信息：芯片/型号名与物理内存，用于本地模型的按设备推荐。
+ * chipName 在 sysctl/CPU 型号都拿不到时为 null，界面只展示内存档位。
+ */
+export interface HardwareInfo {
+  chipName: string | null;
+  memoryBytes: number;
+  platform: "darwin" | "win32" | "linux" | "web";
+}
+
+/**
  * 授权（许可）状态：¥99 一次性购买的激活/校验结果。
  * offline 表示处于离线宽限期；insecureStorage 提示许可证存储未加密。
  */
@@ -762,8 +772,9 @@ export interface MeetingAPI {
       visualSummaryVerifiedAt?: string;
       visualSummaryVerifiedFingerprint?: string;
     }>;
-    /** 拉取在线服务的可用模型列表（OpenAI 兼容与 Ollama）；原生协议返回 null 表示不支持。 */
-    listModels(profile: ModelProfile, apiKey?: string): Promise<{ models: string[] | null }>;
+    /** 拉取在线服务的可用模型列表（OpenAI 兼容与 Ollama）；原生协议返回 null 表示不支持。
+     *  Ollama 额外带回模型名 → 磁盘字节的 sizes 表（/api/tags，尽力而为），供按内存标注适配建议。 */
+    listModels(profile: ModelProfile, apiKey?: string): Promise<{ models: string[] | null; sizes?: Record<string, number> }>;
     deleteSecret(secretId: string): Promise<void>;
     scanLocal(): Promise<LocalModelScanResult>;
     /** 扫描本机已有的说话人分离/声纹 ONNX 模型（声纹设置「检测本机」入口）。 */
@@ -836,6 +847,8 @@ export interface MeetingAPI {
   /** 系统能力：平台标识、权限查询/申请路由到系统设置、系统睡眠/唤醒事件订阅。 */
   system: {
     platform: "darwin" | "win32" | "linux" | "web";
+    /** 本机芯片与内存（本地模型推荐用）；浏览器预览返回演示设备信息。 */
+    hardware(): Promise<HardwareInfo>;
     getPermissions(): Promise<SystemPermissionStatus>;
     requestMicrophone(): Promise<SystemPermissionValue>;
     openSettings(kind?: "microphone" | "screen"): Promise<void>;

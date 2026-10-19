@@ -5,10 +5,12 @@
  * - 请求走主进程 chat:send（需已配置在线总结服务并已激活）；失败在气泡内以错误样式呈现，可重试。
  * - 回答按 Markdown 安全渲染（与个人笔记同一管线）；思维链在传输层仍被拆分
  *   （防止内联 <think> 泄入正文），但不再提供「思考过程」展示入口。
+ * - 输入区上方的模型胶囊可不动设置直接切换正在使用的 LLM 档案（在线/本机 Ollama），
+ *   与设置页「正在使用」开关同一条互斥语义：启用即切换，兄弟档案自动停用。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChatTeardropText, Eraser, PaperPlaneRight, X } from "@phosphor-icons/react";
-import type { Meeting } from "../types";
+import { CaretDown, ChatTeardropText, CheckCircle, Eraser, PaperPlaneRight, X } from "@phosphor-icons/react";
+import type { Meeting, ModelProfile } from "../types";
 import { api } from "../lib/api";
 import { markdownToHtml } from "../lib/markdown";
 import { TYPEWRITER_TICK_MS, typewriterStep } from "../lib/typewriter";
@@ -60,14 +62,126 @@ function suggestedQuestions(meeting: Meeting) {
   return questions.slice(0, 4);
 }
 
+/**
+ * 输入区上方的模型胶囊 + 切换菜单：展示当前启用的 LLM 档案，点开即换。
+ * 本地基础纪要不能问答，不在列表里；没有任何档案时引导去设置页配置。
+ */
+function ChatModelSwitch({ onOpenSettings }: { onOpenSettings?: () => void }) {
+  const [profiles, setProfiles] = useState<ModelProfile[]>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    api.models.list()
+      .then((all) => { if (active) setProfiles(all.filter((p) => p.kind === "llm" && p.transport !== "local-summary")); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  // 菜单打开时点外部/Escape 关闭。
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) setMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menuOpen]);
+
+  const active = profiles.find((profile) => profile.enabled) ?? null;
+
+  /** 切换 = 启用目标档案；主进程同 kind 互斥停用兄弟档案，这里就地同步列表。 */
+  const switchModel = async (profile: ModelProfile) => {
+    if (!profile.id || busyId) return;
+    setBusyId(profile.id);
+    setError(null);
+    try {
+      const saved = await api.models.save({ ...profile, enabled: true });
+      setProfiles((current) => current.map((item) => item.id === saved.id ? saved : { ...item, enabled: false }));
+      setMenuOpen(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "切换失败，请稍后再试。");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  if (!profiles.length) {
+    return (
+      <button className="chat-model-switch__pill is-empty" onClick={onOpenSettings} title="去设置页配置总结/问答模型">
+        未配置模型 · 去设置
+        <CaretDown size={12} />
+      </button>
+    );
+  }
+
+  return (
+    <div className="chat-model-switch" ref={menuRef}>
+      <button
+        className="chat-model-switch__pill"
+        onClick={() => setMenuOpen((open) => !open)}
+        aria-haspopup="listbox"
+        aria-expanded={menuOpen}
+        title="切换问答使用的模型"
+      >
+        <span className={`chat-model-switch__dot ${active ? "" : "is-off"}`} aria-hidden="true" />
+        {active ? active.name : "未启用任何模型"}
+        {active && (
+          <span className={`chat-model-switch__tag ${active.transport === "ollama" ? "is-local" : ""}`}>
+            {active.transport === "ollama" ? "本机" : "在线"}
+          </span>
+        )}
+        <CaretDown size={12} />
+      </button>
+      {menuOpen && (
+        <div className="chat-model-switch__menu" role="listbox" aria-label="切换模型">
+          {profiles.map((profile) => (
+            <button
+              key={profile.id}
+              type="button"
+              role="option"
+              aria-selected={Boolean(profile.enabled)}
+              disabled={busyId !== null}
+              className={`chat-model-switch__option ${profile.enabled ? "is-current" : ""}`}
+              onClick={() => void switchModel(profile)}
+            >
+              <span>{profile.name}</span>
+              <small>{profile.model}{profile.transport === "ollama" ? " · 本机 Ollama" : " · 在线"}</small>
+              {profile.enabled && <CheckCircle size={15} weight="fill" />}
+            </button>
+          ))}
+          {error && <div className="chat-model-switch__error" role="alert">{error}</div>}
+          {onOpenSettings && (
+            <button type="button" className="chat-model-switch__manage" onClick={() => { setMenuOpen(false); onOpenSettings(); }}>
+              在设置中管理服务…
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface ChatPanelProps {
   meeting: Meeting;
   /** 退场动画期间为 true：面板沿滑入方向收回，与栅格轨道收缩同步。 */
   closing?: boolean;
   onClose(): void;
+  /** 模型胶囊的「去设置/管理服务」直达 AI 总结页。 */
+  onOpenSettings?: () => void;
 }
 
-export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
+export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(() => chatSessions.get(meeting.id) ?? []);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -244,28 +358,33 @@ export function ChatPanel({ meeting, closing, onClose }: ChatPanelProps) {
       </div>
 
       <footer className="chat-composer">
-        <textarea
-          value={draft}
-          rows={Math.min(4, Math.max(1, Math.ceil(draft.length / 26)))}
-          placeholder={busy ? "正在回答…" : "问点什么，回车发送"}
-          aria-label="提问输入框"
-          disabled={busy}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              void send(draft);
-            }
-          }}
-        />
-        <button
-          className="chat-send"
-          aria-label="发送问题"
-          disabled={busy || draft.trim().length === 0}
-          onClick={() => void send(draft)}
-        >
-          <PaperPlaneRight size={16} weight="fill" />
-        </button>
+        <div className="chat-composer__toolbar">
+          <ChatModelSwitch onOpenSettings={onOpenSettings} />
+        </div>
+        <div className="chat-composer__input-row">
+          <textarea
+            value={draft}
+            rows={Math.min(4, Math.max(1, Math.ceil(draft.length / 26)))}
+            placeholder={busy ? "正在回答…" : "问点什么，回车发送"}
+            aria-label="提问输入框"
+            disabled={busy}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void send(draft);
+              }
+            }}
+          />
+          <button
+            className="chat-send"
+            aria-label="发送问题"
+            disabled={busy || draft.trim().length === 0}
+            onClick={() => void send(draft)}
+          >
+            <PaperPlaneRight size={16} weight="fill" />
+          </button>
+        </div>
       </footer>
     </aside>
   );

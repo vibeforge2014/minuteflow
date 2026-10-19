@@ -1335,6 +1335,29 @@ export async function listRemoteModels(profile, apiKey, signal) {
   return parseModelListPayload(await response.json());
 }
 
+/** Ollama 专属：读取每个本地模型的磁盘体积（GET {base}/api/tags，尽力而为）。
+ *  OpenAI 兼容的 /models 不带 size，只有 Ollama 原生端点提供；任何失败都返回空表，
+ *  让设置页安静降级为「无大小标注」而不是报错。 */
+export async function listOllamaModelSizes(profile, signal) {
+  try {
+    const base = (profile.baseUrl || "").replace(/\/+$/, "").replace(/\/v1$/, "");
+    if (!/^https?:\/\//i.test(base)) return {};
+    const response = await fetch(`${base}/api/tags`, { signal: requestSignal(signal, 4000) });
+    if (!response.ok) return {};
+    const payload = await response.json();
+    const sizes = {};
+    for (const model of Array.isArray(payload?.models) ? payload.models : []) {
+      if (!model?.name || !Number.isFinite(model.size) || model.size <= 0) continue;
+      sizes[model.name] = model.size;
+      // Ollama 的 /v1/models 会把 "qwen3:4b:latest" 简写成 "qwen3:4b"，两种 id 都映射到同一体积。
+      if (model.name.endsWith(":latest")) sizes[model.name.slice(0, -":latest".length)] = model.size;
+    }
+    return sizes;
+  } catch {
+    return {};
+  }
+}
+
 /** 网络层错误（fetch failed/DNS/拒连/超时）翻译成可操作的中文提示，
  *  避免裸 TypeError 直接进设置页；LLM 测试与视觉纪要验证共用。 */
 function rethrowFriendlyNetworkError(error) {

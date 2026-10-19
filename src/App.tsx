@@ -825,6 +825,7 @@ export function App() {
           meeting={meeting}
           closing={panelPresence.closing}
           onClose={() => setRightPanelOpen(false)}
+          onOpenSettings={() => openSettings("llm")}
         />
       )}
 

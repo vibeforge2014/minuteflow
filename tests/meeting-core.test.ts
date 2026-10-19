@@ -65,6 +65,14 @@ import {
 import { groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments, splitTimedTranscriptText } from "../src/lib/transcript";
 import { groupLibraryMeetings, splitHighlight } from "../src/lib/library";
 import { simplifyChinese, simplifySummary } from "../src/lib/chinese";
+import {
+  formatHardwareLine,
+  formatModelBytes,
+  ollamaGuidance,
+  ollamaModelFit,
+  recommendWhisperModelId,
+  whisperModelFit
+} from "../src/lib/model-recommendation";
 import { derivePermissionSetupPhase, finishPermissionSetup, isMicrophonePermissionError, isScreenPermissionError, shouldOpenPermissionSetup, shouldRequestMicrophone } from "../src/lib/permissions";
 import { lockSummaryField, mergeSummaryRevision, removeSummaryListItem, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { buildBasicKeyPoints, KEY_POINT_MAX_CHARS } from "../electron/services/chinese.mjs";
@@ -2706,5 +2714,52 @@ describe("导入队列网络波动断点续跑", () => {
     seedWaitingJob("net-remove-1");
     expect(removeImportJob("net-remove-1")).toEqual({ removed: true });
     expect(loadJob("net-remove-1")).toBeNull();
+  });
+});
+
+describe("设备感知模型推荐", () => {
+  const GB = 1024 ** 3;
+
+  it("recommendWhisperModelId 按内存档位选多语言推荐款", () => {
+    expect(recommendWhisperModelId(4)).toBe("ggml-base");
+    expect(recommendWhisperModelId(8)).toBe("ggml-small");
+    expect(recommendWhisperModelId(12)).toBe("ggml-large-v3-turbo-q5_0");
+    expect(recommendWhisperModelId(20)).toBe("ggml-large-v3-turbo");
+    expect(recommendWhisperModelId(36)).toBe("ggml-large-v3");
+  });
+
+  it("whisperModelFit 标出推荐款与内存不足", () => {
+    expect(whisperModelFit("ggml-large-v3", 36)).toBe("best");
+    expect(whisperModelFit("ggml-small", 36)).toBe("ok");
+    expect(whisperModelFit("ggml-large-v3", 8)).toBe("heavy");
+    // 未知模型按 0 内存下限放行，不在目录里就不拦。
+    expect(whisperModelFit("ggml-custom", 4)).toBe("ok");
+  });
+
+  it("ollamaModelFit 按体积×1.4 与内存×0.6 预算比较", () => {
+    const memory = 16 * GB;
+    const budget = memory * 0.6;
+    expect(ollamaModelFit(undefined, memory)).toBe("unknown");
+    expect(ollamaModelFit(0, memory)).toBe("unknown");
+    // best：运行占用 ≤ 预算的七成。
+    expect(ollamaModelFit((budget * 0.7) / 1.4, memory)).toBe("best");
+    // ok：预算内但超过七成。
+    expect(ollamaModelFit(budget / 1.4, memory)).toBe("ok");
+    // heavy：超出预算。
+    expect(ollamaModelFit(budget / 1.2, memory)).toBe("heavy");
+  });
+
+  it("ollamaGuidance 与 formatHardwareLine 输出人话", () => {
+    const guidance = ollamaGuidance(36 * GB);
+    expect(guidance).toContain("本机可流畅运行");
+    expect(guidance).toContain("–");
+    expect(formatHardwareLine({ chipName: "Apple M4 Max", memoryBytes: 36 * GB, platform: "darwin" })).toBe("Apple M4 Max · 36 GB 内存");
+    expect(formatHardwareLine({ chipName: null, memoryBytes: 8.2 * GB, platform: "win32" })).toBe("8 GB 内存");
+  });
+
+  it("formatModelBytes 分档可读化", () => {
+    expect(formatModelBytes(6.1 * GB)).toBe("6.1 GB");
+    expect(formatModelBytes(812 * 1024 ** 2)).toBe("812 MB");
+    expect(formatModelBytes(0)).toBe("未知大小");
   });
 });

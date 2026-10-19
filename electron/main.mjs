@@ -29,7 +29,8 @@ import { Readable } from "node:stream";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { homedir } from "node:os";
+import { homedir, totalmem, cpus } from "node:os";
+import { execFile } from "node:child_process";
 import {
   appendAudioChunk,
   createMeeting,
@@ -61,6 +62,7 @@ import {
   chatWithMeetingContext,
   generateVisualSummaryWithOpenAICompatible,
   isVisualSummaryProfileVerified,
+  listOllamaModelSizes,
   listRemoteModels,
   summarizeLocally,
   summarizeWithOpenAICompatible,
@@ -1162,9 +1164,12 @@ function registerIpc() {
   });
   // models:list-models — 拉取在线服务的可用模型列表，设置页模型下拉调用；
   // 未保存密钥时自动回退到已存密钥，原生协议返回 null 由渲染层退回静态建议。
+  // Ollama 额外带回每个模型的磁盘体积（/api/tags，尽力而为），渲染层据此按内存标注适配建议。
   trustedHandle("models:list-models", async (_event, profile, apiKey) => {
     const models = await listRemoteModels(profile, apiKey || readSecret(profile.secretId));
-    return { models };
+    if (profile?.transport !== "ollama") return { models };
+    const sizes = await listOllamaModelSizes(profile);
+    return Object.keys(sizes).length ? { models, sizes } : { models };
   });
   // models:delete-secret — 删除指定凭据（删除/切换档案时调用，避免密钥残留）。
   trustedHandle("models:delete-secret", (_event, secretId) => deleteSecret(secretId));
@@ -1435,6 +1440,28 @@ function registerIpc() {
       };
     }
     return { microphone: "unknown", screen: "unknown", systemAudioRequired: false, systemAudioPickerHint: false };
+  });
+  // system:hardware — 本机芯片与内存（本地模型推荐用）：macOS 读 sysctl 的芯片名，
+  // Windows/其他回退 CPU 型号字符串；进程内缓存，硬件不会在会话中变化。
+  let cachedHardwareInfo = null;
+  trustedHandle("system:hardware", async () => {
+    if (cachedHardwareInfo) return cachedHardwareInfo;
+    let chipName = cpus()[0]?.model?.trim() || null;
+    if (process.platform === "darwin") {
+      try {
+        const { stdout } = await new Promise((resolve, reject) => {
+          execFile("sysctl", ["-n", "machdep.cpu.brand_string"], { timeout: 3000 }, (error, out, stderr) => {
+            if (error) reject(error);
+            else resolve({ stdout: String(out), stderr: String(stderr) });
+          });
+        });
+        chipName = stdout.trim() || chipName;
+      } catch {
+        // sysctl 不可用时保留 os.cpus() 的型号字符串
+      }
+    }
+    cachedHardwareInfo = { chipName, memoryBytes: totalmem(), platform: process.platform };
+    return cachedHardwareInfo;
   });
   // system:request-microphone — 仅在 macOS 主动申请麦克风权限（其余平台由系统在录制时弹出）。
   trustedHandle("system:request-microphone", async () => {

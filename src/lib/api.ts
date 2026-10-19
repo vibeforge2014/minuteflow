@@ -438,6 +438,14 @@ const browserApi: MeetingAPI = {
         return { models: ["gemini-3.6-flash", "gemini-3.6-pro", "gemini-3.6-flash-lite"] };
       }
       const seed = profile.model ? [profile.model] : [];
+      if (profile.transport === "ollama") {
+        // 预览孪生：Ollama 原生 /api/tags 带体积，这里同样返回 sizes 让设置页按内存标注适配。
+        const gb = 1024 ** 3;
+        return {
+          models: [...new Set([...seed, "qwen3.5:9b", "qwen3-vl:4b", "deepseek-r1:8b", "llama3.2:3b"])],
+          sizes: { "qwen3.5:9b": 6.1 * gb, "qwen3-vl:4b": 3.1 * gb, "deepseek-r1:8b": 4.9 * gb, "llama3.2:3b": 2.0 * gb }
+        };
+      }
       return { models: [...new Set([...seed, "gpt-4.1-mini", "deepseek-chat", "qwen-plus", "kimi-k2.6"])] };
     },
     async deleteSecret() {},
@@ -783,6 +791,8 @@ const browserApi: MeetingAPI = {
   system: {
     // 浏览器端伪装权限已授予、无睡眠事件，保证 UI 流程可预览。
     platform: "web",
+    // 演示设备信息（M4 Max / 36GB）让本地模型推荐在预览里有真实观感。
+    async hardware() { return { chipName: "Apple M4 Max", memoryBytes: 36 * 1024 ** 3, platform: "web" as const }; },
     async getPermissions() { return { microphone: "granted", screen: "granted", systemAudioRequired: false, systemAudioPickerHint: false }; },
     async requestMicrophone() { return "granted"; },
     async openSettings() {},

@@ -34,9 +34,19 @@ import { api, isElectronRuntime } from "../lib/api";
 import { useMeetingStore } from "../store/meetingStore";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useExitPresence } from "../hooks/useExitPresence";
+import {
+  formatHardwareLine,
+  formatModelBytes,
+  ollamaGuidance,
+  ollamaModelFit,
+  recommendWhisperModelId,
+  WHISPER_MODEL_MIN_RAM_GB,
+  whisperModelFit
+} from "../lib/model-recommendation";
 import type {
   DiarizationScanResult,
   DownloadableModel,
+  HardwareInfo,
   LicenseStatus,
   LocalModelFile,
   LocalModelScanResult,
@@ -341,6 +351,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const [editorGeneration, setEditorGeneration] = useState(0);
   /** 模型下拉：远端列表（随服务地址/协议变化失效）、拉取状态与菜单开合。 */
   const [modelList, setModelList] = useState<string[] | null>(null);
+  /** Ollama 模型名 → 磁盘体积（随 modelList 一起失效），按设备内存标注适配建议。 */
+  const [modelSizes, setModelSizes] = useState<Record<string, number> | null>(null);
   const [modelListBusy, setModelListBusy] = useState(false);
   const [modelListError, setModelListError] = useState<string | null>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -391,6 +403,15 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   useEffect(() => {
     if (open) loadProfiles();
   }, [loadProfiles, open]);
+
+  // 本机芯片/内存：本地模型推荐（Whisper 目录与 Ollama 编辑器）共用一份检测结果。
+  const [hardware, setHardware] = useState<HardwareInfo | null>(null);
+  useEffect(() => {
+    if (!open || hardware) return;
+    let active = true;
+    api.system.hardware().then((info) => active && setHardware(info)).catch(() => {});
+    return () => { active = false; };
+  }, [open, hardware]);
 
   // 重新打开时清掉上一次会话的测试/保存反馈，避免陈旧状态误导。
   useEffect(() => {
@@ -468,6 +489,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   // 服务地址/协议/端点变化后旧列表作废；切预设/切档案（editorGeneration）同样重置。
   useEffect(() => {
     setModelList(null);
+    setModelSizes(null);
     setModelListError(null);
     setModelMenuOpen(false);
   }, [editorGeneration, editing?.baseUrl, editing?.options?.apiFlavor, editing?.options?.chatEndpoint]);
@@ -605,6 +627,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
         return;
       }
       setModelList(result.models);
+      setModelSizes(result.sizes ?? null);
       setModelMenuOpen(true);
     } catch (error) {
       setModelListError(`未能获取列表：${error instanceof Error ? error.message : "网络错误"}。可直接输入模型名。`);
@@ -966,16 +989,25 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                                       </button>
                                     ))}
                                     {!!modelSuggestions.recommended.length && !!modelSuggestions.fetched.length && <div className="model-picker__divider" />}
-                                    {modelSuggestions.fetched.map((item) => (
-                                      <button key={item.id} type="button" role="option" aria-selected={item.id === editing.model} className={`model-picker__option ${item.id === editing.model ? "is-current" : ""}`} onClick={() => { setEditing({ ...editing, model: item.id, options: invalidateVisualVerification(editing.options) }); setModelMenuOpen(false); }}>
-                                        <span>{item.id}</span>
-                                      </button>
-                                    ))}
+                                    {modelSuggestions.fetched.map((item) => {
+                                      const size = editing.transport === "ollama" ? modelSizes?.[item.id] : undefined;
+                                      const fit = size ? ollamaModelFit(size, hardware?.memoryBytes ?? 0) : "unknown";
+                                      return (
+                                        <button key={item.id} type="button" role="option" aria-selected={item.id === editing.model} className={`model-picker__option ${item.id === editing.model ? "is-current" : ""}`} onClick={() => { setEditing({ ...editing, model: item.id, options: invalidateVisualVerification(editing.options) }); setModelMenuOpen(false); }}>
+                                          <span>{item.id}</span>
+                                          {size ? (
+                                            <small className={fit === "heavy" ? "is-heavy" : fit === "best" ? "is-fit" : undefined}>
+                                              {formatModelBytes(size)}{fit === "best" ? " · 适合本机" : fit === "heavy" ? " · 可能超出内存" : ""}
+                                            </small>
+                                          ) : null}
+                                        </button>
+                                      );
+                                    })}
                                     {!modelSuggestions.recommended.length && !modelSuggestions.fetched.length && (
                                       <div className="model-picker__empty">{modelList ? "没有匹配的模型，将按输入内容保存。" : "点击右侧按钮获取可用模型列表。"}</div>
                                     )}
                                     {modelList && !!modelSuggestions.total && (
-                                      <div className="model-picker__meta">服务返回 {modelSuggestions.total} 个模型{modelSuggestions.fetched.length < modelSuggestions.total ? `，显示前 ${modelSuggestions.fetched.length} 个匹配项` : ""}</div>
+                                      <div className="model-picker__meta">服务返回 {modelSuggestions.total} 个模型{modelSuggestions.fetched.length < modelSuggestions.total ? `，显示前 ${modelSuggestions.fetched.length} 个匹配项` : ""}{editing.transport === "ollama" && modelSizes && hardware ? `；已按${formatHardwareLine(hardware)}标注适配` : ""}</div>
                                     )}
                                   </div>
                                 )}
@@ -997,7 +1029,14 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                     ) : (
                       <>
                         {editing.transport === "ollama" ? (
-                          <div className="field"><span>连接方式</span><div className="readonly-control">本机 Ollama 服务</div></div>
+                          <>
+                            <div className="field"><span>连接方式</span><div className="readonly-control">本机 Ollama 服务</div></div>
+                            <div className="field field--device-info"><span>本机配置</span><div className="readonly-control">
+                              {hardware
+                                ? <>{formatHardwareLine(hardware)}。{ollamaGuidance(hardware.memoryBytes)}；获取模型列表后会按内存标注体积与适配。</>
+                                : "正在读取设备信息…"}
+                            </div></div>
+                          </>
                         ) : editing.transport === "openai-audio" ? (
                           <div className="field"><span>接口格式</span><div className="readonly-control">OpenAI 兼容</div></div>
                         ) : (
@@ -1208,11 +1247,12 @@ const MODEL_GROUP_LABELS: Partial<Record<DownloadableModel["group"], string>> = 
 };
 
 /** 默认只呈现三个可理解的性能档位；完整官方目录仍保留在高级展开区。 */
-const RECOMMENDED_LOCAL_MODELS = [
+type RecommendedLocalModel = { id: string; badge: string; guidance: string };
+const RECOMMENDED_LOCAL_MODELS: readonly RecommendedLocalModel[] = [
   { id: "ggml-base", badge: "轻量入门", guidance: "体积小，适合旧电脑或先快速体验。" },
   { id: "ggml-small", badge: "日常推荐", guidance: "中文与中英混合会议的均衡选择。" },
   { id: "ggml-large-v3-turbo-q5_0", badge: "准确优先", guidance: "更高准确率，仍保持较合理的体积。" }
-] as const;
+];
 
 /**
  * 声纹簿管理（本地说话人识别名单）：列出已记住的发言人，支持簿内改名与忘记。
@@ -1522,11 +1562,14 @@ function LocalModelManager({
   const loadProfiles = useMeetingStore((state) => state.loadProfiles);
   const preferences = useMeetingStore((state) => state.preferences);
   const updatePreferences = useMeetingStore((state) => state.updatePreferences);
+  /** 本机芯片/内存：目录里的推荐徽标与「内存不足」提示都按它计算。 */
+  const [hardware, setHardware] = useState<HardwareInfo | null>(null);
 
   // 挂载时拉取目录并订阅主进程的下载进度推送。
   useEffect(() => {
     let active = true;
     api.models.catalog().then((items) => active && setCatalog(items)).catch(() => {});
+    api.system.hardware().then((info) => active && setHardware(info)).catch(() => {});
     const unsubscribe = api.models.onDownloadProgress((next) => setProgress(next));
     return () => {
       active = false;
@@ -1660,13 +1703,24 @@ function LocalModelManager({
     const percent = currentProgress?.totalBytes
       ? Math.min(100, Math.round(currentProgress.downloadedBytes / currentProgress.totalBytes * 100))
       : 0;
+    // 设备感知：与这台机器内存匹配的模型标「按你的设备推荐」，超出档位的提示内存不足。
+    const memoryGB = hardware ? hardware.memoryBytes / 1024 ** 3 : 0;
+    const fit = memoryGB > 0 ? whisperModelFit(model.id, memoryGB) : null;
+    const deviceBest = fit === "best";
+    const tooHeavy = fit === "heavy";
+    const minRamGB = WHISPER_MODEL_MIN_RAM_GB[model.id];
+    const badge = deviceBest ? "按你的设备推荐" : recommendation?.badge;
+    const guidance = deviceBest && hardware
+      ? `${formatHardwareLine(hardware)}运行这款最合适。`
+      : recommendation?.guidance || model.description;
     return (
-      <div className={`download-model-card ${recommendation ? "download-model-card--recommended" : ""}`} key={model.id}>
+      <div className={`download-model-card ${recommendation || deviceBest ? "download-model-card--recommended" : ""}`} key={model.id}>
         <div>
-          {recommendation && <em>{recommendation.badge}</em>}
+          {badge && <em className={deviceBest ? "is-device" : undefined}>{badge}</em>}
+          {tooHeavy && <em className="is-heavy">内存不足</em>}
           <strong>{model.name}</strong>
-          <small>{recommendation?.guidance || model.description}</small>
-          <span>{model.format} · {formatBytes(model.sizeBytes)} · {model.license}</span>
+          <small>{guidance}</small>
+          <span>{model.format} · {formatBytes(model.sizeBytes)} · {model.license}{tooHeavy && minRamGB ? ` · 建议 ${minRamGB}GB 内存以上` : ""}</span>
         </div>
         {model.installed && model.localPath ? (
           <button className="button button--small" disabled={busy} onClick={async () => {
@@ -1694,6 +1748,12 @@ function LocalModelManager({
           <button className="button button--small" disabled={busy} onClick={chooseModel}><FolderOpen size={15} />选择文件</button>
         </div>
       </div>
+      {hardware && (
+        <div className="device-info-line" role="note">
+          <Cpu size={14} weight="duotone" />
+          <span>检测到 {formatHardwareLine(hardware)}，推荐与提示已按内存计算</span>
+        </div>
+      )}
       {runtimeLabels.length > 0 && <div className="runtime-chips">{runtimeLabels.map((label) => <span key={label}>{label}</span>)}</div>}
       {scan && (
         <div className="local-model-list">
@@ -1708,13 +1768,26 @@ function LocalModelManager({
       )}
       <div className="local-model-library-heading">
         <strong>推荐模型</strong>
-        <small>选一个即可开始，下载后会自动校验并启用</small>
+        <small>已按本机内存标注最适合的款；下载后自动校验并启用</small>
       </div>
       <div className="recommended-model-list">
-        {RECOMMENDED_LOCAL_MODELS.map((recommendation) => {
-          const model = catalog.find((item) => item.id === recommendation.id);
-          return model ? renderDownloadModelCard(model, recommendation) : null;
-        })}
+        {(() => {
+          // 首屏三档随设备微调：本机内存的最优款不在固定三档时顶替「准确优先」位，
+          // 保证「按你的设备推荐」在默认视图就可见，而不是藏在全部模型展开区里。
+          const memoryGB = hardware ? hardware.memoryBytes / 1024 ** 3 : 0;
+          const deviceBestId = memoryGB > 0 ? recommendWhisperModelId(memoryGB) : null;
+          const featured = !deviceBestId || RECOMMENDED_LOCAL_MODELS.some((item) => item.id === deviceBestId)
+            ? RECOMMENDED_LOCAL_MODELS
+            : [
+                RECOMMENDED_LOCAL_MODELS[0],
+                RECOMMENDED_LOCAL_MODELS[1],
+                { id: deviceBestId, badge: "按你的设备推荐", guidance: hardware ? `${formatHardwareLine(hardware)}运行这款最合适。` : "" }
+              ];
+          return featured.map((recommendation) => {
+            const model = catalog.find((item) => item.id === recommendation.id);
+            return model ? renderDownloadModelCard(model, recommendation) : null;
+          });
+        })()}
       </div>
       <details className="local-model-catalog-details">
         <summary>

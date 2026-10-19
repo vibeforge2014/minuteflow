@@ -4089,6 +4089,19 @@ html[data-surface="permission-helper"] #root {
   font-weight: 600;
 }
 
+/* Ollama 拉取列表后按本机内存标注的体积与适配角标。 */
+.model-picker__option > small.is-fit,
+.model-picker__option > small.is-heavy {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 600;
+}
+
+.model-picker__option > small.is-fit { color: #3d7a4e; background: #e8f4ea; }
+.model-picker__option > small.is-heavy { color: #b3492f; background: #fdeee8; }
+
 .model-picker__divider { height: 1px; margin: 4px 6px; background: #f0ebe6; }
 
 .model-picker__empty {
@@ -4676,6 +4689,43 @@ html[data-surface="permission-helper"] #root {
   font-style: normal;
   font-weight: 700;
 }
+
+/* 设备感知徽标：按本机内存算出的推荐与「内存不足」提示。 */
+.download-model-card > div > em.is-device {
+  color: #3d7a4e;
+  background: #e8f4ea;
+}
+
+.download-model-card > div > em.is-heavy {
+  color: #b3492f;
+  background: #fdeee8;
+}
+
+.download-model-card > div > em + em {
+  margin-left: -3px;
+}
+
+/* 本机配置一行（Ollama 编辑器与本地模型目录共用）：cpu 图标 + 设备摘要。 */
+.device-info-line,
+.field--device-info .readonly-control {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: #6f4438;
+  background: var(--accent-soft, #fdeee8);
+}
+
+.device-info-line {
+  margin: -2px 0 8px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  font-size: 9px;
+}
+
+.device-info-line svg { flex: 0 0 auto; margin-top: 1px; }
+
+.field--device-info .readonly-control { border-radius: 9px; }
+
 
 .download-model-card span {
   color: #a0a5ad;
@@ -6451,12 +6501,153 @@ html[data-surface="permission-helper"] #root {
 .chat-composer {
   flex: 0 0 auto;
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
   gap: 8px;
-  padding: 12px 14px 14px;
+  padding: 10px 14px 14px;
   border-top: 1px solid var(--line);
   background: #fbfbfc;
 }
+
+.chat-composer__toolbar {
+  display: flex;
+  align-items: center;
+}
+
+.chat-composer__input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+/* 问答输入区的模型快捷切换：胶囊 + 上弹菜单，切换即时生效无需进设置。 */
+.chat-model-switch { position: relative; }
+
+.chat-model-switch__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #4a4544;
+  transition: background-color var(--motion-fast) var(--ease-out-ui), border-color var(--motion-fast) var(--ease-out-ui), transform 120ms var(--ease-out-ui);
+}
+
+.chat-model-switch__pill:hover { background: #fff6f1; border-color: #eadfd8; }
+.chat-model-switch__pill:active { transform: scale(0.97); }
+.chat-model-switch__pill.is-empty { color: #c4573b; border-color: #f0d5cb; background: #fffaf7; }
+.chat-model-switch__pill > :last-child { flex: 0 0 auto; color: #b3a49c; }
+
+.chat-model-switch__dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-strong);
+}
+
+.chat-model-switch__dot.is-off { background: #c9c4bf; }
+
+.chat-model-switch__tag {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #f1efee;
+  color: #7a7570;
+  font-size: 8px;
+  font-weight: 600;
+}
+
+.chat-model-switch__tag.is-local {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.chat-model-switch__menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 236px;
+  max-width: 100%;
+  max-height: 250px;
+  overflow-y: auto;
+  z-index: 40;
+  padding: 5px;
+  background: #fff;
+  border: 1px solid #eadfd8;
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(31, 36, 43, .12);
+  transform-origin: bottom left;
+  animation: chat-model-menu-in var(--motion-fast, .18s ease);
+}
+
+@keyframes chat-model-menu-in {
+  from { opacity: 0; transform: scale(.97) translateY(3px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.chat-model-switch__option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  text-align: left;
+  font-size: 10.5px;
+  color: #373230;
+}
+
+.chat-model-switch__option > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chat-model-switch__option > small {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: right;
+  color: #a0a5ad;
+  font-size: 8.5px;
+}
+
+.chat-model-switch__option > svg { flex: 0 0 auto; color: var(--accent-strong); }
+.chat-model-switch__option:hover:not(:disabled) { background: #fff6f1; }
+.chat-model-switch__option.is-current { background: #fff2ec; }
+.chat-model-switch__option:disabled { opacity: .55; cursor: default; }
+
+.chat-model-switch__error {
+  padding: 6px 9px 4px;
+  font-size: 9px;
+  color: #b3492f;
+}
+
+.chat-model-switch__manage {
+  width: 100%;
+  margin-top: 3px;
+  padding: 7px 9px 5px;
+  border: none;
+  border-top: 1px solid #f0ebe6;
+  background: transparent;
+  font-size: 9.5px;
+  color: #8a857f;
+  text-align: left;
+  transition: color var(--motion-fast) var(--ease-out-ui);
+}
+
+.chat-model-switch__manage:hover { color: var(--accent-strong); }
+
 
 .chat-composer textarea {
   flex: 1;
@@ -6610,6 +6801,7 @@ html[data-surface="permission-helper"] #root {
   .advanced-provider-options[open] > div,
   .visual-capability-setting > span.is-verified,
   .model-picker__menu,
+  .chat-model-switch__menu,
   .url-recognize {
     animation: content-fade-enter 140ms ease-out both !important;
     transform: none !important;

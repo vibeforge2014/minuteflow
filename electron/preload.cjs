@@ -146,6 +146,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
   },
   system: {
     platform: process.platform,
+    hardware: () => invoke("system:hardware"),
     getPermissions: () => invoke("system:get-permissions"),
     requestMicrophone: () => invoke("system:request-microphone"),
     openSettings: (kind = "microphone") => invoke("system:open-settings", kind),
