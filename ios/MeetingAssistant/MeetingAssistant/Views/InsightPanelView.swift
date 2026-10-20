@@ -157,12 +157,16 @@ struct TranscriptPanelView: View {
             }
           }
 
-          // 空状态：既无定稿片段也无实时文本。
+          // 空状态：既无定稿片段也无实时文本；文案随会议状态变化。
           if displayRows.isEmpty {
             ContentUnavailableView(
-              "等待转录",
+              meeting.status == .recording ? "等待转录" : "暂无转录文本",
               systemImage: "waveform",
-              description: Text("开始录音后，临时文本会显示在这里")
+              description: Text(
+                meeting.status == .recording
+                  ? "开始录音后，临时文本会显示在这里"
+                  : "录音或导入的音频完成转录后，逐字稿会显示在这里"
+              )
             )
             .frame(minHeight: 260)
           }
@@ -218,6 +222,10 @@ private struct TranscriptSegmentRow: View {
   /// 点按时间戳跳转播放器。
   var onSeekTimestamp: () -> Void = {}
 
+  /// 自定义说话人名的输入弹窗。
+  @State private var showsCustomName = false
+  @State private var customNameDraft = ""
+
   var body: some View {
     HStack(alignment: .top, spacing: 10) {
       timestampView
@@ -228,10 +236,15 @@ private struct TranscriptSegmentRow: View {
         .frame(width: 40, alignment: .leading)
 
       VStack(alignment: .leading, spacing: 6) {
-        // 说话人菜单：点按改名（预设名单 + 快速选项）。
+        // 说话人菜单：点按改名（预设名单 + 自定义输入，与桌面端自由改名一致）。
         Menu {
           ForEach(["我", "Speaker 1", "Speaker 2", "刘婷", "周哲"], id: \.self) { name in
             Button(name) { segment.speaker = name }
+          }
+          Divider()
+          Button("自定义…") {
+            customNameDraft = presetNames.contains(segment.speaker) ? "" : segment.speaker
+            showsCustomName = true
           }
         } label: {
           HStack(spacing: 4) {
@@ -272,7 +285,21 @@ private struct TranscriptSegmentRow: View {
       }
     }
     .animation(ContentMotion.quick, value: isCurrentSegment)
+    // 自定义说话人名：输入非空名称即整段改名，空白取消。
+    .alert("自定义说话人", isPresented: $showsCustomName) {
+      TextField("称呼", text: $customNameDraft)
+      Button("确定") {
+        let name = customNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { segment.speaker = name }
+      }
+      Button("取消", role: .cancel) {}
+    } message: {
+      Text("这个名字会应用到本场会议的这一段转录。")
+    }
   }
+
+  /// 预设说话人名单（自定义输入时用于判断是否清空草稿）。
+  private var presetNames: [String] { ["我", "Speaker 1", "Speaker 2", "刘婷", "周哲"] }
 
   /// 时间戳：回放同步时可点按跳转，否则纯展示。
   @ViewBuilder
@@ -399,12 +426,25 @@ struct KeyConclusionsCard: View {
       }
 
       if lines.isEmpty {
-        Text("转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。")
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-          .padding(14)
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        // 空态与桌面端同一语言：一条紧凑说明 + 行内「手动添加」，不再是只读的整块提示。
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+          Text("转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Spacer(minLength: 8)
+          Button {
+            writeBack([""])
+          } label: {
+            Label("手动添加", systemImage: "plus")
+              .font(.caption.weight(.medium))
+          }
+          .buttonStyle(.borderless)
+          .tint(MeetingTheme.primary)
+          .accessibilityLabel("手动添加一条结论")
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(MeetingTheme.primarySoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
       } else {
         VStack(alignment: .leading, spacing: 2) {
           ForEach(lines.indices, id: \.self) { index in

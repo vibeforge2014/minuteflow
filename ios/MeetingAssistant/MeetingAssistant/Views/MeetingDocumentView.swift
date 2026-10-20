@@ -41,16 +41,16 @@ struct MeetingDocumentView: View {
   // MARK: - 视图内容
 
   var body: some View {
-    // 文档纵向结构：页眉 + 回放条 + 各内容卡片。
+    // 文档纵向结构：页眉 + 纪要操作条 + 回放条 + 各内容卡片。
     VStack(spacing: 0) {
       documentHeader
+      summaryStrip
       // 回放条：仅有可回放本机音频时出现；紧凑「回放」操作，展开时间轴。
       PlaybackBar(meeting: meeting)
       ScrollView {
         LazyVStack(spacing: 16) {
           goalAndAgenda
           personalNotes
-          minutesActions
           liveMinutes
           visualSummaryEntry
           actionItems
@@ -149,23 +149,21 @@ struct MeetingDocumentView: View {
       .padding(.horizontal, 24)
       .frame(minHeight: 58)
 
-      HStack(spacing: 16) {
-        Label(
-          MeetingFormatters.dateTime(meeting.startedAt),
-          systemImage: "calendar"
-        )
-        Label(meeting.meetingMode, systemImage: "person.2")
-        // 参与者就地可编辑（顿号/逗号分隔），与桌面端 meta 行一致。
-        Label {
-          TextField("添加参与者", text: $meeting.participantsText)
-            .frame(maxWidth: 150)
-            .accessibilityLabel("参与者")
-        } icon: {
-          Image(systemName: "person.3")
+      HStack(spacing: 14) {
+        // 窄屏（iPhone）放不下时换行成两行，避免参与者输入框被压到「添加…」。
+        ViewThatFits(in: .horizontal) {
+          HStack(spacing: 16) {
+            metaFields
+            Spacer()
+            Text("已保存到本机")
+              .foregroundStyle(.tertiary)
+          }
+          VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 16) { metaFields }
+            Text("已保存到本机")
+              .foregroundStyle(.tertiary)
+          }
         }
-        Spacer()
-        Text("已保存到本机")
-          .foregroundStyle(.tertiary)
       }
       .font(.caption)
       .foregroundStyle(.secondary)
@@ -173,6 +171,25 @@ struct MeetingDocumentView: View {
       .padding(.bottom, 16)
     }
     .background(MeetingTheme.surface)
+  }
+
+  /// 元信息字段：日期、会议形式与可编辑参与者。
+  private var metaFields: some View {
+    HStack(spacing: 16) {
+      Label(
+        MeetingFormatters.dateTime(meeting.startedAt),
+        systemImage: "calendar"
+      )
+      Label(meeting.meetingMode, systemImage: "person.2")
+      // 参与者就地可编辑（顿号/逗号分隔），与桌面端 meta 行一致。
+      Label {
+        TextField("添加参与者", text: $meeting.participantsText)
+          .frame(maxWidth: 170)
+          .accessibilityLabel("参与者")
+      } icon: {
+        Image(systemName: "person.3")
+      }
+    }
   }
 
   /// “会议目标与议程”卡片：两个多行编辑器。
@@ -228,33 +245,60 @@ struct MeetingDocumentView: View {
     )
   }
 
-  /// 纪要操作行：说明生成节奏并主动触发「更新纪要」（会后最终稿也是这里手动生成）。
-  private var minutesActions: some View {
+  /// 纪要操作条（吸附在文档页眉下方，滚动时始终可见）：一行状态说明 +
+  /// 「生成/更新纪要」主操作。与桌面端会后状态带同一信息结构——
+  /// 生成纪要是会后整理的首要动作，不能埋在目标/议程两块编辑器之后。
+  private var summaryStrip: some View {
     HStack(spacing: 10) {
-      Text(
-        meeting.status == .recording
-          ? "录音中每 \(max(1, preferences.summaryIntervalSeconds / 60)) 分钟自动更新"
-          : "最终纪要由你手动更新"
-      )
-      .font(.caption)
-      .foregroundStyle(.secondary)
+      Text(summaryStripText)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
       Spacer()
-      Button {
-        Task { await summarize() }
-      } label: {
-        if isSummarizing {
+      if isSummarizing {
+        HStack(spacing: 6) {
           ProgressView()
             .controlSize(.small)
-        } else {
-          Label("更新纪要", systemImage: "sparkles")
+          Text("正在整理…")
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
+      } else {
+        Button(action: { Task { await summarize() } }) {
+          Label(hasSummary ? "更新纪要" : "生成纪要", systemImage: "sparkles")
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+        .accessibilityIdentifier("update-summary-button")
       }
-      .buttonStyle(.borderedProminent)
-      .controlSize(.small)
-      .disabled(isSummarizing)
-      .accessibilityIdentifier("update-summary-button")
     }
-    .padding(.horizontal, 2)
+    .padding(.horizontal, 24)
+    .padding(.vertical, 9)
+    .background(MeetingTheme.surface)
+    .overlay(alignment: .bottom) { Divider() }
+  }
+
+  /// 操作条左侧的状态说明：随录音状态与纪要是否已生成变化。
+  private var summaryStripText: String {
+    if meeting.status == .recording {
+      return "录音中每 \(max(1, preferences.summaryIntervalSeconds / 60)) 分钟自动更新"
+    }
+    if !hasSummary {
+      return "还没有生成纪要，转录与笔记就绪后一键归纳"
+    }
+    if let last = meeting.lastSummaryAt {
+      return "纪要更新于 \(last.formatted(date: .omitted, time: .shortened))"
+    }
+    return "最终纪要由你手动更新"
+  }
+
+  /// 是否已有可更新的纪要内容（关键结论或任一跟进字段非空）。
+  private var hasSummary: Bool {
+    !meeting.summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      || !meeting.decisionsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      || !meeting.risksText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      || !meeting.nextStepsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
   /// 「视觉纪要」入口卡：已生成时一键全屏查看；未生成且已通过结构验证时提供生成入口。
@@ -302,16 +346,20 @@ struct MeetingDocumentView: View {
     }
   }
 
-  /// “行动项”卡片：行动项列表（或空态）+ 手动添加按钮。
+  /// “行动项”卡片：行动项列表（或紧凑空态行）+ 手动添加按钮。
   private var actionItems: some View {
     DocumentCard("行动项", systemImage: "checkmark.square") {
       if meeting.orderedActionItems.isEmpty {
-        ContentUnavailableView(
-          "暂无行动项",
-          systemImage: "checklist",
-          description: Text("AI 纪要或手动添加的任务会显示在这里")
-        )
-        .frame(minHeight: 100)
+        // 空态是一条紧凑提示行，不再用整块图标空态把卡片撑到两屏高。
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+          Text("生成纪要后会自动归纳行动项，也可以先手动添加。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Spacer(minLength: 8)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
       } else {
         ForEach(meeting.orderedActionItems) { item in
           ActionItemRow(item: item)
