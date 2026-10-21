@@ -6,10 +6,11 @@
  */
 import { useMemo } from "react";
 import {
+  CaretDown,
   FileArrowUp,
   GearSix,
   MagnifyingGlass,
-  Plus,
+  Microphone,
   Star,
   Trash,
   X
@@ -25,6 +26,9 @@ interface SidebarProps {
   meetings: Meeting[];
   selectedId: string | null;
   onSelect(id: string): void;
+  /** 一键开会：免填写，直接创建会议并开始录音。 */
+  onQuickStart(): void;
+  /** 打开完整新建表单（模板/模式/参与者）。 */
   onNew(): void;
   onImport(): void;
   /** 进行中的导入任务数（导入按钮角标）。 */
@@ -39,7 +43,7 @@ interface SidebarProps {
   onSettings(): void;
 }
 
-export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, importCount = 0, importIssueCount = 0, onToggleFavorite, onDeleteMeeting, onTrash, onSettings }: SidebarProps) {
+export function Sidebar({ meetings, selectedId, onSelect, onQuickStart, onNew, onImport, importCount = 0, importIssueCount = 0, onToggleFavorite, onDeleteMeeting, onTrash, onSettings }: SidebarProps) {
   const search = useMeetingStore((state) => state.search);
   const setSearch = useMeetingStore((state) => state.setSearch);
   // 收藏置顶 + 时间分组（搜索时退回纯时间分组），meetings/搜索状态变化时才重算。
@@ -55,10 +59,20 @@ export function Sidebar({ meetings, selectedId, onSelect, onNew, onImport, impor
         <span>MinuteFlow</span>
       </div>
 
-      <button className="new-meeting" onClick={onNew}>
-        <Plus size={18} weight="bold" />
-        新建会议
-      </button>
+      <div className="new-meeting-split">
+        <button className="new-meeting" onClick={onQuickStart} title="立即创建会议并开始录音，无需填写任何信息">
+          <Microphone size={18} weight="bold" />
+          新建会议
+        </button>
+        <button
+          className="new-meeting-more"
+          onClick={onNew}
+          aria-label="使用模板新建会议"
+          title="模板、会议模式与参与者"
+        >
+          <CaretDown size={14} weight="bold" />
+        </button>
+      </div>
 
       <label className="search-box">
         <MagnifyingGlass size={17} />

@@ -301,18 +301,22 @@ const describePreset = (key: string): { text: string; protocol: string } | null 
   };
 };
 
-/** 端点域名 → 预设键索引：粘贴 Base URL 时识别厂商并建议套用预设。 */
-const presetHostIndex: Map<string, string> = new Map(
-  Object.entries(providerPresets)
-    .flatMap(([key, preset]) => {
-      if (!preset.baseUrl) return [];
-      try {
-        return [[new URL(preset.baseUrl).host.toLowerCase(), key] as const];
-      } catch {
-        return [];
-      }
-    })
-);
+/** 端点域名 → 预设键索引（按任务类型分桶）：粘贴 Base URL 时识别厂商并建议套用预设。
+ *  同一域名（如 api.openai.com）会同时命中总结与转录预设，必须按 kind 取，否则会在
+ *  AI 总结页把 OpenAI 总结档案识别成「Whisper 端点」并套用成转录档案。 */
+const presetHostIndexByKind = new Map<string, Map<string, string>>();
+for (const [key, preset] of Object.entries(providerPresets)) {
+  if (!preset.baseUrl || !preset.kind) continue;
+  let host: string;
+  try {
+    host = new URL(preset.baseUrl).host.toLowerCase();
+  } catch {
+    continue;
+  }
+  const bucket = presetHostIndexByKind.get(preset.kind) ?? new Map<string, string>();
+  bucket.set(host, key);
+  presetHostIndexByKind.set(preset.kind, bucket);
+}
 
 /** 旧版曾把 New API 误当成协议；编辑/保存时自动迁移为 OpenAI 兼容格式。 */
 const normalizeLegacyProviderProfile = (profile: ModelProfile): ModelProfile => profile.options?.apiFlavor === "new-api"
@@ -550,7 +554,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
       setUrlPresetSuggestion(null);
       return;
     }
-    const matchedKey = presetHostIndex.get(host);
+    const matchedKey = editing?.kind ? presetHostIndexByKind.get(editing.kind)?.get(host) : undefined;
     setUrlPresetSuggestion(matchedKey && matchedKey !== activePresetKey ? matchedKey : null);
   }, [editingBaseUrl, activePresetKey]);
 

@@ -146,11 +146,18 @@ button {
   height: 42px;
 }
 
-.new-meeting {
-  height: 42px;
+.new-meeting-split {
+  display: flex;
+  align-items: stretch;
   margin: 7px 5px 16px;
+}
+
+.new-meeting {
+  flex: 1;
+  min-width: 0;
+  height: 42px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 7px 0 0 7px;
   color: white;
   background: var(--blue-strong);
   display: flex;
@@ -162,8 +169,28 @@ button {
   transition: 160ms ease;
 }
 
-.new-meeting:hover {
+/* 次要入口：拉起完整新建表单（模板/模式/参与者），主按钮保持免填写一键开会。 */
+.new-meeting-more {
+  width: 30px;
+  height: 42px;
+  border: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 0 7px 7px 0;
+  color: white;
+  background: var(--blue-strong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: 160ms ease;
+}
+
+.new-meeting-split:hover .new-meeting,
+.new-meeting-split:hover .new-meeting-more {
   background: var(--blue-pressed);
+}
+
+.new-meeting:hover,
+.new-meeting-more:hover {
   transform: translateY(-1px);
 }
 
@@ -1235,6 +1262,7 @@ button {
 .model-picker__option:active,
 .model-catalog__custom:active,
 .new-meeting:active,
+.new-meeting-more:active,
 .readiness-item ~ .preparation-start:active,
 .meeting-row-wrap:active .meeting-row:not(.is-selected),
 .import-subsection-heading button:active {

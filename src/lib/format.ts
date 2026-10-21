@@ -31,3 +31,12 @@ export function formatDuration(seconds: number) {
 export function formatInterval(seconds: number) {
   return seconds % 60 === 0 ? `${seconds / 60} 分钟` : `${seconds} 秒`;
 }
+
+/**
+ * Auto-generated title for one-tap meetings, e.g. "快速会议 10月20日 14:35".
+ * 中文补充：免填写快速开会的自动命名（含创建时刻，保证列表可搜索、可区分）。
+ */
+export function quickMeetingTitle(date: Date = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `快速会议 ${date.getMonth() + 1}月${date.getDate()}日 ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}

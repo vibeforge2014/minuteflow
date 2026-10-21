@@ -25,6 +25,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { RecorderBar } from "./components/RecorderBar";
 import { RecordingDock } from "./components/RecordingDock";
 import { NewMeetingDialog } from "./components/NewMeetingDialog";
+import { quickMeetingTitle } from "./lib/format";
 import { SettingsDialog, type SettingsFocus, type SettingsTab } from "./components/SettingsDialog";
 import { ExportMenu } from "./components/ExportMenu";
 import { Toast } from "./components/Toast";
@@ -395,6 +396,17 @@ export function App() {
     return created;
   };
 
+  /** 免填写的一键开会：自动命名 + 偏好录音模式，创建后立即进入录音。 */
+  const handleQuickStart = () => {
+    void handleCreate({
+      title: quickMeetingTitle(),
+      mode: preferences.defaultMode,
+      participants: ["我"],
+      goals: [],
+      tags: []
+    }, { startRecording: true });
+  };
+
   // 全局快捷键：⌘K/Ctrl+K 聚焦会议搜索（与搜索框 kbd 提示一致）、⌘N/Ctrl+N 新建会议；
   // Esc 依次收起导出/更多菜单与导入抽屉。仅在无输入框抢占的场景下拦截（快捷键本身不冲突输入）。
   useEffect(() => {
@@ -559,6 +571,7 @@ export function App() {
         meetings={meetings}
         selectedId={selectedId}
         onSelect={selectMeeting}
+        onQuickStart={handleQuickStart}
         onNew={() => setNewMeetingOpen(true)}
         onImport={handleImport}
         importCount={importJobs.filter((job) => !["complete", "cancelled", "failed"].includes(job.status)).length}
@@ -733,7 +746,7 @@ export function App() {
                   notify(`「${recorder.recordingMeeting?.title ?? "另一场会议"}」正在录音，请先结束当前录音。`);
                   return;
                 }
-                if (requirePremium("录音、实时转写与自动纪要", () => void recorder.start())) return;
+                if (!requirePremium("录音、实时转写与自动纪要", () => void recorder.start())) return;
                 await recorder.start();
               }}
               onConfigureTranscription={() => openSettings("transcription")}
@@ -765,7 +778,7 @@ export function App() {
                 transcriptionFailed={Boolean(recorder.transcriptionFailure)}
                 onFixTranscription={() => openSettings("transcription", "local-whisper")}
                 onStart={async () => {
-                  if (requirePremium("录音、实时转写与自动纪要", () => void recorder.start())) return;
+                  if (!requirePremium("录音、实时转写与自动纪要", () => void recorder.start())) return;
                   await recorder.start();
                 }}
                 onPause={recorder.pause}
@@ -894,7 +907,7 @@ export function App() {
               <button className="button" onClick={() => setContinueRecordingOpen(false)}>取消</button>
               <button className="button button--primary" onClick={async () => {
                 setContinueRecordingOpen(false);
-                if (requirePremium("继续录音、实时转写与自动纪要", () => void recorder.start())) return;
+                if (!requirePremium("继续录音、实时转写与自动纪要", () => void recorder.start())) return;
                 await recorder.start();
               }}>
                 继续录音

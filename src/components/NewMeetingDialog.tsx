@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CalendarBlank, CaretDown, Microphone, Users, WarningCircle, X } from "@phosphor-icons/react";
 import type { CreateMeetingInput, MeetingMode } from "../types";
+import { quickMeetingTitle } from "../lib/format";
 import { useMeetingStore } from "../store/meetingStore";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useExitPresence } from "../hooks/useExitPresence";
@@ -85,7 +86,7 @@ export function NewMeetingDialog({
           setError(null);
           try {
             await onCreate({
-              title: title.trim() || "未命名会议",
+              title: title.trim() || quickMeetingTitle(),
               mode,
               participants: participants.split(/[、,]/).map((item) => item.trim()).filter(Boolean),
               goals: goal.trim() ? [goal.trim()] : [],
