@@ -30,6 +30,8 @@ struct MeetingAssistantApp: App {
   @State private var player = MeetingPlayer()
   /// AI 问答会话存储：按会议维护多轮对话与打字机铺字状态。
   @State private var chatStore = MeetingChatStore()
+  /// 场景生命周期：回到前台时自愈录音管线（后台被系统中断后自动续录）。
+  @Environment(\.scenePhase) private var scenePhase
 
   // MARK: - 初始化
 
@@ -74,5 +76,9 @@ struct MeetingAssistantApp: App {
         .environment(chatStore)
     }
     .modelContainer(modelContainer)
+    .onChange(of: scenePhase) { _, phase in
+      guard phase == .active else { return }
+      recorder.handleAppBecameActive()
+    }
   }
 }

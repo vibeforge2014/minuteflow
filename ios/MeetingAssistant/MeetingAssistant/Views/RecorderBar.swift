@@ -179,7 +179,10 @@ struct RecorderBar: View {
       try await recorder.start(
         meetingID: meeting.id,
         language: preferences.language,
-        summaryInterval: preferences.summaryIntervalSeconds
+        summaryInterval: preferences.summaryIntervalSeconds,
+        onGapBackfill: { paragraphs in
+          self.appendGapBackfill(paragraphs)
+        }
       )
       meeting.startedAt = .now
       meeting.status = .recording
@@ -248,5 +251,34 @@ struct RecorderBar: View {
     try? modelContext.save()
     recorder.clearCompletedSession()
     withAnimation(ContentMotion.quick) { isFinishing = false }
+  }
+
+  /// 识别缺口补转完成：把回填段落按时间序并入会议转录并落盘（静默，无弹窗）。
+  /// - 副作用：追加 TranscriptSegmentRecord 并保存 SwiftData。
+  private func appendGapBackfill(_ paragraphs: [NaturalTranscriptParagraph]) {
+    guard recorder.activeMeetingID == meeting.id || meeting.status == .completed else { return }
+    let fresh = paragraphs.filter { paragraph in
+      !paragraph.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    guard !fresh.isEmpty else { return }
+    withAnimation(ContentMotion.quick) {
+      for paragraph in fresh {
+        meeting.transcriptSegments.append(
+          TranscriptSegmentRecord(
+            id: paragraph.id,
+            startTime: paragraph.startTime,
+            endTime: paragraph.endTime,
+            speaker: paragraph.speaker,
+            text: paragraph.text,
+            isFinal: true,
+            meeting: meeting
+          )
+        )
+      }
+      // 补转段落的时间可能早于已有段（缺口在录音中段），按时间轴重排保持阅读顺序。
+      meeting.transcriptSegments.sort { $0.startTime < $1.startTime }
+    }
+    meeting.updatedAt = .now
+    try? modelContext.save()
   }
 }

@@ -67,11 +67,26 @@ interface CompletedTranscription {
   segments: TranscriptSegment[];
 }
 
+/** 模型未就绪时挂起待补转的音频块；音频已在内存，模型就绪后按签发顺序补转。 */
+interface PendingBacklogChunk {
+  sequence: number;
+  provisionalId: string;
+  data: ArrayBuffer;
+  fileName: string;
+  startMs: number;
+  endMs: number;
+  track: CaptureTrack;
+  /** 补转尝试次数：驱动 4s/8s/15s 循环节奏。 */
+  attempts: number;
+}
+
 /** 每条采集轨独立按签发序号提交，网络返回顺序不会改变段落顺序或稳定 id。 */
 interface TrackTranscriptionState {
   issued: number;
   nextCommit: number;
   completed: Map<number, CompletedTranscription>;
+  /** 未就绪期间挂起的块（含签发时直接失败的与超限被挤掉的补位逻辑）。 */
+  backlog: PendingBacklogChunk[];
 }
 
 /** 按优先级挑一个当前浏览器支持的编码（Chromium 优先 Opus/WebM），保证归档可被 FFmpeg 解码。 */
@@ -81,18 +96,42 @@ const supportedMimeType = () => [
   "audio/mp4"
 ].find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
 
+/** 主进程标记「转录模型未就绪/未配置」的错误前缀：这类块要挂起补转，而不是放弃。 */
+const STT_NOT_READY_MARKER = "[STT_NOT_READY]";
+
+/** 转录模型未就绪（本地模型缺失/仍在下载、尚未选择档案）——按可恢复失败处理。 */
+function isTranscriptionNotReadyFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes(STT_NOT_READY_MARKER) ||
+    message.includes("本地模型尚未就绪") ||
+    message.includes("尚未配置转录模型")
+  );
+}
+
+/** 面向用户的未就绪提示：剥掉机器标记，附上「会自动补转」的预期说明。 */
+function notReadyFailureMessage(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error);
+  const readable = raw.split(STT_NOT_READY_MARKER).pop()?.trim() || "转录模型尚未就绪。";
+  return `${readable}录音将继续，模型就绪后这段内容会自动补转。`;
+}
+
 /**
  * 4xx 配置类失败（密钥错误、端点不存在、模型名无效、文件被拒）重试也不会成功：
  * 主进程的错误文案带「转录模型请求失败：<status>」，据此跳过 1.5s/5s/15s 退避，
- * 让用户尽快看到「改用本地 Whisper」的提示。
+ * 让用户尽快看到「改用本地 Whisper」的提示。模型未就绪不在此列——它走补转队列。
  */
 function isTerminalTranscriptionFailure(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  // 本地模型缺失/未选择同样是配置问题，直接提示，不必等三轮退避。
-  if (message.includes("本地模型尚未就绪") || message.includes("请先选择")) return true;
   const status = Number(/转录模型请求失败：(\d{3})/.exec(message)?.[1] ?? 0);
   return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
+
+/** 补转队列上限（≈8 分钟音频/轨）：超过后放弃最旧的块，音频已归档可会后补转。 */
+const MAX_BACKLOG_CHUNKS = 60;
+
+/** 补转重试节奏：4s/8s/15s 循环，模型下载/配置期间不用高频请求空转。 */
+const BACKLOG_RETRY_DELAYS_MS = [4_000, 8_000, 15_000];
 
 /** 用统一编码与码率创建录制器（归档 96kbps / 转写块 64kbps 由调用方指定）。 */
 function createAudioRecorder(stream: MediaStream, audioBitsPerSecond: number) {
@@ -137,6 +176,8 @@ export class MeetingRecorder {
   /** 正在采集的 8 秒独立转写块；停止时立即停掉，不必等满 8 秒。 */
   private standaloneRecorders = new Set<MediaRecorder>();
   private transcriptionStates = new Map<CaptureTrack, TrackTranscriptionState>();
+  /** 补转队列的顺序重试定时器；积压清空或停止时不再续期。 */
+  private backlogTimer: number | null = null;
   /** 连续失败块数；任一块成功即归零，用于避免整场录音只弹一次或每块都弹。 */
   private transcriptionFailureStreak = 0;
   /** 用户在启动过程中取消（start 会被 reject）。 */
@@ -336,7 +377,7 @@ export class MeetingRecorder {
     this.bindings.push(binding);
 
     if (this.sttProfile) {
-      this.transcriptionStates.set(track, { issued: 0, nextCommit: 0, completed: new Map() });
+      this.transcriptionStates.set(track, { issued: 0, nextCommit: 0, completed: new Map(), backlog: [] });
       this.transcriptionLoops.push(this.runTranscriptionLoop(track, stream));
     }
   }
@@ -373,10 +414,12 @@ export class MeetingRecorder {
         track
       };
       this.callbacks.onProvisional(provisional);
+      const data = await blob.arrayBuffer();
+      const fileName = `${track}-${startMs}.${blob.type.includes("mp4") ? "m4a" : "webm"}`;
       const payload = {
         profileId: this.sttProfile.id,
-        data: await blob.arrayBuffer(),
-        fileName: `${track}-${startMs}.${blob.type.includes("mp4") ? "m4a" : "webm"}`,
+        data,
+        fileName,
         language: "zh",
         startMs,
         endMs,
@@ -407,13 +450,35 @@ export class MeetingRecorder {
             break;
           } catch (error) {
             failure = error;
-            // 4xx 配置错误（密钥/端点/模型名）不会因重试恢复，立即触发失败提示。
-            if (isTerminalTranscriptionFailure(error)) break;
+            // 4xx 配置错误（密钥/端点/模型名）不会因重试恢复，立即触发失败提示；
+            // 模型未就绪同样不退避——它走下面的补转队列，等模型就绪后重发。
+            if (isTerminalTranscriptionFailure(error) || isTranscriptionNotReadyFailure(error)) break;
           }
         }
         // 停止时宽限期已过：这次请求的结果不再写回会议（录音文件已完整归档）。
         if (this.discardLateTranscriptions) return;
         if (failure !== undefined) {
+          if (isTranscriptionNotReadyFailure(failure)) {
+            // 模型未就绪：块挂入补转队列，占位段保留；模型就绪后自动按序补转。
+            this.parkChunkForBacklog(state, {
+              sequence,
+              provisionalId: provisional.id,
+              data,
+              fileName,
+              startMs,
+              endMs,
+              track,
+              attempts: 0
+            });
+            this.transcriptionFailureStreak += 1;
+            this.callbacks.onTranscriptionFailure?.({
+              message: notReadyFailureMessage(failure),
+              consecutive: this.transcriptionFailureStreak,
+              atMs: startMs
+            });
+            this.ensureBacklogDrain();
+            return;
+          }
           this.transcriptionFailureStreak += 1;
           this.callbacks.onTranscriptionFailure?.({
             message: failure instanceof Error ? failure.message : "转录任务失败",
@@ -440,9 +505,138 @@ export class MeetingRecorder {
     }
   }
 
-  /** 录音进行中切换转写档案：下一个 8 秒块即用新档案，无需中断录音。 */
+  /**
+   * 录音进行中切换转写档案：下一个 8 秒块即用新档案，无需中断录音。
+   * 录音开始时未配置档案、中途才配置好的场景也会在这里补启各轨道的转写循环；
+   * 已有补转积压时立即唤醒排空循环（profileId 在发送时重新解析，新档案即刻生效）。
+   */
   updateSttProfile(profile: ModelProfile | undefined) {
     this.sttProfile = profile;
+    if (profile && this.transcriptionStates.size === 0) {
+      for (const binding of this.bindings) {
+        this.transcriptionStates.set(
+          binding.track,
+          { issued: 0, nextCommit: 0, completed: new Map(), backlog: [] }
+        );
+        this.transcriptionLoops.push(this.runTranscriptionLoop(binding.track, binding.stream));
+      }
+    }
+    if (this.hasBacklogChunks()) this.ensureBacklogDrain();
+  }
+
+  // MARK: 补转队列 —— 模型未就绪期间的块挂起排队，模型就绪后按签发顺序自动补转。
+
+  /** 是否还有待补转的块。 */
+  private hasBacklogChunks() {
+    for (const state of this.transcriptionStates.values()) {
+      if (state.backlog.length) return true;
+    }
+    return false;
+  }
+
+  /** 时间轴上最早的挂起块（各轨内部仍按签发顺序排空，跨轨只影响先后不影响顺序保证）。 */
+  private oldestBacklogChunk() {
+    let oldest: PendingBacklogChunk | undefined;
+    for (const state of this.transcriptionStates.values()) {
+      const candidate = state.backlog[0];
+      if (candidate && (!oldest || candidate.startMs < oldest.startMs)) {
+        oldest = candidate;
+      }
+    }
+    return oldest;
+  }
+
+  /** 块入队；超限时放弃最旧的块（音频已归档，可会后补转），保持内存有界。 */
+  private parkChunkForBacklog(state: TrackTranscriptionState, entry: PendingBacklogChunk) {
+    if (state.backlog.length >= MAX_BACKLOG_CHUNKS) {
+      const dropped = state.backlog.shift();
+      if (dropped) this.settleBacklogChunk(dropped, { provisionalId: dropped.provisionalId, segments: [] });
+    }
+    state.backlog.push(entry);
+    this.transcriptionQueue += 1;
+    this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
+  }
+
+  /** 挂起块落定：从队列移除、归还在途计数，并按序提交（占位段在此被替换或清除）。 */
+  private settleBacklogChunk(entry: PendingBacklogChunk, result: CompletedTranscription) {
+    const state = this.transcriptionStates.get(entry.track);
+    const index = state?.backlog.indexOf(entry) ?? -1;
+    if (state && index >= 0) state.backlog.splice(index, 1);
+    this.transcriptionQueue = Math.max(0, this.transcriptionQueue - 1);
+    this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
+    if (!state) return;
+    state.completed.set(entry.sequence, result);
+    this.commitCompletedTranscriptions(entry.track);
+  }
+
+  /** 补转队列非空时安排下一次重试；节奏随最旧块的尝试次数在 4s/8s/15s 间循环。 */
+  private ensureBacklogDrain() {
+    if (this.backlogTimer !== null || this.stopTranscription) return;
+    const oldest = this.oldestBacklogChunk();
+    if (!oldest) return;
+    const delay = BACKLOG_RETRY_DELAYS_MS[oldest.attempts % BACKLOG_RETRY_DELAYS_MS.length];
+    this.backlogTimer = window.setTimeout(() => {
+      this.backlogTimer = null;
+      void this.drainBacklogOnce();
+    }, delay);
+  }
+
+  /**
+   * 补转一轮：取最旧的挂起块用当前档案重发。成功则按序提交（顺带放行
+   * 之后已成功的块）；仍不就绪或网络失败则留在队列按节奏继续，模型
+   * 就绪后首个成功块会触发 onTranscriptionRecovered 收起提示。
+   */
+  private async drainBacklogOnce() {
+    if (this.stopTranscription || this.discardLateTranscriptions || this.paused) return;
+    const entry = this.oldestBacklogChunk();
+    if (!entry) return;
+    if (!this.sttProfile?.id) {
+      // 档案尚未配置：不发请求，配置/切换档案时 updateSttProfile 会再次唤醒。
+      this.ensureBacklogDrain();
+      return;
+    }
+    entry.attempts += 1;
+    try {
+      const result = await api.transcription.processChunk({
+        profileId: this.sttProfile.id,
+        data: entry.data,
+        fileName: entry.fileName,
+        language: "zh",
+        startMs: entry.startMs,
+        endMs: entry.endMs,
+        track: entry.track,
+        glossary: this.glossary
+      });
+      if (this.transcriptionFailureStreak > 0) {
+        this.transcriptionFailureStreak = 0;
+        this.callbacks.onTranscriptionRecovered?.();
+      }
+      this.settleBacklogChunk(entry, {
+        provisionalId: entry.provisionalId,
+        segments: result.segments.filter((segment) => segment.text.trim())
+      });
+    } catch (error) {
+      if (isTranscriptionNotReadyFailure(error)) {
+        this.transcriptionFailureStreak += 1;
+        this.callbacks.onTranscriptionFailure?.({
+          message: notReadyFailureMessage(error),
+          consecutive: this.transcriptionFailureStreak,
+          atMs: entry.startMs
+        });
+      } else if (isTerminalTranscriptionFailure(error)) {
+        // 配置类错误（密钥/端点）重试也不会成功：放弃该块，让后续块按序放行。
+        this.settleBacklogChunk(entry, { provisionalId: entry.provisionalId, segments: [] });
+        this.transcriptionFailureStreak += 1;
+        this.callbacks.onTranscriptionFailure?.({
+          message: error instanceof Error ? error.message : "转录任务失败",
+          consecutive: this.transcriptionFailureStreak,
+          atMs: entry.startMs
+        });
+      }
+      // 其余错误（网络/5xx）留在队列按节奏重试；持续失败由既有 banner 呈现。
+    } finally {
+      if (this.hasBacklogChunks()) this.ensureBacklogDrain();
+    }
   }
 
   /** 只提交从 nextCommit 开始的连续完成结果；较晚窗口先返回时暂存在 completed 中。 */
@@ -517,12 +711,13 @@ export class MeetingRecorder {
     }
   }
 
-  /** 恢复：归档录制器 resume，转写循环恢复采集。 */
+  /** 恢复：归档录制器 resume，转写循环恢复采集；有补转积压时一并唤醒排空。 */
   resume() {
     this.paused = false;
     for (const binding of this.bindings) {
       if (binding.archive.state === "paused") binding.archive.resume();
     }
+    if (this.hasBacklogChunks()) this.ensureBacklogDrain();
   }
 
   /**

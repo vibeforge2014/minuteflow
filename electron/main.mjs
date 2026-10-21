@@ -259,7 +259,8 @@ async function resolveLocalTranscriptionProfile(profile) {
     ]
   });
   if (resolution.readiness.status !== "ready") {
-    throw new Error(`${resolution.readiness.message}请在转录设置中下载模型后重试。`);
+    // [STT_NOT_READY] 标记让渲染层把这类失败挂起补转，而不是当作配置错误放弃该块。
+    throw new Error(`[STT_NOT_READY] ${resolution.readiness.message}请在转录设置中下载模型后重试。`);
   }
   if (!profile.options?.modelPath && resolution.profile.options?.modelPath) {
     saveModelProfile({
@@ -904,7 +905,7 @@ function registerIpc() {
     await requireLicense();
     const profiles = listModelProfiles();
     const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "stt");
-    if (!profile) throw new Error("尚未配置转录模型。");
+    if (!profile) throw new Error("[STT_NOT_READY] 尚未配置转录模型。请在转录设置中选择模型后重试。");
     const audio = Buffer.from(payload.data);
     const isLocal = LOCAL_TRANSCRIPTION_TRANSPORTS.includes(profile.transport);
     const localProfile = isLocal
