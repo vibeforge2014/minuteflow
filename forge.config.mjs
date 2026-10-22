@@ -59,7 +59,9 @@ export default {
     appCategoryType: "public.app-category.productivity",
     executableName: "MinuteFlow",
     icon: "./assets/app-icon",
-    extraResource: ["./assets/licenses"],
+    // Apple Speech helper（构建产物，scripts/build-apple-speech.sh）与真实识别测试样例
+    // 随包分发到 Contents/Resources/{bin,fixtures}；打包前由 prePackage 钩子确保已构建。
+    extraResource: ["./assets/licenses", "./resources/bin", "./resources/fixtures"],
     osxSign: isMac
       ? {
           identity: appleIdentity || "-",
@@ -90,6 +92,7 @@ export default {
       CFBundleDisplayName: "MinuteFlow",
       LSMinimumSystemVersion: "14.2",
       NSMicrophoneUsageDescription: "MinuteFlow需要访问麦克风，以录制并转录会议内容。",
+      NSSpeechRecognitionUsageDescription: "MinuteFlow使用macOS内置语音识别在本机将会议音频转成文字，音频不会上传到任何服务器。",
       NSAudioCaptureUsageDescription: "MinuteFlow需要访问系统音频，以录制线上会议中的其他参与者。",
       NSScreenCaptureUsageDescription: "MinuteFlow需要屏幕与系统音频权限，以捕获线上会议声音。",
       NSHighResolutionCapable: true
@@ -97,6 +100,16 @@ export default {
   },
   rebuildConfig: {},
   hooks: {
+    // Apple Speech helper 是构建产物（不入库）：打包前确保存在，缺失则现场构建。
+    prePackage: async () => {
+      if (!isMac) return;
+      const { existsSync } = await import("node:fs");
+      const helper = "./resources/bin/mf-apple-speech-darwin-universal";
+      if (!existsSync(helper)) {
+        console.log("[forge] 构建 Apple Speech helper…");
+        execFileSync("bash", ["scripts/build-apple-speech.sh"], { stdio: "inherit" });
+      }
+    },
     postMake: async (_forgeConfig, makeResults) => {
       if (!isMac || !appleNotaryProfile) return makeResults;
       for (const result of makeResults) {

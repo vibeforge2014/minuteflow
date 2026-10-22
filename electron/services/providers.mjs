@@ -21,6 +21,7 @@ import { writeFile, unlink } from "node:fs/promises";
 import { z } from "zod";
 import { initWhisper, loadWhisperModule } from "@fugood/whisper.node";
 import { buildBasicKeyPoints, simplifySummary } from "./chinese.mjs";
+import { testAppleSpeech, appleSpeechFixturePath } from "./apple-speech.mjs";
 
 // ESM 下按需加载 CJS 原生模块（sherpa-onnx-node）。
 const require = createRequire(import.meta.url);
@@ -1466,6 +1467,19 @@ export async function testModelProfile(profile, apiKey) {
     await access(profile.options.modelPath);
     const result = await runProcess(pythonPath, ["-c", "import whisper; print(whisper.__version__)"], { timeoutMs: 15_000 });
     return { ok: true, message: `Python Whisper 已就绪（${result.stdout.trim() || "版本未知"}）。` };
+  }
+  if (profile.transport === "apple-speech") {
+    // 真实识别测试：转录随包中文样例（对齐「连接测试必须跑真实请求」的约定），
+    // 首次测试会触发系统「语音识别」授权弹窗（归属 MinuteFlow）。
+    const fixturePath = appleSpeechFixturePath();
+    if (!fixturePath) throw new Error("Apple 语音识别测试样例缺失，请重新安装应用。");
+    const result = await testAppleSpeech(fixturePath, "zh-CN");
+    if (!result.available) throw new Error("Apple 语音识别组件缺失，请重新安装 MinuteFlow。");
+    const preview = result.text.replace(/\s+/g, " ").slice(0, 24);
+    return {
+      ok: true,
+      message: `Apple 语音识别已就绪（本机识别，样例输出「${preview}…」）。`
+    };
   }
   if (profile.transport === "faster-whisper" || profile.transport === "mlx-whisper") {
     const label = profile.transport === "faster-whisper" ? "faster-whisper" : "mlx-whisper";

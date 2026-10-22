@@ -22,3 +22,6 @@ ios/**/artifacts/
 
 # Local design QA screenshots
 /artifacts/
+
+# Apple Speech helper（由 scripts/build-apple-speech.sh 构建，不入库）
+resources/bin/

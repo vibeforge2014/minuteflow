@@ -204,6 +204,13 @@ const providerPresets: Record<string, Partial<ModelProfile>> = {
     baseUrl: "",
     model: "multilingual-small"
   },
+  appleSpeech: {
+    name: "Apple 语音识别",
+    kind: "stt",
+    transport: "apple-speech",
+    baseUrl: "",
+    model: ""
+  },
   openaiWhisper: {
     name: "OpenAI Whisper",
     kind: "stt",
@@ -856,7 +863,12 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                         <button className={editing?.name === "Ollama" ? "is-selected" : ""} onClick={() => startPreset("ollama")}><span className="profile-icon">OL</span><span><strong>Ollama</strong><small>数据留在本机 · 需要已安装服务</small></span>{editing?.name === "Ollama" && <CheckCircle size={16} weight="fill" />}</button>
                       </>
                     ) : (
-                      <button className={isLocalWhisperTransport(editing?.transport) ? "is-selected" : ""} onClick={() => startPreset("whisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>本地 Whisper<em className="model-catalog__tag">离线</em></strong><small>无需联网 · 音频不出本机</small></span>{isLocalWhisperTransport(editing?.transport) && <CheckCircle size={16} weight="fill" />}</button>
+                      <>
+                        <button className={isLocalWhisperTransport(editing?.transport) ? "is-selected" : ""} onClick={() => startPreset("whisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>本地 Whisper<em className="model-catalog__tag">离线</em></strong><small>无需联网 · 音频不出本机</small></span>{isLocalWhisperTransport(editing?.transport) && <CheckCircle size={16} weight="fill" />}</button>
+                        {api.system.platform === "darwin" && (
+                          <button className={editing?.transport === "apple-speech" ? "is-selected" : ""} onClick={() => startPreset("appleSpeech")}><span className="profile-icon"></span><span><strong>Apple 语音识别<em className="model-catalog__tag">免费</em></strong><small>macOS 内置 · 零下载 · 中文优先</small></span>{editing?.transport === "apple-speech" && <CheckCircle size={16} weight="fill" />}</button>
+                        )}
+                      </>
                     )}
                   </div>
                   {tab === "llm" ? (
@@ -889,7 +901,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                               {visualVerified && <span className="model-badge model-badge--visual" title="视觉纪要已通过真实验证">视觉✓</span>}
                               {profile.secretId && <span className="model-badge model-badge--key" title="已安全保存密钥">钥</span>}
                             </span>
-                            <small>{profile.kind === "diarization" ? (profile.options?.segmentationModelPath && profile.options?.embeddingModelPath ? "声纹识别已就绪" : "待补齐模型") : (profile.model || "尚未选择模型")}</small>
+                            <small>{profile.kind === "diarization" ? (profile.options?.segmentationModelPath && profile.options?.embeddingModelPath ? "声纹识别已就绪" : "待补齐模型") : profile.transport === "apple-speech" ? "系统内置 · 零配置" : (profile.model || "尚未选择模型")}</small>
                           </span>
                         </button>
                         <button
@@ -925,6 +937,14 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                           </span>
                           <button type="button" className="button button--small" onClick={() => startPreset("openaiWhisper")}>改用在线服务</button>
                         </div>
+                      ) : editing.transport === "apple-speech" ? (
+                        <div className="transcription-alternative">
+                          <span>
+                            <strong>想要更高质量的转写？</strong>
+                            <small>本地 Whisper 支持更大的模型与逐词时间戳；Apple 语音识别胜在零下载、即刻可用。</small>
+                          </span>
+                          <button type="button" className="button button--small" onClick={() => startPreset("whisper")}>改用本地 Whisper</button>
+                        </div>
                       ) : (
                         <div className="transcription-alternative">
                           <span>
@@ -955,6 +975,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                             <option value="localSummary">本机基础纪要（离线）</option>
                             <option value="ollama">Ollama（本地）</option>
                           </>) : (<>
+                            <option value="appleSpeech">Apple 语音识别（系统内置 · mac）</option>
                             <option value="whisper">本地 Whisper（自动适配）</option>
                             <option value="openaiWhisper">OpenAI Whisper</option>
                             <option value="newApiWhisper">New API</option>
@@ -969,8 +990,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                       </label>
                           <label className="field"><span>名称</span><input value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></label>
                           <div className="field"><span>用于</span><div className="readonly-control">{editing.kind === "diarization" ? "多人会议中区分发言人" : tab === "llm" ? "会议总结与行动项" : "会议语音转文字"}</div></div>
-                          <div className="field"><span>连接方式</span><div className="readonly-control">{editing.transport === "sherpa-onnx" ? "内置引擎 · 全程在本机运行，无需联网" : editing.transport === "local-summary" ? "本机离线规则引擎" : isLocalWhisperTransport(editing.transport) ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
-                          {!isLocalWhisperTransport(editing.transport) && editing.transport !== "local-summary" && editing.transport !== "sherpa-onnx" && (
+                          <div className="field"><span>连接方式</span><div className="readonly-control">{editing.transport === "apple-speech" ? "macOS 系统内置 · 本机离线识别" : editing.transport === "sherpa-onnx" ? "内置引擎 · 全程在本机运行，无需联网" : editing.transport === "local-summary" ? "本机离线规则引擎" : isLocalWhisperTransport(editing.transport) ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
+                          {!isLocalWhisperTransport(editing.transport) && editing.transport !== "local-summary" && editing.transport !== "sherpa-onnx" && editing.transport !== "apple-speech" && (
                             <div className="field field--model-picker" ref={modelMenuRef}>
                               <span>模型</span>
                               <div className={`model-picker ${modelMenuOpen ? "is-open" : ""}`}>
@@ -1025,6 +1046,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                       <div className="field"><span>说明</span><div className="readonly-control">完全离线的规则纪要：从转录中提取要点、决策、行动项与风险，不发起任何网络请求，适合无网环境或隐私优先场景；追求更高质量可另配在线总结服务。</div></div>
                     ) : isLocalWhisperTransport(editing.transport) ? (
                       <LocalModelManager profile={editing} onChange={setEditing} />
+                    ) : editing.transport === "apple-speech" ? (
+                      <div className="field"><span>说明</span><div className="readonly-control">macOS 内置的 Apple 语音识别：完全免费、默认仅在本机运行（音频不出设备）、无需下载任何模型；中文识别自动断句与标点。首次测试或使用时，系统会请求「语音识别」权限；若识别反复超时，请到 系统设置 → 键盘 → 听写 下载对应语言的离线资源。</div></div>
                     ) : editing.transport === "sherpa-onnx" ? (
                       <>
                         <div className="field"><span>说明</span><div className="readonly-control">引擎应用内置、无需安装。下载两个模型后，多人会议会自动区分发言人；在转写里给「发言人N」改名会自动记住 TA 的声纹。</div></div>

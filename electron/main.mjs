@@ -76,6 +76,7 @@ import {
 import { simplifyTranscriptResult } from "./services/chinese.mjs";
 import { audioContentType, parseByteRange } from "./services/media.mjs";
 import { normalizeRemoteTranscriptionAudio } from "./services/transcription-audio.mjs";
+import { transcribeWithAppleSpeech } from "./services/apple-speech.mjs";
 import { isTrustedPermissionRequest, isTrustedRendererUrl } from "./services/permissions.mjs";
 import { chooseImportFiles, exportMeeting } from "./services/exports.mjs";
 import {
@@ -907,12 +908,27 @@ function registerIpc() {
     const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "stt");
     if (!profile) throw new Error("[STT_NOT_READY] 尚未配置转录模型。请在转录设置中选择模型后重试。");
     const audio = Buffer.from(payload.data);
+    const isAppleSpeech = profile.transport === "apple-speech";
     const isLocal = LOCAL_TRANSCRIPTION_TRANSPORTS.includes(profile.transport);
     const localProfile = isLocal
       ? await resolveLocalTranscriptionProfile(profile)
       : profile;
     let rawResult;
-    if (isLocal) {
+    if (isAppleSpeech) {
+      // macOS 内置 Apple Speech：无模型就绪检查，浏览器采集格式先归一化为 WAV
+      // （AVFoundation 不读 WebM），再交 helper 本机识别。
+      rawResult = await transcribeWithAppleSpeech(
+        profile,
+        audio,
+        payload.fileName,
+        payload.language,
+        payload.glossary,
+        {
+          prepareAudio: async (buffer, name) =>
+            normalizeRemoteTranscriptionAudio(buffer, name, await managedFfmpegPath())
+        }
+      );
+    } else if (isLocal) {
       rawResult = await transcribeLocally(localProfile, audio, payload.fileName, payload.language, payload.glossary);
     } else {
       // Chromium 的短 WebM 块通常没有 Duration 元数据。部分 New API / OpenAI
