@@ -38,6 +38,8 @@ targets:
           UIColorName: LaunchBackground
         NSMicrophoneUsageDescription: MinuteFlow需要使用麦克风录制会议，并将语音转换为文字。
         NSSpeechRecognitionUsageDescription: MinuteFlow使用系统语音识别生成实时转录和导入音频的文字稿。
+        UIBackgroundModes:
+          - audio
         ITSAppUsesNonExemptEncryption: false
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
@@ -65,7 +67,7 @@ targets:
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-        CURRENT_PROJECT_VERSION: 202610191354
+        CURRENT_PROJECT_VERSION: 202610221200
         MARKETING_VERSION: 1.0
       configs:
         Debug:
