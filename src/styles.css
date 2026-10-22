@@ -5988,6 +5988,21 @@ html[data-surface="permission-helper"] #root {
   gap: 9px;
 }
 
+/* 「或使用模板创建会议」：安静的文字入口，完整表单仍可达但不抢主路径。 */
+.empty-state__link {
+  border: none;
+  background: none;
+  padding: 2px 4px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.empty-state__link:hover {
+  color: var(--accent-strong);
+}
+
 .app-loading {
   gap: 10px;
   background: #f8f9fb;

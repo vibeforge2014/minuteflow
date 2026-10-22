@@ -40,6 +40,7 @@ struct NewMeetingView: View {
     NavigationStack {
       Form {
         Section("基本信息") {
+          // 标题可留空：创建时回退为自动命名（快速会议 M月d日 HH:mm），与桌面端一致。
           TextField("会议标题", text: $title)
             .accessibilityIdentifier("new-meeting-title")
           DatePicker(
@@ -93,8 +94,8 @@ struct NewMeetingView: View {
           Button("取消") { dismiss() }
         }
         ToolbarItem(placement: .confirmationAction) {
+          // 空表单也可直接创建：全部字段都有默认值，不再强制填写。
           Button("创建") { createMeeting() }
-            .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .accessibilityIdentifier("create-meeting-confirm")
         }
       }
@@ -107,8 +108,9 @@ struct NewMeetingView: View {
   /// 创建并保存会议，选中后关闭表单。
   /// - 副作用：插入 SwiftData 并保存；更新 appState.selectedMeetingID。
   private func createMeeting() {
+    let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
     let meeting = MeetingRecord(
-      title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+      title: trimmedTitle.isEmpty ? MeetingQuickStart.title(at: startedAt) : trimmedTitle,
       startedAt: startedAt,
       meetingMode: mode,
       participantsText: participants,

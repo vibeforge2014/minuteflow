@@ -1,6 +1,6 @@
 /**
  * 空状态引导：中央工作区的落地页，区分两种情形——
- * first-run：没有任何会议，引导新建或导入；
+ * first-run：没有任何会议，一键开始会议（零填写直录）或导入；
  * search：搜索无结果（用户已有会议库），引导清除搜索而不是误以为数据丢失。
  */
 import { FileArrowUp, FilePlus, MagnifyingGlass } from "@phosphor-icons/react";
@@ -8,11 +8,15 @@ import { FileArrowUp, FilePlus, MagnifyingGlass } from "@phosphor-icons/react";
 export function EmptyState({
   variant = "first-run",
   onNew,
+  onTemplate,
   onImport,
   onClear
 }: {
   variant?: "first-run" | "search";
+  /** 一键开会：零填写、创建后立即录音转录。 */
   onNew?(): void;
+  /** 需要模板/参与者等完整表单时的显式入口。 */
+  onTemplate?(): void;
   onImport?(): void;
   /** search 变体：清除搜索词，回到全部会议列表。 */
   onClear?(): void;
@@ -33,11 +37,14 @@ export function EmptyState({
     <div className="empty-state">
       <div><FilePlus size={32} weight="duotone" /></div>
       <h1>创建你的第一份会议文档</h1>
-      <p>录音、转录、笔记与实时纪要都会安静地汇聚到同一个地方。</p>
+      <p>新建会议不再需要填写任何内容——创建后立即开始录音转录，第一时间捕捉会议内容。</p>
       <div>
-        <button className="button button--primary" onClick={onNew}>新建会议</button>
+        <button className="button button--primary" onClick={onNew} title="自动命名并立即开始录音">立即开始会议</button>
         <button className="button" onClick={onImport}><FileArrowUp size={16} />导入录音</button>
       </div>
+      {onTemplate && (
+        <button className="empty-state__link" onClick={onTemplate}>或使用模板创建会议</button>
+      )}
     </div>
   );
 }

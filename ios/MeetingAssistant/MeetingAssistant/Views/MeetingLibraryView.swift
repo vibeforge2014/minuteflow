@@ -14,10 +14,18 @@ import SwiftUI
 struct MeetingLibraryView: View {
   /// 全局 UI 状态（选中会议、搜索词、弹层）。
   @Environment(AppState.self) private var appState
+  /// SwiftData 上下文（快速开会插入新会议）。
+  @Environment(\.modelContext) private var modelContext
+  /// 录音协调器（快速开会直接启动录音）。
+  @Environment(RecordingCoordinator.self) private var recorder
+  /// 识别语言与自动纪要间隔。
+  @Environment(AppPreferences.self) private var preferences
   /// 传入的会议列表（已按开始时间倒序）。
   let meetings: [MeetingRecord]
   /// 导入按钮回调（由根视图唤起文件选择器）。
   let onImport: () -> Void
+  /// 快速开会启动失败的错误文案（alert 展示）。
+  @State private var quickStartError: String?
 
   var body: some View {
     @Bindable var appState = appState
@@ -47,6 +55,17 @@ struct MeetingLibraryView: View {
     .background(MeetingTheme.sidebar)
     .navigationTitle("会议")
     .navigationSplitViewColumnWidth(min: 230, ideal: 270, max: 330)
+    .alert(
+      "无法开始录音",
+      isPresented: Binding(
+        get: { quickStartError != nil },
+        set: { if !$0 { quickStartError = nil } }
+      )
+    ) {
+      Button("好") { quickStartError = nil }
+    } message: {
+      Text(quickStartError ?? "")
+    }
   }
 
   // MARK: - 分区视图
@@ -62,12 +81,20 @@ struct MeetingLibraryView: View {
           .font(.headline)
         Spacer()
       }
-      Button {
-        appState.presentedSheet = .newMeeting
+      // 零填写快速开会：轻点即建即录；长按菜单保留「详细新建…」完整表单。
+      Menu {
+        Button {
+          appState.presentedSheet = .newMeeting
+        } label: {
+          Label("详细新建…", systemImage: "square.and.pencil")
+        }
       } label: {
         Label("新建会议", systemImage: "plus")
           .frame(maxWidth: .infinity)
+      } primaryAction: {
+        startQuickMeeting()
       }
+      .menuStyle(.button)
       .buttonStyle(.borderedProminent)
       .controlSize(.large)
       .accessibilityIdentifier("new-meeting-button")
@@ -182,6 +209,24 @@ struct MeetingLibraryView: View {
         meeting.transcriptText,
       ]
       .contains { $0.localizedCaseInsensitiveContains(query) }
+    }
+  }
+
+  // MARK: - 快速开会
+
+  /// 零填写创建会议并立即录音转录；选中即切到新会议，失败以 alert 呈现。
+  private func startQuickMeeting() {
+    Task {
+      do {
+        _ = try await MeetingQuickStart.createAndStartRecording(
+          in: modelContext,
+          appState: appState,
+          recorder: recorder,
+          preferences: preferences
+        )
+      } catch {
+        quickStartError = error.localizedDescription
+      }
     }
   }
 }

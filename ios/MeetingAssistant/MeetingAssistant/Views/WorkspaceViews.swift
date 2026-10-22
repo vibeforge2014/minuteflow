@@ -98,9 +98,19 @@ struct PhoneWorkspaceView: View {
 /// iPhone「会议」标签：可搜索的会议列表（收藏/最近两组），支持左滑收藏、右滑软删除。
 private struct PhoneMeetingsView: View {
   @Environment(AppState.self) private var appState
+  /// SwiftData 上下文（快速开会插入新会议）。
+  @Environment(\.modelContext) private var modelContext
+  /// 录音协调器（快速开会直接启动录音）。
+  @Environment(RecordingCoordinator.self) private var recorder
+  /// 识别语言与自动纪要间隔。
+  @Environment(AppPreferences.self) private var preferences
   let meetings: [MeetingRecord]
   let onImport: () -> Void
   @State private var searchText = ""
+  /// 快速开会启动失败的错误文案（alert 展示）。
+  @State private var quickStartError: String?
+  /// 快速开会创建的会议：非 nil 时推入其详情页（录音中）。
+  @State private var quickStartedMeeting: MeetingRecord?
 
   var body: some View {
     NavigationStack {
@@ -139,13 +149,52 @@ private struct PhoneMeetingsView: View {
           .accessibilityIdentifier("all-actions-button")
         }
         ToolbarItem(placement: .primaryAction) {
-          Button {
-            appState.presentedSheet = .newMeeting
+          // 零填写快速开会：轻点即建即录并推入详情；长按菜单保留「详细新建…」表单。
+          Menu {
+            Button {
+              appState.presentedSheet = .newMeeting
+            } label: {
+              Label("详细新建…", systemImage: "square.and.pencil")
+            }
           } label: {
             Label("新建会议", systemImage: "plus")
+          } primaryAction: {
+            startQuickMeeting()
           }
           .accessibilityIdentifier("new-meeting-button")
         }
+      }
+      .navigationDestination(item: $quickStartedMeeting) { meeting in
+        PhoneMeetingDetailView(meeting: meeting)
+      }
+      .alert(
+        "无法开始录音",
+        isPresented: Binding(
+          get: { quickStartError != nil },
+          set: { if !$0 { quickStartError = nil } }
+        )
+      ) {
+        Button("好") { quickStartError = nil }
+      } message: {
+        Text(quickStartError ?? "")
+      }
+    }
+  }
+
+  // MARK: - 快速开会
+
+  /// 零填写创建会议并立即录音转录；成功后推入详情页（录音中）。
+  private func startQuickMeeting() {
+    Task {
+      do {
+        quickStartedMeeting = try await MeetingQuickStart.createAndStartRecording(
+          in: modelContext,
+          appState: appState,
+          recorder: recorder,
+          preferences: preferences
+        )
+      } catch {
+        quickStartError = error.localizedDescription
       }
     }
   }

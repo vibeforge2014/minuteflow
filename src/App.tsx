@@ -396,18 +396,19 @@ export function App() {
     return created;
   };
 
-  /** 免填写的一键开会：自动命名 + 偏好录音模式，创建后立即进入录音。 */
+  /** 免填写的一键开会：自动命名、固定线下麦克风模式（不区分线上线下），创建后立即录音转录。 */
   const handleQuickStart = () => {
     void handleCreate({
       title: quickMeetingTitle(),
-      mode: preferences.defaultMode,
+      mode: "offline",
       participants: ["我"],
       goals: [],
       tags: []
     }, { startRecording: true });
   };
 
-  // 全局快捷键：⌘K/Ctrl+K 聚焦会议搜索（与搜索框 kbd 提示一致）、⌘N/Ctrl+N 新建会议；
+  // 全局快捷键：⌘K/Ctrl+K 聚焦会议搜索（与搜索框 kbd 提示一致）、⌘N/Ctrl+N 一键开会
+  // （免填写直接录音，完整表单仍在侧栏「新建会议」的下拉箭头里）；
   // Esc 依次收起导出/更多菜单与导入抽屉。仅在无输入框抢占的场景下拦截（快捷键本身不冲突输入）。
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -419,7 +420,7 @@ export function App() {
       }
       if (meta && event.key.toLowerCase() === "n") {
         event.preventDefault();
-        setNewMeetingOpen(true);
+        handleQuickStart();
         return;
       }
       if (event.key === "Escape") {
@@ -802,7 +803,7 @@ export function App() {
             onClear={() => void setSearch("")}
           />
         ) : (
-          <EmptyState onNew={() => setNewMeetingOpen(true)} onImport={handleImport} />
+          <EmptyState onNew={handleQuickStart} onTemplate={() => setNewMeetingOpen(true)} onImport={handleImport} />
         )}
       </main>
 
