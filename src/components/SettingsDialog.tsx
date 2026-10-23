@@ -343,7 +343,7 @@ export type SettingsTab = "llm" | "transcription" | "general" | "storage" | "upd
 /** 打开设置时的定位意图：直接把编辑器切到对应表单，而不是让用户自己在目录里找。 */
 export type SettingsFocus = "local-whisper" | "online-transcription";
 
-export function SettingsDialog({ open, initialTab, initialFocus, onClose, licenseStatus, onLicenseStatusChange }: { open: boolean; initialTab?: SettingsTab; initialFocus?: SettingsFocus; onClose(): void; licenseStatus: LicenseStatus | null; onLicenseStatusChange(status: LicenseStatus): void }) {
+export function SettingsDialog({ open, initialTab, initialFocus, onClose, licenseStatus, onLicenseStatusChange, recordingActive = false }: { open: boolean; initialTab?: SettingsTab; initialFocus?: SettingsFocus; onClose(): void; licenseStatus: LicenseStatus | null; onLicenseStatusChange(status: LicenseStatus): void; recordingActive?: boolean }) {
   const profiles = useMeetingStore((state) => state.profiles);
   const setProfiles = useMeetingStore((state) => state.setProfiles);
   const preferences = useMeetingStore((state) => state.preferences);
@@ -485,9 +485,19 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   }, [open, initialFocus]);
 
   // 进入「软件更新」页时读取主进程缓存的更新状态（启动时已静默检查过一次）。
+  // macOS 自动更新若已下载就绪（readyVersion），直接进入「待重启」状态。
   useEffect(() => {
     if (!open || tab !== "updates") return;
-    api.updates.getState().then(setUpdateState).catch((error) => {
+    api.updates.getState().then((state) => {
+      setUpdateState(state);
+      if (state.readyVersion) {
+        setDownloadState({
+          status: "ready",
+          version: state.readyVersion,
+          receivedBytes: 0, totalBytes: 0, fraction: 1
+        });
+      }
+    }).catch((error) => {
       setUpdateState({
         status: "error",
         currentVersion: "",
@@ -782,6 +792,23 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     }
   };
 
+  /** macOS 自动更新就绪后的显式安装：原地替换并重启（录音期间由 UI 禁用）。 */
+  const [installingUpdate, setInstallingUpdate] = useState(false);
+  const restartToUpdate = async () => {
+    setInstallingUpdate(true);
+    try {
+      await api.updates.restartToUpdate();
+    } catch (error) {
+      setDownloadState((current) => ({
+        status: "error",
+        version: current?.version || updateState?.update?.version || "",
+        receivedBytes: 0, totalBytes: 0, fraction: 0,
+        message: error instanceof Error ? error.message : "启动更新失败。"
+      }));
+      setInstallingUpdate(false);
+    }
+  };
+
   /** 打开官网下载页：应用内下载不可用时的稳定兜底。 */
   const openUpdateDownload = async () => {
     try {
@@ -800,27 +827,35 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const downloadSize = downloadState?.totalBytes
     ? `${(downloadState.receivedBytes / 1024 / 1024).toFixed(0)} / ${(downloadState.totalBytes / 1024 / 1024).toFixed(0)} MB`
     : "";
-  /** 下载进度的可读文案：区分下载、校验、打开与完成。 */
+  /** 下载进度的可读文案：区分下载、校验、打开、就绪与完成。 */
   const downloadLabel = !downloadState
     ? ""
     : downloadState.status === "downloading"
-      ? `正在下载安装包 ${downloadPercent}%${downloadSize ? `（${downloadSize}）` : ""}`
+      ? `正在后台下载更新 ${downloadPercent}%${downloadSize ? `（${downloadSize}）` : ""}`
       : downloadState.status === "verifying"
-        ? "正在校验安装包…"
-        : downloadState.status === "opening"
-          ? "正在打开安装程序…"
-          : downloadState.status === "done"
-            ? api.system.platform === "win32"
-              ? "安装包已打开：按安装程序提示完成升级，应用会自动重启。"
-              : "安装包已打开：把 MinuteFlow 拖入“应用程序”即可完成升级。"
-            : downloadState.message || (downloadState.status === "cancelled" ? "已取消下载。" : "下载安装包失败。");
+        ? "正在校验更新…"
+        : downloadState.status === "ready"
+          ? `新版本已就绪：点「立即重启并更新」马上升级，或退出应用后自动安装${recordingActive ? "（录音进行中，不会打断你）" : ""}。`
+          : downloadState.status === "installing"
+            ? "正在更新 MinuteFlow…"
+            : downloadState.status === "opening"
+              ? "正在打开安装程序…"
+              : downloadState.status === "done"
+                ? api.system.platform === "win32"
+                  ? "安装包已打开：按安装程序提示完成升级，应用会自动重启。"
+                  : "安装包已打开：把 MinuteFlow 拖入“应用程序”即可完成升级。"
+                : downloadState.message || (downloadState.status === "cancelled" ? "已取消下载。" : "下载更新失败。");
 
-  /** 安装提示按平台区分：macOS 拖入应用程序，Windows 直接运行安装程序。 */
+  /** 安装方式按平台区分：macOS 自动原地更新（无拖拽），Windows 运行 Squirrel 安装程序。 */
   const updateInstallHint = api.system.platform === "win32"
     ? "更新只接受 HTTPS 官网清单和官方安装包；下载完成后会先校验 SHA-256，再打开 MinuteFlow-Setup.exe 完成升级。"
     : api.system.platform === "darwin"
-      ? "更新只接受 HTTPS 官网清单和官方安装包；下载完成后会先校验 SHA-256，再打开 DMG，把 MinuteFlow 拖入“应用程序”即可。"
+      ? "发现新版本后会自动在后台下载；完成 SHA-512 与开发者签名校验后原地更新，全程无需拖拽 DMG。退出应用时也会自动装好新版本，录音期间绝不会自动重启。"
       : "应用只接受 HTTPS 官网清单和官方发布地址。";
+  /** macOS 自动更新已就绪的版本（下载完成，等待重启安装）。 */
+  const updateReadyVersion = downloadState?.status === "ready"
+    ? downloadState.version
+    : updateState?.readyVersion || "";
 
   return (
     <div className={`modal-backdrop ${closing ? "is-closing" : ""}`} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -1193,7 +1228,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
             {tab === "updates" && (
               <div className="update-settings">
                 <div className="settings-section-heading">
-                  <div><h3>软件更新</h3><p>从官网检查新版本，在应用内下载并校验安装包后再安装。</p></div>
+                  <div><h3>软件更新</h3><p>自动检查新版本并后台下载；macOS 校验签名后原地安装，退出应用即完成升级。</p></div>
                 </div>
                 <div className={`update-card update-card--${updateState?.status || "idle"}`}>
                   <div className="update-card__icon">
@@ -1235,7 +1270,19 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                     <ArrowClockwise size={16} className={checkingUpdate ? "spin" : ""} />
                     {checkingUpdate ? "正在检查" : "检查更新"}
                   </button>
-                  {updateState?.status === "available" && (
+                  {updateReadyVersion ? (
+                    <>
+                      <button
+                        className="button button--primary"
+                        disabled={recordingActive || installingUpdate}
+                        onClick={restartToUpdate}
+                      >
+                        <ArrowClockwise size={16} className={installingUpdate ? "spin" : ""} />
+                        {installingUpdate ? "正在更新…" : `立即重启并更新到 ${updateReadyVersion}`}
+                      </button>
+                      {recordingActive && <small className="update-actions__note">录音进行中：退出应用后也会自动安装新版本</small>}
+                    </>
+                  ) : updateState?.status === "available" && (
                     <>
                       <button
                         className="button button--primary"

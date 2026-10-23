@@ -120,6 +120,26 @@ export default {
   },
   rebuildConfig: {},
   hooks: {
+    // macOS 自动更新 feed 指向（electron-updater，运行时读 Contents/Resources/app-update.yml）。
+    // packageAfterPrune 的 buildPath 是 <App>.app/Contents/Resources/app，
+    // 包根在三级之上；必须赶在 osx-sign 之前写入，否则破坏应用签名。
+    packageAfterPrune: async (_forgeConfig, buildPath) => {
+      if (!isMac) return;
+      const { writeFileSync } = await import("node:fs");
+      const { join, resolve } = await import("node:path");
+      const resourcesDir = resolve(buildPath, "..", "..", "..", "Contents", "Resources");
+      writeFileSync(
+        join(resourcesDir, "app-update.yml"),
+        [
+          "provider: generic",
+          "url: https://zensoft.top/minuteflow/dl/auto-update/",
+          "channel: latest",
+          "updaterCacheDirName: minuteflow-updater",
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+    },
     // Apple Speech helper 是构建产物（不入库）：打包前确保存在，缺失则现场构建。
     prePackage: async () => {
       if (!isMac) return;

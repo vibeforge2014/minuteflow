@@ -848,7 +848,7 @@ export function App() {
         onClose={() => setNewMeetingOpen(false)}
         onCreate={handleCreate}
       />
-      <SettingsDialog open={settingsOpen} initialTab={settingsTab} initialFocus={settingsFocus} licenseStatus={licenseStatus} onLicenseStatusChange={setLicenseStatus} onClose={() => {
+      <SettingsDialog open={settingsOpen} initialTab={settingsTab} initialFocus={settingsFocus} licenseStatus={licenseStatus} onLicenseStatusChange={setLicenseStatus} recordingActive={recorder.phase !== "idle"} onClose={() => {
         setSettingsOpen(false);
         // 首次配置期间从设置返回时继续留在向导当前步骤，不提前写入完成标记。
         if (!preferences.onboardingCompleted) setOnboardingOpen(true);

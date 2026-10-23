@@ -95,6 +95,13 @@ import {
   isOfficialHttpsUrl
 } from "./services/updates.mjs";
 import {
+  MAC_AUTO_UPDATE_FALLBACK,
+  cancelMacDownload,
+  downloadMacUpdate,
+  installMacUpdate,
+  macDownloadedUpdateVersion
+} from "./services/auto-update.mjs";
+import {
   activateLicense,
   checkoutUrl,
   quoteDiscount,
@@ -543,6 +550,38 @@ function idleUpdateState() {
 }
 
 /**
+ * 把更新下载进度推送给渲染层（updates:download-progress）。
+ * 手动下载与 macOS 自动更新后台下载共用同一事件通道与 payload 结构。
+ */
+function sendUpdateProgress(payload) {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send("updates:download-progress", payload);
+  }
+}
+
+/** 已启动过后台静默下载的新版本号，避免每次检查都重复触发。 */
+let backgroundMacUpdateVersion = "";
+
+/**
+ * macOS 自动更新：发现新版本后立即开始后台静默下载（不打扰使用）。
+ * 下载完成后：退出应用时自动安装；设置页可显式「立即重启并更新」。
+ * feed 不可用等失败保持静默——用户手动点「下载并安装」时会回退旧的手动 DMG 流程。
+ */
+function startBackgroundMacUpdateDownload(update) {
+  if (process.platform !== "darwin" || !update?.version) return;
+  if (backgroundMacUpdateVersion === update.version || macDownloadedUpdateVersion()) return;
+  backgroundMacUpdateVersion = update.version;
+  downloadMacUpdate({
+    version: update.version,
+    onProgress: (payload) => sendUpdateProgress({ ...payload, version: payload.version || update.version })
+  }).catch((error) => {
+    if (error?.message !== MAC_AUTO_UPDATE_FALLBACK) {
+      console.warn("[updates] 后台自动下载更新失败：", error?.message || error);
+    }
+  });
+}
+
+/**
  * 执行一次桌面端更新检查并把结果缓存到 latestUpdateCheck（供 updates:get-state 读取）。
  * @param {{notify?: boolean}} options notify=true 且发现新版本时向渲染层推送 updates:available 事件
  * @returns {Promise<object>} 检查结果（status: available / up-to-date / unsupported / error）
@@ -563,6 +602,9 @@ async function runUpdateCheck({ notify = false } = {}) {
       checkedAt: new Date().toISOString(),
       message: error instanceof Error ? error.message : "检查更新失败。"
     };
+  }
+  if (latestUpdateCheck.status === "available") {
+    startBackgroundMacUpdateDownload(latestUpdateCheck.update);
   }
   if (notify && latestUpdateCheck.status === "available") {
     // Guard against the window being closed during the 5s startup delay.
@@ -1341,7 +1383,12 @@ function registerIpc() {
     return preferenceWriteQueue;
   });
   // updates:get-state — 读取最近一次更新检查结果（未检查时返回初始状态），更新卡片调用。
-  trustedHandle("updates:get-state", () => latestUpdateCheck ?? idleUpdateState());
+  // macOS 上若自动更新已下载就绪，附带 readyVersion 让设置页直接显示「立即重启并更新」。
+  trustedHandle("updates:get-state", () => {
+    const state = latestUpdateCheck ?? idleUpdateState();
+    const readyVersion = process.platform === "darwin" ? macDownloadedUpdateVersion() : "";
+    return readyVersion ? { ...state, readyVersion } : state;
+  });
   // updates:check — 手动触发一次更新检查，设置页"检查更新"按钮调用。
   trustedHandle("updates:check", () => runUpdateCheck());
   // updates:open-download — 打开官网下载页；下载地址必须再次通过 allow-list HTTPS 校验，
@@ -1356,20 +1403,33 @@ function registerIpc() {
     await shell.openExternal(latestUpdateCheck.update.downloadUrl);
     return { opened: true };
   });
-  // updates:download — 在应用内下载官方安装包：仅接受清单里的 HTTPS 官方直链，
-  // 有 sha256 时强制校验，完成后打开安装程序。不静默替换正在运行的应用。
+  // updates:download — macOS：electron-updater 后台自动更新（sha512 + 签名校验，原地替换，
+  // 无需拖拽 DMG），feed 不可用时回退下方官网直链手动流程；Windows：保持官网直链下载 +
+  // 打开 Squirrel Setup.exe（运行时静默原地升级并自动重启）。
   trustedHandle("updates:download", async () => {
     const state = latestUpdateCheck;
     if (state?.status !== "available" || !state.update) throw new Error("请先检查更新。");
+    const update = state.update;
+    if (process.platform === "darwin") {
+      try {
+        await downloadMacUpdate({
+          version: update.version,
+          onProgress: (payload) => sendUpdateProgress({ ...payload, version: payload.version || update.version })
+        });
+        return { autoUpdate: true, version: update.version };
+      } catch (error) {
+        if (error?.message !== MAC_AUTO_UPDATE_FALLBACK) {
+          const message = error instanceof Error ? error.message : "自动更新下载失败。";
+          sendUpdateProgress({ status: "error", version: update.version, receivedBytes: 0, totalBytes: 0, fraction: 0, message });
+          throw new Error(message);
+        }
+        // feed 不可用：继续走旧的手动 DMG 流程作为兜底。
+      }
+    }
     if (activeUpdateDownload) throw new Error("安装包正在下载，请稍候。");
     const controller = new AbortController();
     activeUpdateDownload = controller;
-    const update = state.update;
-    const sendProgress = (payload) => {
-      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-        mainWindow.webContents.send("updates:download-progress", payload);
-      }
-    };
+    const sendProgress = sendUpdateProgress;
     sendProgress({ status: "downloading", version: update.version, receivedBytes: 0, totalBytes: 0, fraction: 0 });
     try {
       const installer = await downloadUpdateInstaller({
@@ -1410,8 +1470,20 @@ function registerIpc() {
       activeUpdateDownload = null;
     }
   });
+  // updates:restart-to-update — macOS 显式安装：原地替换并重启到已下载的新版本。
+  // 调用前提是更新已就绪（macDownloadedUpdateVersion 非空）；渲染层在录音/导入期间禁用该入口，
+  // 主进程从不自发重启，退出时由 autoInstallOnAppQuit 兜底安装。
+  trustedHandle("updates:restart-to-update", async () => {
+    if (process.platform !== "darwin") throw new Error("当前平台通过安装包完成升级。");
+    await installMacUpdate();
+    return { installing: true };
+  });
   // updates:cancel-download — 中止正在进行的安装包下载并清理临时文件。
-  trustedHandle("updates:cancel-download", () => {
+  trustedHandle("updates:cancel-download", async () => {
+    if (process.platform === "darwin") {
+      const macCancelled = await cancelMacDownload();
+      if (macCancelled.cancelled) return macCancelled;
+    }
     const cancelled = Boolean(activeUpdateDownload);
     activeUpdateDownload?.abort();
     return { cancelled };
@@ -1613,7 +1685,9 @@ app.whenReady().then(async () => {
   // 主窗口就绪后立即唤醒导入队列（含因缺模型/组件而暂停等待的任务）。
   wakeImportQueue();
 
-  // 打包后的 macOS / Windows 版本在启动 5 秒后静默检查一次更新；仅提醒，从不自动安装。
+  // 打包后的 macOS / Windows 版本在启动 5 秒后静默检查一次更新：
+  // Windows 仅提醒（Setup.exe 手动升级）；macOS 提醒后由 startBackgroundMacUpdateDownload
+  // 后台静默下载，退出应用时自动安装，绝不自行重启。
   if (UPDATE_PLATFORMS.has(process.platform) && app.isPackaged) {
     setTimeout(() => runUpdateCheck({ notify: true }), 5_000);
   }

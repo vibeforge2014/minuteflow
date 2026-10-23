@@ -60,7 +60,8 @@ jobs:
           set -euo pipefail
           mkdir -p release
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release \
-            --pattern '*.dmg' --pattern '*Setup*.exe' --pattern '*.sha256' --pattern '*SHA256*'
+            --pattern '*.dmg' --pattern '*Setup*.exe' --pattern '*.sha256' --pattern '*SHA256*' \
+            --pattern '*.zip'
           ls -la release
 
       - name: Verify checksums
@@ -104,6 +105,30 @@ jobs:
           else
             echo "::warning::No SHA256SUMS file for the DMG"
           fi
+          zip="$(find . -maxdepth 1 -name '*.zip' -print -quit)"
+          if [ -n "$zip" ] && [ -n "$sums" ]; then
+            verify_sums "$zip" "$sums" "macOS zip"
+          fi
+
+      # electron-updater 的 latest-mac.yml：macOS 应用内自动更新（Squirrel.Mac 原地替换）的
+      # feed。zip 缺失（历史版本补同步）只告警跳过，不阻塞清单同步。
+      - name: Generate electron-updater feed
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          zip="$(find release -maxdepth 1 -name '*.zip' -print -quit)"
+          if [ -z "$zip" ]; then
+            echo "::warning::Release 没有 macOS zip 资产，跳过 electron-updater feed 生成"
+            exit 0
+          fi
+          node scripts/write-updater-feed.mjs \
+            --version "$VERSION" \
+            --zip "$zip" \
+            --url "https://zensoft.top/minuteflow/dl/$TAG/$(basename "$zip")"
+          cat public/releases/latest-mac.yml
+          cp public/releases/latest-mac.yml release/latest-mac.yml
 
       - name: Upload to zensoft.top
         id: upload
@@ -127,6 +152,13 @@ jobs:
           # 按版本目录整体覆盖（幂等），不 --delete：旧版本安装包保留供回滚。
           rsync -az -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
             release/ "$SSH_USER@$SSH_HOST:/var/www/zensoft/sites/minuteflow/dl/$TAG/"
+          # electron-updater feed 常驻稳定路径（不随版本变化），app-update.yml 指向这里。
+          if [ -f public/releases/latest-mac.yml ]; then
+            $SSH_CMD "mkdir -p /var/www/zensoft/sites/minuteflow/dl/auto-update"
+            rsync -az -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
+              public/releases/latest-mac.yml \
+              "$SSH_USER@$SSH_HOST:/var/www/zensoft/sites/minuteflow/dl/auto-update/latest-mac.yml"
+          fi
           echo "files<<EOF" >> "$GITHUB_OUTPUT"
           for f in release/*; do echo "$(basename "$f") $(stat -c%s "$f")" >> "$GITHUB_OUTPUT"; done
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -149,6 +181,10 @@ jobs:
           fi
           aws s3 cp release/ "s3://minuteflow-releases/$TAG/" --recursive \
             --endpoint-url "$R2_S3_ENDPOINT" --content-type "application/octet-stream"
+          if [ -f public/releases/latest-mac.yml ]; then
+            aws s3 cp public/releases/latest-mac.yml "s3://minuteflow-releases/auto-update/latest-mac.yml" \
+              --endpoint-url "$R2_S3_ENDPOINT" --content-type "text/yaml"
+          fi
           echo "R2 同步完成：s3://minuteflow-releases/$TAG/"
 
       - name: Verify public URLs
@@ -159,7 +195,7 @@ jobs:
           fail=0
           while read -r name size; do
             case "$name" in
-              *.dmg|*.exe) ;;
+              *.dmg|*.exe|*.zip) ;;
               *) continue ;;
             esac
             headers="$(curl -sSI --max-time 60 "https://zensoft.top/minuteflow/dl/$TAG/$name")"
@@ -172,6 +208,16 @@ jobs:
               fail=1
             fi
           done <<< "${{ steps.upload.outputs.files }}"
+          if [ -f public/releases/latest-mac.yml ]; then
+            feed_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 \
+              "https://zensoft.top/minuteflow/dl/auto-update/latest-mac.yml")"
+            if [ "$feed_status" = "200" ]; then
+              echo "OK  auto-update/latest-mac.yml"
+            else
+              echo "::error::electron-updater feed → HTTP $feed_status"
+              fail=1
+            fi
+          fi
           exit $fail
 
       - name: Update website manifests
@@ -213,7 +259,7 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public/releases/latest-macos.json public/releases/latest-windows.json
+          git add public/releases/latest-macos.json public/releases/latest-windows.json public/releases/latest-mac.yml
           git commit -m "官网安装包地址指向 zensoft.top dl/ $TAG"
           for attempt in 1 2 3; do
             if git push origin main; then exit 0; fi

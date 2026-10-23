@@ -448,11 +448,12 @@ export interface AppUpdateInfo {
 export type MacUpdateInfo = AppUpdateInfo;
 
 /**
- * 应用内更新下载进度：下载 → 校验 → 打开安装程序。
- * cancelled/error 带可读原因；done 表示安装包已交给系统打开。
+ * 应用内更新下载进度：下载 → 校验 →（手动流程）打开安装程序 /（macOS 自动更新）就绪待重启。
+ * cancelled/error 带可读原因；done 表示安装包已交给系统打开；
+ * ready 表示 macOS 自动更新已下载并校验完成，可「立即重启并更新」或退出时自动安装。
  */
 export interface AppUpdateDownloadProgress {
-  status: "downloading" | "verifying" | "opening" | "done" | "cancelled" | "error";
+  status: "downloading" | "verifying" | "opening" | "done" | "ready" | "installing" | "cancelled" | "error";
   version: string;
   receivedBytes: number;
   totalBytes: number;
@@ -471,6 +472,8 @@ export interface AppUpdateCheckResult {
   message: string;
   /** 有可用更新时携带的版本详情。 */
   update?: AppUpdateInfo;
+  /** macOS 自动更新已下载并校验就绪的版本号；存在时设置页显示「立即重启并更新」。 */
+  readyVersion?: string;
 }
 
 /**
@@ -839,7 +842,9 @@ export interface MeetingAPI {
     check(): Promise<AppUpdateCheckResult>;
     openDownload(): Promise<{ opened: true }>;
     /** 在应用内下载并打开经校验的安装包（不静默替换当前应用）。 */
-    download(): Promise<{ opened: boolean; path: string; fileName: string }>;
+    download(): Promise<{ opened: boolean; path: string; fileName: string } | { autoUpdate: true; version: string }>;
+    /** macOS 自动更新：原地替换并重启到已下载就绪的新版本（录音期间由 UI 禁用）。 */
+    restartToUpdate(): Promise<{ installing: true }>;
     cancelDownload(): Promise<{ cancelled: boolean }>;
     onDownloadProgress(callback: (progress: AppUpdateDownloadProgress) => void): () => void;
     onAvailable(callback: (result: AppUpdateCheckResult) => void): () => void;

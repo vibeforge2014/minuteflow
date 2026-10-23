@@ -132,6 +132,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     check: () => invoke("updates:check"),
     openDownload: () => invoke("updates:open-download"),
     download: () => invoke("updates:download"),
+    restartToUpdate: () => invoke("updates:restart-to-update"),
     cancelDownload: () => invoke("updates:cancel-download"),
     onDownloadProgress: (callback) => {
       const listener = (_event, progress) => callback(progress);

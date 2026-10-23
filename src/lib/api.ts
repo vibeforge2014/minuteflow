@@ -784,6 +784,9 @@ const browserApi: MeetingAPI = {
       // 浏览器预览无法安装桌面应用：明确报错，而不是假装下载成功。
       throw new Error("浏览器预览无法安装桌面更新，请在 macOS 或 Windows 应用中使用。");
     },
+    async restartToUpdate() {
+      throw new Error("浏览器预览无法安装桌面更新，请在 macOS 应用中使用。");
+    },
     async cancelDownload() { return { cancelled: false }; },
     onDownloadProgress() { return () => {}; },
     onAvailable() { return () => {}; }

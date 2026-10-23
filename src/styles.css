@@ -4516,8 +4516,18 @@ html[data-surface="permission-helper"] #root {
 .update-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 9px;
   margin-top: 16px;
+}
+
+/* 「立即重启并更新」旁的录音保护说明：安静的行内提示，不与主按钮争抢注意力。 */
+.update-actions__note {
+  flex-basis: 100%;
+  color: #8a7f79;
+  font-size: 10px;
+  text-align: right;
 }
 
 .update-progress {
@@ -4547,6 +4557,10 @@ html[data-surface="permission-helper"] #root {
 }
 
 .update-progress--done small {
+  color: #5f715e;
+}
+
+.update-progress--ready small {
   color: #5f715e;
 }
 
