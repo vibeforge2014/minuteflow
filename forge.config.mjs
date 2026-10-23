@@ -12,25 +12,42 @@ import { execFileSync } from "node:child_process";
 const isMac = process.platform === "darwin";
 const appleIdentity = process.env.APPLE_IDENTITY;
 const appleNotaryProfile = process.env.APPLE_NOTARY_PROFILE;
-const appleApiKey = process.env.APPLE_API_KEY;
 const appleApiKeyId = process.env.APPLE_API_KEY_ID;
 const appleApiIssuer = process.env.APPLE_API_ISSUER;
+// 直连 App Store Connect API 的 .p8 路径（keychain profile 缺失时的公证凭据来源）。
+const appleNotaryKeyPath = process.env.APPLE_NOTARY_KEY_PATH;
+
+// DMG 公证参数：优先 keychain profile，其次 .p8 直连三元组（与 notarytool CLI 对应）。
+function notarytoolCredentialArgs() {
+  if (appleNotaryProfile) return ["--keychain-profile", appleNotaryProfile];
+  if (appleNotaryKeyPath && appleApiKeyId && appleApiIssuer) {
+    return ["--key", appleNotaryKeyPath, "--key-id", appleApiKeyId, "--issuer", appleApiIssuer];
+  }
+  return undefined;
+}
 
 // 公证凭据：优先 keychain profile，其次 App Store Connect API 密钥三元组。
+// @electron/notarize 的 notarytool 适配层把 appleApiKey 原样传给 CLI 的 --key，
+// 该参数接收 .p8 的「文件路径」（不是内容，也不是 key id）。
 const notarizeOptions = appleNotaryProfile
   ? { keychainProfile: appleNotaryProfile }
-  : appleApiKey && appleApiKeyId && appleApiIssuer
-    ? { appleApiKey, appleApiKeyId, appleApiIssuer }
+  : appleNotaryKeyPath && appleApiKeyId && appleApiIssuer
+    ? { appleApiKey: appleNotaryKeyPath, appleApiKeyId, appleApiIssuer }
     : undefined;
 
 // forge 的 osxNotarize 只在 afterSign 公证 .app，产出的 DMG 本身没有公证票；
 // 发布校验脚本要求 DMG 装订票（v0.1.24 起两次靠手动 notarytool submit + stapler 补救）。
 // 这里在 postMake 对每个 DMG 产物自动提交公证并装订校验，使 `npm run make` 一步出可发布产物。
 async function notarizeAndStapleDmg(dmgPath) {
+  const credentialArgs = notarytoolCredentialArgs();
+  if (!credentialArgs) {
+    console.log("[forge] 缺少公证凭据，跳过 DMG 公证（产出的 DMG 不可发布！）");
+    return;
+  }
   console.log(`[forge] 公证并装订 DMG: ${dmgPath}`);
   execFileSync("xcrun", [
     "notarytool", "submit", dmgPath,
-    "--keychain-profile", appleNotaryProfile,
+    ...credentialArgs,
     "--no-s3-acceleration", "--wait"
   ], { stdio: "inherit" });
   execFileSync("xcrun", ["stapler", "staple", dmgPath], { stdio: "inherit" });
@@ -111,7 +128,9 @@ export default {
       }
     },
     postMake: async (_forgeConfig, makeResults) => {
-      if (!isMac || !appleNotaryProfile) return makeResults;
+      if (!isMac) return makeResults;
+      const credentialArgs = notarytoolCredentialArgs();
+      if (!credentialArgs) return makeResults;
       for (const result of makeResults) {
         for (const artifact of result.artifacts || []) {
           if (artifact.endsWith(".dmg")) await notarizeAndStapleDmg(artifact);
