@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.31",
+  "version": "0.1.32",
   "platform": "darwin",
   "architectures": [
     "arm64"
   ],
-  "publishedAt": "2026-10-22T03:20:49Z",
+  "publishedAt": "2026-10-23T01:56:27.920Z",
   "minimumSystemVersion": "14.2",
-  "notes": "MinuteFlow 0.1.31 已发布。包含最新的功能改进、兼容性优化与问题修复。",
+  "notes": "MinuteFlow 0.1.32 已发布。包含最新的功能改进、兼容性优化与问题修复。",
   "downloadUrl": "../downloads/macos/latest/",
-  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.31",
-  "assetUrl": "https://zensoft.top/minuteflow/dl/v0.1.31/MinuteFlow-0.1.31-macOS-arm64.dmg",
-  "sha256": "5620944256ac04cf81349f24b9372218cc1d68158b490faa6c4718216298f9a2"
+  "releasePageUrl": "https://github.com/vibeforge2014/minuteflow/releases/tag/v0.1.32",
+  "assetUrl": "https://zensoft.top/minuteflow/dl/v0.1.32/MinuteFlow-0.1.32-macOS-arm64.dmg",
+  "sha256": "ee9fdc6146fae0da16ef13b8844903cd9a4c2a0fe6c1dfa379e09f0547a0c12e"
 }
