@@ -78,7 +78,10 @@ export default {
     icon: "./assets/app-icon",
     // Apple Speech helper（构建产物，scripts/build-apple-speech.sh）与真实识别测试样例
     // 随包分发到 Contents/Resources/{bin,fixtures}；打包前由 prePackage 钩子确保已构建。
-    extraResource: ["./assets/licenses", "./resources/bin", "./resources/fixtures"],
+    // 两者都是 macOS 专属：Windows CI 上 resources/bin 不存在（gitignored），不能列入。
+    extraResource: isMac
+      ? ["./assets/licenses", "./resources/bin", "./resources/fixtures"]
+      : ["./assets/licenses"],
     osxSign: isMac
       ? {
           identity: appleIdentity || "-",
