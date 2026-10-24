@@ -19,6 +19,28 @@ import { randomUUID } from "node:crypto";
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 /**
+ * 出厂默认判定：macOS 且用户还没有任何 stt 档案时，预启用 Apple 语音识别，
+ * 让新装用户第一次录音即实时转写（零下载零配置）。已有 Whisper/在线配置的老用户
+ * 与非 macOS 平台不受影响。
+ */
+export function shouldSeedAppleSpeechProfile(platform, sttProfileCount) {
+  return platform === "darwin" && sttProfileCount === 0;
+}
+
+/** 出厂默认的 Apple 语音识别档案（enabled，走 saveModelProfile 的原子单启用路径）。 */
+export function appleSpeechDefaultProfile() {
+  return {
+    name: "Apple 语音识别",
+    kind: "stt",
+    transport: "apple-speech",
+    baseUrl: "",
+    model: "",
+    enabled: true,
+    options: {}
+  };
+}
+
+/**
  * 解析 helper 二进制路径：开发态取仓库 resources/bin，打包态取 Contents/Resources/bin。
  * @returns {string|null} 可执行文件路径；缺失（非 macOS 或未构建）返回 null。
  */

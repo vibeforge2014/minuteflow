@@ -8,9 +8,10 @@ export const LOCAL_WHISPER_TRANSPORTS = new Set([
   "mlx-whisper"
 ]);
 
-/** 档案是否足以让向导把 Whisper 标记为已配置。 */
+/** 档案是否足以让向导把转录标记为已配置。Apple 语音识别零配置（无 baseUrl/model）即就绪。 */
 export function isOnboardingTranscriptionReady(profile: ModelProfile) {
   if (!profile.enabled || profile.kind !== "stt") return false;
+  if (profile.transport === "apple-speech") return true;
   if (LOCAL_WHISPER_TRANSPORTS.has(profile.transport)) return Boolean(profile.options.modelPath);
   return Boolean(profile.baseUrl.trim() && profile.model.trim());
 }

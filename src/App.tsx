@@ -30,6 +30,7 @@ import { SettingsDialog, type SettingsFocus, type SettingsTab } from "./componen
 import { ExportMenu } from "./components/ExportMenu";
 import { Toast } from "./components/Toast";
 import { EmptyState } from "./components/EmptyState";
+import { ConfirmDialog, useConfirmDialog } from "./components/ConfirmDialog";
 import { DeletedMeetingsDialog } from "./components/DeletedMeetingsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { PaywallDialog } from "./components/PaywallDialog";
@@ -99,7 +100,6 @@ export function App() {
   const [playerAvailable, setPlayerAvailable] = useState(false);
   const [playerOpen, setPlayerOpen] = useState(false);
   const [permissionStatus, setPermissionStatus] = useState<SystemPermissionStatus | null>(null);
-  const [continueRecordingOpen, setContinueRecordingOpen] = useState(false);
   const [recentlyFinalizedId, setRecentlyFinalizedId] = useState<string | null>(null);
   // 已提示过“导入完成/失败”的任务 id 集合：防止事件订阅重放历史任务时重复弹 Toast。
   const completedImports = useRef(new Set<string>());
@@ -108,6 +108,8 @@ export function App() {
   const autoLayoutKeyRef = useRef("");
   // 重新转录的 IPC 在途标记：双击不会创建第二条任务，也不会弹「已有处理中的任务」。
   const retranscribeRequestRef = useRef(false);
+  // 重新转录的应用内确认（替代原生 window.confirm，保持设计系统一致）。
+  const retranscribeConfirm = useConfirmDialog();
 
   /** 统一的提示入口：可附带直达动作（如更新提示一键打开软件更新）。 */
   const notify = useCallback((message: string, action?: { label: string; run: () => void }) => {
@@ -219,6 +221,15 @@ export function App() {
     setExportOpen(true);
   }, []);
 
+  /** 继续录音（追加式，笔记/转写/纪要都不丢）：点击即开始，不再弹确认窗。
+   * 经 ref 转发最新闭包，回调身份稳定，可安全放进 effect 依赖与 Toast 动作。 */
+  const continueRecordingRef = useRef<() => void>(() => {});
+  continueRecordingRef.current = () => {
+    if (!requirePremium("继续录音、实时转写与自动纪要", () => void recorder.start())) return;
+    void recorder.start();
+  };
+  const continueRecording = useCallback(() => continueRecordingRef.current(), []);
+
   /** 付费墙关闭：已授权则继续被打断的动作；未购买则丢弃，避免下次误触发。 */
   const handlePaywallClose = useCallback(() => {
     const resume = pendingPremiumActionRef.current;
@@ -236,8 +247,6 @@ export function App() {
   );
   // 右侧面板退场保持：关闭后保留 240ms 播放收回动画（与 CSS panel-out 时长一致）。
   const panelPresence = useExitPresence(Boolean(rightPanelOpen && meeting), 240);
-  // “继续录音”确认弹窗的退场保持，与其它对话框一致。
-  const continuePresence = useExitPresence(Boolean(meeting && continueRecordingOpen), 170);
   // 搜索词与清除入口：区分「没有任何会议」和「搜索无结果」两种空状态。
   const search = useMeetingStore((state) => state.search);
   const setSearch = useMeetingStore((state) => state.setSearch);
@@ -304,6 +313,8 @@ export function App() {
     const previous = previousWorkspaceRef.current;
     if (previous?.meetingId === meeting.id && previous.stage === "live" && workspaceStage === "review") {
       setRecentlyFinalizedId(meeting.id);
+      // 停止是单步操作，这里给出一键撤销入口：内容已保存，继续录音无缝追加。
+      notify("录音已结束，内容已保存。", { label: "继续录音", run: continueRecording });
     } else if (previous?.meetingId !== meeting.id) {
       setRecentlyFinalizedId(null);
     }
@@ -314,7 +325,7 @@ export function App() {
     }));
     previousWorkspaceRef.current = { meetingId: meeting.id, stage: workspaceStage };
     autoLayoutKeyRef.current = key;
-  }, [importProcessingStatus, meeting?.id, workspaceStage]);
+  }, [continueRecording, importProcessingStatus, meeting?.id, meeting?.transcript.length, notify, workspaceStage]);
 
   useEffect(() => {
     if (recorder.warning) {
@@ -424,7 +435,6 @@ export function App() {
         return;
       }
       if (event.key === "Escape") {
-        if (continueRecordingOpen) { setContinueRecordingOpen(false); return; }
         if (moreOpen) { setMoreOpen(false); return; }
         if (exportOpen) { setExportOpen(false); return; }
         if (importOpen) { setImportOpen(false); return; }
@@ -432,7 +442,7 @@ export function App() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [continueRecordingOpen, exportOpen, importOpen, moreOpen]);
+  }, [exportOpen, importOpen, moreOpen]);
 
   // 导入入口（文件选择器 / 拖拽）：先过付费墙，再把候选文件交给右侧确认抽屉，确认后才入队归档。
   // 把“过墙”与“真正选文件”拆开，激活成功后可以从选文件这一步继续，而不是再弹一次付费墙。
@@ -512,9 +522,11 @@ export function App() {
       return;
     }
     if (!requirePremium("重新转录会议录音", () => void handleRetranscribe())) return;
-    if (target.transcript.length > 0 && !window.confirm(
-      "重新转录会清空当前逐字稿，从已归档的录音重新识别并生成纪要；你的笔记和手动锁定的纪要内容会保留。继续吗？"
-    )) return;
+    if (target.transcript.length > 0 && !(await retranscribeConfirm.confirm({
+      title: "重新转录这场会议？",
+      body: "会清空当前逐字稿，从已归档的录音重新识别并生成纪要；你的笔记和手动锁定的纪要内容会保留。",
+      confirmLabel: "重新转录"
+    }))) return;
     if (retranscribeRequestRef.current) return;
     retranscribeRequestRef.current = true;
     try {
@@ -674,7 +686,7 @@ export function App() {
                       {workspaceStage === "review" && (
                         <button onClick={() => {
                           setMoreOpen(false);
-                          setContinueRecordingOpen(true);
+                          continueRecording();
                         }}>
                           <PlayCircle size={16} />继续录音
                         </button>
@@ -740,7 +752,7 @@ export function App() {
                 requestAnimationFrame(() => setSeekToMs(ms));
               }}
               emptyActionLabel={workspaceStage === "review" ? "继续录音" : undefined}
-              onEmptyAction={workspaceStage === "review" ? () => setContinueRecordingOpen(true) : undefined}
+              onEmptyAction={workspaceStage === "review" ? continueRecording : undefined}
               onChange={handleMeetingChange}
               onStartRecording={async () => {
                 if (recorder.phase !== "idle") {
@@ -863,6 +875,7 @@ export function App() {
         onClose={() => setTrashOpen(false)}
         onRestored={initialize}
       />
+      <ConfirmDialog open={retranscribeConfirm.open} request={retranscribeConfirm.request} onSettle={retranscribeConfirm.settle} />
       <OnboardingDialog
         open={onboardingOpen && !settingsOpen}
         profiles={profiles}
@@ -891,32 +904,6 @@ export function App() {
           notify("已跳过授权。首次开始录音时会再引导你完成麦克风授权。");
         }}
       />
-      {continuePresence.mounted && (
-        <div className={`modal-backdrop ${continuePresence.closing ? "is-closing" : ""}`} onMouseDown={(event) => event.target === event.currentTarget && setContinueRecordingOpen(false)}>
-          <section className="dialog continue-recording-dialog" role="dialog" aria-modal="true" aria-labelledby="continue-recording-title">
-            <header>
-              <div>
-                <h2 id="continue-recording-title">继续这场会议的录音？</h2>
-                <p>新的声音会追加到当前会议；已有笔记、转写和纪要不会被清空。</p>
-              </div>
-            </header>
-            <div className="continue-recording-dialog__body">
-              <PlayCircle size={24} weight="duotone" />
-              <span>录音开始后，工作区会重新进入会中模式。</span>
-            </div>
-            <footer>
-              <button className="button" onClick={() => setContinueRecordingOpen(false)}>取消</button>
-              <button className="button button--primary" onClick={async () => {
-                setContinueRecordingOpen(false);
-                if (!requirePremium("继续录音、实时转写与自动纪要", () => void recorder.start())) return;
-                await recorder.start();
-              }}>
-                继续录音
-              </button>
-            </footer>
-          </section>
-        </div>
-      )}
       <PaywallDialog
         open={paywallOpen}
         reason={paywallReason}

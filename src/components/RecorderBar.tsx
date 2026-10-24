@@ -56,10 +56,6 @@ export function RecorderBar({
   onMark
 }: RecorderBarProps) {
   const [mini, setMini] = useState(false);
-  // 停止二次确认：第一次点击只“武装”按钮（变为“确认结束”），3 秒内再点才真正停止，
-  // 避免紧邻暂停/标记的误触直接终止整场录音。
-  const [stopArmed, setStopArmed] = useState(false);
-  const stopArmedTimer = useRef<number | null>(null);
   // 麦克风静音检测：真实电平持续 6 秒为 0 时提示“未检测到声音”，
   // 让“麦克风被静音/选错设备”在录音中就能被发现，而不是录完才发现空音频。
   const [silentMic, setSilentMic] = useState(false);
@@ -69,19 +65,6 @@ export function RecorderBar({
   const active = phase === "recording" || phase === "paused";
   // 录制中显示实时计时，空闲时回退为该会议已保存的时长。
   const visualElapsed = live ? elapsed : meeting.durationSeconds;
-
-  const disarmStop = () => {
-    if (stopArmedTimer.current !== null) {
-      window.clearTimeout(stopArmedTimer.current);
-      stopArmedTimer.current = null;
-    }
-    setStopArmed(false);
-  };
-
-  // 离开录制态（已停止/暂停/收尾）时撤销停止确认的武装状态。
-  useEffect(() => {
-    if (!active) disarmStop();
-  }, [active]);
 
   // 记录最后一次“听到声音”的时刻（真实电平 > 阈值才算）。
   useEffect(() => {
@@ -100,10 +83,6 @@ export function RecorderBar({
     }, 1_000);
     return () => window.clearInterval(timer);
   }, [phase]);
-
-  useEffect(() => () => {
-    if (stopArmedTimer.current !== null) window.clearTimeout(stopArmedTimer.current);
-  }, []);
 
   return (
     <div className={`recorder-bar ${mini ? "is-mini" : ""}`}>
@@ -168,19 +147,10 @@ export function RecorderBar({
               {phase === "paused" ? <Play size={18} weight="fill" /> : <Pause size={18} weight="fill" />}
               {phase === "paused" ? "继续" : "暂停"}
             </button>
-            <button
-              className={`record-action record-action--stop ${stopArmed ? "is-armed" : ""}`}
-              onClick={() => {
-                if (!stopArmed) {
-                  setStopArmed(true);
-                  stopArmedTimer.current = window.setTimeout(disarmStop, 3_000);
-                  return;
-                }
-                disarmStop();
-                void onStop();
-              }}
-            >
-              <Stop size={18} weight="fill" />{stopArmed ? "确认结束" : "停止"}
+            {/* 停止是单步操作：音频/转录始终已自动保存，误触可在停止后的
+                「继续录音」提示里一键无损恢复，无需二次确认打断收尾时刻。 */}
+            <button className="record-action record-action--stop" onClick={() => void onStop()}>
+              <Stop size={18} weight="fill" />停止
             </button>
           </>
         ) : null}

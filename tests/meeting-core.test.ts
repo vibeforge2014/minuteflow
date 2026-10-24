@@ -153,6 +153,11 @@ describe("首次模型配置向导", () => {
     expect(isOnboardingSummaryReady(profile({ kind: "llm", transport: "local-summary", model: "", baseUrl: "" }))).toBe(false);
     expect(isOnboardingSummaryReady(profile({ kind: "llm", transport: "openai-chat", baseUrl: "https://api.example.com/v1", model: "qwen-plus" }))).toBe(true);
   });
+
+  it("macOS 出厂默认的 Apple 语音识别档案零配置即视为就绪", () => {
+    expect(isOnboardingTranscriptionReady(profile({ transport: "apple-speech", model: "", baseUrl: "" }))).toBe(true);
+    expect(isOnboardingTranscriptionReady(profile({ transport: "apple-speech", enabled: false }))).toBe(false);
+  });
 });
 vi.mock("@ffmpeg-installer/ffmpeg", () => ({
   default: { path: process.execPath }
@@ -322,7 +327,8 @@ describe("phase-aware desktop workspace", () => {
 
   it("opens the right panel only when the current stage has useful live or review content", () => {
     expect(shouldAutoOpenRightPanel({ stage: "prepare", transcriptCount: 12 })).toBe(false);
-    expect(shouldAutoOpenRightPanel({ stage: "live", transcriptCount: 0 })).toBe(true);
+    // 会中不再自动展开空的 AI 问答，转写列保持全宽（入口按钮仍在）。
+    expect(shouldAutoOpenRightPanel({ stage: "live", transcriptCount: 0 })).toBe(false);
     expect(shouldAutoOpenRightPanel({ stage: "review", transcriptCount: 0 })).toBe(false);
     expect(shouldAutoOpenRightPanel({ stage: "review", transcriptCount: 2 })).toBe(true);
     expect(shouldAutoOpenRightPanel({ stage: "review", transcriptCount: 0, hasProcessingStatus: true })).toBe(true);
@@ -2604,6 +2610,26 @@ describe("重新转录已有会议", () => {
     } finally {
       // 后台队列可能在断言间隙已领取该任务（状态不再是 queued），
       // 这里直接删任务行，不经过「先取消再删除」的交互约束。
+      deleteJob(job.id);
+    }
+  });
+
+  it("live 录音的 microphone/system 轨归档也能重新转录（转写不可用时录音并未丢失）", async () => {
+    const id = `retrans-live-track-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    saveMeeting(retranscribeMeeting(id));
+    const dir = await mkdtemp(path.join(tmpdir(), "mf-retrans-"));
+    const audioPath = path.join(dir, "session-mic.webm");
+    await writeFile(audioPath, "fake-pcm");
+    saveAudioAsset({
+      meetingId: id, track: "microphone", sourceType: "recording",
+      originalName: "现场录音.webm", mimeType: "audio/webm", path: audioPath, byteLength: 8
+    });
+    const job = await enqueueRetranscription(id);
+    try {
+      expect(job.retranscribe).toBe(true);
+      expect(job.archivedPath).toBe(audioPath);
+      expect(job.sourceType).toBe("recording");
+    } finally {
       deleteJob(job.id);
     }
   });

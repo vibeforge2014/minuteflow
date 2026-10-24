@@ -21,6 +21,10 @@ struct MeetingChatPanelView: View {
   @Environment(RecordingCoordinator.self) private var recorder
   /// 全局 UI 状态（打开设置弹层）。
   @Environment(AppState.self) private var appState
+  /// iPhone 上「去设置」直接切底部设置 tab，避免 sheet 叠 sheet 还要多退一层。
+  @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+  /// 关闭包着本面板的弹层（iPhone 问答 sheet）。
+  @Environment(\.dismiss) private var dismiss
   /// 目标会议。
   let meeting: MeetingRecord
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -100,7 +104,13 @@ struct MeetingChatPanelView: View {
         Text("问答与「AI 总结」共用同一个在线模型；配置后只发送当前会议的纪要与转录文本，绝不上传音频。")
       } actions: {
         Button("去设置") {
-          appState.presentedSheet = .settings
+          if horizontalSizeClass == .compact {
+            // iPhone：关掉问答 sheet 并切到底部设置 tab，不再 sheet 叠 sheet。
+            dismiss()
+            appState.selectedPhoneTab = .settings
+          } else {
+            appState.presentedSheet = .settings
+          }
         }
         .buttonStyle(.borderedProminent)
       }

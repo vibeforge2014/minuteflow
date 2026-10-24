@@ -340,11 +340,15 @@ export async function enqueueRetranscription(meetingId, options = {}) {
   }
   const busy = listImportJobs().find((job) => job.meetingId === meetingId && ACTIVE_JOB_STATUSES.includes(job.status));
   if (busy) throw new Error("这场会议已有处理中的任务，请等它完成或先暂停。");
-  // 只认 mixed 轨归档录音（live 录音与导入产物都落在这里），并确认文件仍可读——
+  // live 录音按轨归档为 microphone/system，导入产物才是 mixed——优先 mixed，
+  // 否则按 轨优先级 回退（与人声纹提取、回放选择同一口径），并确认文件仍可读——
   // 超过保留期被清理的录音会走到明确的「无法重新转录」提示，而不是排进队列后失败。
-  const asset = listMeetingAudioAssets(meetingId)
-    .filter((candidate) => candidate.track === "mixed" && candidate.path)
-    .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))[0];
+  const assets = listMeetingAudioAssets(meetingId).filter((candidate) => candidate.track && candidate.path);
+  const newest = (left, right) => String(right.createdAt).localeCompare(String(left.createdAt));
+  const asset = assets.find((candidate) => candidate.track === "mixed")
+    || assets.find((candidate) => candidate.track === "microphone")
+    || assets.find((candidate) => candidate.track === "system")
+    || [...assets].sort(newest)[0];
   if (!asset) throw new Error("这场会议没有已归档的录音文件，无法重新转录。");
   try {
     await stat(asset.path);

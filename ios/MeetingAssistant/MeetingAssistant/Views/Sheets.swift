@@ -908,6 +908,18 @@ struct OnboardingView: View {
       }
       Spacer()
 
+      // 一键跳过：落推荐默认（Apple Speech + 本机纪要），不想逐页配置的用户
+      // 两次点击即可开始用；详细配置之后随时可在设置里补。
+      if page > 0 {
+        Button("跳过，使用推荐配置") {
+          preferences.transcriptionProvider = .appleSpeech
+          preferences.summaryProvider = .local
+          preferences.hasCompletedOnboarding = true
+        }
+        .foregroundStyle(.secondary)
+        .accessibilityIdentifier("onboarding-skip")
+      }
+
       if page == 0 {
         Button("开始设置") { advance() }
           .buttonStyle(.borderedProminent)

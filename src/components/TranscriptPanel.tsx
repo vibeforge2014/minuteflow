@@ -23,6 +23,7 @@ import {
 } from "@phosphor-icons/react";
 import type { ImportJob, Meeting, VoiceprintPerson } from "../types";
 import { api } from "../lib/api";
+import { ConfirmDialog, useConfirmDialog } from "./ConfirmDialog";
 import { findPlayingSegment } from "../lib/workspace";
 import { mergeSpeakerLabels } from "../lib/transcript";
 import { classifyTextChange } from "../lib/content-motion";
@@ -86,6 +87,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   const [voiceprints, setVoiceprints] = useState<VoiceprintPerson[]>([]);
   const [learningSpeakerId, setLearningSpeakerId] = useState<string | null>(null);
   const [voiceprintMessage, setVoiceprintMessage] = useState("");
+  const voiceprintConfirm = useConfirmDialog();
   /** 关键结论回链定位到的段落 id（短暂高亮后清除）。 */
   const [jumpHighlightId, setJumpHighlightId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -250,7 +252,11 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
 
   /** 删除本地声纹不会改动历史逐字稿，只影响后续自动识别。 */
   const forgetVoiceprint = async (name: string) => {
-    if (!window.confirm(`要让 MinuteFlow 忘记“${name}”的本地声纹吗？历史会议中的姓名不会改变。`)) return;
+    if (!(await voiceprintConfirm.confirm({
+      title: `忘记“${name}”的声纹？`,
+      body: "只删除本机保存的声纹样本，历史会议中的姓名不会改变。",
+      confirmLabel: "忘记声纹"
+    }))) return;
     try {
       await api.voiceprints.forget(name);
       setVoiceprintMessage(`已忘记“${name}”的声纹，历史会议内容保持不变。`);
@@ -642,6 +648,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           </label>
         </div>
       )}
+      <ConfirmDialog open={voiceprintConfirm.open} request={voiceprintConfirm.request} onSettle={voiceprintConfirm.settle} />
     </>
   );
 }

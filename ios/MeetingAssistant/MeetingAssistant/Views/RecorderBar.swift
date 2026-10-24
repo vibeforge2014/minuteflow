@@ -126,7 +126,7 @@ struct RecorderBar: View {
       }
     }
     .shadow(color: .black.opacity(0.1), radius: 14, y: 5)
-    // 录音错误提示。
+    // 录音错误提示；权限被拒时提供「打开系统设置」直达，而不是只留文字死胡同。
     .alert(
       "录音错误",
       isPresented: Binding(
@@ -134,7 +134,14 @@ struct RecorderBar: View {
         set: { if !$0 { errorMessage = nil } }
       )
     ) {
-      Button("好") { errorMessage = nil }
+      if isPermissionDeniedError {
+        Button("打开系统设置") {
+          if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url)
+          }
+        }
+      }
+      Button("好", role: .cancel) { errorMessage = nil }
     } message: {
       Text(errorMessage ?? "")
     }
@@ -145,6 +152,12 @@ struct RecorderBar: View {
   /// 本工具条对应的会议是否正处于当前录音会话。
   private var isCurrentSession: Bool {
     recorder.isRecording && recorder.activeMeetingID == meeting.id
+  }
+
+  /// 权限被拒类错误（麦克风/语音识别）：alert 额外提供「打开系统设置」直达。
+  private var isPermissionDeniedError: Bool {
+    guard let errorMessage else { return false }
+    return errorMessage.contains("未获得") && errorMessage.contains("权限")
   }
 
   /// 四格麦克风音量条（按 inputLevel 逐格点亮）。

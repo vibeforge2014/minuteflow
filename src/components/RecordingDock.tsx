@@ -3,7 +3,6 @@
  * 这里固定悬浮显示「正在录哪场」的计时与暂停/结束入口，点击可回到该会议，
  * 避免用户忘记仍在录音或误以为已经结束。
  */
-import { useEffect, useRef, useState } from "react";
 import { ArrowUUpLeft, Pause, Play, Stop } from "@phosphor-icons/react";
 import { formatDuration } from "../lib/format";
 
@@ -17,18 +16,6 @@ interface RecordingDockProps {
 }
 
 export function RecordingDock({ title, phase, elapsed, onOpen, onPause, onStop }: RecordingDockProps) {
-  // 与录音条一致的二段确认：误触不会直接结束一场还在进行的会议。
-  const [stopArmed, setStopArmed] = useState(false);
-  const stopTimer = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (phase !== "recording" && phase !== "paused") setStopArmed(false);
-  }, [phase]);
-
-  useEffect(() => () => {
-    if (stopTimer.current !== null) window.clearTimeout(stopTimer.current);
-  }, []);
-
   const stateLabel = phase === "starting"
     ? "正在启动录音"
     : phase === "stopping"
@@ -36,20 +23,6 @@ export function RecordingDock({ title, phase, elapsed, onOpen, onPause, onStop }
       : phase === "paused"
         ? "已暂停"
         : "正在录音";
-
-  function handleStop() {
-    if (stopArmed) {
-      if (stopTimer.current !== null) window.clearTimeout(stopTimer.current);
-      setStopArmed(false);
-      onStop();
-      return;
-    }
-    setStopArmed(true);
-    stopTimer.current = window.setTimeout(() => {
-      stopTimer.current = null;
-      setStopArmed(false);
-    }, 3_000);
-  }
 
   return (
     <aside className="recording-dock" aria-label="后台录音">
@@ -75,12 +48,13 @@ export function RecordingDock({ title, phase, elapsed, onOpen, onPause, onStop }
             {phase === "paused" ? <Play size={16} weight="fill" /> : <Pause size={16} weight="fill" />}
           </button>
         )}
+        {/* 与录音条一致的单步停止：内容始终已保存，误触可经停止后的「继续录音」无损恢复。 */}
         <button
           type="button"
-          className={`icon-button recording-dock__stop ${stopArmed ? "is-armed" : ""}`}
-          aria-label={stopArmed ? "确认结束录音" : "结束录音"}
-          title={stopArmed ? "再点一次确认结束" : "结束录音"}
-          onClick={handleStop}
+          className="icon-button recording-dock__stop"
+          aria-label="结束录音"
+          title="结束录音"
+          onClick={onStop}
         >
           <Stop size={16} weight="fill" />
         </button>

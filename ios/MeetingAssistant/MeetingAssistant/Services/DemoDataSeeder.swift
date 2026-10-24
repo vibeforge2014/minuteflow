@@ -24,12 +24,14 @@ enum DemoDataSeeder {
     descriptor.fetchLimit = 1
     guard try modelContext.fetch(descriptor).isEmpty else { return }
 
-    // 一场“进行中”的主示例会议：完整的目标/议程/笔记/纪要与元信息。
+    // 一场已完成的主示例会议：完整的目标/议程/笔记/纪要与元信息。
+    // （曾用「录音中」状态模拟实时界面，但假录音会让新用户困惑
+    // 「为什么没有声音/时间不走」，演示数据一律用已完成状态。）
     let meeting = MeetingRecord(
       title: "产品团队周会",
       startedAt: .now.addingTimeInterval(-1_477),
       duration: 1_477,
-      status: .recording,
+      status: .completed,
       isFavorite: true,
       meetingMode: "线上会议",
       participantsText: "我、刘婷、周哲、王敏（法务）",
@@ -53,7 +55,7 @@ enum DemoDataSeeder {
       nextStepsText: "• 完成可用性测试\n• 补齐埋点方案\n• 安排客服评审"
     )
 
-    // 示例转录片段：每段约 45 秒，最后一段标记为未定稿（模拟实时录音）。
+    // 示例转录片段：每段约 45 秒，全部为定稿。
     let segments: [(TimeInterval, String, String)] = [
       (0, "我", "大家好，我们开始今天的周会，先快速对齐议程和目标。"),
       (62, "刘婷", "我先汇报登录流程改版的进展。A 方案的可用性测试已经完成，整体反馈比 B 方案更好。"),
@@ -70,7 +72,7 @@ enum DemoDataSeeder {
           endTime: value.0 + 45,
           speaker: value.1,
           text: value.2,
-          isFinal: index < segments.count - 1,
+          isFinal: true,
           meeting: meeting
         )
       )

@@ -4,7 +4,7 @@
  * 确认后文件立即归档并入队；下半部分是后台任务队列（单 worker 串行），
  * 支持重试、取消、等待配置（缺模型时任务可恢复暂停而非失败）。
  */
-import { ArrowClockwise, Check, FileAudio, GearSix, Pause, Trash, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowClockwise, Check, FileAudio, GearSix, Pause, Trash, X } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import type { ImportCandidate, ImportJob, ModelProfile } from "../types";
 import { useEnteringItemIds } from "../hooks/useContentMotion";
@@ -118,13 +118,11 @@ export function ImportDrawer(props: Props) {
             })()}
           </p>
           {!sttProfiles.length && <button className="import-model-hint" onClick={props.onConfigure}><GearSix size={16} /><span><strong>尚未配置转录模型</strong>音频仍会先安全归档，配置后自动继续。</span></button>}
-          <button className="button button--primary import-submit" disabled={busy || props.candidates.some((item) => !item.title.trim())} onClick={async () => {
+          {/* 空标题不需要拦住提交：主进程会用文件名兜底命名（import-queue.mjs），
+              不让「忘了改标题」挡住一键导入。 */}
+          <button className="button button--primary import-submit" disabled={busy} onClick={async () => {
             setBusy(true); try { await props.onEnqueue(props.candidates, { language, sttProfileId: sttProfileId || undefined, llmProfileId: llmProfileId || undefined, diarizationEnabled, autoSummarize }); } finally { setBusy(false); }
           }}>{busy ? "正在加入…" : `导入并后台处理 ${props.candidates.length} 个文件`}</button>
-          {props.candidates.some((item) => !item.title.trim()) && (
-            // 提交按钮因标题为空被禁用时，明确告诉用户缺什么，而不是只留一个灰按钮。
-            <p className="import-title-hint"><WarningCircle size={13} weight="fill" />还有文件未填写会议标题，填写后即可开始导入。</p>
-          )}
           <p className="import-duplicate-note">重复文件也会创建新的会议副本，原文件不会被移动或修改。</p>
         </section>
       )}

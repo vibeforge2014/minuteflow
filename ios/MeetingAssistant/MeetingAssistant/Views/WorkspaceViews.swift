@@ -174,7 +174,15 @@ private struct PhoneMeetingsView: View {
           set: { if !$0 { quickStartError = nil } }
         )
       ) {
-        Button("好") { quickStartError = nil }
+        // 权限被拒时直达系统设置，不留文字死胡同。
+        if let quickStartError, quickStartError.contains("未获得"), quickStartError.contains("权限") {
+          Button("打开系统设置") {
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+              UIApplication.shared.open(url)
+            }
+          }
+        }
+        Button("好", role: .cancel) { quickStartError = nil }
       } message: {
         Text(quickStartError ?? "")
       }

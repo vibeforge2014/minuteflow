@@ -76,7 +76,7 @@ import {
 import { simplifyTranscriptResult } from "./services/chinese.mjs";
 import { audioContentType, parseByteRange } from "./services/media.mjs";
 import { normalizeRemoteTranscriptionAudio } from "./services/transcription-audio.mjs";
-import { transcribeWithAppleSpeech } from "./services/apple-speech.mjs";
+import { appleSpeechDefaultProfile, shouldSeedAppleSpeechProfile, transcribeWithAppleSpeech } from "./services/apple-speech.mjs";
 import { isTrustedPermissionRequest, isTrustedRendererUrl } from "./services/permissions.mjs";
 import { chooseImportFiles, exportMeeting } from "./services/exports.mjs";
 import {
@@ -673,7 +673,8 @@ function registerIpc() {
     const preferredTrack = meeting.transcript.find((segment) => segment.speakerId === speakerId)?.track;
     const asset = assets.find((candidate) => candidate.sourceType === "import" && candidate.track === "mixed")
       || assets.find((candidate) => candidate.track === preferredTrack)
-      || assets.find((candidate) => candidate.track === "mixed");
+      || assets.find((candidate) => candidate.track === "mixed")
+      || assets[0];
     const audioPath = asset?.playbackPath || asset?.path;
     const audioStat = audioPath ? await stat(audioPath).catch(() => null) : null;
     if (!audioPath || !audioStat?.isFile() || audioStat.size <= 0) {
@@ -1667,6 +1668,12 @@ app.whenReady().then(async () => {
   markRunningJobsInterrupted();
   // 历史多启用档案收敛为同类单选「正在使用」（保留实际生效的那个，其余停用不删）。
   normalizeExclusiveModelProfiles();
+  // macOS 出厂即转录：还没有任何 stt 档案时预启用免费的 Apple 语音识别（零下载、
+  // 本机离线），新装用户第一次录音即实时转写。已有配置的老用户与 Windows 不受影响。
+  if (shouldSeedAppleSpeechProfile(process.platform, listModelProfiles().filter((profile) => profile.kind === "stt").length)) {
+    const seeded = saveModelProfile(appleSpeechDefaultProfile());
+    console.log("[stt] 已为 macOS 预启用 Apple 语音识别出厂默认档案:", seeded.id);
+  }
   // 导入队列的任务状态变化经 imports:job-updated 推送给渲染层（后台执行，不抢焦点）。
   configureImportQueue({
     notify: (job) => {

@@ -4,7 +4,7 @@
  *
  */
 import { describe, expect, it } from "vitest";
-import { mapLanguageToLocale, parseHelperOutput } from "../electron/services/apple-speech.mjs";
+import { mapLanguageToLocale, parseHelperOutput, shouldSeedAppleSpeechProfile } from "../electron/services/apple-speech.mjs";
 
 describe("mapLanguageToLocale", () => {
   it("空值与 auto 默认中文（首发语言优先级）", () => {
@@ -87,5 +87,14 @@ describe("parseHelperOutput", () => {
 
   it("无法解析的输出给出可读错误", () => {
     expect(() => parseHelperOutput("not json at all")).toThrow("无法解析");
+  });
+});
+
+describe("shouldSeedAppleSpeechProfile（出厂默认）", () => {
+  it("仅 macOS 且无任何 stt 档案时预启用", () => {
+    expect(shouldSeedAppleSpeechProfile("darwin", 0)).toBe(true);
+    expect(shouldSeedAppleSpeechProfile("darwin", 1)).toBe(false);
+    expect(shouldSeedAppleSpeechProfile("win32", 0)).toBe(false);
+    expect(shouldSeedAppleSpeechProfile("linux", 0)).toBe(false);
   });
 });

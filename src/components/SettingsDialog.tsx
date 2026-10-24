@@ -32,6 +32,7 @@ import {
 } from "@phosphor-icons/react";
 import { api, isElectronRuntime } from "../lib/api";
 import { useMeetingStore } from "../store/meetingStore";
+import { ConfirmDialog, useConfirmDialog } from "./ConfirmDialog";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useExitPresence } from "../hooks/useExitPresence";
 import {
@@ -341,7 +342,7 @@ const invalidateVisualVerification = (options: ModelProfile["options"]): ModelPr
 export type SettingsTab = "llm" | "transcription" | "general" | "storage" | "updates";
 
 /** 打开设置时的定位意图：直接把编辑器切到对应表单，而不是让用户自己在目录里找。 */
-export type SettingsFocus = "local-whisper" | "online-transcription";
+export type SettingsFocus = "local-whisper" | "online-transcription" | "apple-speech";
 
 export function SettingsDialog({ open, initialTab, initialFocus, onClose, licenseStatus, onLicenseStatusChange, recordingActive = false }: { open: boolean; initialTab?: SettingsTab; initialFocus?: SettingsFocus; onClose(): void; licenseStatus: LicenseStatus | null; onLicenseStatusChange(status: LicenseStatus): void; recordingActive?: boolean }) {
   const profiles = useMeetingStore((state) => state.profiles);
@@ -463,14 +464,20 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     setTab("transcription");
     const saved = initialFocus === "local-whisper"
       ? profiles.find((profile) => profile.kind === "stt" && isLocalWhisperTransport(profile.transport))
-      : profiles.find((profile) => profile.kind === "stt" && profile.transport === "openai-audio");
+      : initialFocus === "apple-speech"
+        ? profiles.find((profile) => profile.kind === "stt" && profile.transport === "apple-speech")
+        : profiles.find((profile) => profile.kind === "stt" && profile.transport === "openai-audio");
     if (saved) {
       setEditing({
         ...normalizeLegacyProviderProfile(saved),
         ...(initialFocus === "local-whisper" ? { enabled: true } : {})
       });
     } else {
-      const preset = initialFocus === "local-whisper" ? providerPresets.whisper : providerPresets.openaiWhisper;
+      const preset = initialFocus === "local-whisper"
+        ? providerPresets.whisper
+        : initialFocus === "apple-speech"
+          ? providerPresets.appleSpeech
+          : providerPresets.openaiWhisper;
       setEditing({
         ...emptyProfile,
         ...preset,
@@ -1339,6 +1346,7 @@ function VoiceprintBookCard() {
   const [people, setPeople] = useState<VoiceprintPerson[]>([]);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [message, setMessage] = useState("");
+  const voiceprintConfirm = useConfirmDialog();
 
   const refresh = () => api.voiceprints.list()
     .then(setPeople)
@@ -1361,7 +1369,11 @@ function VoiceprintBookCard() {
   };
 
   const forgetPerson = async (name: string) => {
-    if (!window.confirm(`要让 MinuteFlow 忘记“${name}”的本地声纹吗？历史会议中的姓名不会改变。`)) return;
+    if (!(await voiceprintConfirm.confirm({
+      title: `忘记“${name}”的声纹？`,
+      body: "只删除本机保存的声纹样本，历史会议中的姓名不会改变。",
+      confirmLabel: "忘记声纹"
+    }))) return;
     try {
       await api.voiceprints.forget(name);
       setMessage(`已忘记“${name}”的声纹。`);
@@ -1417,6 +1429,7 @@ function VoiceprintBookCard() {
           会自动从本场音频学习 TA 的声纹；之后多人会议会自动标注 TA 的名字，认不准时仍用「发言人N」占位。
         </p>
       )}
+      <ConfirmDialog open={voiceprintConfirm.open} request={voiceprintConfirm.request} onSettle={voiceprintConfirm.settle} />
     </section>
   );
 }

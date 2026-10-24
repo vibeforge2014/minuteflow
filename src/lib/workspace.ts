@@ -37,8 +37,9 @@ export interface RecordingReadiness {
 }
 
 /**
- * 阶段切换时是否自动打开右栏：会前保持专注；会中始终显示实时转写；
- * 会后只有确有逐字稿或后台处理状态时才打开，避免空白侧栏挤压纪要正文。
+ * 阶段切换时是否自动打开右栏：会前保持专注；会中不再自动展开空的 AI 问答
+ * （转写列全宽，聊天按钮入口仍在）；会后只有确有逐字稿或后台处理状态时才打开，
+ * 避免空白侧栏挤压纪要正文。
  */
 export function shouldAutoOpenRightPanel(input: {
   stage: WorkspaceStage;
@@ -46,7 +47,7 @@ export function shouldAutoOpenRightPanel(input: {
   hasProcessingStatus?: boolean;
 }) {
   if (input.stage === "prepare") return false;
-  if (input.stage === "live") return true;
+  if (input.stage === "live") return false;
   return input.transcriptCount > 0 || Boolean(input.hasProcessingStatus);
 }
 

@@ -24,6 +24,7 @@ import {
   LOCAL_WHISPER_TRANSPORTS
 } from "../lib/onboarding";
 import type { SettingsFocus, SettingsTab } from "./SettingsDialog";
+import { api } from "../lib/api";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useExitPresence } from "../hooks/useExitPresence";
 
@@ -38,6 +39,7 @@ export function OnboardingDialog({
   onComplete(): Promise<void>;
   onConfigureModels(tab: Extract<SettingsTab, "transcription" | "llm">, focus?: SettingsFocus): void;
 }) {
+  const isMac = api.system.platform === "darwin";
   const [step, setStep] = useState(0);
   const transcriptionProfile = useMemo(
     () => profiles.find(isOnboardingTranscriptionReady),
@@ -78,18 +80,23 @@ export function OnboardingDialog({
           {step === 1 && (
             <ModelSetupStep
               icon={<Waveform size={28} weight="duotone" />}
-              eyebrow="第一项 · Whisper"
+              eyebrow="第一项 · 语音转录"
               title="先让声音变成可靠文字"
-              description="选择本地 Whisper 模型，或配置兼容的在线转录服务。MinuteFlow 不会在你开始录音时临时弹出模型设置。"
+              description="macOS 内置的 Apple 语音识别免费、零下载、开箱即用；也可以选择本地 Whisper 模型或在线服务。MinuteFlow 不会在你开始录音时临时弹出模型设置。"
               ready={Boolean(transcriptionProfile)}
               readyTitle={transcriptionProfile ? `${transcriptionProfile.name} 已启用` : "尚未配置转录模型"}
               readyDescription={transcriptionProfile
-                ? `${LOCAL_WHISPER_TRANSPORTS.has(transcriptionProfile.transport) ? "在本机完成转写" : "通过你选择的服务转写"} · ${transcriptionProfile.model || "自动模型"}`
+                ? transcriptionProfile.transport === "apple-speech"
+                  ? "系统内置 · 零下载 · 音频不出本机 · 中文优先"
+                  : `${LOCAL_WHISPER_TRANSPORTS.has(transcriptionProfile.transport) ? "在本机完成转写" : "通过你选择的服务转写"} · ${transcriptionProfile.model || "自动模型"}`
                 : "你仍可继续，但会议只会保存录音，无法自动生成文字稿。"}
-              actionLabel={transcriptionProfile ? "检查或更换 Whisper" : "去配置 Whisper"}
-              onConfigure={() => onConfigureModels("transcription", "local-whisper")}
+              actionLabel={transcriptionProfile ? "检查或更换转写方式" : "去配置转写"}
+              onConfigure={() => onConfigureModels("transcription", isMac ? "apple-speech" : "local-whisper")}
             >
-              <SetupChoice icon={<Cpu size={20} />} title="本地 Whisper" description="推荐。不用联网、音频不出本机；首次使用需下载模型。" recommended onClick={() => onConfigureModels("transcription", "local-whisper")} />
+              {isMac && (
+                <SetupChoice icon={<Waveform size={20} />} title="Apple 语音识别" description="推荐。免费 · 零下载 · 音频不出本机，中文优先。" recommended onClick={() => onConfigureModels("transcription", "apple-speech")} />
+              )}
+              <SetupChoice icon={<Cpu size={20} />} title="本地 Whisper" description={isMac ? "想要更高质量的转写时选它：下载本机模型，不联网。" : "推荐。不用联网、音频不出本机；首次使用需下载模型。"} recommended={!isMac} onClick={() => onConfigureModels("transcription", "local-whisper")} />
               <SetupChoice icon={<Cloud size={20} />} title="在线 Whisper" description="填好服务地址和密钥即可用，适合不方便下载模型的设备。" onClick={() => onConfigureModels("transcription", "online-transcription")} />
             </ModelSetupStep>
           )}
@@ -144,7 +151,7 @@ function WelcomeStep() {
     <h3>先配置两项能力，会议结束后就能直接拿到纪要</h3>
     <p>我们会依次检查语音转录和 AI 总结。录音、会议和索引仍默认保存在本机，远程服务只在对应功能被使用时收到必要内容。</p>
     <div className="onboarding-welcome__flow">
-      <article><Waveform size={22} /><div><strong>Whisper 转录</strong><small>声音 → 简体中文文字稿</small></div></article>
+      <article><Waveform size={22} /><div><strong>语音转录</strong><small>声音 → 简体中文文字稿</small></div></article>
       <ArrowRight size={17} />
       <article><Brain size={22} /><div><strong>大模型总结</strong><small>文字稿 → 普通/视觉纪要</small></div></article>
     </div>

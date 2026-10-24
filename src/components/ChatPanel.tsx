@@ -208,6 +208,8 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
   /** 当前会议 id 的镜像：发送进行中用户切换会议时，只写会话存储不覆盖正在看的列表。 */
   const meetingIdRef = useRef(meeting.id);
   meetingIdRef.current = meeting.id;
+  // 最近一次失败提问的原文，供「重试」按钮原样重发。
+  const lastFailedPrompt = useRef("");
 
   const commitMessages = (next: ChatMessage[]) => {
     chatSessions.set(meeting.id, next);
@@ -219,6 +221,7 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
     if (!trimmed || busy) return;
     setDraft("");
     setBusy(true);
+    lastFailedPrompt.current = trimmed;
     const pendingId = newMessageId();
     const history = messages.map(({ role, text }) => ({ role, text }));
     commitMessages([
@@ -286,9 +289,19 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
       const reason = error instanceof Error ? error.message : String(error);
       patchPending((message) =>
         ({ ...message, text: reason.replace(/^Error invoking remote method '[^']+':\s*/, ""), pending: false, failed: true }));
+      // 发送失败不丢字：把问题放回输入框，用户可直接改后重发或点气泡上的「重试」。
+      setDraft(trimmed);
     } finally {
       setBusy(false);
     }
+  };
+
+  /** 重试上一条失败的提问：移除失败气泡后原样重发。 */
+  const retryLastFailure = () => {
+    const prompt = lastFailedPrompt.current;
+    if (!prompt || busy) return;
+    commitMessages(messages.filter((message) => !(message.role === "assistant" && message.failed)));
+    void send(prompt);
   };
 
   const clearSession = () => {
@@ -351,6 +364,9 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
                     </span>
                   ) : null
                 ) : message.text}
+                {message.failed && !message.pending && (
+                  <button className="chat-retry" onClick={retryLastFailure}>重试</button>
+                )}
               </div>
             </div>
           ))
