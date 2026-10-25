@@ -381,6 +381,10 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const [deactivateConfirm, setDeactivateConfirm] = useState(false);
   const [deactivateBusy, setDeactivateBusy] = useState(false);
   const [licenseError, setLicenseError] = useState<string | null>(null);
+  // macOS 自动更新的显式安装进行中（「立即重启并更新」按钮的忙碌态）。
+  // 必须声明在 if (!mounted) return 之前的无条件区：放在其后会让关闭态
+  // 与打开态的 hook 数量不一致，触发 React #310 白屏（0.1.33 的线上事故）。
+  const [installingUpdate, setInstallingUpdate] = useState(false);
   /** 停用本机授权：先由主进程尽力释放服务端设备绑定，再清除本地密钥；释放失败也会完成本地停用。 */
   const handleDeactivate = async () => {
     setDeactivateBusy(true);
@@ -800,7 +804,6 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   };
 
   /** macOS 自动更新就绪后的显式安装：原地替换并重启（录音期间由 UI 禁用）。 */
-  const [installingUpdate, setInstallingUpdate] = useState(false);
   const restartToUpdate = async () => {
     setInstallingUpdate(true);
     try {
