@@ -5,7 +5,7 @@
   "architectures": [
     "arm64"
   ],
-  "publishedAt": "2026-10-25T04:13:19.121Z",
+  "publishedAt": "2026-10-25T04:16:11Z",
   "minimumSystemVersion": "14.2",
   "notes": "MinuteFlow 0.1.33 已发布。包含最新的功能改进、兼容性优化与问题修复。",
   "downloadUrl": "../downloads/macos/latest/",
