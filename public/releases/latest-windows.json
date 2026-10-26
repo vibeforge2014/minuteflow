@@ -5,7 +5,7 @@
   "architectures": [
     "x64"
   ],
-  "publishedAt": "2026-10-26T18:21:38.916Z",
+  "publishedAt": "2026-10-26T18:24:09Z",
   "minimumSystemVersion": "10.0.19045",
   "notes": "MinuteFlow 0.1.35 已发布。包含最新的功能改进、兼容性优化与问题修复。",
   "downloadUrl": "../downloads/windows/latest/",
