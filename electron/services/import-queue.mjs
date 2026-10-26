@@ -42,13 +42,15 @@ import {
   transcribeWithMlxWhisper
 } from "./providers.mjs";
 import { applyDiarization, diarizeWithSherpa } from "./diarization.mjs";
+import { transcribeWithAppleSpeech } from "./apple-speech.mjs";
+import { importTranscriptionRoute, resolveJobProfile } from "./import-profiles.mjs";
 import { managedFfmpegPath, resolveLocalModelProfile } from "./local-models.mjs";
 import { simplifyTranscriptResult } from "./chinese.mjs";
 import { groupTranscriptSegments, splitTimedTranscriptText } from "./transcript-grouping.mjs";
 import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "./chunk-planning.mjs";
 
-const LOCAL_TRANSCRIPTION_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"];
-/** 与 main.mjs 的 transcribeLocally 同构：按 transport 分派本地转录（导入流程不注入术语表）。 */
+/** 与 main.mjs 的 transcribeLocally 同构：按 transport 分派本地 Whisper 转录（导入流程不注入术语表）。
+ *  Apple Speech 与在线服务不在此列：路由见 import-profiles.mjs 的 importTranscriptionRoute。 */
 function transcribeLocal(profile, audio, fileName, language, signal) {
   switch (profile.transport) {
     case "whisper-python":
@@ -147,7 +149,7 @@ async function maybeUpdateRollingSummary(job, meeting, profiles, signal) {
     previousSummary: meeting.summary
   };
   const llmProfile = job.autoSummarize
-    ? profiles.find((profile) => profile.kind === "llm" && profile.enabled && (!job.llmProfileId || profile.id === job.llmProfileId))
+    ? resolveJobProfile(profiles, "llm", job.llmProfileId)
     : undefined;
   let summary;
   let generationMode = "local";
@@ -585,14 +587,15 @@ async function processJob(initial) {
     }
 
     const profiles = listModelProfiles();
-    // 尚无可用的转录模型：暂停为可恢复状态，待用户配置后由 wakeImportQueue 续跑。
-    let sttProfile = profiles.find((profile) =>
-      profile.kind === "stt" && profile.enabled && (!job.sttProfileId || profile.id === job.sttProfileId));
+    // 任务显式钉住的档案优先（导入抽屉可选未启用的已保存档案）；未钉住或档案
+    // 已被删除时回落当前启用的档案。尚无任何可用档案：暂停为可恢复的等待态，
+    // 待用户配置后由 wakeImportQueue 续跑。
+    let sttProfile = resolveJobProfile(profiles, "stt", job.sttProfileId);
     if (!sttProfile) {
       patchJob(job.id, { status: "waiting_for_model", stage: "transcribing", progress: 0.2 });
       return;
     }
-    if (LOCAL_TRANSCRIPTION_TRANSPORTS.includes(sttProfile.transport)) {
+    if (importTranscriptionRoute(sttProfile.transport) === "whisper") {
       const resolution = await resolveLocalProfile(sttProfile);
       if (isJobCancelled(job.id, controller)) return;
       sttProfile = resolution.profile;
@@ -666,25 +669,35 @@ async function processJob(initial) {
           extractionStartMs, chunkEndMs - extractionStartMs, controller.signal
         );
         const audio = await readFile(chunkPath);
+        const transcriptionRoute = importTranscriptionRoute(sttProfile.transport);
         let rawResult;
         try {
-          rawResult = LOCAL_TRANSCRIPTION_TRANSPORTS.includes(sttProfile.transport)
-            ? await transcribeLocal(sttProfile, audio, `chunk-${chunkIndex}.wav`, language, controller.signal)
-            : await transcribeRemote(sttProfile, readSecret(sttProfile.secretId), audio, `chunk-${chunkIndex}.wav`, language, [], controller.signal);
+          // apple-speech 是本机引擎（切块已是 16k 单声道 WAV，helper 直接识别），
+          // 绝不能落进 transcribeRemote——那会拿空 baseUrl 发 HTTP 请求报「网络错误」。
+          rawResult = transcriptionRoute === "apple-speech"
+            ? await transcribeWithAppleSpeech(sttProfile, audio, `chunk-${chunkIndex}.wav`, language, [], { signal: controller.signal })
+            : transcriptionRoute === "whisper"
+              ? await transcribeLocal(sttProfile, audio, `chunk-${chunkIndex}.wav`, language, controller.signal)
+              : await transcribeRemote(sttProfile, readSecret(sttProfile.secretId), audio, `chunk-${chunkIndex}.wav`, language, [], controller.signal);
         } catch (error) {
-          if (controller.signal.aborted || !error?.retryable) throw error;
-          // 网关/网络持续波动（请求级重试已耗尽）：进入可恢复等待态，按退避自动从
-          // 当前块续跑。断点 = 已完成块数 + 持久化切块计划，崩溃/重启也不会重切重算。
-          const attempt = (job.transcriptionRetryAttempts || 0) + 1;
-          const delayMs = nextTranscriptionResumeDelayMs(attempt);
-          patchJob(job.id, {
-            status: "waiting_for_network",
-            stage: "transcribing",
-            transcriptionRetryAttempts: attempt,
-            error: `${error instanceof Error ? error.message : "转录模型请求失败"}（第 ${attempt} 次等待，${Math.round(delayMs / 1000)} 秒后自动从断点继续）`
-          });
-          scheduleQueueAutoResume(delayMs);
-          return;
+          // 静音块识别不到语音是正常输入，不是失败：按空结果继续，任务不中断。
+          if (error?.appleSpeechCode === "no_speech") {
+            rawResult = { text: "", segments: [] };
+          } else {
+            if (controller.signal.aborted || !error?.retryable) throw error;
+            // 网关/网络持续波动（请求级重试已耗尽）：进入可恢复等待态，按退避自动从
+            // 当前块续跑。断点 = 已完成块数 + 持久化切块计划，崩溃/重启也不会重切重算。
+            const attempt = (job.transcriptionRetryAttempts || 0) + 1;
+            const delayMs = nextTranscriptionResumeDelayMs(attempt);
+            patchJob(job.id, {
+              status: "waiting_for_network",
+              stage: "transcribing",
+              transcriptionRetryAttempts: attempt,
+              error: `${error instanceof Error ? error.message : "转录模型请求失败"}（第 ${attempt} 次等待，${Math.round(delayMs / 1000)} 秒后自动从断点继续）`
+            });
+            scheduleQueueAutoResume(delayMs);
+            return;
+          }
         }
         const result = simplifyTranscriptResult(rawResult);
         // 用户可能在转录期间编辑标题/笔记/已出现的文本；每块落盘前重读最新会议，
@@ -812,8 +825,7 @@ async function processJob(initial) {
       meeting = loadMeeting(job.meetingId) || meeting;
       // 最终总结：有 LLM 时生成在线终稿；未配置或调用失败时使用本机基础纪要，
       // 不让已经完成的转录因缺少总结服务停在等待态。
-      const llmProfile = profiles.find((profile) =>
-        profile.kind === "llm" && profile.enabled && (!job.llmProfileId || profile.id === job.llmProfileId));
+      const llmProfile = resolveJobProfile(profiles, "llm", job.llmProfileId);
       job = patchJob(job.id, { status: "summarizing", stage: "summarizing", progress: 0.88, llmProfileId: llmProfile?.id ?? job.llmProfileId });
       const input = {
         title: meeting.title,
