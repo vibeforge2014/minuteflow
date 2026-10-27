@@ -85,6 +85,32 @@ describe("parseHelperOutput", () => {
     expect(caught?.message).toContain("没有识别到语音内容");
   });
 
+  it("系统静音错误（recognition_failed + No speech detected）归一为 no_speech", () => {
+    // 线上问题：静音块让 SFSpeechRecognizer 走失败路径而非空文本，导入任务被打成
+    // 「处理失败：No speech detected」。这里锁死归一行为（含中文系统错误文本变体）。
+    for (const message of ["No speech detected", "未检测到语音"]) {
+      let caught: Error | null = null;
+      try {
+        parseHelperOutput(JSON.stringify({ ok: false, code: "recognition_failed", message }));
+      } catch (error) {
+        caught = error as Error;
+      }
+      expect(caught?.message).toContain("没有识别到语音内容");
+      expect((caught as Error & { appleSpeechCode?: string })?.appleSpeechCode).toBe("no_speech");
+    }
+  });
+
+  it("其他 recognition_failed 仍按原样抛出（不吞真实失败）", () => {
+    let caught: Error | null = null;
+    try {
+      parseHelperOutput(JSON.stringify({ ok: false, code: "recognition_failed", message: "network error" }));
+    } catch (error) {
+      caught = error as Error;
+    }
+    expect(caught?.message).toBe("network error");
+    expect((caught as Error & { appleSpeechCode?: string })?.appleSpeechCode).toBe("recognition_failed");
+  });
+
   it("无法解析的输出给出可读错误", () => {
     expect(() => parseHelperOutput("not json at all")).toThrow("无法解析");
   });

@@ -650,6 +650,10 @@ async function processJob(initial) {
         paragraphingVersion: job.paragraphingVersion || PARAGRAPHING_VERSION
       });
       const language = job.language === "auto" ? "" : job.language;
+      // 静音块统计：全程无语音（典型：语言与所选模型不匹配）时给出可行动失败，
+      // 而不是无声地产出一份空转写。
+      let silentChunks = 0;
+      let speechChunks = 0;
       for (let chunkIndex = completedChunks; chunkIndex < totalChunks; chunkIndex += 1) {
         if (controller.signal.aborted || loadJob(job.id)?.status === "cancelled") return;
         const nominalStartMs = useAdaptiveBoundaries ? chunkBoundaries[chunkIndex] : chunkIndex * chunkDurationMs;
@@ -683,6 +687,7 @@ async function processJob(initial) {
           // 静音块识别不到语音是正常输入，不是失败：按空结果继续，任务不中断。
           if (error?.appleSpeechCode === "no_speech") {
             rawResult = { text: "", segments: [] };
+            silentChunks += 1;
           } else {
             if (controller.signal.aborted || !error?.retryable) throw error;
             // 网关/网络持续波动（请求级重试已耗尽）：进入可恢复等待态，按退避自动从
@@ -700,6 +705,7 @@ async function processJob(initial) {
           }
         }
         const result = simplifyTranscriptResult(rawResult);
+        if (result.text.trim() || result.segments?.length) speechChunks += 1;
         // 用户可能在转录期间编辑标题/笔记/已出现的文本；每块落盘前重读最新会议，
         // 只把本块结果合进去，避免后台快照覆盖前台编辑。
         meeting = loadMeeting(job.meetingId) || meeting;
@@ -733,6 +739,16 @@ async function processJob(initial) {
         await rm(chunkPath, { force: true }).catch(() => {});
       }
       if (isJobCancelled(job.id, controller)) return;
+      // 全程没有识别到任何语音（典型：录音语言与所选模型不匹配，或纯音乐/环境音）：
+      // 停在可重试的失败态并给出可行动指引，不静默产出一份空转写。任务钉住的模型
+      // 不会随重试变化，所以指引重新导入改选模型；原文件已安全归档。
+      if (speechChunks === 0 && silentChunks > 0 && silentChunks >= totalChunks) {
+        patchJob(job.id, {
+          status: "failed", stage: "transcribing",
+          error: "所选转录模型没有在这份录音中识别到语音（可能语言不匹配，或录音中无人说话）。请重新导入并选择其他转录模型；原文件已安全归档。"
+        });
+        return;
+      }
       saveAudioAsset({
         id: job.audioAssetId, meetingId: job.meetingId, path: job.archivedPath,
         playbackPath: job.playbackPath, track: "mixed",

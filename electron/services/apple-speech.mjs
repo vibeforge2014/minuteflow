@@ -81,6 +81,15 @@ export function parseHelperOutput(stdout) {
     throw new Error("Apple 语音识别组件返回了无法解析的结果。");
   }
   if (!payload || payload.ok !== true) {
+    // 系统识别器对静音音频走失败路径（helper 报 recognition_failed + 原始错误文本
+    // "No speech detected"，中文系统则是「未检测到语音」），而不是 ok:true 空文本。
+    // 统一归一为 no_speech：导入/直播按空输入继续，不把任务或录音块打成失败。
+    if (payload?.code === "recognition_failed"
+      && /no speech|未检测到语音|没有检测到语音|未检测到讲话/i.test(String(payload?.message ?? ""))) {
+      const silentError = new Error("这段音频里没有识别到语音内容。");
+      silentError.appleSpeechCode = "no_speech";
+      throw silentError;
+    }
     const message = payload?.message || "Apple 语音识别失败。";
     const error = new Error(message);
     error.appleSpeechCode = payload?.code || "unknown";

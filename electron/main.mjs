@@ -959,18 +959,27 @@ function registerIpc() {
     let rawResult;
     if (isAppleSpeech) {
       // macOS 内置 Apple Speech：无模型就绪检查，浏览器采集格式先归一化为 WAV
-      // （AVFoundation 不读 WebM），再交 helper 本机识别。
-      rawResult = await transcribeWithAppleSpeech(
-        profile,
-        audio,
-        payload.fileName,
-        payload.language,
-        payload.glossary,
-        {
-          prepareAudio: async (buffer, name) =>
-            normalizeRemoteTranscriptionAudio(buffer, name, await managedFfmpegPath())
+      // （AVFoundation 不读 WebM），再交 helper 本机识别。会议中的自然停顿会让
+      // 系统识别器报 No speech detected：按空块继续，不当失败重试、不留缺口。
+      try {
+        rawResult = await transcribeWithAppleSpeech(
+          profile,
+          audio,
+          payload.fileName,
+          payload.language,
+          payload.glossary,
+          {
+            prepareAudio: async (buffer, name) =>
+              normalizeRemoteTranscriptionAudio(buffer, name, await managedFfmpegPath())
+          }
+        );
+      } catch (error) {
+        if (error?.appleSpeechCode === "no_speech") {
+          rawResult = { text: "", segments: [] };
+        } else {
+          throw error;
         }
-      );
+      }
     } else if (isLocal) {
       rawResult = await transcribeLocally(localProfile, audio, payload.fileName, payload.language, payload.glossary);
     } else {
