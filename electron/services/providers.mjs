@@ -1473,12 +1473,14 @@ export async function testModelProfile(profile, apiKey) {
     // 首次测试会触发系统「语音识别」授权弹窗（归属 MinuteFlow）。
     const fixturePath = appleSpeechFixturePath();
     if (!fixturePath) throw new Error("Apple 语音识别测试样例缺失，请重新安装应用。");
-    const result = await testAppleSpeech(fixturePath, "zh-CN");
+    const result = await testAppleSpeech(fixturePath, "zh-CN", {
+      allowServer: profile.options?.allowServer === true
+    });
     if (!result.available) throw new Error("Apple 语音识别组件缺失，请重新安装 MinuteFlow。");
     const preview = result.text.replace(/\s+/g, " ").slice(0, 24);
     return {
       ok: true,
-      message: `Apple 语音识别已就绪（本机识别，样例输出「${preview}…」）。`
+      message: `Apple 语音识别已就绪（${result.onDeviceUsed ? "本机识别" : "在线识别"}，样例输出「${preview}…」）。`
     };
   }
   if (profile.transport === "faster-whisper" || profile.transport === "mlx-whisper") {

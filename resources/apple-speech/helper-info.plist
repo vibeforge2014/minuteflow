@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>top.zensoft.minuteflow.apple-speech-helper</string>
+  <key>CFBundleName</key>
+  <string>MinuteFlow Speech Helper</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>MinuteFlow 使用语音识别在本机转写你的会议录音；开启在线识别后音频将按 Apple 隐私政策发送至 Apple。</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>MinuteFlow 使用麦克风录制会议。</string>
+</dict>
+</plist>

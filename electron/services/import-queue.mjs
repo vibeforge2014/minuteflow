@@ -43,7 +43,7 @@ import {
 } from "./providers.mjs";
 import { applyDiarization, diarizeWithSherpa } from "./diarization.mjs";
 import { transcribeWithAppleSpeech } from "./apple-speech.mjs";
-import { importTranscriptionRoute, resolveJobProfile } from "./import-profiles.mjs";
+import { chunkPlanDefaults, importTranscriptionRoute, resolveJobProfile } from "./import-profiles.mjs";
 import { managedFfmpegPath, resolveLocalModelProfile } from "./local-models.mjs";
 import { simplifyTranscriptResult } from "./chinese.mjs";
 import { groupTranscriptSegments, splitTimedTranscriptText } from "./transcript-grouping.mjs";
@@ -64,6 +64,46 @@ function transcribeLocal(profile, audio, fileName, language, signal) {
   }
 }
 
+/**
+ * 转录一个导入切块。apple-speech 是本机引擎（切块已是 16k 单声道 WAV，helper 直接
+ * 识别，绝不能落进 transcribeRemote——那会拿空 baseUrl 发 HTTP 请求报「网络错误」），
+ * 且本机识别对同一音频存在偶发失败：静默重试一次再交给调用方分类（no_speech 跳过 /
+ * 其他错误按原语义处理）。长块（30 秒）把 helper 超时放宽到 100 秒。
+ */
+async function transcribeImportChunk(route, profile, audio, chunkIndex, language, signal) {
+  const fileName = `chunk-${chunkIndex}.wav`;
+  const attempts = route === "apple-speech" ? 2 : 1;
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (attempt > 1) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 400);
+        signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+      });
+      if (signal?.aborted) throw lastError;
+    }
+    try {
+      if (route === "apple-speech") {
+        // 档案级开关：默认本机离线（音频不出设备）；用户显式开启在线识别后走
+        // Apple 服务器模型——对难识别音频（术语密集、口音、压缩噪声）质量差距巨大。
+        return await transcribeWithAppleSpeech(profile, audio, fileName, language, [], {
+          signal,
+          timeoutMs: 100_000,
+          allowServer: profile.options?.allowServer === true
+        });
+      }
+      if (route === "whisper") {
+        return await transcribeLocal(profile, audio, fileName, language, signal);
+      }
+      return await transcribeRemote(profile, readSecret(profile.secretId), audio, fileName, language, [], signal);
+    } catch (error) {
+      lastError = error;
+      if (signal?.aborted) throw error;
+    }
+  }
+  throw lastError;
+}
+
 // 运行中的任务取消器与子进程句柄：cancelImport 借此中止在途转录/转码。
 const activeControllers = new Map();
 const activeProcesses = new Map();
@@ -78,10 +118,9 @@ let notifyMeeting = () => {};
 
 const LEGACY_TRANSCRIPTION_CHUNK_MS = 60_000;
 const LEGACY_TRANSCRIPTION_OVERLAP_MS = 1_000;
-// v3：切块边界在 10 秒目标网格附近吸附最近静音中点，避免把词切成两半；计划持久化后重启不漂移。
+// v3：切块边界吸附最近静音中点（引擎相关的目标网格见 import-profiles.mjs 的
+// chunkPlanDefaults），避免把词切成两半；计划持久化后重启不漂移。
 const TRANSCRIPTION_PLAN_VERSION = 3;
-const TRANSCRIPTION_CHUNK_MS = 10_000;
-const TRANSCRIPTION_OVERLAP_MS = 2_000;
 const PARAGRAPHING_VERSION = 2;
 
 const summaryListKeys = ["keyPoints", "decisions", "openQuestions", "risks", "nextSteps"];
@@ -311,8 +350,8 @@ export async function enqueueImports(items, options = {}) {
       diarizationEnabled: options.diarizationEnabled !== false,
       autoSummarize: options.autoSummarize !== false,
       chunkingVersion: TRANSCRIPTION_PLAN_VERSION,
-      chunkDurationMs: TRANSCRIPTION_CHUNK_MS,
-      chunkOverlapMs: TRANSCRIPTION_OVERLAP_MS,
+      // 切块时长不预填：开工时按所选引擎取策略（Apple Speech 30 秒长窗），再随
+      // 边界计划一起落库绑定，保证断点续跑稳定。
       paragraphingVersion: PARAGRAPHING_VERSION
     })));
   }
@@ -385,8 +424,7 @@ export async function enqueueRetranscription(meetingId, options = {}) {
     autoSummarize: options.autoSummarize !== false,
     previousTranscript: meeting.transcript,
     chunkingVersion: TRANSCRIPTION_PLAN_VERSION,
-    chunkDurationMs: TRANSCRIPTION_CHUNK_MS,
-    chunkOverlapMs: TRANSCRIPTION_OVERLAP_MS,
+    // 切块时长不预填（与 enqueueImports 同理）：开工时按引擎定并落库绑定。
     paragraphingVersion: PARAGRAPHING_VERSION,
     createdAt: now,
     updatedAt: now
@@ -605,6 +643,10 @@ async function processJob(initial) {
       }
     }
 
+    // 静音/无语音块统计（跨转录阶段保留到任务完成）：全部为空 → 可行动失败提示；
+    // 部分为空 → 任务照常完成但注明转写不完整，绝不静默吞掉缺口。
+    let silentChunks = 0;
+    let speechChunks = 0;
     let meeting = loadMeeting(job.meetingId);
     if (!job.transcriptionComplete) {
       // 渐进式转录：新任务用应用内 FFmpeg 生成约 10 秒 WAV 块并带短重叠；
@@ -615,13 +657,21 @@ async function processJob(initial) {
         return;
       }
       const durationMs = job.durationMs || await probeAudioDuration(job.id, bundledFfmpeg, job.archivedPath, controller.signal);
-      // 已经产生过转录的旧任务继续沿用 60 秒计划；未开始和新任务升级到 10 秒，
-      // 防止改变断点后重切已有内容。计划参数持久化，重启后不会漂移。
+      // 已经产生过转录的旧任务继续沿用 60 秒计划；未开始和新任务按引擎取切块策略
+      // （Apple Speech 用 30 秒长窗保上下文，Whisper/远程维持 10 秒），防止改变断点
+      // 后重切已有内容。计划参数持久化，重启后不会漂移。
       const legacyInProgress = !job.chunkingVersion && (job.completedChunks || 0) > 0;
-      const chunkDurationMs = job.chunkDurationMs
-        || (legacyInProgress ? LEGACY_TRANSCRIPTION_CHUNK_MS : TRANSCRIPTION_CHUNK_MS);
-      const chunkOverlapMs = job.chunkOverlapMs
-        || (legacyInProgress ? LEGACY_TRANSCRIPTION_OVERLAP_MS : TRANSCRIPTION_OVERLAP_MS);
+      const enginePlan = chunkPlanDefaults(sttProfile.transport);
+      // 已开工任务的切块计划视为绑定（断点续跑不漂移）；未开工时按引擎策略计算，
+      // 随边界计划一起落库。入队不再预填时长，避免旧默认压掉 Apple Speech 长窗。
+      const planBound = Boolean(job.chunkDurationMs)
+        && ((job.completedChunks || 0) > 0 || (Array.isArray(job.chunkBoundaries) && job.chunkBoundaries.length > 0));
+      const chunkDurationMs = planBound && job.chunkDurationMs
+        ? job.chunkDurationMs
+        : (legacyInProgress ? LEGACY_TRANSCRIPTION_CHUNK_MS : enginePlan.chunkMs);
+      const chunkOverlapMs = planBound && job.chunkOverlapMs
+        ? job.chunkOverlapMs
+        : (legacyInProgress ? LEGACY_TRANSCRIPTION_OVERLAP_MS : enginePlan.overlapMs);
       const chunkingVersion = job.chunkingVersion || (legacyInProgress ? 1 : TRANSCRIPTION_PLAN_VERSION);
       // v3 起，先对整段录音做一次静音扫描，把切块边界吸附到目标网格附近的自然停顿。
       // 边界计划随任务落库：崩溃重启后沿用同一份切点，已完成块的 id 与时间轴保持稳定。
@@ -632,7 +682,7 @@ async function processJob(initial) {
       if (!chunkBoundaries && chunkingVersion >= 3 && !(job.completedChunks > 0)) {
         const silenceMidpoints = await detectSilenceMidpoints(job.id, bundledFfmpeg, job.archivedPath, controller.signal, durationMs);
         if (isJobCancelled(job.id, controller)) return;
-        chunkBoundaries = planTranscriptionChunkBoundaries(durationMs, silenceMidpoints);
+        chunkBoundaries = planTranscriptionChunkBoundaries(durationMs, silenceMidpoints, enginePlan.planning);
       }
       if (isJobCancelled(job.id, controller)) return;
       const useAdaptiveBoundaries = Boolean(chunkBoundaries);
@@ -650,10 +700,6 @@ async function processJob(initial) {
         paragraphingVersion: job.paragraphingVersion || PARAGRAPHING_VERSION
       });
       const language = job.language === "auto" ? "" : job.language;
-      // 静音块统计：全程无语音（典型：语言与所选模型不匹配）时给出可行动失败，
-      // 而不是无声地产出一份空转写。
-      let silentChunks = 0;
-      let speechChunks = 0;
       for (let chunkIndex = completedChunks; chunkIndex < totalChunks; chunkIndex += 1) {
         if (controller.signal.aborted || loadJob(job.id)?.status === "cancelled") return;
         const nominalStartMs = useAdaptiveBoundaries ? chunkBoundaries[chunkIndex] : chunkIndex * chunkDurationMs;
@@ -662,6 +708,7 @@ async function processJob(initial) {
           ? (chunkIndex + 1 < chunkBoundaries.length ? chunkBoundaries[chunkIndex + 1] : durationMs)
           : Math.min(durationMs, nominalStartMs + chunkDurationMs);
         const chunkPath = path.join(chunkDirectory, `chunk-${String(chunkIndex).padStart(5, "0")}.wav`);
+        const transcriptionRoute = importTranscriptionRoute(sttProfile.transport);
         job = patchJob(job.id, {
           status: "transcribing",
           currentChunkStartMs: nominalStartMs,
@@ -670,19 +717,13 @@ async function processJob(initial) {
         });
         await extractTranscriptionChunk(
           job.id, bundledFfmpeg, job.archivedPath, chunkPath,
-          extractionStartMs, chunkEndMs - extractionStartMs, controller.signal
+          extractionStartMs, chunkEndMs - extractionStartMs, controller.signal,
+          transcriptionRoute === "apple-speech" ? APPLE_SPEECH_CHUNK_FILTERS : []
         );
         const audio = await readFile(chunkPath);
-        const transcriptionRoute = importTranscriptionRoute(sttProfile.transport);
         let rawResult;
         try {
-          // apple-speech 是本机引擎（切块已是 16k 单声道 WAV，helper 直接识别），
-          // 绝不能落进 transcribeRemote——那会拿空 baseUrl 发 HTTP 请求报「网络错误」。
-          rawResult = transcriptionRoute === "apple-speech"
-            ? await transcribeWithAppleSpeech(sttProfile, audio, `chunk-${chunkIndex}.wav`, language, [], { signal: controller.signal })
-            : transcriptionRoute === "whisper"
-              ? await transcribeLocal(sttProfile, audio, `chunk-${chunkIndex}.wav`, language, controller.signal)
-              : await transcribeRemote(sttProfile, readSecret(sttProfile.secretId), audio, `chunk-${chunkIndex}.wav`, language, [], controller.signal);
+          rawResult = await transcribeImportChunk(transcriptionRoute, sttProfile, audio, chunkIndex, language, controller.signal);
         } catch (error) {
           // 静音块识别不到语音是正常输入，不是失败：按空结果继续，任务不中断。
           if (error?.appleSpeechCode === "no_speech") {
@@ -924,7 +965,14 @@ async function processJob(initial) {
     if (isJobCancelled(job.id, controller)) return;
     meeting = loadMeeting(job.meetingId) || meeting;
     publishMeeting(saveMeeting({ ...meeting, status: "complete" }));
-    patchJob(job.id, { status: "complete", stage: "complete", progress: 1, error: undefined });
+    patchJob(job.id, {
+      status: "complete", stage: "complete", progress: 1,
+      // 部分片段没识别出内容：任务完成但明确告知转写不完整（静默缺块会让人误以为
+      // 录音没人说话）。全部片段都为空的情况已在转录阶段走可重试失败提示。
+      error: silentChunks > 0 && speechChunks > 0
+        ? `${silentChunks} 个片段未能识别出内容，已跳过；转写可能不完整，可更换转录模型后重试。`
+        : undefined
+    });
   } catch (error) {
     const current = loadJob(initial.id);
     // AbortController 已取消时，即使状态刚被重试改回 queued，也不能把旧一轮的
@@ -968,7 +1016,9 @@ export function normalizeImportChunkSegments(result, extractionStartMs, nominalS
     const rawEndMs = extractionStartMs + Math.max(Number(segment.endMs) || 0, Number(segment.startMs) || 0);
     if (nominalStartMs > 0 && rawEndMs <= nominalStartMs) return [];
     const normalized = normalizeTranscriptText(text);
-    if (recentTexts.some((value) => value === normalized || value.includes(normalized))) return [];
+    // 重叠预滚的重复靠文本匹配去除；但极短文本（「对」「好的」）天然容易是上一段
+    // 长句的子串，只有足够长的文本才参与子串级去重，精确匹配始终去重。
+    if (recentTexts.some((value) => value === normalized || (normalized.length >= 6 && value.includes(normalized)))) return [];
     const startMs = Math.max(nominalStartMs, rawStartMs);
     const endMs = Math.max(startMs + 1, Math.min(chunkEndMs, rawEndMs || chunkEndMs));
     return [{
@@ -1007,14 +1057,23 @@ function probeAudioDuration(jobId, executable, input, signal) {
   });
 }
 
-/** 截取并规范化一个 16kHz 单声道 WAV 转录块。 */
-function extractTranscriptionChunk(jobId, executable, input, output, startMs, durationMs, signal) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, [
-      "-y", "-ss", (startMs / 1000).toFixed(3), "-i", input,
-      "-t", (durationMs / 1000).toFixed(3), "-vn", "-ac", "1", "-ar", "16000",
-      "-c:a", "pcm_s16le", output
-    ], { stdio: ["ignore", "ignore", "pipe"] });
+// Apple Speech 对欠响度、带低频隆隆声的录音明显欠驱动（实测 -30dB 的会议 MP3
+// 只识别出约四分之一内容；高通 + 响度归一到广播标准后识别字数翻倍以上）。
+// 仅对 apple-speech 路由在切块时套用；Whisper 类引擎自带稳健前端，不需要。
+const APPLE_SPEECH_CHUNK_FILTERS = ["highpass=f=70", "loudnorm=I=-16:TP=-1.5:LRA=9"];
+
+/**
+ * 截取并规范化一个 16kHz 单声道 WAV 转录块。
+ * filters 非空时先带滤波链截取，失败（非取消）自动回退一次裸切，保证导入不因
+ * 滤镜兼容性问题中断。
+ */
+async function extractTranscriptionChunk(jobId, executable, input, output, startMs, durationMs, signal, filters = []) {
+  const run = (withFilters) => new Promise((resolve, reject) => {
+    const args = ["-y", "-ss", (startMs / 1000).toFixed(3), "-i", input,
+      "-t", (durationMs / 1000).toFixed(3), "-vn", "-ac", "1", "-ar", "16000"];
+    if (withFilters.length) args.push("-af", withFilters.join(","));
+    args.push("-c:a", "pcm_s16le", output);
+    const child = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"] });
     activeProcesses.set(jobId, child);
     let details = "";
     child.stderr.on("data", (chunk) => { details = `${details}${chunk}`.slice(-2_000); });
@@ -1025,6 +1084,12 @@ function extractTranscriptionChunk(jobId, executable, input, output, startMs, du
       reject(new Error(signal.aborted || killedBy ? "任务已取消。" : `准备转录分段失败：${details.trim()}`));
     });
   });
+  try {
+    await run(filters);
+  } catch (error) {
+    if (signal.aborted || !filters.length) throw error;
+    await run([]);
+  }
 }
 
 /**

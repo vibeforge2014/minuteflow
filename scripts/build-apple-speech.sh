@@ -6,6 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SRC="resources/apple-speech/mf-apple-speech.swift"
+INFO_PLIST="resources/apple-speech/helper-info.plist"
 OUT_DIR="resources/bin"
 OUT="$OUT_DIR/mf-apple-speech-darwin-universal"
 MIN_MACOS="13.0"
@@ -16,8 +17,13 @@ mkdir -p "$OUT_DIR"
 ARM="$OUT_DIR/.mf-apple-speech-arm64"
 X86="$OUT_DIR/.mf-apple-speech-x86_64"
 
-xcrun swiftc -O -target "arm64-apple-macos$MIN_MACOS" -o "$ARM" "$SRC" -framework Speech
-xcrun swiftc -O -target "x86_64-apple-macos$MIN_MACOS" -o "$X86" "$SRC" -framework Speech
+# 内嵌 Info.plist（__TEXT __info_plist）：TCC 会对照发起语音识别的进程自己的
+# usage description；helper 作为裸二进制被主应用拉起时，多数情况归属父应用，
+# 但在重签/硬化运行时等场景下会被按自身判定——内嵌后两种归属都能过。
+xcrun swiftc -O -target "arm64-apple-macos$MIN_MACOS" -o "$ARM" "$SRC" -framework Speech \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$INFO_PLIST"
+xcrun swiftc -O -target "x86_64-apple-macos$MIN_MACOS" -o "$X86" "$SRC" -framework Speech \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$INFO_PLIST"
 lipo -create -output "$OUT" "$ARM" "$X86"
 rm -f "$ARM" "$X86"
 codesign --sign - --force "$OUT" 2>/dev/null || true

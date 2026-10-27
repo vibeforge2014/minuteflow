@@ -220,6 +220,8 @@ export interface ModelProfile {
     transcriptionEndpoint?: string;
     /** 附加请求头。 */
     headers?: Record<string, string>;
+    /** Apple Speech：用户显式开启在线识别（音频将发送至 Apple 服务器）；默认关闭，仅本机离线识别。 */
+    allowServer?: boolean;
     /** 用户显式开启视觉纪要能力；仅在 verifiedAt 与当前配置指纹匹配时生效。 */
     visualSummaryEnabled?: boolean;
     /** 最近一次视觉 schema 测试成功时间。 */

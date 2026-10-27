@@ -221,9 +221,11 @@ export async function transcribeWithAppleSpeech(profile, audio, fileName, langua
   await mkdir(tmpdir(), { recursive: true });
   await writeFile(inputPath, prepared.audio);
   try {
-    const args = ["transcribe", inputPath, "--locale", mapLanguageToLocale(language), "--timeout", "55"];
+    // 单块识别时限：默认 55 秒（8–10 秒块），导入的 30 秒长块由调用方放宽到 100 秒。
+    const timeoutMs = Math.min(Math.max(Number(options.timeoutMs) || 55_000, 10_000), 300_000);
+    const args = ["transcribe", inputPath, "--locale", mapLanguageToLocale(language), "--timeout", String(Math.round(timeoutMs / 1000))];
     if (options.allowServer) args.push("--allow-server");
-    const payload = await runHelper(helperPath, args, 65_000, options.signal);
+    const payload = await runHelper(helperPath, args, timeoutMs + 10_000, options.signal);
     return {
       text: payload.text,
       segments: payload.segments,
@@ -243,7 +245,7 @@ export async function transcribeWithAppleSpeech(profile, audio, fileName, langua
 }
 
 /** 供设置页「测试」使用：转录随包的中文样例语音，返回识别文本。 */
-export async function testAppleSpeech(fixturePath, language = "zh-CN") {
+export async function testAppleSpeech(fixturePath, language = "zh-CN", options = {}) {
   const helperPath = appleSpeechHelperPath();
   if (!helperPath) return { available: false, reason: "missing_helper" };
   const audio = await readFile(fixturePath);
@@ -252,7 +254,8 @@ export async function testAppleSpeech(fixturePath, language = "zh-CN") {
     audio,
     path.basename(fixturePath),
     language,
-    undefined
+    undefined,
+    options
   );
   return { available: true, text: result.text, onDeviceUsed: result.onDeviceUsed };
 }

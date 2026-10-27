@@ -970,7 +970,8 @@ function registerIpc() {
           payload.glossary,
           {
             prepareAudio: async (buffer, name) =>
-              normalizeRemoteTranscriptionAudio(buffer, name, await managedFfmpegPath())
+              normalizeRemoteTranscriptionAudio(buffer, name, await managedFfmpegPath()),
+            allowServer: profile.options?.allowServer === true
           }
         );
       } catch (error) {

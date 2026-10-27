@@ -31,3 +31,25 @@ export function importTranscriptionRoute(transport) {
   if (transport === "apple-speech") return "apple-speech";
   return WHISPER_RUNTIMES.includes(transport) ? "whisper" : "remote";
 }
+
+/**
+ * 导入切块策略按引擎定制（切块边界吸附参数见 chunk-planning.mjs 的 tuning）。
+ * Apple Speech 必须用更长的上下文窗口：实测连续中文会议音频用 10 秒句中截断时，
+ * 本机识别器约六成块报「No speech detected」、成功块产出也骤减（336 秒连续语音
+ * 只出 176 字）；30 秒块 + 20–40 秒上下限仍远在 helper 单次识别超时之内。
+ * 远程/本地 Whisper 维持 10 秒网格（进度反馈密度优先）。
+ */
+export function chunkPlanDefaults(transport) {
+  if (transport === "apple-speech") {
+    return {
+      chunkMs: 30_000,
+      overlapMs: 3_000,
+      planning: { targetMs: 30_000, windowMs: 4_000, minMs: 20_000, maxMs: 40_000 }
+    };
+  }
+  return {
+    chunkMs: 10_000,
+    overlapMs: 2_000,
+    planning: { targetMs: 10_000, windowMs: 2_500, minMs: 7_000, maxMs: 13_000 }
+  };
+}

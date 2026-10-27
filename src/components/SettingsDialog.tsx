@@ -1035,7 +1035,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                       </label>
                           <label className="field"><span>名称</span><input value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></label>
                           <div className="field"><span>用于</span><div className="readonly-control">{editing.kind === "diarization" ? "多人会议中区分发言人" : tab === "llm" ? "会议总结与行动项" : "会议语音转文字"}</div></div>
-                          <div className="field"><span>连接方式</span><div className="readonly-control">{editing.transport === "apple-speech" ? "macOS 系统内置 · 本机离线识别" : editing.transport === "sherpa-onnx" ? "内置引擎 · 全程在本机运行，无需联网" : editing.transport === "local-summary" ? "本机离线规则引擎" : isLocalWhisperTransport(editing.transport) ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
+                          <div className="field"><span>连接方式</span><div className="readonly-control">{editing.transport === "apple-speech" ? (editing.options.allowServer === true ? "macOS 系统内置 · 在线识别（音频发送至 Apple）" : "macOS 系统内置 · 本机离线识别") : editing.transport === "sherpa-onnx" ? "内置引擎 · 全程在本机运行，无需联网" : editing.transport === "local-summary" ? "本机离线规则引擎" : isLocalWhisperTransport(editing.transport) ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
                           {!isLocalWhisperTransport(editing.transport) && editing.transport !== "local-summary" && editing.transport !== "sherpa-onnx" && editing.transport !== "apple-speech" && (
                             <div className="field field--model-picker" ref={modelMenuRef}>
                               <span>模型</span>
@@ -1092,7 +1092,20 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                     ) : isLocalWhisperTransport(editing.transport) ? (
                       <LocalModelManager profile={editing} onChange={setEditing} />
                     ) : editing.transport === "apple-speech" ? (
-                      <div className="field"><span>说明</span><div className="readonly-control">macOS 内置的 Apple 语音识别：完全免费、默认仅在本机运行（音频不出设备）、无需下载任何模型；中文识别自动断句与标点。首次测试或使用时，系统会请求「语音识别」权限；若识别反复超时，请到 系统设置 → 键盘 → 听写 下载对应语言的离线资源。</div></div>
+                      <>
+                        <div className="field"><span>说明</span><div className="readonly-control">macOS 内置的 Apple 语音识别：完全免费、默认仅在本机运行（音频不出设备）、无需下载任何模型；中文识别自动断句与标点。首次测试或使用时，系统会请求「语音识别」权限；若识别反复超时，请到 系统设置 → 键盘 → 听写 下载对应语言的离线资源。</div></div>
+                        <section className="visual-capability-setting">
+                          <label>
+                            <input
+                              type="checkbox"
+                              checked={editing.options.allowServer === true}
+                              onChange={(event) => setEditing({ ...editing, options: { ...editing.options, allowServer: event.target.checked } })}
+                            />
+                            <span><strong>使用 Apple 在线识别</strong><small>改用 Apple 服务器上的语音模型，对专业术语、长句与连续讲话的识别完整度明显更高；开启后音频将发送至 Apple（按 Apple 隐私政策处理）。默认关闭，仅在本机离线识别。</small></span>
+                          </label>
+                          <span className={editing.options.allowServer ? "is-verified" : ""}>{editing.options.allowServer ? "在线识别 · 音频发送至 Apple" : "本机离线 · 音频不出设备"}</span>
+                        </section>
+                      </>
                     ) : editing.transport === "sherpa-onnx" ? (
                       <>
                         <div className="field"><span>说明</span><div className="readonly-control">引擎应用内置、无需安装。下载两个模型后，多人会议会自动区分发言人；在转写里给「发言人N」改名会自动记住 TA 的声纹。</div></div>

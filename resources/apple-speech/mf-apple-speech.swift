@@ -167,7 +167,20 @@ if !finished.isFinished {
 collector.lock.lock()
 defer { collector.lock.unlock() }
 if let message = collector.errorMessage {
-  fail("recognition_failed", message)
+  // 出错但已识别出部分文本：抢救已收到的内容（partial），而不是整块丢弃。
+  // 实测连续中文会议音频上，本机识别器会在难识别片段中途报错（报 No speech
+  // detected 之前往往已产出若干句）——丢弃它们会让导入转写出现大段空洞。
+  if !collector.text.isEmpty {
+    emit([
+      "ok": true,
+      "onDeviceUsed": onDeviceCapable,
+      "text": collector.text,
+      "segments": collector.segments,
+      "partial": true
+    ])
+  } else {
+    fail("recognition_failed", message)
+  }
 }
 emit([
   "ok": true,

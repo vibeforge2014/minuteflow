@@ -8,7 +8,7 @@
  * 2) 任务显式钉住的档案（含未启用）优先于全局启用项。
  */
 import { describe, expect, it } from "vitest";
-import { importTranscriptionRoute, resolveJobProfile } from "../electron/services/import-profiles.mjs";
+import { chunkPlanDefaults, importTranscriptionRoute, resolveJobProfile } from "../electron/services/import-profiles.mjs";
 
 const appleSpeech = { id: "stt-apple", kind: "stt", transport: "apple-speech", enabled: true };
 const newApiWhisper = { id: "stt-newapi", kind: "stt", transport: "openai", enabled: false };
@@ -53,5 +53,24 @@ describe("importTranscriptionRoute", () => {
 
   it("OpenAI 兼容等在线传输走 remote", () => {
     expect(importTranscriptionRoute("openai")).toBe("remote");
+  });
+});
+
+describe("chunkPlanDefaults（按引擎切块策略）", () => {
+  it("Apple Speech 用 30 秒长窗保上下文（实测 10 秒句中截断约六成块为空）", () => {
+    const plan = chunkPlanDefaults("apple-speech");
+    expect(plan.chunkMs).toBe(30_000);
+    expect(plan.overlapMs).toBe(3_000);
+    expect(plan.planning.targetMs).toBe(30_000);
+    expect(plan.planning.maxMs).toBeLessThan(55_000);
+  });
+
+  it("Whisper 与在线服务维持 10 秒网格", () => {
+    for (const transport of ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper", "openai"]) {
+      const plan = chunkPlanDefaults(transport);
+      expect(plan.chunkMs).toBe(10_000);
+      expect(plan.overlapMs).toBe(2_000);
+      expect(plan.planning.targetMs).toBe(10_000);
+    }
   });
 });
