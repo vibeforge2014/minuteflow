@@ -85,7 +85,10 @@ struct PhoneWorkspaceView: View {
         .tag(AppState.PhoneTab.meetings)
 
       NavigationStack {
-        SettingsView(showsDoneButton: false)
+        SettingsView(
+          showsDoneButton: false,
+          uitestingInitialTask: Self.uitestingSettingsTask
+        )
       }
       .tabItem {
         Label("设置", systemImage: "gearshape")
@@ -93,6 +96,18 @@ struct PhoneWorkspaceView: View {
       .tag(AppState.PhoneTab.settings)
     }
   }
+
+  #if DEBUG
+  /// 截图驱动：UI_TESTING_INITIAL=settings-summary / settings-transcription
+  /// 映射到设置标签的初始任务子页。
+  private static var uitestingSettingsTask: ModelServiceTask? {
+    switch UITestingLauncher.initialRoute {
+    case .settingsSummary: .summary
+    case .settingsTranscription: .transcription
+    default: nil
+    }
+  }
+  #endif
 }
 
 /// iPhone「会议」标签：可搜索的会议列表（收藏/最近两组），支持左滑收藏、右滑软删除。
@@ -167,6 +182,21 @@ private struct PhoneMeetingsView: View {
       .navigationDestination(item: $quickStartedMeeting) { meeting in
         PhoneMeetingDetailView(meeting: meeting)
       }
+      #if DEBUG
+      // 截图驱动：UI_TESTING_INITIAL=minutes/transcript/chat 时等待演示数据后推入详情页。
+      .task {
+        guard let route = UITestingLauncher.initialRoute,
+              ["minutes", "transcript", "chat"].contains(route.rawValue) else {
+          return
+        }
+        for _ in 0..<50 where meetings.isEmpty {
+          try? await Task.sleep(for: .milliseconds(100))
+        }
+        if let first = meetings.first {
+          quickStartedMeeting = first
+        }
+      }
+      #endif
       .alert(
         "无法开始录音",
         isPresented: Binding(
@@ -255,11 +285,11 @@ private struct PhoneMeetingsView: View {
   }
 }
 
-/// 会议详情两段：AI 纪要（合并后的可编辑纪要文档）与 转录。
-/// 默认段随会议状态：录音中先看转录，会前准备/会后整理先看纪要（与 Mac 一致）。
+/// 会议详情两段：AI 纪要（合并后的可编辑纪要文档）与 转写。
+/// 默认段随会议状态：录音中先看转写，会前准备/会后整理先看纪要（与 Mac 一致）。
 enum MeetingDetailSection: String, CaseIterable, Identifiable {
   case summary = "AI 纪要"
-  case transcript = "转录"
+  case transcript = "转写"
 
   var id: String { rawValue }
 
@@ -269,7 +299,7 @@ enum MeetingDetailSection: String, CaseIterable, Identifiable {
 }
 
 /// 会议详情内容切换（iPhone 详情页与 iPad 中栏共用）：
-/// 顶部分段「AI 纪要 | 转录」，不包含录音条（由外层工作区放置）。
+/// 顶部分段「AI 纪要 | 转写」，不包含录音条（由外层工作区放置）。
 struct MeetingDetailTabsView: View {
   let meeting: MeetingRecord
   @State private var selectedSection: MeetingDetailSection
@@ -277,7 +307,18 @@ struct MeetingDetailTabsView: View {
 
   init(meeting: MeetingRecord) {
     self.meeting = meeting
-    _selectedSection = State(initialValue: MeetingDetailSection.defaultSection(for: meeting.status))
+    #if DEBUG
+    // 截图驱动：UI_TESTING_INITIAL=transcript 时直接落在转写段。
+    let override: MeetingDetailSection? =
+      UITestingLauncher.initialRoute == .transcript ? .transcript : nil
+    _selectedSection = State(
+      initialValue: override ?? MeetingDetailSection.defaultSection(for: meeting.status)
+    )
+    #else
+    _selectedSection = State(
+      initialValue: MeetingDetailSection.defaultSection(for: meeting.status)
+    )
+    #endif
   }
 
   var body: some View {
@@ -342,6 +383,14 @@ private struct PhoneMeetingDetailView: View {
       }
       // 详情页出现即挂载本会议音频（纪要分段同样会兜底）。
       .onAppear { player.attach(meeting: meeting) }
+      #if DEBUG
+      // 截图驱动：UI_TESTING_INITIAL=chat 时打开 AI 问答弹层。
+      .task {
+        if UITestingLauncher.initialRoute == .chat {
+          showsChat = true
+        }
+      }
+      #endif
   }
 }
 

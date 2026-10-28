@@ -57,6 +57,7 @@ struct MeetingChatPanelView: View {
       } else {
         panelHeader
         messageList
+        modelSwitchBar
         inputBar
       }
     }
@@ -193,6 +194,64 @@ struct MeetingChatPanelView: View {
           }
         }
       }
+    }
+  }
+
+  // MARK: - 模型胶囊
+
+  /// 输入区上方的模型胶囊（与桌面端 ChatPanel 同一契约）：显示问答正在复用的
+  /// 「AI 总结」在线模型；iOS 为单配置，菜单提供直达设置的入口而不是档案列表。
+  private var modelSwitchBar: some View {
+    HStack {
+      Menu {
+        Button {
+          openSettings()
+        } label: {
+          Label("在设置中管理服务…", systemImage: "slider.horizontal.3")
+        }
+      } label: {
+        HStack(spacing: 5) {
+          Circle()
+            .fill(MeetingTheme.success)
+            .frame(width: 6, height: 6)
+          Text(modelDisplayName)
+            .lineLimit(1)
+          Text("在线")
+            .font(.caption2.weight(.medium))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(MeetingTheme.primary.opacity(0.12), in: Capsule())
+            .foregroundStyle(MeetingTheme.primary)
+          Image(systemName: "chevron.down")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.tertiary)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(MeetingTheme.surfaceRaised, in: Capsule())
+      }
+      .accessibilityLabel("问答模型：\(modelDisplayName)，点按管理")
+      Spacer()
+    }
+    .padding(.horizontal, 14)
+    .padding(.top, 8)
+  }
+
+  /// 胶囊里显示的模型名：偏好里没填时退回「在线模型」占位。
+  private var modelDisplayName: String {
+    let name = preferences.summaryModel.trimmingCharacters(in: .whitespacesAndNewlines)
+    return name.isEmpty ? "在线模型" : name
+  }
+
+  /// 直达设置的路径与「去设置」引导一致：iPhone 切底部设置标签，iPad 弹设置 sheet。
+  private func openSettings() {
+    if horizontalSizeClass == .compact {
+      dismiss()
+      appState.selectedPhoneTab = .settings
+    } else {
+      appState.presentedSheet = .settings
     }
   }
 

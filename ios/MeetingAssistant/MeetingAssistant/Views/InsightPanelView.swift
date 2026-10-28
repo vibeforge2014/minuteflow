@@ -78,9 +78,20 @@ struct TranscriptPanelView: View {
   @Environment(RecordingCoordinator.self) private var recorder
   /// 回放播放器（播放同步：时间戳跳转 + 当前行高亮）。
   @Environment(MeetingPlayer.self) private var player
+  /// 导入协调器（执行重新转录并展示全局进度遮罩）。
+  @Environment(AudioImportCoordinator.self) private var importCoordinator
+  /// 用户偏好（重新转录按当前转写路径重跑）。
+  @Environment(AppPreferences.self) private var preferences
+  /// SwiftData 上下文（重新转录结果落库）。
+  @Environment(\.modelContext) private var modelContext
   /// 目标会议。
   let meeting: MeetingRecord
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  /// 重新转录的应用内确认（与桌面端 ConfirmDialog 同一文案契约）。
+  @State private var showsRetranscribeConfirm = false
+  /// 重新转录失败的错误文案（alert 展示）。
+  @State private var retranscribeError: String?
 
   /// 本会议是否处于回放同步态。
   private var isPlaybackSynced: Bool {
@@ -131,6 +142,22 @@ struct TranscriptPanelView: View {
               .font(.caption)
               .foregroundStyle(.secondary)
               .contentTransition(.numericText())
+            // 低频维护动作收进 ⋯ 菜单，不与主操作抢注意力（对齐桌面端会后 hero）。
+            if meeting.status != .recording {
+              Menu {
+                Button {
+                  showsRetranscribeConfirm = true
+                } label: {
+                  Label("重新转录", systemImage: "arrow.clockwise")
+                }
+              } label: {
+                Image(systemName: "ellipsis.circle")
+                  .font(.subheadline)
+                  .foregroundStyle(.secondary)
+                  .frame(width: 26, height: 22)
+              }
+              .accessibilityLabel("更多转写操作")
+            }
           }
           .padding(.horizontal, 16)
           .padding(.vertical, 12)
@@ -159,15 +186,27 @@ struct TranscriptPanelView: View {
 
           // 空状态：既无定稿片段也无实时文本；文案随会议状态变化。
           if displayRows.isEmpty {
-            ContentUnavailableView(
-              meeting.status == .recording ? "等待转录" : "暂无转录文本",
-              systemImage: "waveform",
-              description: Text(
+            ContentUnavailableView {
+              Label(
+                meeting.status == .recording ? "等待转录" : "暂无转录文本",
+                systemImage: "waveform"
+              )
+            } description: {
+              Text(
                 meeting.status == .recording
                   ? "开始录音后，临时文本会显示在这里"
                   : "录音或导入的音频完成转录后，逐字稿会显示在这里"
               )
-            )
+            } actions: {
+              // 已完成但零段落：与桌面端一致提供重新转录补救（无归档录音时给出可读错误）。
+              if meeting.status != .recording {
+                Button("重新转录") {
+                  showsRetranscribeConfirm = true
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(MeetingTheme.primary)
+              }
+            }
             .frame(minHeight: 260)
           }
         }
@@ -206,6 +245,40 @@ struct TranscriptPanelView: View {
           player.updateSync(with: meeting.orderedSegments)
         }
       }
+      // 重新转录确认（文案与桌面端 ConfirmDialog 一致）：笔记与纪要保留，只换逐字稿。
+      .alert("重新转录这场会议？", isPresented: $showsRetranscribeConfirm) {
+        Button("重新转录", role: .destructive) {
+          Task { await retranscribe() }
+        }
+        Button("取消", role: .cancel) {}
+      } message: {
+        Text("会清空当前逐字稿，从已归档的录音重新识别；你的笔记和已生成的纪要会保留。")
+      }
+      // 重新转录失败：给出可读原因（无归档录音/正在录音/识别失败）。
+      .alert(
+        "无法重新转录",
+        isPresented: Binding(
+          get: { retranscribeError != nil },
+          set: { if !$0 { retranscribeError = nil } }
+        )
+      ) {
+        Button("好", role: .cancel) { retranscribeError = nil }
+      } message: {
+        Text(retranscribeError ?? "")
+      }
+    }
+  }
+
+  /// 用已归档录音重跑整场转录；失败以可读错误弹窗展示，成功后转写就地整体更新。
+  private func retranscribe() async {
+    do {
+      try await importCoordinator.retranscribe(
+        meeting: meeting,
+        preferences: preferences,
+        modelContext: modelContext
+      )
+    } catch {
+      retranscribeError = error.localizedDescription
     }
   }
 }

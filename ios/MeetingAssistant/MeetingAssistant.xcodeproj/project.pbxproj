@@ -11,6 +11,7 @@
 		13895059F24AA99A4D193B24 /* SummaryEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FDFA9AFB1072984CB3BA1CB /* SummaryEngineTests.swift */; };
 		1B0F95D29B08530A786BD6AA /* AppRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90E75CF2735CA4ED5BAB78EE /* AppRootView.swift */; };
 		1F9E1F0CF550DD8B1677CD78 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BA867D908140F1ACCB8AC1B /* AppState.swift */; };
+		F49ED8ECD89E44B4BCEF68A4 /* UITestingSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 261A744693414FD09A26D9B1 /* UITestingSupport.swift */; };
 		2774EA4A94AC19880DE2390D /* DemoDataSeeder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C2961720777A73D891E19F3 /* DemoDataSeeder.swift */; };
 		2C807D710C843F36A8785404 /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1203D3014E7CAF34ABEC53 /* RecordingCoordinator.swift */; };
 		34D322A31AFEDF0F61AE21EE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FB1DD7246CBEC8B0B7F604E9 /* Assets.xcassets */; };
@@ -67,6 +68,7 @@
 		0B003790E69F688B1B1E936F /* NaturalTranscriptParagraphBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NaturalTranscriptParagraphBuilder.swift; sourceTree = "<group>"; };
 		136882FDF99DDD91DD81E51C /* RecorderBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecorderBar.swift; sourceTree = "<group>"; };
 		1BA867D908140F1ACCB8AC1B /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		261A744693414FD09A26D9B1 /* UITestingSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITestingSupport.swift; sourceTree = "<group>"; };
 		288B9E75A7BAFE2E4DC319E5 /* MeetingFormatters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingFormatters.swift; sourceTree = "<group>"; };
 		468F0C8A3166C9C7CE19A22F /* PlaybackBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackBar.swift; sourceTree = "<group>"; };
 		49D394E001BBDC63D0525075 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
@@ -114,6 +116,7 @@
 			isa = PBXGroup;
 			children = (
 				1BA867D908140F1ACCB8AC1B /* AppState.swift */,
+				261A744693414FD09A26D9B1 /* UITestingSupport.swift */,
 				05F46BBBDCB585F64B4A3AEF /* MeetingAssistantApp.swift */,
 			);
 			path = App;
@@ -343,6 +346,7 @@
 				0652098E93111CE7B2DD644B /* AppPreferences.swift in Sources */,
 				1B0F95D29B08530A786BD6AA /* AppRootView.swift in Sources */,
 				1F9E1F0CF550DD8B1677CD78 /* AppState.swift in Sources */,
+				F49ED8ECD89E44B4BCEF68A4 /* UITestingSupport.swift in Sources */,
 				F083CA03F414CB0FB9CD1A98 /* AudioImportCoordinator.swift in Sources */,
 				2774EA4A94AC19880DE2390D /* DemoDataSeeder.swift in Sources */,
 				D0C94C94214AF004A21F607D /* ExportService.swift in Sources */,

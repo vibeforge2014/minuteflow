@@ -33,6 +33,21 @@ enum AudioImportError: LocalizedError {
   }
 }
 
+/// 重新转录的前置校验错误（与桌面端文案一致）。
+enum RetranscribeError: LocalizedError {
+  case noArchivedAudio
+  case recordingActive
+
+  var errorDescription: String? {
+    switch self {
+    case .noArchivedAudio:
+      "这场会议没有已归档的录音文件"
+    case .recordingActive:
+      "这场会议正在录音，请先结束后再重新转录。"
+    }
+  }
+}
+
 // MARK: - 导入协调器
 
 /// 音频导入协调器：一次处理一段导入，暴露进度文案与错误信息供全局遮罩/弹窗展示。
@@ -132,6 +147,67 @@ final class AudioImportCoordinator {
       try? modelContext.save()
       throw error
     }
+  }
+
+  // MARK: - 重新转录
+
+  /// 用已归档录音重跑整场转录并整体替换现有转写（与桌面端「重新转录」同一契约）。
+  ///
+  /// 典型场景是录音时转写不可用、会后换一条转写路径补跑整场：
+  /// 笔记、纪要与会议状态保留（不把已完成降级），说话人回落为导入同款 Speaker 1。
+  /// - Throws: 无归档录音、会议正在录音、识别失败等可读错误（由调用方 alert 展示）。
+  func retranscribe(
+    meeting: MeetingRecord,
+    preferences: AppPreferences,
+    modelContext: ModelContext
+  ) async throws {
+    guard meeting.status != .recording else {
+      throw RetranscribeError.recordingActive
+    }
+    guard let filename = meeting.audioFilename,
+          let audioURL = MeetingPlayer.resolvableAudioURL(forFilename: filename) else {
+      throw RetranscribeError.noArchivedAudio
+    }
+
+    isImporting = true
+    progressText = "正在重新转录…"
+    errorMessage = nil
+    defer {
+      isImporting = false
+      progressText = ""
+    }
+
+    // 与导入相同的转写路径选择：Apple Speech（系统）或远程 Whisper。
+    let recognition: TranscriptRecognitionResult
+    switch preferences.transcriptionProvider {
+    case .appleSpeech:
+      recognition = try await transcribe(url: audioURL, language: preferences.language)
+    case .remoteWhisper:
+      recognition = try await RemoteWhisperService().transcribe(
+        audioURL: audioURL,
+        preferences: preferences
+      )
+    }
+
+    // 用识别片段重建自然段并整体替换旧转写；纪要/笔记字段原样保留。
+    for segment in meeting.transcriptSegments {
+      modelContext.delete(segment)
+    }
+    let paragraphs = NaturalTranscriptParagraphBuilder.paragraphs(from: recognition.fragments)
+    for paragraph in paragraphs {
+      meeting.transcriptSegments.append(
+        TranscriptSegmentRecord(
+          id: paragraph.id,
+          startTime: paragraph.startTime,
+          endTime: paragraph.endTime,
+          speaker: paragraph.speaker,
+          text: paragraph.text,
+          meeting: meeting
+        )
+      )
+    }
+    meeting.updatedAt = .now
+    try modelContext.save()
   }
 
   // MARK: - 私有方法

@@ -68,7 +68,10 @@ struct AppRootView: View {
         NewMeetingView()
       case .settings:
         NavigationStack {
-          SettingsView(showsDoneButton: true)
+          SettingsView(
+            showsDoneButton: true,
+            uitestingInitialTask: Self.uitestingSettingsTask
+          )
         }
       case .importAudio:
         ImportHelpView {
@@ -153,6 +156,19 @@ struct AppRootView: View {
       } catch {
         seedError = error.localizedDescription
       }
+      #if DEBUG
+      // 截图驱动：UI_TESTING_INITIAL=settings* 时直接落在设置标签；
+      // =chat 时预置一个在线总结模型，让 AI 问答以「已配置」形态呈现（模型胶囊可见）。
+      if let route = UITestingLauncher.initialRoute {
+        if route.rawValue.hasPrefix("settings") {
+          appState.selectedPhoneTab = .settings
+        }
+        if route == .chat {
+          preferences.summaryProvider = .openAICompatible
+          preferences.summaryModel = "deepseek-chat"
+        }
+      }
+      #endif
     }
     // 会议列表变化时保持默认选中不为空。
     .onChange(of: meetings.map(\.id)) { _, _ in
@@ -179,6 +195,18 @@ struct AppRootView: View {
     guard let id = recorder.activeMeetingID else { return nil }
     return meetings.first { $0.id == id }
   }
+
+  #if DEBUG
+  /// 截图驱动：UI_TESTING_INITIAL=settings-summary / settings-transcription
+  /// 映射到设置 sheet 的初始任务子页。
+  private static var uitestingSettingsTask: ModelServiceTask? {
+    switch UITestingLauncher.initialRoute {
+    case .settingsSummary: .summary
+    case .settingsTranscription: .transcription
+    default: nil
+    }
+  }
+  #endif
 
   /// 汇总当前转录（含实时文本）与笔记生成纪要并应用；失败时以 Toast 提示。
   /// - 副作用：修改 meeting 字段并保存 SwiftData；远程模式下发起网络调用。

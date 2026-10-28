@@ -191,7 +191,7 @@ struct ModelPresetMenu: View {
   }
 }
 
-/// 设置页：模型服务工作台（AI 总结 / 语音转录两个任务子页）、纪要节奏、
+/// 设置页：模型服务工作台（AI 总结 / 转录设置两个任务子页）、纪要节奏、
 /// 说话人说明与隐私存储分区。
 /// 导航位置：iPhone 为 TabView“设置”标签（无完成按钮）；iPad 经全局 sheet
 /// 弹出（带“完成”按钮）。
@@ -204,10 +204,28 @@ struct SettingsView: View {
   /// 是否显示工具栏“完成”按钮（sheet 场景）。
   let showsDoneButton: Bool
 
+  #if DEBUG
+  /// 截图驱动：UI_TESTING_INITIAL=settings-summary / settings-transcription
+  /// 时把对应任务子页作为根视图直接呈现（宿主 XCUITest 不可用时的替代路径）。
+  var uitestingInitialTask: ModelServiceTask? = nil
+  #endif
+
   var body: some View {
+    #if DEBUG
+    if let uitestingInitialTask {
+      TaskModelSettingsView(task: uitestingInitialTask)
+    } else {
+      settingsForm
+    }
+    #else
+    settingsForm
+    #endif
+  }
+
+  private var settingsForm: some View {
     @Bindable var preferences = preferences
 
-    Form {
+    return Form {
       // 模型服务：先说清楚任务结果，再进入 Provider/协议细节（子页）。
       Section {
         NavigationLink {
@@ -230,7 +248,7 @@ struct SettingsView: View {
         } label: {
           Label {
             VStack(alignment: .leading, spacing: 3) {
-              Text("语音转录")
+              Text("转录设置")
               Text(taskSummary(.transcription))
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -312,7 +330,7 @@ enum ModelServiceTask {
   var title: String {
     switch self {
     case .summary: "AI 总结"
-    case .transcription: "语音转录"
+    case .transcription: "转录设置"
     }
   }
 

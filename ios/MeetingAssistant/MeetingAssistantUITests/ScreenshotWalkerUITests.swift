@@ -81,7 +81,7 @@ final class ScreenshotWalkerUITests: XCTestCase {
       app.tabBars.buttons["设置"].tap()
       Thread.sleep(forTimeInterval: 0.8)
       snap(app, "ios-settings")
-      for (label, name) in [("AI 总结", "ios-settings-summary"), ("语音转录", "ios-settings-transcription")] {
+      for (label, name) in [("AI 总结", "ios-settings-summary"), ("转录设置", "ios-settings-transcription")] {
         let link = app.staticTexts[label].firstMatch
         if link.waitForExistence(timeout: 3) {
           link.tap()
