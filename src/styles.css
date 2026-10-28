@@ -3953,6 +3953,50 @@ html[data-surface="permission-helper"] #root {
   vertical-align: 1px;
 }
 
+/* 说话人分离（可选增强）：与转写选择明显区隔的独立任务区——
+   淡暖底整块卡片 + 一句职责说明，目录里一眼分清「转写」与「分离」两个任务。 */
+.model-catalog__enhancement {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 14px;
+  padding: 10px;
+  background: #fdf8f3;
+  border: 1px solid #f0e2d7;
+  border-radius: 12px;
+}
+
+.model-catalog__enhancement-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 7px 2px;
+}
+
+.model-catalog__enhancement-heading > span {
+  color: #8a7f77;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.model-catalog__enhancement-heading > small {
+  color: #b0a69e;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+/* 增强区内部的「已保存」子分组：缩进收窄，标题降一级灰度，从属关系可读。 */
+.model-catalog__section--nested {
+  margin: 2px 0 0;
+  gap: 5px;
+}
+
+.model-catalog__section--nested > span {
+  padding-top: 4px;
+  color: #b6aca4;
+}
+
+
 /* 已保存档案行：一张完整卡片 = 主体按钮（图标+两行文字）+ 右侧「正在使用」单选开关（同类互斥，见 database.saveModelProfile）。
    开关状态本身即「使用中」，不再另设徽标，避免挤占名称列。 */
 .model-catalog__row {

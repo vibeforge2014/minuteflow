@@ -62,6 +62,14 @@ import type {
 /** 四种本地 Whisper 运行时（whisper.cpp GGML/GGUF、Python .pt、CT2、MLX）统一呈现为一个「本地 Whisper」。 */
 const LOCAL_WHISPER_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"] as const;
 
+/** 已保存档案副标题里的运行时短标注：同名的 ggml-small 档案也能一眼分清是谁在跑。 */
+const LOCAL_WHISPER_RUNTIME_LABELS: Partial<Record<string, string>> = {
+  "whisper-cpp": "whisper.cpp",
+  "whisper-python": "Python",
+  "faster-whisper": "CTranslate2",
+  "mlx-whisper": "MLX"
+};
+
 /** 视觉纪要验证指纹（与主进程 visualSummaryProfileFingerprint 同构）：
  *  传输协议/地址/模型/兼容协议/聊天端点任一变化即视为未验证，保存或测试时需重新验证。 */
 const visualFingerprint = (profile: ModelProfile) => JSON.stringify({
@@ -867,6 +875,49 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     ? downloadState.version
     : updateState?.readyVersion || "";
 
+  // 已保存档案按任务分区展示（转写档案与人声分离档案不再混排）：
+  // 每个分区内「正在使用」的排在最前，其余保持既有顺序，扫一眼就能找到在用的那条。
+  const enabledFirst = (left: ModelProfile, right: ModelProfile) => Number(right.enabled) - Number(left.enabled);
+  const savedTranscriptionProfiles = [...profiles.filter((profile) => profile.kind === "stt")].sort(enabledFirst);
+  const savedDiarizationProfiles = [...profiles.filter((profile) => profile.kind === "diarization")].sort(enabledFirst);
+  const savedLlmProfiles = [...profiles.filter((profile) => profile.kind === "llm")].sort(enabledFirst);
+
+  /**
+   * 已保存档案行的统一渲染（目录各任务分区共用）。
+   * 副标题区分两类信息：转写档案补运行时（同名 ggml-small 也能分清 whisper.cpp/Python），
+   * 开关文案按 kind 说明「正在使用」的是转写还是说话人分离。
+   */
+  const renderSavedRow = (profile: ModelProfile, taskLabel: string) => {
+    const visualVerified = Boolean(profile.options?.visualSummaryEnabled && profile.options?.visualSummaryVerifiedAt);
+    const runtimeLabel = profile.kind === "stt" && isLocalWhisperTransport(profile.transport)
+      ? ` · ${LOCAL_WHISPER_RUNTIME_LABELS[profile.transport] ?? ""}`
+      : "";
+    return (
+      <div key={profile.id} className={`model-catalog__row ${editing?.id === profile.id ? "is-selected" : ""}`}>
+        <button className="model-catalog__row-main" onClick={() => { setEditing(normalizeLegacyProviderProfile(profile)); setApiKey(""); setStatus(null); setEditorGeneration((value) => value + 1); }}>
+          <span className="profile-icon">{profile.kind === "stt" ? "STT" : profile.kind === "llm" ? "LLM" : "SPK"}</span>
+          <span className="model-catalog__text">
+            <span className="model-catalog__titleline">
+              <strong>{profile.name}</strong>
+              {visualVerified && <span className="model-badge model-badge--visual" title="视觉纪要已通过真实验证">视觉✓</span>}
+              {profile.secretId && <span className="model-badge model-badge--key" title="已安全保存密钥">钥</span>}
+            </span>
+            <small>{profile.kind === "diarization" ? (profile.options?.segmentationModelPath && profile.options?.embeddingModelPath ? "声纹识别已就绪" : "待补齐模型") : profile.transport === "apple-speech" ? "系统内置 · 零配置" : `${profile.model || "尚未选择模型"}${runtimeLabel}`}</small>
+          </span>
+        </button>
+        <button
+          className={`model-switch ${profile.enabled ? "is-on" : ""}`}
+          role="switch"
+          aria-checked={profile.enabled}
+          aria-label={profile.enabled ? `停用${taskLabel}：${profile.name}` : `将 ${profile.name} 设为${taskLabel}的正在使用`}
+          title={profile.enabled ? `${taskLabel}正在使用 · 点击停用` : `点击设为${taskLabel}正在使用`}
+          disabled={switchBusy === profile.id}
+          onClick={() => void toggleActiveProfile(profile)}
+        ><span className="model-switch__knob" /></button>
+      </div>
+    );
+  };
+
   return (
     <div className={`modal-backdrop ${closing ? "is-closing" : ""}`} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div ref={dialogRef} className="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
@@ -930,37 +981,32 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                         onClick={() => startPreset("openaiWhisper")}
                       ><span className="profile-icon"><CloudArrowDown size={18} /></span><span><strong>在线语音转录</strong><small>配置好即可用 · 网络或额度异常时可随时切回本地</small></span>{editing?.transport === "openai-audio" && <CheckCircle size={16} weight="fill" />}</button>
                     </div>
-                    <div className="model-catalog__section"><span>说话人分离</span>
-                      <button className={editing?.transport === "sherpa-onnx" ? "is-selected" : ""} onClick={() => startPreset("sherpa")}><span className="profile-icon"><FingerprintSimple size={18} /></span><span><strong>本地声纹识别</strong><small>多人会议区分发言人 · 数据不出本机</small></span>{editing?.transport === "sherpa-onnx" && <CheckCircle size={16} weight="fill" />}</button>
+                    {/* 转写档案紧跟转写选择：只列 stt，与下方说话人分离彻底分开。 */}
+                    {!!savedTranscriptionProfiles.length && (
+                      <div className="model-catalog__section"><span>已保存的转写档案</span>
+                        {savedTranscriptionProfiles.map((profile) => renderSavedRow(profile, "转写"))}
+                      </div>
+                    )}
+                    {/* 说话人分离是独立的可选增强，不是第三种转写服务：
+                        淡暖底独立区块 + 一句说明，让「各自独立的开关」结构一目了然。 */}
+                    <div className="model-catalog__enhancement">
+                      <div className="model-catalog__enhancement-heading">
+                        <span>说话人分离</span>
+                        <small>可选增强 · 与转写服务各自独立启用，多人会议自动区分发言人</small>
+                      </div>
+                      <button className={editing?.transport === "sherpa-onnx" ? "is-selected" : ""} onClick={() => startPreset("sherpa")}><span className="profile-icon"><FingerprintSimple size={18} /></span><span><strong>本地声纹识别</strong><small>数据不出本机 · 首次使用需下载约 70MB 模型</small></span>{editing?.transport === "sherpa-onnx" && <CheckCircle size={16} weight="fill" />}</button>
+                      {!!savedDiarizationProfiles.length && (
+                        <div className="model-catalog__section model-catalog__section--nested"><span>已保存</span>
+                          {savedDiarizationProfiles.map((profile) => renderSavedRow(profile, "说话人分离"))}
+                        </div>
+                      )}
                     </div>
                   </>)}
-                  {!!profiles.length && <div className="model-catalog__section"><span>已保存</span>{profiles.filter((profile) => profile.kind === (tab === "llm" ? "llm" : "stt") || (tab === "transcription" && profile.kind === "diarization")).map((profile) => {
-                    const visualVerified = Boolean(profile.options?.visualSummaryEnabled && profile.options?.visualSummaryVerifiedAt);
-                    return (
-                      <div key={profile.id} className={`model-catalog__row ${editing?.id === profile.id ? "is-selected" : ""}`}>
-                        <button className="model-catalog__row-main" onClick={() => { setEditing(normalizeLegacyProviderProfile(profile)); setApiKey(""); setStatus(null); setEditorGeneration((value) => value + 1); }}>
-                          <span className="profile-icon">{profile.kind === "stt" ? "STT" : profile.kind === "llm" ? "LLM" : "SPK"}</span>
-                          <span className="model-catalog__text">
-                            <span className="model-catalog__titleline">
-                              <strong>{profile.name}</strong>
-                              {visualVerified && <span className="model-badge model-badge--visual" title="视觉纪要已通过真实验证">视觉✓</span>}
-                              {profile.secretId && <span className="model-badge model-badge--key" title="已安全保存密钥">钥</span>}
-                            </span>
-                            <small>{profile.kind === "diarization" ? (profile.options?.segmentationModelPath && profile.options?.embeddingModelPath ? "声纹识别已就绪" : "待补齐模型") : profile.transport === "apple-speech" ? "系统内置 · 零配置" : (profile.model || "尚未选择模型")}</small>
-                          </span>
-                        </button>
-                        <button
-                          className={`model-switch ${profile.enabled ? "is-on" : ""}`}
-                          role="switch"
-                          aria-checked={profile.enabled}
-                          aria-label={profile.enabled ? `停用 ${profile.name}` : `将 ${profile.name} 设为正在使用`}
-                          title={profile.enabled ? "正在使用 · 点击停用" : "点击设为正在使用"}
-                          disabled={switchBusy === profile.id}
-                          onClick={() => void toggleActiveProfile(profile)}
-                        ><span className="model-switch__knob" /></button>
-                      </div>
-                    );
-                  })}</div>}
+                  {tab === "llm" && !!savedLlmProfiles.length && (
+                    <div className="model-catalog__section"><span>已保存</span>
+                      {savedLlmProfiles.map((profile) => renderSavedRow(profile, "总结"))}
+                    </div>
+                  )}
                 </aside>
                 {editing && (
                   <div key={editorGeneration} className="profile-editor-wrap">
