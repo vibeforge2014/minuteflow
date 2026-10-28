@@ -204,22 +204,17 @@ struct SettingsView: View {
   /// 是否显示工具栏“完成”按钮（sheet 场景）。
   let showsDoneButton: Bool
 
-  #if DEBUG
   /// 截图驱动：UI_TESTING_INITIAL=settings-summary / settings-transcription
-  /// 时把对应任务子页作为根视图直接呈现（宿主 XCUITest 不可用时的替代路径）。
+  /// 时把对应任务子页作为根视图直接呈现（宿主 XCUITest 不可用时的替代路径）；
+  /// Release 下恒为 nil，走正常表单。
   var uitestingInitialTask: ModelServiceTask? = nil
-  #endif
 
   var body: some View {
-    #if DEBUG
     if let uitestingInitialTask {
       TaskModelSettingsView(task: uitestingInitialTask)
     } else {
       settingsForm
     }
-    #else
-    settingsForm
-    #endif
   }
 
   private var settingsForm: some View {

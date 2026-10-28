@@ -97,9 +97,8 @@ struct PhoneWorkspaceView: View {
     }
   }
 
-  #if DEBUG
   /// 截图驱动：UI_TESTING_INITIAL=settings-summary / settings-transcription
-  /// 映射到设置标签的初始任务子页。
+  /// 映射到设置标签的初始任务子页（Release 下恒为 nil）。
   private static var uitestingSettingsTask: ModelServiceTask? {
     switch UITestingLauncher.initialRoute {
     case .settingsSummary: .summary
@@ -107,7 +106,6 @@ struct PhoneWorkspaceView: View {
     default: nil
     }
   }
-  #endif
 }
 
 /// iPhone「会议」标签：可搜索的会议列表（收藏/最近两组），支持左滑收藏、右滑软删除。
@@ -182,8 +180,8 @@ private struct PhoneMeetingsView: View {
       .navigationDestination(item: $quickStartedMeeting) { meeting in
         PhoneMeetingDetailView(meeting: meeting)
       }
-      #if DEBUG
-      // 截图驱动：UI_TESTING_INITIAL=minutes/transcript/chat 时等待演示数据后推入详情页。
+      // 截图驱动：UI_TESTING_INITIAL=minutes/transcript/chat 时等待演示数据后推入详情页
+      //（Release 下 initialRoute 恒为 nil，本 task 为空操作）。
       .task {
         guard let route = UITestingLauncher.initialRoute,
               ["minutes", "transcript", "chat"].contains(route.rawValue) else {
@@ -196,7 +194,6 @@ private struct PhoneMeetingsView: View {
           quickStartedMeeting = first
         }
       }
-      #endif
       .alert(
         "无法开始录音",
         isPresented: Binding(
@@ -307,18 +304,12 @@ struct MeetingDetailTabsView: View {
 
   init(meeting: MeetingRecord) {
     self.meeting = meeting
-    #if DEBUG
-    // 截图驱动：UI_TESTING_INITIAL=transcript 时直接落在转写段。
+    // 截图驱动：UI_TESTING_INITIAL=transcript 时直接落在转写段（Release 下为 nil）。
     let override: MeetingDetailSection? =
       UITestingLauncher.initialRoute == .transcript ? .transcript : nil
     _selectedSection = State(
       initialValue: override ?? MeetingDetailSection.defaultSection(for: meeting.status)
     )
-    #else
-    _selectedSection = State(
-      initialValue: MeetingDetailSection.defaultSection(for: meeting.status)
-    )
-    #endif
   }
 
   var body: some View {
@@ -383,14 +374,12 @@ private struct PhoneMeetingDetailView: View {
       }
       // 详情页出现即挂载本会议音频（纪要分段同样会兜底）。
       .onAppear { player.attach(meeting: meeting) }
-      #if DEBUG
-      // 截图驱动：UI_TESTING_INITIAL=chat 时打开 AI 问答弹层。
+      // 截图驱动：UI_TESTING_INITIAL=chat 时打开 AI 问答弹层（Release 下为空操作）。
       .task {
         if UITestingLauncher.initialRoute == .chat {
           showsChat = true
         }
       }
-      #endif
   }
 }
 
