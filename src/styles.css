@@ -2242,6 +2242,105 @@ button.transcription-status {
 }
 
 .transcription-status.is-error { color: #a7422f; background: #fdece7; }
+
+/* 转写模型勾选器（智谱式多可用）：徽标即按钮，菜单列出全部已配置档案供任务开启时勾选。 */
+.stt-picker { position: relative; }
+
+.stt-picker__trigger { border: 0; font: inherit; cursor: pointer; }
+.stt-picker__trigger:hover { background: #e2f0e8; }
+.stt-picker__trigger:active { transform: scale(.97); }
+.stt-picker__trigger.is-open { background: #e2f0e8; }
+
+.stt-picker__queue {
+  margin-left: 2px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #46755d;
+  color: #fff;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.stt-picker__menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  min-width: 220px;
+  max-width: 300px;
+  display: flex;
+  flex-direction: column;
+  padding: 5px;
+  background: #fff;
+  border: 1px solid #e7e0da;
+  border-radius: 12px;
+  box-shadow: 0 14px 34px rgba(64, 44, 33, .16);
+}
+
+.stt-picker__hint {
+  padding: 4px 8px 6px;
+  color: #a49a92;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.stt-picker__option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 8px;
+  padding: 7px 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.stt-picker__option:hover { background: #fbf3ee; }
+
+.stt-picker__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #373230;
+  font-size: 10px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stt-picker__name em {
+  padding: 0 4px;
+  border-radius: 5px;
+  background: #fcf1e9;
+  color: #a64d39;
+  font-size: 7px;
+  font-style: normal;
+  font-weight: 750;
+}
+
+.stt-picker__option small {
+  grid-column: 1 / -1;
+  color: #a49a92;
+  font-size: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stt-picker__option--manage {
+  margin-top: 3px;
+  padding-top: 7px;
+  border-top: 1px solid #f0e8e2;
+  color: #8a7f77;
+  font-size: 9px;
+}
+
+.stt-picker__option--manage:hover { color: #6b6058; }
 button.transcription-status.is-error:hover { background: #fbe0d7; }
 button.transcription-status.is-error:active { transform: scale(.97); }
 
@@ -3997,9 +4096,8 @@ html[data-surface="permission-helper"] #root {
 }
 
 
-/* 已保存档案行：一张完整卡片 = 主体按钮（图标+两行文字）+ 右侧「正在使用」单选开关（同类互斥，见 database.saveModelProfile）。
-   开关状态本身即「使用中」，不再另设徽标，避免挤占名称列。 */
-.model-catalog__row {
+/* 已保存档案行：一张完整卡片 = 主体按钮（图标+两行文字）+ 右侧「默认档」状态。
+   智谱式多可用：全部档案同时可用；默认档徽标只标注未选模任务的兜底，非「启用」语义。 */.model-catalog__row {
   min-width: 0;
   min-height: 54px;
   display: grid;
@@ -4018,6 +4116,35 @@ html[data-surface="permission-helper"] #root {
   background: #fff8f4;
   box-shadow: 0 0 0 2px rgba(231, 111, 81, .08);
 }
+
+/* 默认档徽标与「设为默认」动作：徽标静态标注，动作是低强调文字按钮，悬停行时才明显。 */
+.model-default-badge {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: #fcf1e9;
+  color: #a64d39;
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: .04em;
+}
+
+.model-set-default {
+  flex: none;
+  padding: 3px 8px;
+  color: #a49a92;
+  background: transparent;
+  border: 1px solid #ece4de;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-out-ui), border-color var(--motion-fast) var(--ease-out-ui), transform 90ms var(--ease-out-ui);
+}
+
+.model-set-default:hover { color: #a64d39; border-color: #ecc4b5; }
+.model-set-default:active { transform: scale(.96); }
+.model-set-default:disabled { opacity: .5; cursor: default; }
 
 .model-catalog__row-main {
   min-width: 0;

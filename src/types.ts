@@ -229,8 +229,11 @@ export interface ModelProfile {
     /** 验证时的端点/协议/模型指纹；配置变化会让验证自动失效。 */
     visualSummaryVerifiedFingerprint?: string;
   };
-  /** 是否启用；录音与总结只挑选已启用的档案。 */
+  /** 是否可用：保存即启用（默认 true），全部档案同时可用，同类互不影响。 */
   enabled: boolean;
+  /** 该类的默认档（同类互斥）：未显式选模的任务（快速录音、滚动纪要、说话人分离）走默认档；
+   *  保存该类第一条档案时自动成为默认。 */
+  isDefault?: boolean;
 }
 
 /**
@@ -759,7 +762,9 @@ export interface MeetingAPI {
         transcriptText: string;
       },
       /** 流式增量回调：content/reasoning 为可直接渲染的追加片段（思考过程先于正文）。 */
-      onDelta?: (delta: { content?: string; reasoning?: string }) => void
+      onDelta?: (delta: { content?: string; reasoning?: string }) => void,
+      /** 本条消息使用的 LLM 档案 id（任务时勾选）；缺省走默认档。 */
+      profileId?: string
     ): Promise<{
       /** Markdown 回答正文（渲染层用安全管线渲染）。 */
       answer: string;
@@ -771,6 +776,8 @@ export interface MeetingAPI {
   models: {
     list(): Promise<ModelProfile[]>;
     save(profile: ModelProfile, apiKey?: string): Promise<ModelProfile>;
+    /** 把某类档案设为默认档（同类互斥）；未显式选模的任务走默认档。 */
+    setDefault(kind: ModelProfile["kind"], id: string): Promise<void>;
     test(profile: ModelProfile, apiKey?: string): Promise<{
       ok: boolean;
       message: string;

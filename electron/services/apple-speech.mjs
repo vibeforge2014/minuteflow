@@ -27,7 +27,7 @@ export function shouldSeedAppleSpeechProfile(platform, sttProfileCount) {
   return platform === "darwin" && sttProfileCount === 0;
 }
 
-/** 出厂默认的 Apple 语音识别档案（enabled，走 saveModelProfile 的原子单启用路径）。 */
+/** 出厂默认的 Apple 语音识别档案（智谱式多可用：保存即启用；首条 stt 档案自动成为默认档）。 */
 export function appleSpeechDefaultProfile() {
   return {
     name: "Apple 语音识别",
@@ -36,6 +36,7 @@ export function appleSpeechDefaultProfile() {
     baseUrl: "",
     model: "",
     enabled: true,
+    isDefault: true,
     options: {}
   };
 }

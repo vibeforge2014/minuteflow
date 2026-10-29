@@ -7,7 +7,9 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowsOutSimple,
   BookmarkSimple,
+  CaretDown,
   CheckCircle,
+  Gear,
   Microphone,
   Pause,
   Play,
@@ -15,7 +17,7 @@ import {
   Stop,
   WarningCircle
 } from "@phosphor-icons/react";
-import type { Meeting } from "../types";
+import type { Meeting, ModelProfile } from "../types";
 import { api } from "../lib/api";
 import { formatDuration } from "../lib/format";
 
@@ -31,6 +33,15 @@ interface RecorderBarProps {
   queue: number;
   /** 本次会议是否配置了可用的实时转写档案。 */
   transcriptionReady: boolean;
+  /** 已保存的转写档案（智谱式多可用：全部可勾选）。 */
+  sttProfiles: ModelProfile[];
+  /** 本场实际使用的转写档案（勾选 > 默认档 > 第一条可用）：id 用于菜单勾选态，名用于徽标。 */
+  activeSttProfileId?: string;
+  activeSttProfileName?: string;
+  /** 任务开启时勾选转写模型；录音中切换从下一个 8 秒块生效。 */
+  onSelectSttProfile(profileId: string): void;
+  /** 打开设置 → 转录（未配置/异常时的去设置入口）。 */
+  onManageTranscription(): void;
   /** 实时转写连续失败：徽标转为「转写异常 · 去修复」，点击直达本地 Whisper 配置。 */
   transcriptionFailed?: boolean;
   onFixTranscription?(): void;
@@ -48,6 +59,11 @@ export function RecorderBar({
   levels,
   queue,
   transcriptionReady,
+  sttProfiles,
+  activeSttProfileId,
+  activeSttProfileName,
+  onSelectSttProfile,
+  onManageTranscription,
   transcriptionFailed = false,
   onFixTranscription,
   onStart,
@@ -113,11 +129,27 @@ export function RecorderBar({
               <WarningCircle size={14} weight="fill" />
               转写异常 · 去修复
             </button>
+          ) : sttProfiles.length > 0 ? (
+            <SttModelPicker
+              profiles={sttProfiles}
+              activeId={activeSttProfileId}
+              activeName={activeSttProfileName}
+              queue={queue}
+              recording={phase === "recording"}
+              onSelect={onSelectSttProfile}
+              onManage={onManageTranscription}
+            />
           ) : (
-            <span className={`transcription-status ${transcriptionReady ? "is-ready" : "is-limited"}`} aria-live="polite">
-              {transcriptionReady ? <CheckCircle size={14} weight="fill" /> : <WarningCircle size={14} weight="fill" />}
-              {transcriptionReady ? queue > 0 ? `转写处理中 ${queue}` : "实时转写正常" : "仅录音"}
-            </span>
+            <button
+              type="button"
+              className="transcription-status is-limited"
+              aria-live="polite"
+              title="配置转写模型后，录音的同时生成逐字稿"
+              onClick={onManageTranscription}
+            >
+              <WarningCircle size={14} weight="fill" />
+              未配置转写 · 去设置
+            </button>
           )}
           {silentMic && (
             <span className="recorder-warning" role="alert">
@@ -170,6 +202,102 @@ export function RecorderBar({
     </div>
   );
 }
+
+/** 转写模型勾选器：智谱式多可用语义——开启任务（录音）时直接勾选具体模型，
+ *  勾选即本场生效（录音中切换从下一个 8 秒块开始），默认档用于一键快速录音。 */
+function SttModelPicker({
+  profiles,
+  activeId,
+  activeName,
+  queue,
+  recording,
+  onSelect,
+  onManage
+}: {
+  profiles: ModelProfile[];
+  activeId?: string;
+  activeName?: string;
+  queue: number;
+  recording: boolean;
+  onSelect(profileId: string): void;
+  onManage(): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="stt-picker" ref={rootRef}>
+      <button
+        type="button"
+        className={`transcription-status is-ready stt-picker__trigger ${open ? "is-open" : ""}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-live="polite"
+        title="勾选本场录音使用的转写模型"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <CheckCircle size={14} weight="fill" />
+        {activeName ? `转写 · ${activeName}` : "选择转写模型"}
+        {queue > 0 && <em className="stt-picker__queue">{queue}</em>}
+        <CaretDown size={12} weight="bold" />
+      </button>
+      {open && (
+        <div className="stt-picker__menu" role="menu" aria-label="选择转写模型">
+          {recording && (
+            <small className="stt-picker__hint">切换从下一个 8 秒音频块生效，无需停止录音</small>
+          )}
+          {profiles.map((profile) => (
+            <button
+              key={profile.id}
+              role="menuitemradio"
+              aria-checked={profile.id === activeId}
+              className="stt-picker__option"
+              onClick={() => {
+                onSelect(profile.id!);
+                setOpen(false);
+              }}
+            >
+              <span className="stt-picker__name">
+                {profile.name}
+                {profile.isDefault && <em>默认</em>}
+              </span>
+              <small>{[profile.model, TRANSPORT_HINTS[profile.transport]].filter(Boolean).join(" · ")}</small>
+              {profile.id === activeId && <CheckCircle size={15} weight="fill" />}
+            </button>
+          ))}
+          <button role="menuitem" className="stt-picker__option stt-picker__option--manage" onClick={() => { setOpen(false); onManage(); }}>
+            <Gear size={15} />管理转写服务…
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const TRANSPORT_HINTS: Partial<Record<ModelProfile["transport"], string>> = {
+  "apple-speech": "macOS 内置",
+  "openai-audio": "在线服务",
+  "whisper-cpp": "whisper.cpp",
+  "whisper-python": "Python Whisper",
+  "faster-whisper": "CTranslate2",
+  "mlx-whisper": "MLX"
+};
 
 /** 单轨电平表：把 0-1 的 RMS 值点亮为 6 格中的若干格。 */
 function Level({ label, icon, value }: { label: string; icon: React.ReactNode; value: number }) {

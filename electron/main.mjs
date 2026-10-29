@@ -53,10 +53,12 @@ import {
   saveAudioAsset,
   saveMeeting,
   saveModelProfile,
+  setDefaultModelProfile,
   saveVoiceprintSample,
   deleteVoiceprintPerson,
   softDeleteMeeting
 } from "./database.mjs";
+import { resolveProfile } from "./services/import-profiles.mjs";
 import { deleteSecret, flushSecrets, readSecret, storeSecret, warmSecretCache } from "./services/secrets.mjs";
 import {
   chatWithMeetingContext,
@@ -664,7 +666,7 @@ function registerIpc() {
       .filter((segment) => segment.speakerId === speakerId && segment.status === "final")
       .map((segment) => ({ startMs: segment.startMs, endMs: segment.endMs }));
     if (!intervals.length) throw new Error("这个发言人还没有可用于学习的定稿语音。");
-    const profile = listModelProfiles().find((candidate) => candidate.kind === "diarization" && candidate.enabled);
+    const profile = resolveProfile(listModelProfiles(), "diarization");
     if (!profile) throw new Error("请先配置并启用说话人分离模型，再记住发言人。");
     const modelKey = voiceprintModelKey(profile);
     if (!modelKey) throw new Error("说话人分离档案缺少 3D-Speaker 模型。");
@@ -706,7 +708,7 @@ function registerIpc() {
     try {
       const meeting = loadMeeting(meetingId);
       if (!meeting?.transcript?.length) return;
-      const profile = listModelProfiles().find((candidate) => candidate.kind === "diarization" && candidate.enabled);
+      const profile = resolveProfile(listModelProfiles(), "diarization");
       if (!profile) return; // 未配置分离模型：保留按轨标签，不额外打扰。
       const turns = await diarizeWithSherpa(profile, microphonePath, {
         expectedSpeakers: -1,
@@ -1148,7 +1150,7 @@ function registerIpc() {
     const profiles = listModelProfiles();
     const profile = (typeof payload?.profileId === "string"
       ? profiles.find((item) => item.id === payload.profileId && item.kind === "llm")
-      : undefined) ?? profiles.find((item) => item.kind === "llm" && item.enabled);
+      : undefined) ?? resolveProfile(profiles, "llm");
     if (!profile || profile.transport === "local-summary") {
       throw new Error("AI 问答需要一个在线大模型服务。请先在「设置 → AI 总结」中添加并启用，再回到这里提问。");
     }
@@ -1224,6 +1226,14 @@ function registerIpc() {
     const saved = saveModelProfile({ ...profile, secretId });
     wakeImportQueue();
     return saved;
+  });
+  // models:set-default — 把某类档案设为默认档（同类互斥）：未显式选模的任务
+  // （快速录音、滚动纪要、说话人分离）都走默认档；保存该类第一条档案时自动成为默认。
+  trustedHandle("models:set-default", (_event, kind, id) => {
+    if (!["stt", "llm", "diarization"].includes(kind) || typeof id !== "string") {
+      throw new Error("默认档参数无效。");
+    }
+    return setDefaultModelProfile(kind, id);
   });
   // models:test — 测试模型连通性/本地就绪度，设置页"测试"按钮调用。
   trustedHandle("models:test", async (_event, profile, apiKey) => {

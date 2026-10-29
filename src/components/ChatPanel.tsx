@@ -5,10 +5,10 @@
  * - 请求走主进程 chat:send（需已配置在线总结服务并已激活）；失败在气泡内以错误样式呈现，可重试。
  * - 回答按 Markdown 安全渲染（与个人笔记同一管线）；思维链在传输层仍被拆分
  *   （防止内联 <think> 泄入正文），但不再提供「思考过程」展示入口。
- * - 输入区上方的模型胶囊可不动设置直接切换正在使用的 LLM 档案（在线/本机 Ollama），
- *   与设置页「正在使用」开关同一条互斥语义：启用即切换，兄弟档案自动停用。
+ * - 输入区上方的模型胶囊可不动设置直接勾选本次问答使用的 LLM 档案（在线/本机 Ollama）：
+ *   智谱式多可用，勾选随消息发送 profileId，不写库改默认档。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CaretDown, ChatTeardropText, CheckCircle, Eraser, PaperPlaneRight, X } from "@phosphor-icons/react";
 import type { Meeting, ModelProfile } from "../types";
 import { api } from "../lib/api";
@@ -63,23 +63,26 @@ function suggestedQuestions(meeting: Meeting) {
 }
 
 /**
- * 输入区上方的模型胶囊 + 切换菜单：展示当前启用的 LLM 档案，点开即换。
+ * 输入区上方的模型胶囊 + 切换菜单：智谱式多可用——列出全部在线 LLM 档案，
+ * 勾选即本会话问答使用（随消息发送 profileId，主进程优先采用），不再写库改默认。
  * 本地基础纪要不能问答，不在列表里；没有任何档案时引导去设置页配置。
  */
-function ChatModelSwitch({ onOpenSettings }: { onOpenSettings?: () => void }) {
-  const [profiles, setProfiles] = useState<ModelProfile[]>([]);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
+/** 上次勾选的问答模型：面板收起再展开仍记住（应用重启回落默认档）。 */
+let lastChatProfileId: string | undefined;
 
-  useEffect(() => {
-    let active = true;
-    api.models.list()
-      .then((all) => { if (active) setProfiles(all.filter((p) => p.kind === "llm" && p.transport !== "local-summary")); })
-      .catch(() => {});
-    return () => { active = false; };
-  }, []);
+function ChatModelSwitch({
+  profiles,
+  selectedId,
+  onSelect,
+  onOpenSettings
+}: {
+  profiles: ModelProfile[];
+  selectedId?: string;
+  onSelect(profileId: string): void;
+  onOpenSettings?: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   // 菜单打开时点外部/Escape 关闭。
   useEffect(() => {
@@ -98,23 +101,10 @@ function ChatModelSwitch({ onOpenSettings }: { onOpenSettings?: () => void }) {
     };
   }, [menuOpen]);
 
-  const active = profiles.find((profile) => profile.enabled) ?? null;
-
-  /** 切换 = 启用目标档案；主进程同 kind 互斥停用兄弟档案，这里就地同步列表。 */
-  const switchModel = async (profile: ModelProfile) => {
-    if (!profile.id || busyId) return;
-    setBusyId(profile.id);
-    setError(null);
-    try {
-      const saved = await api.models.save({ ...profile, enabled: true });
-      setProfiles((current) => current.map((item) => item.id === saved.id ? saved : { ...item, enabled: false }));
-      setMenuOpen(false);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "切换失败，请稍后再试。");
-    } finally {
-      setBusyId(null);
-    }
-  };
+  const active = profiles.find((profile) => profile.id === selectedId)
+    || profiles.find((profile) => profile.isDefault)
+    || profiles[0]
+    || null;
 
   if (!profiles.length) {
     return (
@@ -135,7 +125,7 @@ function ChatModelSwitch({ onOpenSettings }: { onOpenSettings?: () => void }) {
         title="切换问答使用的模型"
       >
         <span className={`chat-model-switch__dot ${active ? "" : "is-off"}`} aria-hidden="true" />
-        {active ? active.name : "未启用任何模型"}
+        {active ? active.name : "选择模型"}
         {active && (
           <span className={`chat-model-switch__tag ${active.transport === "ollama" ? "is-local" : ""}`}>
             {active.transport === "ollama" ? "本机" : "在线"}
@@ -150,17 +140,21 @@ function ChatModelSwitch({ onOpenSettings }: { onOpenSettings?: () => void }) {
               key={profile.id}
               type="button"
               role="option"
-              aria-selected={Boolean(profile.enabled)}
-              disabled={busyId !== null}
-              className={`chat-model-switch__option ${profile.enabled ? "is-current" : ""}`}
-              onClick={() => void switchModel(profile)}
+              aria-selected={profile.id === active?.id}
+              className={`chat-model-switch__option ${profile.id === active?.id ? "is-current" : ""}`}
+              onClick={() => {
+                onSelect(profile.id!);
+                setMenuOpen(false);
+              }}
             >
-              <span>{profile.name}</span>
+              <span>
+                {profile.name}
+                {profile.isDefault && <em className="chat-model-switch__default">默认</em>}
+              </span>
               <small>{profile.model}{profile.transport === "ollama" ? " · 本机 Ollama" : " · 在线"}</small>
-              {profile.enabled && <CheckCircle size={15} weight="fill" />}
+              {profile.id === active?.id && <CheckCircle size={15} weight="fill" />}
             </button>
           ))}
-          {error && <div className="chat-model-switch__error" role="alert">{error}</div>}
           {onOpenSettings && (
             <button type="button" className="chat-model-switch__manage" onClick={() => { setMenuOpen(false); onOpenSettings(); }}>
               在设置中管理服务…
@@ -186,7 +180,30 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
-  const suggestions = useMemo(() => suggestedQuestions(meeting), [meeting]);
+  const suggestions = useMemo(() => suggestedQuestions(meeting), [meeting.id]);
+  // 问答模型选择（智谱式多可用）：勾选随消息发送 profileId，不写库；模块级变量让面板收起再展开仍记住选择。
+  const [chatProfiles, setChatProfiles] = useState<ModelProfile[]>([]);
+  const [chatProfileId, setChatProfileId] = useState<string | undefined>(lastChatProfileId);
+
+  useEffect(() => {
+    let active = true;
+    api.models.list()
+      .then((all) => { if (active) setChatProfiles(all.filter((p) => p.kind === "llm" && p.transport !== "local-summary")); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  const activeChatProfile = useMemo(
+    () => chatProfiles.find((profile) => profile.id === chatProfileId)
+      || chatProfiles.find((profile) => profile.isDefault)
+      || chatProfiles[0],
+    [chatProfiles, chatProfileId]
+  );
+
+  const selectChatProfile = useCallback((profileId: string) => {
+    lastChatProfileId = profileId;
+    setChatProfileId(profileId);
+  }, []);
 
   // 切换会议时载入该会议自己的会话记录。
   useEffect(() => {
@@ -273,7 +290,7 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
         buffer.reasoning += delta.reasoning ?? "";
         buffer.content += delta.content ?? "";
         startDrain();
-      });
+      }, activeChatProfile?.id);
       // 流结束后等平滑队列吐完再落最终结果，避免结尾突兀地整段校正。
       await new Promise<void>((resolve) => {
         const check = () => {
@@ -375,7 +392,12 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
 
       <footer className="chat-composer">
         <div className="chat-composer__toolbar">
-          <ChatModelSwitch onOpenSettings={onOpenSettings} />
+          <ChatModelSwitch
+            profiles={chatProfiles}
+            selectedId={activeChatProfile?.id}
+            onSelect={selectChatProfile}
+            onOpenSettings={onOpenSettings}
+          />
         </div>
         <div className="chat-composer__input-row">
           <textarea

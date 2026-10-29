@@ -42,13 +42,12 @@ const statusText: Record<ImportJob["status"], string> = {
 };
 
 export function ImportDrawer(props: Props) {
-  // 列出全部已保存的 stt/llm 档案：任务级选择独立于设置里全局唯一的「正在使用」
-  // 开关（单启用模型），否则被顶替为未启用的档案会从下拉里消失、无从选择。
-  // 默认选中当前启用项；未启用项加标注，明确它只是本任务一次性选用。
+  // 列出全部已保存的 stt/llm 档案（智谱式多可用）：导入是任务级选择，逐单勾选，
+  // 默认档预选；与设置页互不影响。
   const sttProfiles = useMemo(() => props.profiles.filter((profile) => profile.kind === "stt"), [props.profiles]);
   const llmProfiles = useMemo(() => props.profiles.filter((profile) => profile.kind === "llm"), [props.profiles]);
-  const defaultSttId = () => sttProfiles.find((profile) => profile.enabled)?.id || sttProfiles[0]?.id || "";
-  const defaultLlmId = () => llmProfiles.find((profile) => profile.enabled)?.id || llmProfiles[0]?.id || "";
+  const defaultSttId = () => sttProfiles.find((profile) => profile.isDefault)?.id || sttProfiles[0]?.id || "";
+  const defaultLlmId = () => llmProfiles.find((profile) => profile.isDefault)?.id || llmProfiles[0]?.id || "";
   const [language, setLanguage] = useState("auto");
   const [sttProfileId, setSttProfileId] = useState(defaultSttId);
   const [llmProfileId, setLlmProfileId] = useState(defaultLlmId);
@@ -67,8 +66,8 @@ export function ImportDrawer(props: Props) {
   }, [props.jobs]);
 
   // 档案列表后加载（如刚打开设置保存了新档案）时，把空选择补默认值（优先启用项）。
-  useEffect(() => { if (!sttProfileId && sttProfiles.length) setSttProfileId(sttProfiles.find((profile) => profile.enabled)?.id || sttProfiles[0]?.id || ""); }, [sttProfileId, sttProfiles]);
-  useEffect(() => { if (!llmProfileId && llmProfiles.length) setLlmProfileId(llmProfiles.find((profile) => profile.enabled)?.id || llmProfiles[0]?.id || ""); }, [llmProfileId, llmProfiles]);
+  useEffect(() => { if (!sttProfileId && sttProfiles.length) setSttProfileId(sttProfiles.find((profile) => profile.isDefault)?.id || sttProfiles[0]?.id || ""); }, [sttProfileId, sttProfiles]);
+  useEffect(() => { if (!llmProfileId && llmProfiles.length) setLlmProfileId(llmProfiles.find((profile) => profile.isDefault)?.id || llmProfiles[0]?.id || ""); }, [llmProfileId, llmProfiles]);
 
   if (!props.open) return null;
   // 仍在处理中的任务数（用于副标题提示）。
@@ -107,8 +106,8 @@ export function ImportDrawer(props: Props) {
           <div className="import-subsection-heading"><strong>可选处理设置</strong><small>不影响文件先归档到本机</small></div>
           <div className="import-settings">
             <label>语言<select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动识别（中文/中英混合优先）</option><option value="zh">中文</option><option value="en">English</option></select></label>
-            <label>转录模型<select value={sttProfileId} onChange={(event) => setSttProfileId(event.target.value)}><option value="">稍后配置</option>{sttProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.enabled ? "" : "（未启用，仅本次导入）"}</option>)}</select></label>
-            <label>总结模型<select value={llmProfileId} onChange={(event) => setLlmProfileId(event.target.value)}><option value="">稍后配置</option>{llmProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.enabled ? "" : "（未启用，仅本次导入）"}</option>)}</select></label>
+            <label>转录模型<select value={sttProfileId} onChange={(event) => setSttProfileId(event.target.value)}><option value="">稍后配置</option>{sttProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
+            <label>总结模型<select value={llmProfileId} onChange={(event) => setLlmProfileId(event.target.value)}><option value="">稍后配置</option>{llmProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
             <label className="import-check"><input type="checkbox" checked={diarizationEnabled} onChange={(event) => setDiarizationEnabled(event.target.checked)} />识别不同发言人</label>
             <label className="import-check"><input type="checkbox" checked={autoSummarize} onChange={(event) => setAutoSummarize(event.target.checked)} />转录后自动生成纪要</label>
           </div>

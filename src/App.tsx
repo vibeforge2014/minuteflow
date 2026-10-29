@@ -280,7 +280,14 @@ export function App() {
     [meetingImportJob]
   );
   const transcriptionProfile = useMemo(
-    () => profiles.find((profile) => profile.kind === "stt" && profile.enabled),
+    () => profiles.find((profile) => profile.kind === "stt" && profile.isDefault)
+      || profiles.find((profile) => profile.kind === "stt" && profile.enabled),
+    [profiles]
+  );
+  /** 任务时勾选的转写档案清单（智谱式多可用：全部列出，含默认徽标排序）。 */
+  const sttProfiles = useMemo(
+    () => [...profiles.filter((profile) => profile.kind === "stt")]
+      .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault))),
     [profiles]
   );
   /** 当前转写是否跑在本机：失败提示据此把「改用本地 Whisper」换成「检查本地模型」。 */
@@ -788,6 +795,11 @@ export function App() {
                 levels={recorder.levels}
                 queue={recorder.queue}
                 transcriptionReady={recordingReadiness?.hasTranscription ?? false}
+                sttProfiles={sttProfiles}
+                activeSttProfileId={recorder.activeSttProfile?.id}
+                activeSttProfileName={recorder.activeSttProfile?.name}
+                onSelectSttProfile={(profileId) => recorder.selectSttProfile(profileId)}
+                onManageTranscription={() => openSettings("transcription")}
                 transcriptionFailed={Boolean(recorder.transcriptionFailure)}
                 onFixTranscription={() => openSettings("transcription", "local-whisper")}
                 onStart={async () => {

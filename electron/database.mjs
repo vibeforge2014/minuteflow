@@ -207,6 +207,7 @@ function createSchema(db) {
       secret_id TEXT,
       options_json TEXT NOT NULL DEFAULT '{}',
       enabled INTEGER NOT NULL DEFAULT 1,
+      is_default INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -275,6 +276,11 @@ function createSchema(db) {
   // 老库迁移：早期版本没有 notes_markdown 列，检测缺失时补列（SQLite 不支持 IF NOT EXISTS 的 ADD COLUMN）。
   if (!meetingColumns.some((column) => column.name === "notes_markdown")) {
     db.exec("ALTER TABLE meetings ADD COLUMN notes_markdown TEXT NOT NULL DEFAULT ''");
+  }
+  // 老库迁移：模型档案从「同类单启用」改为「全部可用 + 每类一个默认档」。
+  const profileColumns = db.prepare("PRAGMA table_info(model_profiles)").all();
+  if (!profileColumns.some((column) => column.name === "is_default")) {
+    db.exec("ALTER TABLE model_profiles ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0");
   }
 }
 
@@ -936,27 +942,32 @@ export function listModelProfiles() {
       model: row.model ?? "",
       secretId: row.secret_id ?? undefined,
       options: safeJson(row.options_json, {}),
-      enabled: Boolean(row.enabled)
+      enabled: Boolean(row.enabled),
+      isDefault: Boolean(row.is_default)
     }));
 }
 
 /** 新增或更新模型档案（models:save 调用；密钥本身存于 secrets.mjs，这里只存 secretId 引用）。
- *  同类档案互斥启用：保存启用档案时在同一事务里停用兄弟档案，让「保存/切换即生效」
- *  成为唯一心智模型——运行时对每个 kind 只取唯一启用的档案。 */
+ *  智谱式多可用语义：保存即启用（enabled 默认 1），同类档案互不影响；
+ *  每类恰有一个「默认档」（is_default）供未显式选模的任务兜底——保存该类第一条
+ *  档案时自动成为默认，显式传 isDefault=true 则在同一事务里排他切换默认。 */
 export function saveModelProfile(profile) {
   const db = openDatabase();
   const timestamp = nowIso();
   const id = profile.id || randomUUID();
   const enabled = profile.enabled === false ? 0 : 1;
-  // node:sqlite 没有 better-sqlite3 式的 transaction() 包装，用显式 BEGIN/COMMIT，
-  // 失败回滚，保证「写档案 + 互斥停用兄弟档案」是原子操作。
+  // 同类其他档案里还没有默认档时，本次保存的档案自动成为默认（保证每类始终有一个默认）。
+  const hasOtherDefault = Boolean(db.prepare(
+    "SELECT 1 AS one FROM model_profiles WHERE kind = ? AND is_default != 0 AND id != ? LIMIT 1"
+  ).get(profile.kind, id));
+  const isDefault = profile.isDefault === true || !hasOtherDefault;
   db.exec("BEGIN");
   try {
     db.prepare(`
       INSERT INTO model_profiles(
         id, name, kind, transport, base_url, model, secret_id, options_json,
-        enabled, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        enabled, is_default, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         kind = excluded.kind,
@@ -966,6 +977,7 @@ export function saveModelProfile(profile) {
         secret_id = excluded.secret_id,
         options_json = excluded.options_json,
         enabled = excluded.enabled,
+        is_default = excluded.is_default,
         updated_at = excluded.updated_at
     `).run(
       id,
@@ -977,11 +989,12 @@ export function saveModelProfile(profile) {
       profile.secretId || null,
       JSON.stringify(profile.options ?? {}),
       enabled,
+      isDefault ? 1 : 0,
       timestamp,
       timestamp
     );
-    if (enabled) {
-      db.prepare("UPDATE model_profiles SET enabled = 0, updated_at = ? WHERE kind = ? AND id != ? AND enabled != 0")
+    if (isDefault) {
+      db.prepare("UPDATE model_profiles SET is_default = 0, updated_at = ? WHERE kind = ? AND id != ? AND is_default != 0")
         .run(timestamp, profile.kind, id);
     }
     db.exec("COMMIT");
@@ -989,31 +1002,57 @@ export function saveModelProfile(profile) {
     db.exec("ROLLBACK");
     throw error;
   }
-  return { ...profile, id, enabled: Boolean(enabled) };
+  return { ...profile, id, enabled: Boolean(enabled), isDefault: Boolean(isDefault) };
 }
 
-/** 启动迁移：历史数据里同类多个档案可能同时启用，而运行时只按名称排序取第一个；
- *  显式保留实际生效的那个、停用其余，与单选「正在使用」语义对齐（不删除任何数据）。 */
-export function normalizeExclusiveModelProfiles() {
+/** 显式设置某类的默认档（设置目录「设为默认」/任务选择器的「设为默认」调用）。
+ *  默认档同类互斥：设为默认时清掉兄弟的默认位；目标不存在时抛错。 */
+export function setDefaultModelProfile(kind, id) {
   const db = openDatabase();
-  const rows = db.prepare("SELECT id, kind FROM model_profiles WHERE enabled != 0 ORDER BY kind, name").all();
-  const seenKinds = new Set();
-  const staleIds = [];
-  for (const row of rows) {
-    if (seenKinds.has(row.kind)) staleIds.push(row.id);
-    else seenKinds.add(row.kind);
-  }
-  if (!staleIds.length) return [];
-  const deactivate = db.prepare("UPDATE model_profiles SET enabled = 0 WHERE id = ?");
+  const row = db.prepare("SELECT id FROM model_profiles WHERE kind = ? AND id = ?").get(kind, id);
+  if (!row) throw new Error("档案不存在，无法设为默认。");
+  const timestamp = nowIso();
   db.exec("BEGIN");
   try {
-    staleIds.forEach((id) => deactivate.run(id));
+    db.prepare("UPDATE model_profiles SET is_default = 0, updated_at = ? WHERE kind = ? AND is_default != 0").run(timestamp, kind);
+    db.prepare("UPDATE model_profiles SET is_default = 1, updated_at = ? WHERE id = ?").run(timestamp, id);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
   }
-  return staleIds;
+  return { id, kind, isDefault: true };
+}
+
+/** 启动迁移：从「同类单启用」升级到「全部可用 + 每类默认档」。历史库里同类最多一条
+ *  enabled 档案（旧互斥语义的生效档），它升级为该类的默认档；其余停用档案恢复为可用；
+ *  某类没有任何启用档案时按名称序取第一条为默认。不删除任何数据，幂等可重跑。 */
+export function normalizeExclusiveModelProfiles() {
+  const db = openDatabase();
+  const kinds = db.prepare("SELECT DISTINCT kind FROM model_profiles").all().map((row) => row.kind);
+  const changed = [];
+  db.exec("BEGIN");
+  try {
+    for (const kind of kinds) {
+      const rows = db.prepare("SELECT id, enabled, is_default FROM model_profiles WHERE kind = ? ORDER BY name").all(kind);
+      const alreadyMigrated = rows.some((row) => row.is_default) && rows.every((row) => row.enabled);
+      if (alreadyMigrated) continue;
+      const previousActive = rows.find((row) => row.enabled) || rows[0];
+      for (const row of rows) {
+        const nextDefault = row.id === previousActive.id ? 1 : 0;
+        if (!row.enabled || row.is_default !== nextDefault) {
+          db.prepare("UPDATE model_profiles SET enabled = 1, is_default = ?, updated_at = ? WHERE id = ?")
+            .run(nextDefault, nowIso(), row.id);
+          if (!changed.includes(row.id)) changed.push(row.id);
+        }
+      }
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return changed;
 }
 
 /** 应用启动时调用：把仍处于 recording 状态的会议标记为 interrupted（上次进程未正常结束录音的兜底）。 */

@@ -112,13 +112,19 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     return remove;
   }, []);
 
-  // 从已启用的档案中选出第一个 stt（转写）与 llm（总结）配置，作为本次会话使用的模型。
+  // 模型选择（智谱式多可用语义）：所有已配置档案同时可用；具体用哪个在任务开启时勾选。
+  // stt 支持「本场录音」的临时选择（准备卡/录音条下拉），未选择时走该类默认档再退第一条可用；
+  // llm（滚动纪要/手动生成纪要）走默认档——按任务换模型在 AI 问答的面板切换器里做。
+  const [recordingSttProfileId, setRecordingSttProfileId] = useState<string | undefined>(undefined);
   const sttProfile = useMemo(
-    () => profiles.find((profile) => profile.kind === "stt" && profile.enabled),
-    [profiles]
+    () => profiles.find((profile) => profile.kind === "stt" && profile.id === recordingSttProfileId)
+      || profiles.find((profile) => profile.kind === "stt" && profile.isDefault)
+      || profiles.find((profile) => profile.kind === "stt" && profile.enabled),
+    [profiles, recordingSttProfileId]
   );
   const llmProfile = useMemo(
-    () => profiles.find((profile) => profile.kind === "llm" && profile.enabled),
+    () => profiles.find((profile) => profile.kind === "llm" && profile.isDefault)
+      || profiles.find((profile) => profile.kind === "llm" && profile.enabled),
     [profiles]
   );
 
@@ -419,6 +425,12 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     /** 正在录音的会议（录音中切换选中项后仍指向它），供全局录音入口与错误绑定使用。 */
     recordingMeetingId,
     recordingMeeting: recordingMeeting ?? (recordingMeetingId ? recordingMeetingRef.current ?? undefined : undefined),
+    /** 本场录音显式勾选的转写档案 id；undefined = 跟随默认档。 */
+    recordingSttProfileId,
+    /** 任务开启时勾选转写模型：录音中切换从下一个 8 秒块生效，无需重开录音。 */
+    selectSttProfile: setRecordingSttProfileId,
+    /** 本场实际使用的转写档案（勾选 > 默认档 > 第一条可用），录音条/准备卡展示用。 */
+    activeSttProfile: sttProfile,
     warning,
     transcriptionFailure,
     summaryBusy,

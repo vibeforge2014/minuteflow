@@ -378,7 +378,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const [modelListError, setModelListError] = useState<string | null>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
-  /** 已保存列表「正在使用」开关的行级忙碌态，防止连点。 */
+  /** 已保存列表「设为默认」的行级忙碌态，防止连点。 */
   const [switchBusy, setSwitchBusy] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<AppUpdateCheckResult | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -677,16 +677,17 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     }
   };
 
-  /** 已保存档案的「正在使用」单选切换：主进程同 kind 互斥停用兄弟档案，这里整表刷新反映。 */
-  const toggleActiveProfile = async (profile: ModelProfile) => {
+  /** 把档案设为该类默认档（同类互斥）：未显式选模的任务（快速录音/滚动纪要/说话人分离）走默认档；
+   *  智谱式多可用语义下所有档案同时可用，默认档只是兜底，不影响任务时勾选其他模型。 */
+  const makeDefaultProfile = async (profile: ModelProfile) => {
     if (!profile.id || switchBusy) return;
     setSwitchBusy(profile.id);
     try {
-      await api.models.save({ ...profile, enabled: !profile.enabled });
+      await api.models.setDefault(profile.kind, profile.id!);
       await loadProfiles();
-      if (editing?.id === profile.id) setEditing({ ...editing, enabled: !profile.enabled });
+      if (editing?.id === profile.id) setEditing({ ...editing, isDefault: true });
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "切换失败");
+      setStatus(error instanceof Error ? error.message : "设置默认失败");
     } finally {
       setSwitchBusy(null);
     }
@@ -723,8 +724,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
       setEditing(saved);
       setApiKey("");
       setStatus("配置已安全保存。");
-      // 保存的档案即「正在使用」：主进程已互斥停用兄弟档案，整表刷新让目录立即反映。
-      if (saved.enabled !== false) await loadProfiles();
+      // 保存即启用（同类首条自动成为默认档），整表刷新让目录立即反映。
+      await loadProfiles();
       onClose();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "保存失败");
@@ -875,17 +876,18 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     ? downloadState.version
     : updateState?.readyVersion || "";
 
-  // 已保存档案按任务分区展示（转写档案与人声分离档案不再混排）：
-  // 每个分区内「正在使用」的排在最前，其余保持既有顺序，扫一眼就能找到在用的那条。
-  const enabledFirst = (left: ModelProfile, right: ModelProfile) => Number(right.enabled) - Number(left.enabled);
-  const savedTranscriptionProfiles = [...profiles.filter((profile) => profile.kind === "stt")].sort(enabledFirst);
-  const savedDiarizationProfiles = [...profiles.filter((profile) => profile.kind === "diarization")].sort(enabledFirst);
-  const savedLlmProfiles = [...profiles.filter((profile) => profile.kind === "llm")].sort(enabledFirst);
+  // 已保存档案按任务分区展示（转写档案与人声分离档案不混排）：
+  // 智谱式多可用——全部档案同时可用，分区内默认档排在最前，任务开启时再按需勾选其他模型。
+  const defaultFirst = (left: ModelProfile, right: ModelProfile) => Number(Boolean(right.isDefault)) - Number(Boolean(left.isDefault));
+  const savedTranscriptionProfiles = [...profiles.filter((profile) => profile.kind === "stt")].sort(defaultFirst);
+  const savedDiarizationProfiles = [...profiles.filter((profile) => profile.kind === "diarization")].sort(defaultFirst);
+  const savedLlmProfiles = [...profiles.filter((profile) => profile.kind === "llm")].sort(defaultFirst);
 
   /**
    * 已保存档案行的统一渲染（目录各任务分区共用）。
-   * 副标题区分两类信息：转写档案补运行时（同名 ggml-small 也能分清 whisper.cpp/Python），
-   * 开关文案按 kind 说明「正在使用」的是转写还是说话人分离。
+   * 智谱式多可用：保存即启用、全部可用；右侧是「默认档」状态——默认档供未显式选模的
+   * 任务兜底，点「设为默认」切换；具体用哪个模型在任务开启时勾选（录音条/导入抽屉/问答面板）。
+   * 副标题区分两类信息：转写档案补运行时（同名 ggml-small 也能分清 whisper.cpp/Python）。
    */
   const renderSavedRow = (profile: ModelProfile, taskLabel: string) => {
     const visualVerified = Boolean(profile.options?.visualSummaryEnabled && profile.options?.visualSummaryVerifiedAt);
@@ -905,15 +907,18 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
             <small>{profile.kind === "diarization" ? (profile.options?.segmentationModelPath && profile.options?.embeddingModelPath ? "声纹识别已就绪" : "待补齐模型") : profile.transport === "apple-speech" ? "系统内置 · 零配置" : `${profile.model || "尚未选择模型"}${runtimeLabel}`}</small>
           </span>
         </button>
-        <button
-          className={`model-switch ${profile.enabled ? "is-on" : ""}`}
-          role="switch"
-          aria-checked={profile.enabled}
-          aria-label={profile.enabled ? `停用${taskLabel}：${profile.name}` : `将 ${profile.name} 设为${taskLabel}的正在使用`}
-          title={profile.enabled ? `${taskLabel}正在使用 · 点击停用` : `点击设为${taskLabel}正在使用`}
-          disabled={switchBusy === profile.id}
-          onClick={() => void toggleActiveProfile(profile)}
-        ><span className="model-switch__knob" /></button>
+        {profile.isDefault ? (
+          <span className="model-default-badge" title={`${taskLabel}的默认模型：未手动选择时的新任务用它`}>默认</span>
+        ) : (
+          <button
+            type="button"
+            className="model-set-default"
+            aria-label={`将 ${profile.name} 设为${taskLabel}的默认模型`}
+            title={`设为${taskLabel}默认：未手动选择模型的新任务（如快速录音）将使用它`}
+            disabled={switchBusy === profile.id}
+            onClick={() => void makeDefaultProfile(profile)}
+          >设为默认</button>
+        )}
       </div>
     );
   };
@@ -992,7 +997,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                     <div className="model-catalog__enhancement">
                       <div className="model-catalog__enhancement-heading">
                         <span>说话人分离</span>
-                        <small>可选增强 · 与转写服务各自独立启用，多人会议自动区分发言人</small>
+                        <small>可选增强 · 与转写服务各自独立选择，多人会议自动区分发言人</small>
                       </div>
                       <button className={editing?.transport === "sherpa-onnx" ? "is-selected" : ""} onClick={() => startPreset("sherpa")}><span className="profile-icon"><FingerprintSimple size={18} /></span><span><strong>本地声纹识别</strong><small>数据不出本机 · 首次使用需下载约 70MB 模型</small></span>{editing?.transport === "sherpa-onnx" && <CheckCircle size={16} weight="fill" />}</button>
                       {!!savedDiarizationProfiles.length && (
@@ -1013,8 +1018,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                     <div className="profile-editor-heading">
                       <span className="profile-editor-heading__icon">{editing.kind === "stt" ? <Waveform size={24} /> : editing.kind === "diarization" ? <FingerprintSimple size={24} /> : <Sparkle size={24} />}</span>
                       <div><h2>{editing.name}</h2><p>{editing.kind === "stt" ? "将会议音频转换为可编辑的中文与多语言文本。" : editing.kind === "diarization" ? "在多人会议中区分不同发言人，并按声纹簿自动套用姓名。" : "用于会议总结、行动项提取与内容整理。"}</p></div>
-                      {editing.id && !editing.enabled && (
-                        <button type="button" className="button button--small profile-editor-heading__enable" onClick={() => void toggleActiveProfile(editing)}>设为正在使用</button>
+                      {editing.id && !editing.isDefault && (
+                        <button type="button" className="button button--small profile-editor-heading__enable" onClick={() => void makeDefaultProfile(editing)}>设为默认模型</button>
                       )}
                     </div>
                     <div className="profile-editor-divider" />

@@ -177,6 +177,7 @@ import {
   saveJob,
   saveMeeting,
   saveModelProfile,
+  setDefaultModelProfile,
   saveVoiceprintSample
 } from "../electron/database.mjs";
 
@@ -2454,43 +2455,50 @@ describe("模型设置易用性：模型列表拉取与错误翻译", () => {
   });
 });
 
-describe("模型档案单选「正在使用」", () => {
+describe("模型档案多可用与默认档（智谱式）", () => {
   const llmProfile = (id: string, name: string): ModelProfile => ({
     id, name, kind: "llm", transport: "openai-chat",
     baseUrl: "https://api.example.com/v1", model: "m", options: {}, enabled: true
   });
 
-  it("saving an enabled profile deactivates siblings of the same kind only", () => {
+  it("saving never deactivates siblings; the first profile of a kind auto-becomes default", () => {
+    const first = saveModelProfile(llmProfile("usability-p1", "服务 A"));
+    const second = saveModelProfile(llmProfile("usability-p2", "服务 B"));
+    // 智谱式多可用：保存即启用，兄弟档案互不停用；首条自动成为默认档。
+    expect(first.isDefault).toBe(true);
+    expect(second.isDefault).toBe(false);
+    const stt = saveModelProfile({ ...llmProfile("usability-s1", "转录服务"), kind: "stt" as const, transport: "openai-audio" as const });
+    expect(stt.isDefault).toBe(true);
+    const profiles = listModelProfiles().filter((profile) => profile.id.startsWith("usability-"));
+    expect(profiles.every((profile) => profile.enabled)).toBe(true);
+    expect(profiles.filter((profile) => profile.kind === "llm" && profile.isDefault).length).toBe(1);
+  });
+
+  it("setDefaultModelProfile moves the default exclusively within the kind", () => {
     saveModelProfile(llmProfile("usability-p1", "服务 A"));
     saveModelProfile(llmProfile("usability-p2", "服务 B"));
-    // 保存 B（启用）后同类只剩 B；stt 档案不受影响。
-    const stt = { ...llmProfile("usability-s1", "转录服务"), kind: "stt" as const, transport: "openai-audio" as const };
-    saveModelProfile(stt);
-    saveModelProfile(llmProfile("usability-p1", "服务 A"));
+    setDefaultModelProfile("llm", "usability-p2");
     const profiles = listModelProfiles().filter((profile) => profile.id.startsWith("usability-"));
-    expect(profiles.find((profile) => profile.id === "usability-p1")?.enabled).toBe(true);
-    expect(profiles.find((profile) => profile.id === "usability-p2")?.enabled).toBe(false);
-    expect(profiles.find((profile) => profile.id === "usability-s1")?.enabled).toBe(true);
+    expect(profiles.find((profile) => profile.id === "usability-p1")?.isDefault).toBe(false);
+    expect(profiles.find((profile) => profile.id === "usability-p2")?.isDefault).toBe(true);
+    // stt 类不受影响。
+    saveModelProfile({ ...llmProfile("usability-s1", "转录服务"), kind: "stt" as const, transport: "openai-audio" as const });
+    setDefaultModelProfile("llm", "usability-p1");
+    expect(listModelProfiles().find((profile) => profile.id === "usability-s1")?.isDefault).toBe(true);
   });
 
-  it("saving a disabled profile never steals the active slot", () => {
-    saveModelProfile(llmProfile("usability-p3", "服务 C"));
-    saveModelProfile({ ...llmProfile("usability-p3", "服务 C"), enabled: false });
-    const active = listModelProfiles().filter((profile) => profile.kind === "llm" && profile.enabled);
-    // 停用保存不抢「正在使用」位。
-    expect(active.some((profile) => profile.id === "usability-p3")).toBe(false);
-  });
-
-  it("startup migration keeps only the first enabled profile per kind", () => {
-    // 直接写库模拟历史遗留的「同类多个同时启用」，迁移应按运行时的名称序保留第一个。
+  it("startup migration re-enables legacy disabled profiles and keeps the previous active one as default", () => {
+    // 直接写库模拟旧「单启用」语义的数据：同类多条、只有一条 enabled。
     const db = openDatabase();
-    db.prepare("UPDATE model_profiles SET enabled = 1 WHERE kind = 'llm' AND id LIKE 'usability-%'").run();
-    const before = db.prepare("SELECT COUNT(*) AS n FROM model_profiles WHERE kind = 'llm' AND enabled = 1 AND id LIKE 'usability-%'").get();
-    expect(before.n).toBeGreaterThanOrEqual(2);
+    saveModelProfile(llmProfile("usability-p1", "服务 A"));
+    saveModelProfile(llmProfile("usability-p2", "服务 B"));
+    db.prepare("UPDATE model_profiles SET enabled = CASE id WHEN 'usability-p2' THEN 1 ELSE 0 END, is_default = 0 WHERE kind = 'llm' AND id LIKE 'usability-%'").run();
     normalizeExclusiveModelProfiles();
-    const remaining = db.prepare("SELECT id FROM model_profiles WHERE kind = 'llm' AND enabled = 1 AND id LIKE 'usability-%' ORDER BY name").all();
-    expect(remaining.length).toBe(1);
-    expect(remaining[0].id).toBe("usability-p1"); // 名称序：服务 A
+    const rows = db.prepare("SELECT id, enabled, is_default FROM model_profiles WHERE kind = 'llm' AND id LIKE 'usability-%' ORDER BY name").all();
+    // 全部恢复可用，旧生效档（服务 B）成为默认档。
+    expect(rows.every((row) => row.enabled === 1)).toBe(true);
+    expect(rows.find((row) => row.id === "usability-p2")?.is_default).toBe(1);
+    expect(rows.filter((row) => row.is_default === 1).length).toBe(1);
   });
 });
 

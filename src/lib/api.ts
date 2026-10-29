@@ -372,7 +372,7 @@ const browserApi: MeetingAPI = {
   chat: {
     // 浏览器预览没有真实模型：从传入的纪要上下文拼一个占位回答（含示例思考过程），
     // 并按小块模拟流式输出（先思考、后正文），让对话框可演示真实节奏。
-    async send(question, _history, context, onDelta) {
+    async send(question, _history, context, onDelta, profileId) {
       const points = context.summary.keyPoints.slice(0, 3);
       const lines = ["**（浏览器预览模式，未调用真实模型）**", "", `关于「${question}」：`];
       if (points.length) {
@@ -393,7 +393,10 @@ const browserApi: MeetingAPI = {
       // 到达节奏对标真实 API（约 50 字/秒）：先思考、后正文，演示观感与真实使用一致。
       await stream(reasoning, "reasoning", 4, 70);
       await stream(answer, "content", 3, 65);
-      return { answer, reasoning, profileName: "浏览器预览" };
+      const profileName = profileId
+        ? (JSON.parse(localStorage.getItem(profileKey) || "[]") as ModelProfile[]).find((item) => item.id === profileId)?.name
+        : undefined;
+      return { answer, reasoning, profileName: profileName ?? "浏览器预览" };
     }
   },
   models: {
@@ -404,11 +407,20 @@ const browserApi: MeetingAPI = {
     async save(profile) {
       const profiles = JSON.parse(localStorage.getItem(profileKey) || "[]") as ModelProfile[];
       const saved = { ...profile, id: profile.id || crypto.randomUUID() };
+      // 浏览器预览与主进程同语义：同类还没有默认档时保存即默认，同类互不停用。
+      const hasOtherDefault = profiles.some((item) => item.id !== saved.id && item.kind === saved.kind && item.isDefault);
+      saved.isDefault = profile.isDefault === true || !hasOtherDefault;
       const next = profiles.some((item) => item.id === saved.id)
-        ? profiles.map((item) => item.id === saved.id ? saved : item)
+        ? profiles.map((item) => item.id === saved.id ? saved : (item.kind === saved.kind && saved.isDefault ? { ...item, isDefault: false } : item))
         : [...profiles, saved];
       localStorage.setItem(profileKey, JSON.stringify(next));
       return saved;
+    },
+    async setDefault(kind, id) {
+      const profiles = JSON.parse(localStorage.getItem(profileKey) || "[]") as ModelProfile[];
+      localStorage.setItem(profileKey, JSON.stringify(
+        profiles.map((item) => ({ ...item, isDefault: item.kind === kind && item.id === id }))
+      ));
     },
     async test(profile) {
       await new Promise((resolve) => setTimeout(resolve, 500));

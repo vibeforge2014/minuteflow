@@ -50,9 +50,9 @@ contextBridge.exposeInMainWorld("meetingAPI", {
   chat: {
     // 流式问答：传入 onDelta 时生成 streamId 并订阅 chat:delta 增量（按 id 过滤），
     // invoke 结束（成功/失败）后注销监听；不传 onDelta 则保持一次性返回。
-    send: (question, history, context, onDelta) => {
+    send: (question, history, context, onDelta, profileId) => {
       if (typeof onDelta !== "function") {
-        return invoke("chat:send", { question, history, context });
+        return invoke("chat:send", { question, history, context, profileId });
       }
       const streamId = (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
         ? globalThis.crypto.randomUUID()
@@ -61,13 +61,14 @@ contextBridge.exposeInMainWorld("meetingAPI", {
         if (payload?.id === streamId) onDelta({ content: payload.content, reasoning: payload.reasoning });
       };
       ipcRenderer.on("chat:delta", listener);
-      return invoke("chat:send", { streamId, question, history, context })
+      return invoke("chat:send", { streamId, question, history, context, profileId })
         .finally(() => ipcRenderer.removeListener("chat:delta", listener));
     }
   },
   models: {
     list: () => invoke("models:list"),
     save: (profile, apiKey) => invoke("models:save", profile, apiKey),
+    setDefault: (kind, id) => invoke("models:set-default", kind, id),
     test: (profile, apiKey) => invoke("models:test", profile, apiKey),
     listModels: (profile, apiKey) => invoke("models:list-models", profile, apiKey),
     deleteSecret: (secretId) => invoke("models:delete-secret", secretId),
