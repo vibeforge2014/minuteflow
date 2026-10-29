@@ -422,6 +422,22 @@ const browserApi: MeetingAPI = {
         profiles.map((item) => ({ ...item, isDefault: item.kind === kind && item.id === id }))
       ));
     },
+    async delete(id) {
+      const profiles = JSON.parse(localStorage.getItem(profileKey) || "[]") as ModelProfile[];
+      const target = profiles.find((item) => item.id === id);
+      if (!target) throw new Error("档案不存在，无法删除。");
+      let rest = profiles.filter((item) => item.id !== id);
+      // 预览与主进程同语义：删掉默认档时，同类剩余第一条补位。
+      const successor = target.isDefault ? rest.find((item) => item.kind === target.kind) : undefined;
+      if (successor) rest = rest.map((item) => item.id === successor.id ? { ...item, isDefault: true } : item);
+      localStorage.setItem(profileKey, JSON.stringify(rest));
+      return {
+        id,
+        kind: target.kind,
+        secretId: target.secretId ?? null,
+        nextDefaultId: successor?.id ?? null
+      };
+    },
     async test(profile) {
       await new Promise((resolve) => setTimeout(resolve, 500));
       if (profile.options.visualSummaryEnabled) {

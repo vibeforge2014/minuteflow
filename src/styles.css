@@ -3912,6 +3912,27 @@ html[data-surface="permission-helper"] #root {
   font-weight: 640;
 }
 
+/* 模型页用页面标题替代面包屑：一句说明交代这一页在决定什么。 */
+.settings-header__title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-header__title h1 {
+  margin: 0;
+  color: #2b2725;
+  font-size: 14px;
+  font-weight: 660;
+  letter-spacing: -.01em;
+}
+
+.settings-header__title p {
+  margin: 0;
+  color: #9a938e;
+  font-size: 10px;
+}
+
 .settings-content {
   min-width: 0;
   min-height: 0;
@@ -3956,7 +3977,7 @@ html[data-surface="permission-helper"] #root {
 .model-settings {
   height: 100%;
   display: grid;
-  grid-template-columns: 248px minmax(0, 1fr);
+  grid-template-columns: 264px minmax(0, 1fr);
 }
 
 .model-catalog {
@@ -3990,8 +4011,8 @@ html[data-surface="permission-helper"] #root {
 
 .model-catalog__section > span {
   padding: 0 7px 2px;
-  color: #aaa29d;
-  font-size: 9px;
+  color: #8f8781;
+  font-size: 10px;
   font-weight: 650;
 }
 
@@ -4013,6 +4034,7 @@ html[data-surface="permission-helper"] #root {
 .model-catalog__section > button:hover {
   border-color: #e8c7bd;
   background: #fffaf7;
+  transition: border-color var(--motion-fast) var(--ease-out-ui), background var(--motion-fast) var(--ease-out-ui);
 }
 
 .model-catalog__section > button.is-selected {
@@ -4036,21 +4058,8 @@ html[data-surface="permission-helper"] #root {
 }
 
 .model-catalog__section strong { font-size: 11px; }
-.model-catalog__section small { color: #96908c; font-size: 8px; }
+.model-catalog__section small { color: #8b8480; font-size: 10px; }
 .model-catalog__section > button > svg { color: var(--green); }
-
-/* 「本地 Whisper」的离线标签：把关键取舍（不联网）放在目录第一眼。 */
-.model-catalog__tag {
-  margin-left: 6px;
-  padding: 1px 5px;
-  color: #a64d39;
-  background: #fcf1e9;
-  border-radius: 5px;
-  font-size: 7px;
-  font-style: normal;
-  font-weight: 750;
-  vertical-align: 1px;
-}
 
 /* 说话人分离（可选增强）：与转写选择明显区隔的独立任务区——
    淡暖底整块卡片 + 一句职责说明，目录里一眼分清「转写」与「分离」两个任务。 */
@@ -4074,13 +4083,13 @@ html[data-surface="permission-helper"] #root {
 
 .model-catalog__enhancement-heading > span {
   color: #8a7f77;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 650;
 }
 
 .model-catalog__enhancement-heading > small {
-  color: #b0a69e;
-  font-size: 8px;
+  color: #a29890;
+  font-size: 10px;
   line-height: 1.5;
 }
 
@@ -4110,7 +4119,7 @@ html[data-surface="permission-helper"] #root {
   border-radius: 10px;
 }
 
-.model-catalog__row:hover { border-color: #e8c7bd; background: #fffaf7; }
+.model-catalog__row:hover { border-color: #e8c7bd; background: #fffaf7; transition: border-color var(--motion-fast) var(--ease-out-ui), background var(--motion-fast) var(--ease-out-ui); }
 .model-catalog__row.is-selected {
   border-color: #e59a85;
   background: #fff8f4;
@@ -4182,20 +4191,10 @@ html[data-surface="permission-helper"] #root {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.model-catalog__row-main small { color: #96908c; font-size: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.model-catalog__row-main small { color: #8b8480; font-size: 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
-.model-badge {
-  flex: 0 0 auto;
-  padding: 2px 5px;
-  border-radius: 999px;
-  font-size: 8px;
-  font-weight: 600;
-  line-height: 1.2;
-  white-space: nowrap;
-}
-
-.model-badge--visual { color: #3c7a52; background: #e2f2e6; }
-.model-badge--key { color: #8a8480; background: #f1efec; }
+/* 需要动手才能用的档案：问题直接写在副标题里，不用徽标占位。 */
+.model-catalog__row-main small.is-issue { color: #a64d39; }
 
 .model-switch {
   position: relative;
@@ -4450,28 +4449,181 @@ html[data-surface="permission-helper"] #root {
 
 .profile-editor-heading p { font-size: 10px; }
 
-/* 在线/本地 Whisper 的一键互切提示：让「换一种转写方式」不再藏在目录里。 */
-.transcription-alternative {
+.profile-editor-heading__text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 标题下的两枚只读标签：先讲音频是否离开设备，再讲服务商与协议。 */
+.profile-editor-heading__meta {
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin: 0 0 16px;
-  padding: 12px 14px;
-  border: 1px solid #f0ddd3;
-  border-radius: 11px;
-  background: linear-gradient(135deg, #fffaf7 0%, #fdf3ee 100%);
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.transcription-alternative > span {
-  flex: 1;
-  min-width: 0;
+.profile-chip {
+  padding: 2px 7px;
+  color: #8a7f77;
+  background: #f6f2ef;
+  border-radius: 6px;
+  font-size: 9.5px;
+  font-weight: 560;
+  white-space: nowrap;
+}
+
+.profile-chip.is-online { color: #a64d39; background: #fcf1e9; }
+
+/* 标题区「⋯」菜单：删除密钥 / 删除档案收在这里，都有确认。 */
+.profile-menu { position: relative; margin-left: auto; flex: none; }
+
+.profile-menu__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 8;
+  min-width: 132px;
+  display: flex;
+  flex-direction: column;
+  padding: 5px;
+  background: #fff;
+  border: 1px solid #ece4de;
+  border-radius: 10px;
+  box-shadow: 0 14px 30px rgba(61, 43, 33, .12);
+  animation: settings-pane-in 160ms var(--ease-emphasized) both;
+}
+
+.profile-menu__panel button {
+  padding: 7px 9px;
+  color: #4a4340;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.profile-menu__panel button:hover { background: #f7f2ee; }
+.profile-menu__panel button.is-danger { color: #a63e41; }
+.profile-menu__panel button.is-danger:hover { background: #fdf1f1; }
+
+/* 本机服务的次级验证入口：不占保存底栏。 */
+.local-test-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.local-test-row small { color: #9a938e; font-size: 10px; }
+
+/* 没有任何配置时的编辑器：一句引导代替空白表单。 */
+.profile-editor-empty {
+  max-width: 380px;
+  margin: 15vh auto 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.profile-editor-empty__icon {
+  width: 44px;
+  height: 44px;
   display: grid;
-  gap: 3px;
+  place-items: center;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 12px;
 }
 
-.transcription-alternative strong { color: #5b4439; font-size: 11.5px; }
-.transcription-alternative small { color: #927e74; font-size: 9.5px; line-height: 1.55; }
-.transcription-alternative > button { flex: none; }
+.profile-editor-empty h2 {
+  margin: 0;
+  color: #2b2725;
+  font-size: 15px;
+}
+
+.profile-editor-empty p {
+  margin: 0;
+  color: #8b8480;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* 服务商下拉占满一行：它是新建在线草稿时的第一个选择。 */
+.form-grid__full { grid-column: 1 / -1; }
+
+/* 「添加服务」：目录底部唯一的添加入口，没有配置时自动展开并贴顶。 */
+.model-catalog__add {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid #efeae6;
+}
+
+.model-catalog__add.is-empty {
+  margin-top: 0;
+  border-top: none;
+}
+
+.model-catalog__add-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 8px;
+  color: #a64d39;
+  background: transparent;
+  border: none;
+  border-radius: 9px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out-ui);
+}
+
+.model-catalog__add-trigger:hover { background: #fdf3ee; }
+.model-catalog__add-trigger > svg { flex: none; }
+
+.model-catalog__add-trigger > span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.model-catalog__add-trigger strong { font-size: 11px; font-weight: 640; }
+.model-catalog__add-trigger small { color: #a99e96; font-size: 9.5px; }
+
+.model-catalog__add-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0 2px;
+  animation: settings-pane-in 180ms var(--ease-emphasized) both;
+}
+
+.model-catalog__add-options button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px 7px 32px;
+  color: #45403d;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-catalog__add-options button:hover { background: #fffaf7; }
+.model-catalog__add-options strong { font-size: 11px; font-weight: 600; }
+.model-catalog__add-options small { color: #9d958f; font-size: 9.5px; }
 
 .profile-editor-divider {
   height: 1px;
@@ -5206,6 +5358,12 @@ html[data-surface="permission-helper"] #root {
   background: #fff0f0;
 }
 
+/* 进行中的反馈用中性色：绿色只属于“成功”，不再让所有结果都读作成功。 */
+.connection-status.is-info {
+  color: #6b625c;
+  background: #f5f2f0;
+}
+
 @keyframes status-slide-in {
   from { opacity: 0; transform: translateY(4px); }
 }
@@ -5215,6 +5373,7 @@ html[data-surface="permission-helper"] #root {
   z-index: 4;
   bottom: -32px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin: 18px -32px -32px;
@@ -5222,6 +5381,12 @@ html[data-surface="permission-helper"] #root {
   background: rgba(255, 255, 255, .98);
   border-top: 1px solid #ebe7e4;
   box-shadow: 0 -12px 24px rgba(61, 43, 33, .035);
+}
+
+/* 在线服务的状态行固定在底栏上方：滚到表单顶部也看得到结果。 */
+.profile-actions > .connection-status {
+  flex: 1 0 100%;
+  margin: 0 0 2px;
 }
 
 .profile-actions > span {

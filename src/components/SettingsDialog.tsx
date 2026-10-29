@@ -14,6 +14,7 @@ import {
   CloudArrowDown,
   Cpu,
   Database,
+  DotsThree,
   GearSix,
   DownloadSimple,
   FingerprintSimple,
@@ -26,7 +27,6 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkle,
-  Trash,
   Waveform,
   X
 } from "@phosphor-icons/react";
@@ -81,12 +81,93 @@ const visualFingerprint = (profile: ModelProfile) => JSON.stringify({
 });
 const isLocalWhisperTransport = (transport: string | undefined) =>
   !!transport && (LOCAL_WHISPER_TRANSPORTS as readonly string[]).includes(transport);
+/** 已保存档案的排序：默认档置顶，其余保持名称序。 */
+const defaultFirst = (left: ModelProfile, right: ModelProfile) =>
+  Number(Boolean(right.isDefault)) - Number(Boolean(left.isDefault));
+/** 本机转写家族：本地 Whisper 四种运行时与 Apple 系统识别。 */
+const isLocalSttProfile = (profile: ModelProfile) =>
+  isLocalWhisperTransport(profile.transport) || profile.transport === "apple-speech";
+/** 本机总结家族：离线规则纪要与 Ollama。 */
+const isLocalLlmProfile = (profile: ModelProfile) =>
+  profile.transport === "local-summary" || profile.transport === "ollama";
+/** 本机服务：选完即生效，不出现保存底栏（说话人分离也归入本机）。 */
+const isLocalServiceProfile = (profile: ModelProfile) =>
+  isLocalSttProfile(profile) || profile.transport === "sherpa-onnx" || profile.transport === "local-summary";
+/** 档案的服务商标识：按端点/传输匹配预设，名称只作展示——改名不会掉回「自定义配置」。 */
+const providerKeyForProfile = (profile: ModelProfile): string => {
+  if (isLocalWhisperTransport(profile.transport)) return "whisper";
+  if (profile.transport === "apple-speech") return "appleSpeech";
+  if (profile.transport === "sherpa-onnx") return "sherpa";
+  if (profile.transport === "local-summary") return "localSummary";
+  if (profile.transport === "ollama") return "ollama";
+  let host = "";
+  try {
+    host = new URL(profile.baseUrl.trim()).host.toLowerCase();
+  } catch {
+    // 手填地址尚未成型：保持自定义配置。
+  }
+  // 草稿没有 id：先按预设名称认回来（Azure 这类占位端点无法从 host 反推）。
+  if (!profile.id) {
+    const named = Object.entries(providerPresets).find(([, preset]) =>
+      preset.name === profile.name && preset.transport === profile.transport && preset.kind === profile.kind
+    );
+    if (named) return named[0];
+  }
+  const key = host ? presetHostIndexByKind.get(profile.kind)?.get(host) : undefined;
+  return key ?? "";
+};
+/** 目录副标题里的问题提示：只报需要用户动手的状态，不用正向徽标占位。 */
+const profileIssue = (profile: ModelProfile): string | null => {
+  if (profile.kind === "diarization") {
+    return profile.options.segmentationModelPath && profile.options.embeddingModelPath ? null : "缺少声纹模型";
+  }
+  if (profile.transport === "apple-speech" || profile.transport === "local-summary" || profile.transport === "ollama") return null;
+  if (isLocalWhisperTransport(profile.transport)) return profile.options.modelPath ? null : "缺少本地模型";
+  if (!profile.model) return "缺少模型名称";
+  if (!profile.secretId) return "缺少 API Key";
+  return null;
+};
+/** 标题旁的本机/在线标签：把「音频是否离开设备」放在第一眼。 */
+const describeTransport = (profile: ModelProfile): { text: string; online: boolean } => {
+  if (profile.transport === "apple-speech") {
+    return profile.options.allowServer === true
+      ? { text: "在线 · 音频发送至 Apple", online: true }
+      : { text: "本机 · 音频不出设备", online: false };
+  }
+  if (profile.transport === "sherpa-onnx") return { text: "本机 · 数据不出设备", online: false };
+  if (profile.transport === "local-summary") return { text: "本机 · 完全离线", online: false };
+  if (isLocalWhisperTransport(profile.transport)) return { text: "本机 · 音频不出设备", online: false };
+  if (profile.transport === "ollama") return { text: "本机 · Ollama 服务", online: false };
+  return profile.kind === "stt"
+    ? { text: "在线 · 音频发送至服务商", online: true }
+    : { text: "在线 · 文本发送至服务商", online: true };
+};
+/** 本地 Whisper 的展示名：去掉 ggml 前缀与扩展名（ggml-small → Small）。 */
+const whisperModelLabel = (model: string) => {
+  const raw = (model || "")
+    .replace(/^ggml[-_]/i, "")
+    .replace(/\.(?:pt|bin|gguf)$/i, "")
+    .replace(/[-_]+/g, " ")
+    .trim();
+  return raw ? raw.replace(/\b[a-z]/g, (character) => character.toUpperCase()) : "";
+};
+/** 本机档案的自动名称：不再要求用户为配置起名，同名副本自然消失。 */
+const localProfileName = (profile: ModelProfile): string => {
+  if (profile.transport === "apple-speech") return "Apple 语音识别";
+  if (profile.transport === "sherpa-onnx") return "本地声纹识别";
+  if (profile.transport === "local-summary") return "本机基础纪要";
+  if (isLocalWhisperTransport(profile.transport)) {
+    const label = whisperModelLabel(profile.model);
+    return label ? `本地 Whisper · ${label}` : "本地 Whisper";
+  }
+  return profile.name;
+};
 /** 新建档案的空白模板（自定义服务从这里开始）。 */
 const emptyProfile: ModelProfile = {
   name: "OpenAI 兼容模型",
   kind: "llm",
   transport: "openai-chat",
-  baseUrl: "https://api.openai.com/v1",
+  baseUrl: "",
   model: "",
   options: { timeoutMs: 60_000 },
   enabled: true
@@ -249,7 +330,7 @@ const providerPresets: Record<string, Partial<ModelProfile>> = {
     options: { timeoutMs: 120_000 }
   },
   sherpa: {
-    name: "本地 sherpa-onnx",
+    name: "本地声纹识别",
     kind: "diarization",
     transport: "sherpa-onnx",
     baseUrl: "",
@@ -352,6 +433,12 @@ export type SettingsTab = "llm" | "transcription" | "general" | "storage" | "upd
 /** 打开设置时的定位意图：直接把编辑器切到对应表单，而不是让用户自己在目录里找。 */
 export type SettingsFocus = "local-whisper" | "online-transcription" | "apple-speech";
 
+type StatusTone = "info" | "success" | "error";
+
+/** 反馈归属：字段一改或切页，旧结果自动失效，不会停在已改过的配置旁边。 */
+const profileStatusKey = (tab: SettingsTab, profile: ModelProfile | null) =>
+  [tab, profile?.id ?? "new", profile?.name ?? "", profile?.transport ?? "", profile?.baseUrl ?? "", profile?.model ?? ""].join("|");
+
 export function SettingsDialog({ open, initialTab, initialFocus, onClose, licenseStatus, onLicenseStatusChange, recordingActive = false }: { open: boolean; initialTab?: SettingsTab; initialFocus?: SettingsFocus; onClose(): void; licenseStatus: LicenseStatus | null; onLicenseStatusChange(status: LicenseStatus): void; recordingActive?: boolean }) {
   const profiles = useMeetingStore((state) => state.profiles);
   const setProfiles = useMeetingStore((state) => state.setProfiles);
@@ -364,9 +451,15 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const [editing, setEditing] = useState<ModelProfile | null>(null);
   /** 密钥输入框的明文值（保存后只留 secretId 引用，不回显）。 */
   const [apiKey, setApiKey] = useState("");
-  /** 测试/保存的结果反馈。 */
-  const [status, setStatus] = useState<string | null>(null);
+  /** 测试/保存的结果反馈：带 tone 与归属键，错误不再显示成成功色。 */
+  const [status, setStatus] = useState<{ text: string; tone: StatusTone; key: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 目录「添加服务」展开态；没有已保存档案时强制展开。 */
+  const [addOpen, setAddOpen] = useState(false);
+  /** 标题区「⋯」菜单（删除档案 / 删除密钥）。 */
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const profileMenuRef = useRef<HTMLDivElement | null>(null);
+  const profileConfirm = useConfirmDialog();
   /** 配置面板“世代”：目录里切换选中服务（预设/已保存/自定义）时 +1，
    *  驱动编辑器面板重放进场过渡；字段编辑不递增，打字不会打断输入。 */
   const [editorGeneration, setEditorGeneration] = useState(0);
@@ -419,6 +512,12 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     onEscape: onClose
   });
   const { mounted, closing } = useExitPresence(open, 170);
+  /** 当前反馈是否仍属于这份配置：字段/页面一变就隐藏，避免旧结果误导。 */
+  const statusKey = profileStatusKey(tab, editing);
+  const visibleStatus = status && status.key === statusKey ? status : null;
+  const pushStatus = (text: string, tone: StatusTone, key = statusKey) => setStatus({ text, tone, key });
+  const statusClass = (tone: StatusTone) =>
+    `connection-status${tone === "error" ? " is-error" : tone === "info" ? " is-info" : " is-success"}`;
   // 正式桌面端支持 macOS / Windows；开发环境额外显示，便于用 ?preview=desktop 做浏览器视觉验收。
   const showUpdateSettings = api.system.platform === "darwin"
     || api.system.platform === "win32"
@@ -449,25 +548,39 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   }, [open, initialTab]);
 
   // 切到 AI 总结/转录页时，为编辑器选一个初始档案：
-  // 优先取该用途已保存的第一个档案，否则落回默认预设（OpenAI / 本地 Whisper）。
+  // 默认档优先（与目录置顶一致）；没有已保存档案时保持空态，由「添加服务」引导。
   // 转录页还承载说话人分离档案（diarization），已在编辑时不要用 stt 档案把它顶掉。
   useEffect(() => {
     if (!open || (tab !== "llm" && tab !== "transcription")) return;
     const targetKind: ModelProfile["kind"] = tab === "llm" ? "llm" : "stt";
     const acceptedKinds = tab === "llm" ? ["llm"] : ["stt", "diarization"];
     if (editing && acceptedKinds.includes(editing.kind)) return;
-    const saved = profiles.find((profile) => profile.kind === targetKind);
-    if (saved) {
-      setEditing(normalizeLegacyProviderProfile(saved));
-      return;
-    }
-    const preset = tab === "llm" ? providerPresets.openai : providerPresets.whisper;
-    setEditing({
-      ...emptyProfile,
-      ...preset,
-      options: { ...emptyProfile.options, ...(preset.options ?? {}) }
-    });
+    const saved = [...profiles.filter((profile) => profile.kind === targetKind)].sort(defaultFirst)[0];
+    setEditing(saved ? normalizeLegacyProviderProfile(saved) : null);
   }, [editing, open, profiles, tab]);
+
+  // 切页时收起添加面板与「⋯」菜单，避免跨页浮层残留。
+  useEffect(() => {
+    setAddOpen(false);
+    setProfileMenuOpen(false);
+  }, [tab]);
+
+  // 档案切换后收起「⋯」菜单。
+  useEffect(() => {
+    setProfileMenuOpen(false);
+  }, [editing?.id]);
+
+  // 「⋯」菜单点外部关闭（与模型下拉一致）。
+  useEffect(() => {
+    if (!profileMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (profileMenuRef.current && !profileMenuRef.current.contains(event.target as Node)) {
+        setProfileMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [profileMenuOpen]);
 
   // 深链定位（转写失败横幅 / 引导里的「去配置」）：跳过目录浏览，直接把编辑器切到
   // 对应表单。本地已有同类档案时优先复用并标记为启用——保存即生效，不会凭空多一份副本。
@@ -547,11 +660,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [modelMenuOpen]);
 
-  // 用名称+transport 反查当前档案命中的预设（驱动下拉框回显）；pythonWhisper 归并为统一的 whisper 预设。
-  const matchedPresetKey = editing
-    ? Object.entries(providerPresets).find(([, preset]) => preset.name === editing.name && preset.transport === editing.transport)?.[0] ?? ""
-    : "";
-  const activePresetKey = matchedPresetKey === "pythonWhisper" ? "whisper" : matchedPresetKey;
+  // 服务商标识按端点/传输匹配预设（名称只作展示）：改名后下拉与服务商标签不会掉回自定义。
+  const activePresetKey = editing ? providerKeyForProfile(editing) : "";
 
   /** 模型下拉的候选：预设推荐（含当前值）置顶带徽标，其余为远端列表按字母序、随输入过滤。 */
   const modelSuggestions = useMemo(() => {
@@ -687,10 +797,25 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
       await loadProfiles();
       if (editing?.id === profile.id) setEditing({ ...editing, isDefault: true });
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "设置默认失败");
+      pushStatus(error instanceof Error ? error.message : "设置默认失败", "error");
     } finally {
       setSwitchBusy(null);
     }
+  };
+
+  /** 在线服务保存前的最小校验：缺项留在弹窗内说明原因，不创建不可用档案。 */
+  const saveValidationError = (profile: ModelProfile): string | null => {
+    if (!profile.name.trim()) return "请填写配置名称。";
+    if (isLocalWhisperTransport(profile.transport)) {
+      return profile.options.modelPath ? null : "请选择或下载一个本地模型。";
+    }
+    if (profile.transport === "sherpa-onnx") {
+      return profile.options.segmentationModelPath && profile.options.embeddingModelPath ? null : "请先补齐两个声纹模型。";
+    }
+    if (profile.transport === "apple-speech" || profile.transport === "local-summary") return null;
+    if (!profile.baseUrl.trim()) return "请填写 Base URL。";
+    if (!profile.model.trim()) return "请填写模型名称。";
+    return null;
   };
 
   /** 保存档案：密钥随请求送到主进程安全存储，渲染层不再持有明文。
@@ -698,8 +823,15 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
    *  杜绝「已保存却静默不生效」；保存成功即关闭弹窗，收回动画就是“已保存”的反馈。 */
   const saveProfile = async () => {
     if (!editing) return;
-    let toSave = editing;
+    // 本机档案不需要命名：名称跟着模型自动更新。
+    let toSave = isLocalServiceProfile(editing) ? { ...editing, name: localProfileName(editing) } : editing;
+    const validationError = saveValidationError(toSave);
+    if (validationError) {
+      pushStatus(validationError, "error");
+      return;
+    }
     const key = apiKey.trim();
+    const keyAtStart = statusKey;
     setBusy(true);
     setStatus(null);
     try {
@@ -708,7 +840,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
         && toSave.options.visualSummaryEnabled
         && toSave.options.visualSummaryVerifiedFingerprint !== visualFingerprint(toSave)
       ) {
-        setStatus("正在验证视觉纪要…");
+        pushStatus("正在验证视觉纪要…", "info", keyAtStart);
         const result = await api.models.test(toSave, key || undefined);
         toSave = {
           ...toSave,
@@ -723,12 +855,12 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
       const saved = mergeSavedProfile(await api.models.save(toSave, key || undefined));
       setEditing(saved);
       setApiKey("");
-      setStatus("配置已安全保存。");
+      pushStatus("配置已安全保存。", "success", keyAtStart);
       // 保存即启用（同类首条自动成为默认档），整表刷新让目录立即反映。
       await loadProfiles();
       onClose();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "保存失败");
+      pushStatus(error instanceof Error ? error.message : "保存失败", "error", keyAtStart);
     } finally {
       setBusy(false);
     }
@@ -737,10 +869,11 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   /** 测试连接：主进程对所选端点发一次最小请求（见 providers.mjs 的 testModelProfile）。 */
   const testProfile = async () => {
     if (!editing) return;
+    const keyAtStart = statusKey;
     setBusy(true);
     // 立即给出"已在测试"的反馈：远程接口的测试可能要数秒到 20 秒，
     // 只禁用按钮没有任何文字变化，用户会以为点击没生效。
-    setStatus("正在测试连接…");
+    pushStatus("正在测试连接…", "info", keyAtStart);
     try {
       const result = await api.models.test(editing, apiKey.trim() || undefined);
       if (result.visualSummaryVerifiedAt && result.visualSummaryVerifiedFingerprint) {
@@ -756,12 +889,144 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
         setEditing(saved);
         setApiKey("");
       }
-      setStatus(result.message);
+      pushStatus(result.message, "success", keyAtStart);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "连接失败");
+      pushStatus(error instanceof Error ? error.message : "连接失败", "error", keyAtStart);
     } finally {
       setBusy(false);
     }
+  };
+
+  /** 本机服务（Apple 在线识别）改动即写入：保存失败回滚开关并用红字说明。 */
+  const updateAppleServerMode = async (allowServer: boolean) => {
+    if (!editing) return;
+    const previous = editing;
+    const next = { ...editing, options: { ...editing.options, allowServer } };
+    setEditing(next);
+    setBusy(true);
+    pushStatus("正在保存…", "info");
+    try {
+      const saved = mergeSavedProfile(await api.models.save(next));
+      setEditing(saved);
+      await loadProfiles();
+      pushStatus("已生效，无需再保存。", "success", profileStatusKey(tab, saved));
+    } catch (error) {
+      setEditing(previous);
+      pushStatus(error instanceof Error ? error.message : "保存失败", "error", profileStatusKey(tab, previous));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 本机档案的即时写入：声纹高级字段这类零散改动直接落库，不需要底栏保存。 */
+  const saveLocalProfile = async (next: ModelProfile) => {
+    const named = { ...next, name: localProfileName(next) };
+    setBusy(true);
+    pushStatus("正在保存…", "info");
+    try {
+      const saved = mergeSavedProfile(await api.models.save(named));
+      setEditing(saved);
+      await loadProfiles();
+      pushStatus("已生效，无需再保存。", "success", profileStatusKey(tab, saved));
+    } catch (error) {
+      pushStatus(error instanceof Error ? error.message : "保存失败", "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 标题区「⋯」：删除档案（默认档由主进程按名称序补位）。 */
+  const deleteProfile = async () => {
+    if (!editing?.id) return;
+    setProfileMenuOpen(false);
+    const target = editing;
+    if (!(await profileConfirm.confirm({
+      title: `删除「${target.name}」？`,
+      body: "只会移除这份配置，历史会议、转写与纪要都不受影响。",
+      confirmLabel: "删除配置"
+    }))) return;
+    setBusy(true);
+    try {
+      await api.models.delete(target.id!);
+      setEditing(null);
+      setStatus(null);
+      await loadProfiles();
+    } catch (error) {
+      pushStatus(error instanceof Error ? error.message : "删除失败", "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 标题区「⋯」：删除已保存的密钥（档案保留，副标题会提示缺少 API Key）。 */
+  const deleteProfileSecret = async () => {
+    if (!editing?.secretId) return;
+    setProfileMenuOpen(false);
+    const target = editing;
+    if (!(await profileConfirm.confirm({
+      title: "删除已保存的密钥？",
+      body: "配置会保留；需要重新填写 API Key 才能继续使用这个在线服务。",
+      confirmLabel: "删除密钥"
+    }))) return;
+    setBusy(true);
+    try {
+      await api.models.deleteSecret(target.secretId!);
+      const cleared = { ...target, secretId: undefined };
+      setEditing(cleared);
+      await api.models.save(cleared);
+      await loadProfiles();
+      pushStatus("密钥已删除。", "success", profileStatusKey(tab, cleared));
+    } catch (error) {
+      pushStatus(error instanceof Error ? error.message : "删除密钥失败", "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 「添加服务」选择：无模型可选的本机服务（Apple / 本机纪要）点选即落库；
+   *  其余进入草稿，由模型选择或底部保存完成配置。 */
+  const addService = async (key: "whisper" | "appleSpeech" | "openaiWhisper" | "sherpa" | "localSummary" | "ollama" | "openai") => {
+    setAddOpen(false);
+    const preset = providerPresets[key];
+    // 本机服务天然只有一份：已有配置时直接打开，不产生同名副本。
+    // 在线服务相反——「添加在线服务」就是要新建一份，不复用已有档案。
+    const singleton = key === "whisper" || key === "appleSpeech" || key === "sherpa" || key === "localSummary" || key === "ollama";
+    const reusable = singleton
+      ? profiles
+        .filter((profile) => profile.kind === preset.kind && (
+          key === "whisper" ? isLocalWhisperTransport(profile.transport)
+            : key === "sherpa" ? profile.transport === "sherpa-onnx"
+            : profile.transport === preset.transport
+        ))
+        .sort(defaultFirst)[0]
+      : undefined;
+    if (reusable) {
+      setEditing(normalizeLegacyProviderProfile(reusable));
+      setApiKey("");
+      setStatus(null);
+      setEditorGeneration((value) => value + 1);
+      return;
+    }
+    if (key === "appleSpeech" || key === "localSummary") {
+      const draft: ModelProfile = {
+        ...emptyProfile,
+        ...preset,
+        options: { ...emptyProfile.options, ...(preset.options ?? {}) }
+      };
+      setEditing(draft);
+      setApiKey("");
+      setStatus(null);
+      setEditorGeneration((value) => value + 1);
+      try {
+        const saved = mergeSavedProfile(await api.models.save({ ...draft, name: localProfileName(draft) }));
+        setEditing(saved);
+        await loadProfiles();
+      } catch (error) {
+        pushStatus(error instanceof Error ? error.message : "添加失败", "error", profileStatusKey(tab, draft));
+      }
+      return;
+    }
+    startPreset(key as Parameters<typeof startPreset>[0]);
   };
 
   /** 手动检查更新：主进程拉取并校验官网 JSON 清单（updates.mjs）。 */
@@ -876,24 +1141,47 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     ? downloadState.version
     : updateState?.readyVersion || "";
 
-  // 已保存档案按任务分区展示（转写档案与人声分离档案不混排）：
-  // 智谱式多可用——全部档案同时可用，分区内默认档排在最前，任务开启时再按需勾选其他模型。
-  const defaultFirst = (left: ModelProfile, right: ModelProfile) => Number(Boolean(right.isDefault)) - Number(Boolean(left.isDefault));
+  // 已保存档案按「本机 / 在线 / 说话人分离」分组展示：
+  // 智谱式多可用——全部档案同时可用，组内默认档排在最前，任务开启时再按需勾选其他模型。
   const savedTranscriptionProfiles = [...profiles.filter((profile) => profile.kind === "stt")].sort(defaultFirst);
+  const localSttProfiles = savedTranscriptionProfiles.filter(isLocalSttProfile);
+  const onlineSttProfiles = savedTranscriptionProfiles.filter((profile) => !isLocalSttProfile(profile));
   const savedDiarizationProfiles = [...profiles.filter((profile) => profile.kind === "diarization")].sort(defaultFirst);
   const savedLlmProfiles = [...profiles.filter((profile) => profile.kind === "llm")].sort(defaultFirst);
+  const localLlmProfiles = savedLlmProfiles.filter(isLocalLlmProfile);
+  const onlineLlmProfiles = savedLlmProfiles.filter((profile) => !isLocalLlmProfile(profile));
+
+  /** 模型页用标题替代面包屑；「添加服务」在没有配置时强制展开。 */
+  const modelTab = tab === "llm" || tab === "transcription";
+  const totalSaved = tab === "llm"
+    ? savedLlmProfiles.length
+    : savedTranscriptionProfiles.length + savedDiarizationProfiles.length;
+  const addExpanded = addOpen || totalSaved === 0;
+  /** 标题区标签：本机/在线语义 + 在线服务商（名称只作展示，改名不影响识别）。 */
+  const transportInfo = editing ? describeTransport(editing) : null;
+  const chipPresetKey = editing && !isLocalServiceProfile(editing) && !isLocalLlmProfile(editing)
+    ? providerKeyForProfile(editing)
+    : "";
+  const chipPreset = chipPresetKey ? providerPresets[chipPresetKey as keyof typeof providerPresets] : undefined;
+  const chipProtocol = chipPresetKey ? describePreset(chipPresetKey)?.protocol : undefined;
 
   /**
    * 已保存档案行的统一渲染（目录各任务分区共用）。
    * 智谱式多可用：保存即启用、全部可用；右侧是「默认档」状态——默认档供未显式选模的
    * 任务兜底，点「设为默认」切换；具体用哪个模型在任务开启时勾选（录音条/导入抽屉/问答面板）。
-   * 副标题区分两类信息：转写档案补运行时（同名 ggml-small 也能分清 whisper.cpp/Python）。
+   * 副标题只报需要动手的问题（缺密钥/缺模型），不再用正向徽标占据目录宽度。
    */
   const renderSavedRow = (profile: ModelProfile, taskLabel: string) => {
-    const visualVerified = Boolean(profile.options?.visualSummaryEnabled && profile.options?.visualSummaryVerifiedAt);
-    const runtimeLabel = profile.kind === "stt" && isLocalWhisperTransport(profile.transport)
-      ? ` · ${LOCAL_WHISPER_RUNTIME_LABELS[profile.transport] ?? ""}`
-      : "";
+    const issue = profileIssue(profile);
+    const subtitle = profile.kind === "diarization"
+      ? (issue ?? "声纹识别已就绪")
+      : profile.transport === "apple-speech"
+        ? (profile.options.allowServer === true ? "系统内置 · 在线识别" : "系统内置 · 本机离线")
+        : profile.transport === "local-summary"
+          ? "完全离线 · 无需模型"
+          : isLocalWhisperTransport(profile.transport)
+            ? (issue ?? `已就绪 · ${LOCAL_WHISPER_RUNTIME_LABELS[profile.transport] ?? "本地模型"}`)
+            : `${profile.model || "尚未选择模型"}`;
     return (
       <div key={profile.id} className={`model-catalog__row ${editing?.id === profile.id ? "is-selected" : ""}`}>
         <button className="model-catalog__row-main" onClick={() => { setEditing(normalizeLegacyProviderProfile(profile)); setApiKey(""); setStatus(null); setEditorGeneration((value) => value + 1); }}>
@@ -901,10 +1189,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
           <span className="model-catalog__text">
             <span className="model-catalog__titleline">
               <strong>{profile.name}</strong>
-              {visualVerified && <span className="model-badge model-badge--visual" title="视觉纪要已通过真实验证">视觉✓</span>}
-              {profile.secretId && <span className="model-badge model-badge--key" title="已安全保存密钥">钥</span>}
             </span>
-            <small>{profile.kind === "diarization" ? (profile.options?.segmentationModelPath && profile.options?.embeddingModelPath ? "声纹识别已就绪" : "待补齐模型") : profile.transport === "apple-speech" ? "系统内置 · 零配置" : `${profile.model || "尚未选择模型"}${runtimeLabel}`}</small>
+            <small className={issue ? "is-issue" : undefined}>{subtitle}</small>
           </span>
         </button>
         {profile.isDefault ? (
@@ -949,133 +1235,159 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
           </nav>
           <main className="settings-main">
             <header className="settings-header">
-              <div className="settings-breadcrumb"><span>设置</span><CaretRight size={14} /><strong>{tab === "llm" ? "AI 总结" : tab === "transcription" ? "转录设置" : tab === "general" ? "通用设置" : tab === "storage" ? "存储与隐私" : "软件更新"}</strong></div>
-              <button className="icon-button" onClick={onClose} aria-label="关闭设置"><X size={18} /></button>
+              {modelTab ? (
+                <div className="settings-header__title">
+                  <h1>{tab === "llm" ? "AI 总结" : "转录设置"}</h1>
+                  <p>{tab === "llm" ? "选择会议内容的整理方式" : "选择声音转文字的方式"}</p>
+                </div>
+              ) : (
+                <div className="settings-breadcrumb"><span>设置</span><CaretRight size={14} /><strong>{tab === "general" ? "通用设置" : tab === "storage" ? "存储与隐私" : "软件更新"}</strong></div>
+              )}
+              <button className="icon-button" onClick={onClose} aria-label="关闭设置" disabled={busy}><X size={18} /></button>
             </header>
           <div key={tab} className={`settings-content ${(tab === "llm" || tab === "transcription") ? "settings-content--models" : `settings-content--${tab}`}`}>
             {(tab === "llm" || tab === "transcription") && (
               <div className="model-settings">
                 <aside className="model-catalog">
-                  <div className="model-catalog__heading"><div><h3>{tab === "llm" ? "总结服务" : "转录服务"}</h3><p>{tab === "llm" ? "选择会议内容的整理方式" : "选择声音转文字的方式"}</p></div><button className="icon-button" onClick={startCustomProfile} aria-label={tab === "llm" ? "添加自定义总结服务" : "添加自定义转录服务"}><Plus size={16} /></button></div>
-                  <div className="model-catalog__section"><span>在本机运行</span>
-                    {tab === "llm" ? (
-                      <>
-                        <button className={editing?.transport === "local-summary" ? "is-selected" : ""} onClick={() => startPreset("localSummary")}><span className="profile-icon"><Sparkle size={18} /></span><span><strong>本机基础纪要</strong><small>完全离线 · 无需配置模型</small></span>{editing?.transport === "local-summary" && <CheckCircle size={16} weight="fill" />}</button>
-                        <button className={editing?.name === "Ollama" ? "is-selected" : ""} onClick={() => startPreset("ollama")}><span className="profile-icon">OL</span><span><strong>Ollama</strong><small>数据留在本机 · 需要已安装服务</small></span>{editing?.name === "Ollama" && <CheckCircle size={16} weight="fill" />}</button>
-                      </>
-                    ) : (
-                      <>
-                        <button className={isLocalWhisperTransport(editing?.transport) ? "is-selected" : ""} onClick={() => startPreset("whisper")}><span className="profile-icon"><Waveform size={18} /></span><span><strong>本地 Whisper<em className="model-catalog__tag">离线</em></strong><small>无需联网 · 音频不出本机</small></span>{isLocalWhisperTransport(editing?.transport) && <CheckCircle size={16} weight="fill" />}</button>
-                        {api.system.platform === "darwin" && (
-                          <button className={editing?.transport === "apple-speech" ? "is-selected" : ""} onClick={() => startPreset("appleSpeech")}><span className="profile-icon"></span><span><strong>Apple 语音识别<em className="model-catalog__tag">免费</em></strong><small>macOS 内置 · 零下载 · 中文优先</small></span>{editing?.transport === "apple-speech" && <CheckCircle size={16} weight="fill" />}</button>
-                        )}
-                      </>
-                    )}
-                  </div>
-                  {tab === "llm" ? (
-                    <div className="model-catalog__section"><span>在线服务</span>
-                      <button
-                        className={editing && editing.kind === "llm" && editing.transport !== "local-summary" && editing.transport !== "ollama" ? "is-selected" : ""}
-                        onClick={() => startPreset("openai")}
-                      ><span className="profile-icon">AI</span><span><strong>在线大模型服务</strong><small>智谱、DeepSeek、Kimi、MiniMax、OpenAI 等 12+ 厂商</small></span>{editing && editing.kind === "llm" && editing.transport !== "local-summary" && editing.transport !== "ollama" && <CheckCircle size={16} weight="fill" />}</button>
-                    </div>
-                  ) : (<>
-                    <div className="model-catalog__section"><span>在线服务</span>
-                      <button
-                        className={editing?.transport === "openai-audio" ? "is-selected" : ""}
-                        onClick={() => startPreset("openaiWhisper")}
-                      ><span className="profile-icon"><CloudArrowDown size={18} /></span><span><strong>在线语音转录</strong><small>配置好即可用 · 网络或额度异常时可随时切回本地</small></span>{editing?.transport === "openai-audio" && <CheckCircle size={16} weight="fill" />}</button>
-                    </div>
-                    {/* 转写档案紧跟转写选择：只列 stt，与下方说话人分离彻底分开。 */}
-                    {!!savedTranscriptionProfiles.length && (
-                      <div className="model-catalog__section"><span>已保存的转写档案</span>
-                        {savedTranscriptionProfiles.map((profile) => renderSavedRow(profile, "转写"))}
-                      </div>
-                    )}
-                    {/* 说话人分离是独立的可选增强，不是第三种转写服务：
-                        淡暖底独立区块 + 一句说明，让「各自独立的开关」结构一目了然。 */}
-                    <div className="model-catalog__enhancement">
-                      <div className="model-catalog__enhancement-heading">
-                        <span>说话人分离</span>
-                        <small>可选增强 · 与转写服务各自独立选择，多人会议自动区分发言人</small>
-                      </div>
-                      <button className={editing?.transport === "sherpa-onnx" ? "is-selected" : ""} onClick={() => startPreset("sherpa")}><span className="profile-icon"><FingerprintSimple size={18} /></span><span><strong>本地声纹识别</strong><small>数据不出本机 · 首次使用需下载约 70MB 模型</small></span>{editing?.transport === "sherpa-onnx" && <CheckCircle size={16} weight="fill" />}</button>
+                  {tab === "transcription" ? (
+                    <>
+                      {!!localSttProfiles.length && (
+                        <div className="model-catalog__section"><span>在本机运行</span>
+                          {localSttProfiles.map((profile) => renderSavedRow(profile, "转写"))}
+                        </div>
+                      )}
+                      {!!onlineSttProfiles.length && (
+                        <div className="model-catalog__section"><span>在线服务</span>
+                          {onlineSttProfiles.map((profile) => renderSavedRow(profile, "转写"))}
+                        </div>
+                      )}
+                      {/* 说话人分离是独立的可选增强：只有配置过才出现在目录里。 */}
                       {!!savedDiarizationProfiles.length && (
-                        <div className="model-catalog__section model-catalog__section--nested"><span>已保存</span>
+                        <div className="model-catalog__enhancement">
+                          <div className="model-catalog__enhancement-heading">
+                            <span>说话人分离</span>
+                            <small>可选增强 · 多人会议自动区分发言人</small>
+                          </div>
                           {savedDiarizationProfiles.map((profile) => renderSavedRow(profile, "说话人分离"))}
                         </div>
                       )}
-                    </div>
-                  </>)}
-                  {tab === "llm" && !!savedLlmProfiles.length && (
-                    <div className="model-catalog__section"><span>已保存</span>
-                      {savedLlmProfiles.map((profile) => renderSavedRow(profile, "总结"))}
-                    </div>
+                    </>
+                  ) : (
+                    <>
+                      {!!localLlmProfiles.length && (
+                        <div className="model-catalog__section"><span>在本机运行</span>
+                          {localLlmProfiles.map((profile) => renderSavedRow(profile, "总结"))}
+                        </div>
+                      )}
+                      {!!onlineLlmProfiles.length && (
+                        <div className="model-catalog__section"><span>在线服务</span>
+                          {onlineLlmProfiles.map((profile) => renderSavedRow(profile, "总结"))}
+                        </div>
+                      )}
+                    </>
                   )}
+                  {/* 没有配置时添加入口贴顶，避免整列只剩一大片空白。 */}
+                  <div className={`model-catalog__add${addExpanded ? " is-open" : ""}${totalSaved === 0 ? " is-empty" : ""}`}>
+                    <button
+                      type="button"
+                      className="model-catalog__add-trigger"
+                      aria-expanded={addExpanded}
+                      onClick={() => setAddOpen((value) => !value)}
+                    >
+                      <Plus size={15} />
+                      <span>
+                        <strong>添加服务</strong>
+                        <small>{tab === "llm"
+                          ? "本机纪要 · Ollama · 在线服务"
+                          : api.system.platform === "darwin" ? "本地 Whisper · Apple · 在线 · 声纹" : "本地 Whisper · 在线 · 声纹"}</small>
+                      </span>
+                    </button>
+                    {addExpanded && (
+                      <div className="model-catalog__add-options">
+                        {tab === "llm" ? (
+                          <>
+                            <button type="button" onClick={() => void addService("localSummary")}><strong>本机基础纪要</strong><small>完全离线 · 无需模型</small></button>
+                            <button type="button" onClick={() => void addService("ollama")}><strong>Ollama</strong><small>需已安装本机服务</small></button>
+                            <button type="button" onClick={() => void addService("openai")}><strong>在线服务</strong><small>DeepSeek、Kimi、智谱等</small></button>
+                          </>
+                        ) : (
+                          <>
+                            <button type="button" onClick={() => void addService("whisper")}><strong>本地 Whisper</strong><small>离线 · 需下载模型</small></button>
+                            {api.system.platform === "darwin" && (
+                              <button type="button" onClick={() => void addService("appleSpeech")}><strong>Apple 语音识别</strong><small>系统内置 · 零下载</small></button>
+                            )}
+                            <button type="button" onClick={() => void addService("openaiWhisper")}><strong>在线服务</strong><small>OpenAI Whisper 或兼容接口</small></button>
+                            <button type="button" onClick={() => void addService("sherpa")}><strong>说话人分离</strong><small>可选增强 · 本地声纹</small></button>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </aside>
-                {editing && (
+                {editing ? (
                   <div key={editorGeneration} className="profile-editor-wrap">
                     <div className="profile-editor-heading">
                       <span className="profile-editor-heading__icon">{editing.kind === "stt" ? <Waveform size={24} /> : editing.kind === "diarization" ? <FingerprintSimple size={24} /> : <Sparkle size={24} />}</span>
-                      <div><h2>{editing.name}</h2><p>{editing.kind === "stt" ? "将会议音频转换为可编辑的中文与多语言文本。" : editing.kind === "diarization" ? "在多人会议中区分不同发言人，并按声纹簿自动套用姓名。" : "用于会议总结、行动项提取与内容整理。"}</p></div>
-                      {editing.id && !editing.isDefault && (
-                        <button type="button" className="button button--small profile-editor-heading__enable" onClick={() => void makeDefaultProfile(editing)}>设为默认模型</button>
+                      <div className="profile-editor-heading__text">
+                        <h2>{editing.name}</h2>
+                        <div className="profile-editor-heading__meta">
+                          <span className={`profile-chip${transportInfo?.online ? " is-online" : ""}`}>{transportInfo?.text}</span>
+                          {chipPreset && (
+                            <span className="profile-chip">{chipPreset.name}{chipProtocol ? ` · ${chipProtocol}` : ""}</span>
+                          )}
+                        </div>
+                      </div>
+                      {editing.id && (
+                        <div className="profile-menu" ref={profileMenuRef}>
+                          <button
+                            type="button"
+                            className="icon-button"
+                            aria-label="更多操作"
+                            aria-expanded={profileMenuOpen}
+                            onClick={() => setProfileMenuOpen((value) => !value)}
+                          ><DotsThree size={18} weight="bold" /></button>
+                          {profileMenuOpen && (
+                            <div className="profile-menu__panel" role="menu">
+                              {editing.secretId && <button type="button" role="menuitem" onClick={() => void deleteProfileSecret()}>删除密钥</button>}
+                              <button type="button" role="menuitem" className="is-danger" onClick={() => void deleteProfile()}>删除档案</button>
+                            </div>
+                          )}
+                        </div>
                       )}
                     </div>
                     <div className="profile-editor-divider" />
                   <div className="profile-editor">
-                    {tab === "transcription" && editing.kind === "stt" && (
-                      isLocalWhisperTransport(editing.transport) ? (
-                        <div className="transcription-alternative">
-                          <span>
-                            <strong>需要更高准确率？可改用在线服务</strong>
-                            <small>在线 Whisper 通常更快、更准，但受网络和额度影响；本地 Whisper 始终可离线使用。</small>
-                          </span>
-                          <button type="button" className="button button--small" onClick={() => startPreset("openaiWhisper")}>改用在线服务</button>
-                        </div>
-                      ) : editing.transport === "apple-speech" ? (
-                        <div className="transcription-alternative">
-                          <span>
-                            <strong>想要更高质量的转写？</strong>
-                            <small>本地 Whisper 支持更大的模型与逐词时间戳；Apple 语音识别胜在零下载、即刻可用。</small>
-                          </span>
-                          <button type="button" className="button button--small" onClick={() => startPreset("whisper")}>改用本地 Whisper</button>
-                        </div>
-                      ) : (
-                        <div className="transcription-alternative">
-                          <span>
-                            <strong>在线服务不可用？改用本地 Whisper</strong>
-                            <small>音频不离开这台电脑，无需联网；首次使用需下载模型。保存配置后，正在进行的录音从下一段自动生效。</small>
-                          </span>
-                          <button type="button" className="button button--small button--primary" onClick={() => startPreset("whisper")}>改用本地 Whisper</button>
-                        </div>
-                      )
-                    )}
+                    {!isLocalServiceProfile(editing) && (
                     <div className="form-grid">
-                      <label className="field"><span>服务商</span>
+                      {!editing.id && (
+                      <label className="field form-grid__full"><span>服务商</span>
                         <select value={activePresetKey} onChange={(event) => {
                           if (!event.target.value) {
                             startCustomProfile();
                             return;
                           }
                           const preset = providerPresets[event.target.value as keyof typeof providerPresets];
-                          if (preset) setEditing({
-                            ...editing,
+                          if (!preset) return;
+                          // 换服务商等于换一份配置：丢掉旧草稿的档案绑定与密钥，避免把 A 的密钥留给 B。
+                          setEditing({
+                            ...emptyProfile,
                             ...preset,
+                            id: undefined,
+                            secretId: undefined,
                             options: { ...emptyProfile.options, ...(preset.options ?? {}) }
                           });
+                          setApiKey("");
+                          setStatus(null);
+                          setModelList(null);
+                          setModelListError(null);
                         }}>
                           <option value="">自定义配置</option>
                           {tab === "llm" ? (<>
                             {llmProviderGroups.map((group) => <optgroup label={group.label} key={group.label}>{group.providers.map((provider) => <option value={provider.key} key={provider.key}>{provider.name}</option>)}</optgroup>)}
-                            <option value="localSummary">本机基础纪要（离线）</option>
-                            <option value="ollama">Ollama（本地）</option>
+                            <option value="ollama">Ollama（本机服务）</option>
                           </>) : (<>
-                            <option value="appleSpeech">Apple 语音识别（系统内置 · mac）</option>
-                            <option value="whisper">本地 Whisper（自动适配）</option>
                             <option value="openaiWhisper">OpenAI Whisper</option>
                             <option value="newApiWhisper">New API</option>
-                            <option value="sherpa">本地声纹识别（说话人分离）</option>
                           </>)}
                         </select>
                         {(() => {
@@ -1084,11 +1396,10 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                           return <small className="preset-describe">{describe.text}{describe.protocol ? ` · ${describe.protocol}` : ""}</small>;
                         })()}
                       </label>
+                      )}
                           <label className="field"><span>名称</span><input value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></label>
-                          <div className="field"><span>用于</span><div className="readonly-control">{editing.kind === "diarization" ? "多人会议中区分发言人" : tab === "llm" ? "会议总结与行动项" : "会议语音转文字"}</div></div>
-                          <div className="field"><span>连接方式</span><div className="readonly-control">{editing.transport === "apple-speech" ? (editing.options.allowServer === true ? "macOS 系统内置 · 在线识别（音频发送至 Apple）" : "macOS 系统内置 · 本机离线识别") : editing.transport === "sherpa-onnx" ? "内置引擎 · 全程在本机运行，无需联网" : editing.transport === "local-summary" ? "本机离线规则引擎" : isLocalWhisperTransport(editing.transport) ? "自动适配本地模型文件" : editing.transport === "ollama" ? "本机 Ollama 服务" : editing.transport === "openai-audio" ? "在线语音转录接口" : "在线大模型接口"}</div></div>
                           {!isLocalWhisperTransport(editing.transport) && editing.transport !== "local-summary" && editing.transport !== "sherpa-onnx" && editing.transport !== "apple-speech" && (
-                            <div className="field field--model-picker" ref={modelMenuRef}>
+                            <div className="field field--model-picker form-grid__full" ref={modelMenuRef}>
                               <span>模型</span>
                               <div className={`model-picker ${modelMenuOpen ? "is-open" : ""}`}>
                                 <input
@@ -1138,52 +1449,54 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                             </div>
                           )}
                     </div>
+                    )}
                     {editing.transport === "local-summary" ? (
-                      <div className="field"><span>说明</span><div className="readonly-control">完全离线的规则纪要：从转录中提取要点、决策、行动项与风险，不发起任何网络请求，适合无网环境或隐私优先场景；追求更高质量可另配在线总结服务。</div></div>
+                      <>
+                        <div className="field"><span>说明</span><div className="readonly-control">完全离线的规则纪要：不发起任何网络请求，也不需要下载模型。</div></div>
+                        <details className="advanced-provider-options">
+                          <summary>它能做什么</summary>
+                          <div className="readonly-control">从转录中提取要点、决策、行动项与风险，适合无网环境或隐私优先场景；追求更高质量可另配在线总结服务。</div>
+                        </details>
+                      </>
                     ) : isLocalWhisperTransport(editing.transport) ? (
                       <LocalModelManager profile={editing} onChange={setEditing} />
                     ) : editing.transport === "apple-speech" ? (
                       <>
-                        <div className="field"><span>说明</span><div className="readonly-control">macOS 内置的 Apple 语音识别：完全免费、默认仅在本机运行（音频不出设备）、无需下载任何模型；中文识别自动断句与标点。首次测试或使用时，系统会请求「语音识别」权限；若识别反复超时，请到 系统设置 → 键盘 → 听写 下载对应语言的离线资源。</div></div>
+                        <div className="field"><span>说明</span><div className="readonly-control">macOS 内置的语音识别：免费、无需下载模型，默认只在本机运行、音频不出设备。</div></div>
+                        <details className="advanced-provider-options">
+                          <summary>权限与故障排除</summary>
+                          <div className="readonly-control">首次测试或使用时，系统会请求「语音识别」权限；若识别反复超时，请到 系统设置 → 键盘 → 听写 下载对应语言的离线资源。</div>
+                        </details>
                         <section className="visual-capability-setting">
                           <label>
                             <input
                               type="checkbox"
                               checked={editing.options.allowServer === true}
-                              onChange={(event) => setEditing({ ...editing, options: { ...editing.options, allowServer: event.target.checked } })}
+                              disabled={busy}
+                              onChange={(event) => void updateAppleServerMode(event.target.checked)}
                             />
-                            <span><strong>使用 Apple 在线识别</strong><small>改用 Apple 服务器上的语音模型，对专业术语、长句与连续讲话的识别完整度明显更高；开启后音频将发送至 Apple（按 Apple 隐私政策处理）。默认关闭，仅在本机离线识别。</small></span>
+                            <span><strong>使用 Apple 在线识别</strong><small>改用 Apple 服务器上的语音模型，专业术语与连续讲话的识别更完整；开启后音频会发送至 Apple。改动立即生效。</small></span>
                           </label>
-                          <span className={editing.options.allowServer ? "is-verified" : ""}>{editing.options.allowServer ? "在线识别 · 音频发送至 Apple" : "本机离线 · 音频不出设备"}</span>
                         </section>
+                        <div className="local-test-row">
+                          <button type="button" className="text-button" disabled={busy} onClick={() => void testProfile()}>测试识别</button>
+                          <small>用一段真实语音验证是否可用（首次会请求系统权限）</small>
+                        </div>
                       </>
                     ) : editing.transport === "sherpa-onnx" ? (
                       <>
-                        <div className="field"><span>说明</span><div className="readonly-control">引擎应用内置、无需安装。下载两个模型后，多人会议会自动区分发言人；在转写里给「发言人N」改名会自动记住 TA 的声纹。</div></div>
-                        <DiarizationSetup profile={editing} onChange={setEditing} />
+                        <div className="field"><span>说明</span><div className="readonly-control">引擎应用内置、无需安装；补齐两个模型后，多人会议会自动区分发言人。</div></div>
+                        <DiarizationSetup profile={editing} onChange={setEditing} onCommit={(next) => void saveLocalProfile(next)} />
                         <VoiceprintBookCard />
                       </>
                     ) : (
                       <>
-                        {editing.transport === "ollama" ? (
-                          <>
-                            <div className="field"><span>连接方式</span><div className="readonly-control">本机 Ollama 服务</div></div>
-                            <div className="field field--device-info"><span>本机配置</span><div className="readonly-control">
-                              {hardware
-                                ? <>{formatHardwareLine(hardware)}。{ollamaGuidance(hardware.memoryBytes)}；获取模型列表后会按内存标注体积与适配。</>
-                                : "正在读取设备信息…"}
-                            </div></div>
-                          </>
-                        ) : editing.transport === "openai-audio" ? (
-                          <div className="field"><span>接口格式</span><div className="readonly-control">OpenAI 兼容</div></div>
-                        ) : (
-                          <label className="field"><span>兼容协议</span>
-                            <select value={editing.options.apiFlavor || "openai"} onChange={(event) => setEditing({ ...editing, options: { ...invalidateVisualVerification(editing.options), apiFlavor: event.target.value as "openai" | "anthropic" | "gemini" } })}>
-                              <option value="openai">OpenAI 兼容</option>
-                              <option value="anthropic">Anthropic 原生</option>
-                              <option value="gemini">Google Gemini 原生</option>
-                            </select>
-                          </label>
+                        {editing.transport === "ollama" && (
+                          <div className="field field--device-info"><span>本机配置</span><div className="readonly-control">
+                            {hardware
+                              ? <>{formatHardwareLine(hardware)}。{ollamaGuidance(hardware.memoryBytes)}；获取模型列表后会按内存标注体积与适配。</>
+                              : "正在读取设备信息…"}
+                          </div></div>
                         )}
                         <label className="field"><span>Base URL</span><input value={editing.baseUrl} onChange={(event) => setEditing({ ...editing, baseUrl: event.target.value, options: invalidateVisualVerification(editing.options) })} placeholder={editing.transport === "openai-audio" ? "https://example.com/v1，也可粘贴完整转录端点" : "https://example.com/v1"} /></label>
                         {urlPresetSuggestion && (
@@ -1193,17 +1506,25 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                           </div>
                         )}
                         {editing.transport !== "ollama" && <label className="field"><span>API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={editing.secretId ? "已安全保存；留空保持不变" : "sk-…"} /></label>}
-                        {editing.transport === "openai-audio" && (
-                          <label className="field"><span>返回格式</span>
-                            <select value={editing.options.responseFormat || (editing.options.apiFlavor === "new-api" ? "json" : "verbose_json")} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, responseFormat: event.target.value as "json" | "verbose_json" | "text" } })}>
-                              <option value="json">JSON（兼容性最好）</option>
-                              <option value="verbose_json">Verbose JSON（含时间戳）</option>
-                              <option value="text">纯文本</option>
-                            </select>
-                          </label>
-                        )}
                         {editing.transport !== "ollama" && <details className="advanced-provider-options">
-                          <summary>高级端点设置</summary>
+                          <summary>高级设置</summary>
+                          {editing.transport === "openai-audio" ? (
+                            <label className="field"><span>返回格式</span>
+                              <select value={editing.options.responseFormat || (editing.options.apiFlavor === "new-api" ? "json" : "verbose_json")} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, responseFormat: event.target.value as "json" | "verbose_json" | "text" } })}>
+                                <option value="json">JSON（兼容性最好）</option>
+                                <option value="verbose_json">Verbose JSON（含时间戳）</option>
+                                <option value="text">纯文本</option>
+                              </select>
+                            </label>
+                          ) : (
+                            <label className="field"><span>兼容协议</span>
+                              <select value={editing.options.apiFlavor || "openai"} onChange={(event) => setEditing({ ...editing, options: { ...invalidateVisualVerification(editing.options), apiFlavor: event.target.value as "openai" | "anthropic" | "gemini" } })}>
+                                <option value="openai">OpenAI 兼容</option>
+                                <option value="anthropic">Anthropic 原生</option>
+                                <option value="gemini">Google Gemini 原生</option>
+                              </select>
+                            </label>
+                          )}
                           {editing.transport === "openai-audio" ? (
                             <label className="field"><span>转录端点（可选）</span><input value={editing.options.transcriptionEndpoint || ""} onChange={(event) => setEditing({ ...editing, options: { ...editing.options, transcriptionEndpoint: event.target.value } })} placeholder="留空自动尝试 /v1/audio/transcriptions" /></label>
                           ) : (
@@ -1237,22 +1558,25 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                         </span>
                       </section>
                     )}
-                    {status && <div className="connection-status">{status}</div>}
-                    <div className="profile-actions">
-                      {editing.secretId && <button className="text-button text-button--danger" onClick={async () => {
-                        await api.models.deleteSecret(editing.secretId!);
-                        // Clear the orphaned secretId on the profile and reflect it
-                        // in the editor, otherwise the row keeps showing a key is
-                        // stored while the vault no longer has one.
-                        const cleared = { ...editing, secretId: undefined };
-                        setEditing(cleared);
-                        await api.models.save(cleared);
-                      }}><Trash size={15} />删除密钥</button>}
-                      <span />
-                      <button className="button" disabled={busy} onClick={testProfile}>测试连接</button>
-                      <button className="button button--primary" disabled={busy} onClick={saveProfile}>保存配置</button>
-                    </div>
+                    {isLocalServiceProfile(editing) ? (
+                      visibleStatus && <div className={statusClass(visibleStatus.tone)} role="status" aria-live="polite">{visibleStatus.text}</div>
+                    ) : (
+                      <div className="profile-actions">
+                        {visibleStatus && <div className={statusClass(visibleStatus.tone)} role="status" aria-live="polite">{visibleStatus.text}</div>}
+                        <span />
+                        <button className="button" disabled={busy} onClick={testProfile}>测试连接</button>
+                        <button className="button button--primary" disabled={busy} onClick={saveProfile}>保存配置</button>
+                      </div>
+                    )}
                   </div>
+                  </div>
+                ) : (
+                  <div className="profile-editor-wrap">
+                    <div className="profile-editor-empty">
+                      <span className="profile-editor-empty__icon"><Plus size={20} /></span>
+                      <h2>还没有配置{tab === "llm" ? "总结服务" : "转录服务"}</h2>
+                      <p>从左侧「添加服务」开始：本机服务选完即生效，在线服务只需填写一次密钥。</p>
+                    </div>
                   </div>
                 )}
               </div>
@@ -1383,6 +1707,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
           </main>
         </div>
       </div>
+      {/* 删除档案 / 删除密钥的应用内确认：与设置弹窗同源渲染，退场动画一致。 */}
+      <ConfirmDialog open={profileConfirm.open} request={profileConfirm.request} onSettle={profileConfirm.settle} />
     </div>
   );
 }
@@ -1509,10 +1835,13 @@ function VoiceprintBookCard() {
  */
 function DiarizationSetup({
   profile,
-  onChange
+  onChange,
+  onCommit
 }: {
   profile: ModelProfile;
   onChange(profile: ModelProfile): void;
+  /** 高级字段失焦时直接落库（本机档案没有底栏保存）。 */
+  onCommit?(profile: ModelProfile): void;
 }) {
   const [catalog, setCatalog] = useState<DownloadableModel[]>([]);
   const [scan, setScan] = useState<DiarizationScanResult | null>(null);
@@ -1539,6 +1868,7 @@ function DiarizationSetup({
       ...profile,
       kind: "diarization",
       transport: "sherpa-onnx",
+      name: "本地声纹识别",
       enabled: true,
       options: { ...profile.options, [key]: file.path }
     });
@@ -1681,9 +2011,9 @@ function DiarizationSetup({
       <details className="advanced-provider-options">
         <summary>高级与故障排除</summary>
         <div className="field"><span>说明</span><div className="readonly-control">模型损坏或需要使用特殊版本时，可在此手动指定文件路径；聚类阈值控制「切成几个说话人」的灵敏度，默认 0.5 适合大多数会议。</div></div>
-        <label className="field"><span>分离模型路径</span><input value={profile.options.segmentationModelPath || ""} onChange={(event) => onChange({ ...profile, options: { ...profile.options, segmentationModelPath: event.target.value } })} spellCheck={false} /></label>
-        <label className="field"><span>声纹模型路径</span><input value={profile.options.embeddingModelPath || ""} onChange={(event) => onChange({ ...profile, options: { ...profile.options, embeddingModelPath: event.target.value } })} spellCheck={false} /></label>
-        <label className="field"><span>聚类阈值</span><input type="number" min="0.1" max="0.9" step="0.01" value={profile.options.clusteringThreshold ?? 0.5} onChange={(event) => onChange({ ...profile, options: { ...profile.options, clusteringThreshold: Number(event.target.value) } })} /></label>
+        <label className="field"><span>分离模型路径</span><input value={profile.options.segmentationModelPath || ""} onChange={(event) => onChange({ ...profile, options: { ...profile.options, segmentationModelPath: event.target.value } })} onBlur={() => onCommit?.(profile)} spellCheck={false} /></label>
+        <label className="field"><span>声纹模型路径</span><input value={profile.options.embeddingModelPath || ""} onChange={(event) => onChange({ ...profile, options: { ...profile.options, embeddingModelPath: event.target.value } })} onBlur={() => onCommit?.(profile)} spellCheck={false} /></label>
+        <label className="field"><span>聚类阈值</span><input type="number" min="0.1" max="0.9" step="0.01" value={profile.options.clusteringThreshold ?? 0.5} onChange={(event) => onChange({ ...profile, options: { ...profile.options, clusteringThreshold: Number(event.target.value) } })} onBlur={() => onCommit?.(profile)} /></label>
       </details>
     </section>
   );
@@ -1738,11 +2068,13 @@ function LocalModelManager({
     setError(null);
     setSuccess(null);
     try {
+      const selectedModelName = model.name.replace(/\.(?:pt|bin|gguf)$/i, "");
       const nextProfile: ModelProfile = {
       ...profile,
       kind: "stt",
       transport: model.engine,
-      model: model.name.replace(/\.(?:pt|bin|gguf)$/i, ""),
+      name: localProfileName({ ...profile, transport: model.engine, model: selectedModelName } as ModelProfile),
+      model: selectedModelName,
       enabled: true,
       options: {
         ...profile.options,

@@ -778,6 +778,8 @@ export interface MeetingAPI {
     save(profile: ModelProfile, apiKey?: string): Promise<ModelProfile>;
     /** 把某类档案设为默认档（同类互斥）；未显式选模的任务走默认档。 */
     setDefault(kind: ModelProfile["kind"], id: string): Promise<void>;
+    /** 删除档案并清理其凭据；默认档删除后同类按名称序自动补位。 */
+    delete(id: string): Promise<{ id: string; kind: ModelProfile["kind"]; secretId: string | null; nextDefaultId: string | null }>;
     test(profile: ModelProfile, apiKey?: string): Promise<{
       ok: boolean;
       message: string;

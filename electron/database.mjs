@@ -1024,6 +1024,32 @@ export function setDefaultModelProfile(kind, id) {
   return { id, kind, isDefault: true };
 }
 
+/** 删除模型档案（models:delete）：同事务删除并处理默认位。
+ *  删的是默认档时，同类剩余档案按名称序第一条补位；返回 secretId 供主进程清理凭据。 */
+export function deleteModelProfile(id) {
+  const db = openDatabase();
+  const row = db.prepare("SELECT id, kind, is_default, secret_id FROM model_profiles WHERE id = ?").get(id);
+  if (!row) throw new Error("档案不存在，无法删除。");
+  const timestamp = nowIso();
+  db.exec("BEGIN");
+  try {
+    db.prepare("DELETE FROM model_profiles WHERE id = ?").run(id);
+    let nextDefaultId = null;
+    if (row.is_default) {
+      const next = db.prepare("SELECT id FROM model_profiles WHERE kind = ? ORDER BY name LIMIT 1").get(row.kind);
+      if (next) {
+        db.prepare("UPDATE model_profiles SET is_default = 1, updated_at = ? WHERE id = ?").run(timestamp, next.id);
+        nextDefaultId = next.id;
+      }
+    }
+    db.exec("COMMIT");
+    return { id, kind: row.kind, secretId: row.secret_id ?? null, nextDefaultId };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 /** 启动迁移：从「同类单启用」升级到「全部可用 + 每类默认档」。历史库里同类最多一条
  *  enabled 档案（旧互斥语义的生效档），它升级为该类的默认档；其余停用档案恢复为可用；
  *  某类没有任何启用档案时按名称序取第一条为默认。不删除任何数据，幂等可重跑。 */

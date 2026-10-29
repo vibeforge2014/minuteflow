@@ -178,6 +178,7 @@ import {
   saveMeeting,
   saveModelProfile,
   setDefaultModelProfile,
+  deleteModelProfile,
   saveVoiceprintSample
 } from "../electron/database.mjs";
 
@@ -2485,6 +2486,26 @@ describe("模型档案多可用与默认档（智谱式）", () => {
     saveModelProfile({ ...llmProfile("usability-s1", "转录服务"), kind: "stt" as const, transport: "openai-audio" as const });
     setDefaultModelProfile("llm", "usability-p1");
     expect(listModelProfiles().find((profile) => profile.id === "usability-s1")?.isDefault).toBe(true);
+  });
+
+  it("deleting the default profile promotes the next sibling by name order", () => {
+    saveModelProfile(llmProfile("usability-d1", "A 服务"));
+    saveModelProfile(llmProfile("usability-d2", "B 服务"));
+    setDefaultModelProfile("llm", "usability-d2");
+    const deleted = deleteModelProfile("usability-d2");
+    expect(deleted.kind).toBe("llm");
+    expect(deleted.nextDefaultId).toBe("usability-d1");
+    const remaining = listModelProfiles().filter((profile) => profile.id.startsWith("usability-d"));
+    expect(remaining.some((profile) => profile.id === "usability-d2")).toBe(false);
+    expect(remaining.find((profile) => profile.id === "usability-d1")?.isDefault).toBe(true);
+    // 删除非默认档不动默认位。
+    saveModelProfile(llmProfile("usability-d3", "C 服务"));
+    expect(deleteModelProfile("usability-d3").nextDefaultId).toBeNull();
+    expect(listModelProfiles().find((profile) => profile.id === "usability-d1")?.isDefault).toBe(true);
+  });
+
+  it("deleting an unknown profile reports an actionable error", () => {
+    expect(() => deleteModelProfile("missing-profile")).toThrow(/不存在/);
   });
 
   it("startup migration re-enables legacy disabled profiles and keeps the previous active one as default", () => {

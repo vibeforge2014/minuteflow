@@ -35,6 +35,7 @@ import {
   appendAudioChunk,
   createMeeting,
   deleteAudioPathRecord,
+  deleteModelProfile,
   finalizeAudioPath,
   listExpiredAudioPaths,
   listMeetings,
@@ -1234,6 +1235,14 @@ function registerIpc() {
       throw new Error("默认档参数无效。");
     }
     return setDefaultModelProfile(kind, id);
+  });
+  // models:delete — 删除档案并清理其凭据；删的是默认档时同类自动补位。
+  trustedHandle("models:delete", (_event, id) => {
+    if (typeof id !== "string" || !id) throw new Error("档案参数无效。");
+    const deleted = deleteModelProfile(id);
+    if (deleted.secretId) deleteSecret(deleted.secretId);
+    wakeImportQueue();
+    return deleted;
   });
   // models:test — 测试模型连通性/本地就绪度，设置页"测试"按钮调用。
   trustedHandle("models:test", async (_event, profile, apiKey) => {

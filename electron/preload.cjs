@@ -69,6 +69,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     list: () => invoke("models:list"),
     save: (profile, apiKey) => invoke("models:save", profile, apiKey),
     setDefault: (kind, id) => invoke("models:set-default", kind, id),
+    delete: (id) => invoke("models:delete", id),
     test: (profile, apiKey) => invoke("models:test", profile, apiKey),
     listModels: (profile, apiKey) => invoke("models:list-models", profile, apiKey),
     deleteSecret: (secretId) => invoke("models:delete-secret", secretId),
