@@ -16,6 +16,16 @@ let downloadedVersion = "";
 let activeProgressHandler = null;
 let downloadCancellationToken = null;
 
+/**
+ * CJS 互操作加载 electron-updater：其入口用 defineProperty getter 导出具名导出，
+ * cjs-module-lexer 静态探测不到，ESM 具名解构会拿到 undefined（0.1.36/0.1.37
+ * 「本机暂不支持自动更新」的根因），必须回退到 default（= module.exports）取值。
+ */
+async function importElectronUpdater() {
+  const mod = await import("electron-updater");
+  return mod?.autoUpdater !== undefined ? mod : (mod?.default ?? mod);
+}
+
 /** 已下载待安装的新版本号；空串表示当前没有就绪的更新。 */
 export function macDownloadedUpdateVersion() {
   return downloadedVersion;
@@ -31,11 +41,17 @@ async function getUpdater() {
   if (updaterInstance) return updaterInstance;
   if (process.platform !== "darwin") return null;
   try {
-    const [{ app }, { autoUpdater }] = await Promise.all([
+    const [{ app }, updaterModule] = await Promise.all([
       import("electron"),
-      import("electron-updater")
+      importElectronUpdater()
     ]);
     if (!app.isPackaged) return null;
+    const autoUpdater = updaterModule?.autoUpdater;
+    if (!autoUpdater) {
+      console.error("[auto-update] electron-updater 未导出 autoUpdater（CJS 互操作异常），回退手动下载流程");
+      updaterLoadFailed = true;
+      return null;
+    }
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = true;
     autoUpdater.logger = {
@@ -87,11 +103,13 @@ export async function checkMacUpdateFeed() {
  * 后台静默下载（或复用进行中/已完成的下载）。onProgress 收到与
  * updates:download-progress 相同结构的 payload（status: downloading | ready）。
  * 失败时抛错，由调用方决定是否回退手动 DMG 流程。
+ * updater 本身不可用（模块加载失败等）与 feed 不可用同待遇：抛回退哨兵，
+ * 让用户至少拿到官网直链手动下载，而不是「本机暂不支持自动更新」死胡同。
  */
 export async function downloadMacUpdate({ version = "", onProgress = () => {} } = {}) {
   if (downloadInFlight) return downloadInFlight;
   const autoUpdater = await getUpdater();
-  if (!autoUpdater) throw new Error("本机暂不支持自动更新。");
+  if (!autoUpdater) throw new Error(MAC_AUTO_UPDATE_FALLBACK);
   downloadInFlight = (async () => {
     try {
       const feed = await checkMacUpdateFeed();
@@ -102,7 +120,7 @@ export async function downloadMacUpdate({ version = "", onProgress = () => {} } 
         return { version: downloadedVersion };
       }
       activeProgressHandler = (payload) => onProgress({ ...payload, version: payload.version || version || feed.version });
-      const { CancellationToken } = await import("electron-updater");
+      const { CancellationToken } = await importElectronUpdater();
       downloadCancellationToken = new CancellationToken();
       const result = await autoUpdater.downloadUpdate(downloadCancellationToken);
       const resolved = downloadedVersion || String(result || feed.version);
