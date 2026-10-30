@@ -488,7 +488,6 @@ export function App() {
     try {
       const job = await api.imports.retry(id);
       if (job) setImportJobs((current) => [job, ...current.filter((item) => item.id !== id)]);
-      notify("已重新加入处理队列，会从已完成的阶段继续。");
     } catch (error) {
       notify(error instanceof Error ? error.message : "重试导入任务失败，请稍后再试。");
     }
@@ -499,7 +498,6 @@ export function App() {
     try {
       const job = await api.imports.cancel(id);
       if (job) setImportJobs((current) => [job, ...current.filter((item) => item.id !== id)]);
-      notify("已暂停处理；已完成的转写和录音文件都会保留，可随时继续。");
     } catch (error) {
       notify(error instanceof Error ? error.message : "暂停导入任务失败，请稍后再试。");
     }
@@ -510,7 +508,6 @@ export function App() {
     try {
       const job = await api.imports.skipDiarization(id);
       if (job) setImportJobs((current) => [job, ...current.filter((item) => item.id !== id)]);
-      notify("已跳过发言人识别，正在用现有转写生成纪要。");
     } catch (error) {
       notify(error instanceof Error ? error.message : "跳过发言人识别失败，请稍后再试。");
     }
@@ -541,7 +538,6 @@ export function App() {
       // 立刻按返回的任务快照抬高「处理中」状态：不等推送到达，按钮就不会在启动瞬间闪回。
       setImportJobs((current) => mergeImportJob(current, job));
       setImportOpen(true);
-      notify("已开始重新转录；可随时暂停、跳过识别或查看进度。");
     } catch (error) {
       notify((error instanceof Error ? error.message : "无法开始重新转录。").replace(/^Error invoking remote method '[^']+':\s*/, ""));
     } finally {

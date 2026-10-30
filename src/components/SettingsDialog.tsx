@@ -1119,7 +1119,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
       : downloadState.status === "verifying"
         ? "正在校验更新…"
         : downloadState.status === "ready"
-          ? `新版本已就绪：点「立即重启并更新」马上升级，或退出应用后自动安装${recordingActive ? "（录音进行中，不会打断你）" : ""}。`
+          ? `新版本已下载并通过校验${recordingActive ? "；录音结束后可重启安装" : ""}。`
           : downloadState.status === "installing"
             ? "正在更新 MinuteFlow…"
             : downloadState.status === "opening"
@@ -1132,10 +1132,10 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
 
   /** 安装方式按平台区分：macOS 自动原地更新（无拖拽），Windows 运行 Squirrel 安装程序。 */
   const updateInstallHint = api.system.platform === "win32"
-    ? "更新只接受 HTTPS 官网清单和官方安装包；下载完成后会先校验 SHA-256，再打开 MinuteFlow-Setup.exe 完成升级。"
+    ? "只接受 HTTPS 官网清单与官方安装包：下载后校验 SHA-256，再打开 MinuteFlow-Setup.exe 完成升级。"
     : api.system.platform === "darwin"
-      ? "发现新版本后会自动在后台下载；完成 SHA-512 与开发者签名校验后原地更新，全程无需拖拽 DMG。退出应用时也会自动装好新版本，录音期间绝不会自动重启。"
-      : "应用只接受 HTTPS 官网清单和官方发布地址。";
+      ? "新版本在后台下载，校验 SHA-512 与开发者签名后原地安装，退出应用时生效；录音期间不会自动重启。"
+      : "只接受 HTTPS 官网清单与官方发布地址。";
   /** macOS 自动更新已就绪的版本（下载完成，等待重启安装）。 */
   const updateReadyVersion = downloadState?.status === "ready"
     ? downloadState.version
@@ -1173,15 +1173,13 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
    */
   const renderSavedRow = (profile: ModelProfile, taskLabel: string) => {
     const issue = profileIssue(profile);
-    const subtitle = profile.kind === "diarization"
-      ? (issue ?? "声纹识别已就绪")
-      : profile.transport === "apple-speech"
-        ? (profile.options.allowServer === true ? "系统内置 · 在线识别" : "系统内置 · 本机离线")
-        : profile.transport === "local-summary"
-          ? "完全离线 · 无需模型"
-          : isLocalWhisperTransport(profile.transport)
-            ? (issue ?? `已就绪 · ${LOCAL_WHISPER_RUNTIME_LABELS[profile.transport] ?? "本地模型"}`)
-            : `${profile.model || "尚未选择模型"}`;
+    // 副标题只承载两类内容：需要动手的问题，或档案实际在用的模型名（数据）。
+    // 本机 Whisper 的模型文件让同名历史档案在目录里可区分；位置/就绪/离线由分组名与图标表达。
+    const localModelLabel = isLocalWhisperTransport(profile.transport) && profile.model
+      ? profile.model.split(/[\\/]/).pop() ?? ""
+      : "";
+    const subtitle = issue
+      ?? (isLocalServiceProfile(profile) ? localModelLabel : (profile.model || "尚未选择模型"));
     return (
       <div key={profile.id} className={`model-catalog__row ${editing?.id === profile.id ? "is-selected" : ""}`}>
         <button className="model-catalog__row-main" onClick={() => { setEditing(normalizeLegacyProviderProfile(profile)); setApiKey(""); setStatus(null); setEditorGeneration((value) => value + 1); }}>
@@ -1190,7 +1188,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
             <span className="model-catalog__titleline">
               <strong>{profile.name}</strong>
             </span>
-            <small className={issue ? "is-issue" : undefined}>{subtitle}</small>
+            {subtitle ? <small className={issue ? "is-issue" : undefined}>{subtitle}</small> : null}
           </span>
         </button>
         {profile.isDefault ? (
@@ -1216,7 +1214,6 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
           <nav className="settings-nav" aria-label="设置分类">
             <div className="settings-nav__title">
               <span id="settings-dialog-title">设置</span>
-              <small>MinuteFlow</small>
             </div>
             <div className="settings-nav__group">
               <span className="settings-nav__label">应用</span>
@@ -1230,19 +1227,14 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
             {showUpdateSettings && (
               <button aria-current={tab === "updates" ? "page" : undefined} className={tab === "updates" ? "is-active" : ""} onClick={() => setTab("updates")}><ArrowClockwise size={18} />软件更新</button>
             )}
-              <div className="settings-nav__privacy"><ShieldCheck size={15} weight="fill" /><span>本地优先<br /><small>你的会议数据默认留在本机</small></span></div>
+              <div className="settings-nav__privacy" title="会议数据默认保存在本机"><ShieldCheck size={15} weight="fill" /><span>数据留在本机</span></div>
             </div>
           </nav>
           <main className="settings-main">
             <header className="settings-header">
-              {modelTab ? (
-                <div className="settings-header__title">
-                  <h1>{tab === "llm" ? "AI 总结" : "转录设置"}</h1>
-                  <p>{tab === "llm" ? "选择会议内容的整理方式" : "选择声音转文字的方式"}</p>
-                </div>
-              ) : (
-                <div className="settings-breadcrumb"><span>设置</span><CaretRight size={14} /><strong>{tab === "general" ? "通用设置" : tab === "storage" ? "存储与隐私" : "软件更新"}</strong></div>
-              )}
+              <div className="settings-header__title">
+                <h1>{tab === "llm" ? "AI 总结" : tab === "transcription" ? "转录设置" : tab === "general" ? "通用设置" : tab === "storage" ? "存储与隐私" : "软件更新"}</h1>
+              </div>
               <button className="icon-button" onClick={onClose} aria-label="关闭设置" disabled={busy}><X size={18} /></button>
             </header>
           <div key={tab} className={`settings-content ${(tab === "llm" || tab === "transcription") ? "settings-content--models" : `settings-content--${tab}`}`}>
@@ -1266,7 +1258,6 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                         <div className="model-catalog__enhancement">
                           <div className="model-catalog__enhancement-heading">
                             <span>说话人分离</span>
-                            <small>可选增强 · 多人会议自动区分发言人</small>
                           </div>
                           {savedDiarizationProfiles.map((profile) => renderSavedRow(profile, "说话人分离"))}
                         </div>
@@ -1297,27 +1288,24 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                       <Plus size={15} />
                       <span>
                         <strong>添加服务</strong>
-                        <small>{tab === "llm"
-                          ? "本机纪要 · Ollama · 在线服务"
-                          : api.system.platform === "darwin" ? "本地 Whisper · Apple · 在线 · 声纹" : "本地 Whisper · 在线 · 声纹"}</small>
                       </span>
                     </button>
                     {addExpanded && (
                       <div className="model-catalog__add-options">
                         {tab === "llm" ? (
                           <>
-                            <button type="button" onClick={() => void addService("localSummary")}><strong>本机基础纪要</strong><small>完全离线 · 无需模型</small></button>
+                            <button type="button" onClick={() => void addService("localSummary")}><strong>本机基础纪要</strong></button>
                             <button type="button" onClick={() => void addService("ollama")}><strong>Ollama</strong><small>需已安装本机服务</small></button>
-                            <button type="button" onClick={() => void addService("openai")}><strong>在线服务</strong><small>DeepSeek、Kimi、智谱等</small></button>
+                            <button type="button" onClick={() => void addService("openai")}><strong>在线服务</strong></button>
                           </>
                         ) : (
                           <>
-                            <button type="button" onClick={() => void addService("whisper")}><strong>本地 Whisper</strong><small>离线 · 需下载模型</small></button>
+                            <button type="button" onClick={() => void addService("whisper")}><strong>本地 Whisper</strong><small>需下载模型</small></button>
                             {api.system.platform === "darwin" && (
-                              <button type="button" onClick={() => void addService("appleSpeech")}><strong>Apple 语音识别</strong><small>系统内置 · 零下载</small></button>
+                              <button type="button" onClick={() => void addService("appleSpeech")}><strong>Apple 语音识别</strong></button>
                             )}
-                            <button type="button" onClick={() => void addService("openaiWhisper")}><strong>在线服务</strong><small>OpenAI Whisper 或兼容接口</small></button>
-                            <button type="button" onClick={() => void addService("sherpa")}><strong>说话人分离</strong><small>可选增强 · 本地声纹</small></button>
+                            <button type="button" onClick={() => void addService("openaiWhisper")}><strong>在线服务</strong></button>
+                            <button type="button" onClick={() => void addService("sherpa")}><strong>说话人分离</strong></button>
                           </>
                         )}
                       </div>
@@ -1331,7 +1319,9 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                       <div className="profile-editor-heading__text">
                         <h2>{editing.name}</h2>
                         <div className="profile-editor-heading__meta">
-                          <span className={`profile-chip${transportInfo?.online ? " is-online" : ""}`}>{transportInfo?.text}</span>
+                          {transportInfo?.online && (
+                            <span className="profile-chip is-online">{transportInfo.text}</span>
+                          )}
                           {chipPreset && (
                             <span className="profile-chip">{chipPreset.name}{chipProtocol ? ` · ${chipProtocol}` : ""}</span>
                           )}
@@ -1399,7 +1389,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                       )}
                           <label className="field"><span>名称</span><input value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></label>
                           {!isLocalWhisperTransport(editing.transport) && editing.transport !== "local-summary" && editing.transport !== "sherpa-onnx" && editing.transport !== "apple-speech" && (
-                            <div className="field field--model-picker form-grid__full" ref={modelMenuRef}>
+                            <div className="field field--model-picker" ref={modelMenuRef}>
                               <span>模型</span>
                               <div className={`model-picker ${modelMenuOpen ? "is-open" : ""}`}>
                                 <input
@@ -1452,17 +1442,15 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                     )}
                     {editing.transport === "local-summary" ? (
                       <>
-                        <div className="field"><span>说明</span><div className="readonly-control">完全离线的规则纪要：不发起任何网络请求，也不需要下载模型。</div></div>
                         <details className="advanced-provider-options">
                           <summary>它能做什么</summary>
-                          <div className="readonly-control">从转录中提取要点、决策、行动项与风险，适合无网环境或隐私优先场景；追求更高质量可另配在线总结服务。</div>
+                          <div className="readonly-control">完全离线：不发起任何网络请求，也不需要下载模型。从转录中提取要点、决策、行动项与风险；追求更高质量可另配在线总结服务。</div>
                         </details>
                       </>
                     ) : isLocalWhisperTransport(editing.transport) ? (
                       <LocalModelManager profile={editing} onChange={setEditing} />
                     ) : editing.transport === "apple-speech" ? (
                       <>
-                        <div className="field"><span>说明</span><div className="readonly-control">macOS 内置的语音识别：免费、无需下载模型，默认只在本机运行、音频不出设备。</div></div>
                         <details className="advanced-provider-options">
                           <summary>权限与故障排除</summary>
                           <div className="readonly-control">首次测试或使用时，系统会请求「语音识别」权限；若识别反复超时，请到 系统设置 → 键盘 → 听写 下载对应语言的离线资源。</div>
@@ -1475,7 +1463,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                               disabled={busy}
                               onChange={(event) => void updateAppleServerMode(event.target.checked)}
                             />
-                            <span><strong>使用 Apple 在线识别</strong><small>改用 Apple 服务器上的语音模型，专业术语与连续讲话的识别更完整；开启后音频会发送至 Apple。改动立即生效。</small></span>
+                            <span><strong>使用 Apple 在线识别</strong><small>连续讲话识别更完整；开启后音频会发送至 Apple。</small></span>
                           </label>
                         </section>
                         <div className="local-test-row">
@@ -1485,7 +1473,6 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                       </>
                     ) : editing.transport === "sherpa-onnx" ? (
                       <>
-                        <div className="field"><span>说明</span><div className="readonly-control">引擎应用内置、无需安装；补齐两个模型后，多人会议会自动区分发言人。</div></div>
                         <DiarizationSetup profile={editing} onChange={setEditing} onCommit={(next) => void saveLocalProfile(next)} />
                         <VoiceprintBookCard />
                       </>
@@ -1494,7 +1481,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                         {editing.transport === "ollama" && (
                           <div className="field field--device-info"><span>本机配置</span><div className="readonly-control">
                             {hardware
-                              ? <>{formatHardwareLine(hardware)}。{ollamaGuidance(hardware.memoryBytes)}；获取模型列表后会按内存标注体积与适配。</>
+                              ? <>{formatHardwareLine(hardware)}。{ollamaGuidance(hardware.memoryBytes)}</>
                               : "正在读取设备信息…"}
                           </div></div>
                         )}
@@ -1575,7 +1562,6 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                     <div className="profile-editor-empty">
                       <span className="profile-editor-empty__icon"><Plus size={20} /></span>
                       <h2>还没有配置{tab === "llm" ? "总结服务" : "转录服务"}</h2>
-                      <p>从左侧「添加服务」开始：本机服务选完即生效，在线服务只需填写一次密钥。</p>
                     </div>
                   </div>
                 )}
@@ -1583,12 +1569,11 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
             )}
             {tab === "general" && (
               <div className="preference-settings">
-                <div className="settings-page-intro"><h2>通用设置</h2><p>设置新会议的默认行为，减少每次开始前的重复选择。</p></div>
-                <section className="settings-card"><div className="settings-card__title"><SlidersHorizontal size={19} /><div><strong>会议偏好</strong><small>适用于之后创建的会议</small></div></div>
-                  <label><span><strong>默认会议模式</strong><small>决定新会议的录音来源提示</small></span><select value={preferences.defaultMode} onChange={(event) => updatePreferences({ ...preferences, defaultMode: event.target.value as "online" | "offline" })}><option value="online">线上会议</option><option value="offline">线下会议</option></select></label>
-                  <label><span><strong>AI 会议纪要间隔</strong><small>有足够新内容时自动归纳的频率</small></span><select value={preferences.summaryIntervalSeconds} onChange={(event) => updatePreferences({ ...preferences, summaryIntervalSeconds: Number(event.target.value) })}><option value="60">约每 1 分钟</option><option value="120">约每 2 分钟</option><option value="300">约每 5 分钟</option></select></label>
+                <section className="settings-card"><div className="settings-card__title"><SlidersHorizontal size={19} /><div><strong>会议偏好</strong></div></div>
+                  <label><span><strong>默认会议模式</strong></span><select value={preferences.defaultMode} onChange={(event) => updatePreferences({ ...preferences, defaultMode: event.target.value as "online" | "offline" })}><option value="online">线上会议</option><option value="offline">线下会议</option></select></label>
+                  <label><span><strong>AI 会议纪要间隔</strong></span><select value={preferences.summaryIntervalSeconds} onChange={(event) => updatePreferences({ ...preferences, summaryIntervalSeconds: Number(event.target.value) })}><option value="60">约每 1 分钟</option><option value="120">约每 2 分钟</option><option value="300">约每 5 分钟</option></select></label>
                 </section>
-                <section className="settings-card settings-card--stacked"><div className="settings-card__title"><Sparkle size={19} /><div><strong>自定义术语</strong><small>帮助模型更准确地识别人名、产品名和缩写</small></div></div><label><textarea rows={6} value={preferences.glossary.join("\n")} onChange={(event) => updatePreferences({ ...preferences, glossary: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} placeholder="例如：MinuteFlow、Q3 复盘、SKU（每行一个）" /><small className="field-hint">每行填写一个术语，修改会自动保存。</small></label></section>
+                <section className="settings-card settings-card--stacked"><div className="settings-card__title"><Sparkle size={19} /><div><strong>自定义术语</strong></div></div><label><textarea rows={6} value={preferences.glossary.join("\n")} onChange={(event) => updatePreferences({ ...preferences, glossary: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} placeholder="例如：MinuteFlow、Q3 复盘、SKU（每行一个）" /><small className="field-hint">每行一个术语，改完自动保存。</small></label></section>
                 <section className="settings-card license-card"><div className="settings-card__title"><Key size={19} /><div><strong>授权</strong><small>一个激活码最多可在 2 台设备上使用</small></div></div>
                   {licenseStatus?.state === "licensed" ? (
                     <>
@@ -1617,17 +1602,13 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
             )}
             {tab === "storage" && (
               <div className="storage-settings">
-                <div className="settings-page-intro"><h2>存储与隐私</h2><p>MinuteFlow 默认在本机处理并保存会议内容。</p></div>
                 <div className="local-first-banner"><ShieldCheck size={24} weight="duotone" /><div><strong>本地优先</strong><p>录音、笔记和索引不会自动上传。只有配置服务商后，对应内容才会发送给该服务。</p></div></div>
-                <section className="settings-card"><div className="settings-card__title"><HardDrives size={19} /><div><strong>数据保留</strong><small>管理原始音频的本地生命周期</small></div></div><label><span><strong>保留原始录音</strong><small>笔记与转写不会随原始录音删除</small></span><select value={preferences.retentionDays === null ? "forever" : String(preferences.retentionDays)} onChange={(event) => updatePreferences({ ...preferences, retentionDays: event.target.value === "forever" ? null : Number(event.target.value) })}><option value="forever">永久保留</option><option value="30">30 天</option><option value="7">7 天</option><option value="0">转录完成后删除</option></select></label></section>
-                <section className="settings-card"><div className="settings-card__title"><Info size={19} /><div><strong>系统权限</strong><small>麦克风与系统音频权限由操作系统管理</small></div></div><div className="settings-card__action"><span>{isElectronRuntime ? "桌面安全环境已启用" : "浏览器预览不会请求桌面权限"}</span><button className="button" onClick={() => api.system.openSettings()}>打开系统设置</button></div></section>
+                <section className="settings-card"><div className="settings-card__title"><HardDrives size={19} /><div><strong>数据保留</strong></div></div><label><span><strong>保留原始录音</strong><small>笔记与转写不会随原始录音删除</small></span><select value={preferences.retentionDays === null ? "forever" : String(preferences.retentionDays)} onChange={(event) => updatePreferences({ ...preferences, retentionDays: event.target.value === "forever" ? null : Number(event.target.value) })}><option value="forever">永久保留</option><option value="30">30 天</option><option value="7">7 天</option><option value="0">转录完成后删除</option></select></label></section>
+                <section className="settings-card"><div className="settings-card__title"><Info size={19} /><div><strong>系统权限</strong></div></div><div className="settings-card__action"><span>{isElectronRuntime ? "桌面安全环境已启用" : "浏览器预览不会请求桌面权限"}</span><button className="button" onClick={() => api.system.openSettings()}>打开系统设置</button></div></section>
               </div>
             )}
             {tab === "updates" && (
               <div className="update-settings">
-                <div className="settings-section-heading">
-                  <div><h3>软件更新</h3><p>自动检查新版本并后台下载；macOS 校验签名后原地安装，退出应用即完成升级。</p></div>
-                </div>
                 <div className={`update-card update-card--${updateState?.status || "idle"}`}>
                   <div className="update-card__icon">
                     {updateState?.status === "available"
@@ -1642,8 +1623,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                         ? "暂时无法检查更新"
                         : updateState?.status === "up-to-date"
                           ? "已经是最新版本"
-                          : "保持MinuteFlow为最新版本"}</h4>
-                    <p>{updateState?.message || "应用启动后会静默检查一次，你也可以随时手动检查。"}</p>
+                          : "尚未检查更新"}</h4>
+                    {updateState?.message && <p>{updateState.message}</p>}
                     {updateState?.update?.notes && updateState.status === "available" && (
                       <div className="update-notes">
                         <strong>本次更新</strong>
@@ -1678,7 +1659,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                         <ArrowClockwise size={16} className={installingUpdate ? "spin" : ""} />
                         {installingUpdate ? "正在更新…" : `立即重启并更新到 ${updateReadyVersion}`}
                       </button>
-                      {recordingActive && <small className="update-actions__note">录音进行中：退出应用后也会自动安装新版本</small>}
+                      {recordingActive && <small className="update-actions__note">录音进行中，结束后可重启</small>}
                     </>
                   ) : updateState?.status === "available" && (
                     <>
@@ -1722,11 +1703,11 @@ const MODEL_GROUP_LABELS: Partial<Record<DownloadableModel["group"], string>> = 
 };
 
 /** 默认只呈现三个可理解的性能档位；完整官方目录仍保留在高级展开区。 */
-type RecommendedLocalModel = { id: string; badge: string; guidance: string };
+type RecommendedLocalModel = { id: string; badge: string };
 const RECOMMENDED_LOCAL_MODELS: readonly RecommendedLocalModel[] = [
-  { id: "ggml-base", badge: "轻量入门", guidance: "体积小，适合旧电脑或先快速体验。" },
-  { id: "ggml-small", badge: "日常推荐", guidance: "中文与中英混合会议的均衡选择。" },
-  { id: "ggml-large-v3-turbo-q5_0", badge: "准确优先", guidance: "更高准确率，仍保持较合理的体积。" }
+  { id: "ggml-base", badge: "轻量入门" },
+  { id: "ggml-small", badge: "日常推荐" },
+  { id: "ggml-large-v3-turbo-q5_0", badge: "准确优先" }
 ];
 
 /**
@@ -1782,7 +1763,6 @@ function VoiceprintBookCard() {
         <FingerprintSimple size={19} />
         <div>
           <strong>声纹簿</strong>
-          <small>记住的发言人 · 全部保存在本机</small>
         </div>
       </div>
       {message && <p className="settings-hint" role="status">{message}</p>}
@@ -1818,8 +1798,7 @@ function VoiceprintBookCard() {
         </div>
       )) : (
         <p className="settings-hint">
-          还没有记住任何人。开启说话人分离后，在会议转写里点击「发言人N」改名，MinuteFlow
-          会自动从本场音频学习 TA 的声纹；之后多人会议会自动标注 TA 的名字，认不准时仍用「发言人N」占位。
+          还没有记住任何人。在转写里给「发言人N」改名即可记住，声纹只保存在本机。
         </p>
       )}
       <ConfirmDialog open={voiceprintConfirm.open} request={voiceprintConfirm.request} onSettle={voiceprintConfirm.settle} />
@@ -1977,8 +1956,7 @@ function DiarizationSetup({
     <section className="local-model-manager diarization-setup">
       <div className="local-model-manager__heading">
         <div>
-          <strong>声纹引擎已内置</strong>
-          <small>sherpa-onnx 随应用安装，无需额外配置；补齐两个模型即可开始。</small>
+          <strong>声纹模型</strong>
         </div>
         <div className="local-model-actions">
           <button className="button button--small" disabled={busy} onClick={() => void detectModels()}><MagnifyingGlass size={15} />检测本机</button>
@@ -2002,15 +1980,15 @@ function DiarizationSetup({
         </div>
       )}
       <div className="local-model-library-heading">
-        <strong>推荐模型（共两个，都需下载）</strong>
-        <small>下载后自动校验并启用，官方源连不上会自动换镜像</small>
+        <strong>推荐模型</strong>
+        <small>两个都需下载</small>
       </div>
       <div className="recommended-model-list">
         {catalog.map((model) => renderSlotCard(model))}
       </div>
       <details className="advanced-provider-options">
         <summary>高级与故障排除</summary>
-        <div className="field"><span>说明</span><div className="readonly-control">模型损坏或需要使用特殊版本时，可在此手动指定文件路径；聚类阈值控制「切成几个说话人」的灵敏度，默认 0.5 适合大多数会议。</div></div>
+        <div className="field"><span>说明</span><div className="readonly-control">聚类阈值越低越容易分成更多说话人，默认 0.5 适合大多数会议。</div></div>
         <label className="field"><span>分离模型路径</span><input value={profile.options.segmentationModelPath || ""} onChange={(event) => onChange({ ...profile, options: { ...profile.options, segmentationModelPath: event.target.value } })} onBlur={() => onCommit?.(profile)} spellCheck={false} /></label>
         <label className="field"><span>声纹模型路径</span><input value={profile.options.embeddingModelPath || ""} onChange={(event) => onChange({ ...profile, options: { ...profile.options, embeddingModelPath: event.target.value } })} onBlur={() => onCommit?.(profile)} spellCheck={false} /></label>
         <label className="field"><span>聚类阈值</span><input type="number" min="0.1" max="0.9" step="0.01" value={profile.options.clusteringThreshold ?? 0.5} onChange={(event) => onChange({ ...profile, options: { ...profile.options, clusteringThreshold: Number(event.target.value) } })} onBlur={() => onCommit?.(profile)} /></label>
@@ -2197,9 +2175,7 @@ function LocalModelManager({
     const tooHeavy = fit === "heavy";
     const minRamGB = WHISPER_MODEL_MIN_RAM_GB[model.id];
     const badge = deviceBest ? "按你的设备推荐" : recommendation?.badge;
-    const guidance = deviceBest && hardware
-      ? `${formatHardwareLine(hardware)}运行这款最合适。`
-      : recommendation?.guidance || model.description;
+    const guidance = model.description;
     return (
       <div className={`download-model-card ${recommendation || deviceBest ? "download-model-card--recommended" : ""}`} key={model.id}>
         <div>
@@ -2229,7 +2205,7 @@ function LocalModelManager({
   return (
     <section className="local-model-manager">
       <div className="local-model-manager__heading">
-        <div><strong>本地模型</strong><small>自动查找常见目录，也可以选择文件或直接下载。</small></div>
+        <div><strong>本地模型</strong></div>
         <div className="local-model-actions">
           <button className="button button--small" disabled={busy} onClick={scanModels}><MagnifyingGlass size={15} />搜索本机</button>
           <button className="button button--small" disabled={busy} onClick={chooseModel}><FolderOpen size={15} />选择文件</button>
@@ -2238,7 +2214,7 @@ function LocalModelManager({
       {hardware && (
         <div className="device-info-line" role="note">
           <Cpu size={14} weight="duotone" />
-          <span>检测到 {formatHardwareLine(hardware)}，推荐与提示已按内存计算</span>
+          <span>检测到 {formatHardwareLine(hardware)}</span>
         </div>
       )}
       {runtimeLabels.length > 0 && <div className="runtime-chips">{runtimeLabels.map((label) => <span key={label}>{label}</span>)}</div>}
@@ -2250,12 +2226,11 @@ function LocalModelManager({
               <span><strong>{model.name}</strong><small>{model.format} · {formatBytes(model.sizeBytes)}</small></span>
               {profile.options.modelPath === model.path && <CheckCircle size={17} weight="fill" />}
             </button>
-          )) : <p className="local-model-empty">本机暂未找到模型，可从下方选择一个下载。</p>}
+          )) : <p className="local-model-empty">本机暂未找到模型。</p>}
         </div>
       )}
       <div className="local-model-library-heading">
         <strong>推荐模型</strong>
-        <small>已按本机内存标注最适合的款；下载后自动校验并启用</small>
       </div>
       <div className="recommended-model-list">
         {(() => {
@@ -2268,7 +2243,7 @@ function LocalModelManager({
             : [
                 RECOMMENDED_LOCAL_MODELS[0],
                 RECOMMENDED_LOCAL_MODELS[1],
-                { id: deviceBestId, badge: "按你的设备推荐", guidance: hardware ? `${formatHardwareLine(hardware)}运行这款最合适。` : "" }
+                { id: deviceBestId, badge: "按你的设备推荐" }
               ];
           return featured.map((recommendation) => {
             const model = catalog.find((item) => item.id === recommendation.id);
@@ -2278,13 +2253,13 @@ function LocalModelManager({
       </div>
       <details className="local-model-catalog-details">
         <summary>
-          <span><strong>浏览全部模型与下载选项</strong><small>{catalog.filter((item) => item.group !== "diarization").length} 款官方模型、量化版、英文专用与自定义直链</small></span>
+          <span><strong>浏览全部模型与下载选项</strong></span>
           <CaretDown size={16} />
         </summary>
         <div className="local-model-catalog-details__body">
           <div className="download-source-row">
             <label>
-              <span><strong>下载源</strong><small>官方源连不上时会自动尝试另一个预设源</small></span>
+              <span><strong>下载源</strong></span>
               <select
                 value={preferences.modelDownloadSourceKind}
                 onChange={(event) => updatePreferences({ ...preferences, modelDownloadSourceKind: event.target.value as "official" | "mirror" | "custom" })}
@@ -2317,7 +2292,7 @@ function LocalModelManager({
           <div className="download-url-row">
             <div className="download-url-row__heading">
               <strong>从链接下载</strong>
-              <small>目录之外的模型可粘贴直链（.bin / .gguf / .pt）。自定义直链不经过完整性校验，请仅使用信任来源。</small>
+              <small>支持 .bin / .gguf / .pt；直链不校验完整性，请只用信任来源。</small>
             </div>
             <div className="download-url-row__controls">
               <input

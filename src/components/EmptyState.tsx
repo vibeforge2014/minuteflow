@@ -26,7 +26,6 @@ export function EmptyState({
       <div className="empty-state">
         <div><MagnifyingGlass size={32} weight="duotone" /></div>
         <h1>没有找到匹配的会议</h1>
-        <p>换个关键词试试，或清除搜索查看全部会议。</p>
         <div>
           <button className="button button--primary" onClick={onClear}>清除搜索</button>
         </div>
@@ -37,7 +36,6 @@ export function EmptyState({
     <div className="empty-state">
       <div><FilePlus size={32} weight="duotone" /></div>
       <h1>创建你的第一份会议文档</h1>
-      <p>新建会议不再需要填写任何内容——创建后立即开始录音转录，第一时间捕捉会议内容。</p>
       <div>
         <button className="button button--primary" onClick={onNew} title="自动命名并立即开始录音">立即开始会议</button>
         <button className="button" onClick={onImport}><FileArrowUp size={16} />导入录音</button>

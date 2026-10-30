@@ -125,9 +125,9 @@ export function describeImportProgressDetail(job: ImportJob | undefined, now = D
   }
   if (job.status === "transcribing" || job.stage === "transcribing") {
     if (!job.totalChunks) return "音频会按自然停顿切段，首段文本很快出现";
-    return `已完成 ${Math.min(job.completedChunks || 0, job.totalChunks)}/${job.totalChunks} 段，无需停留在本页`;
+    return `已完成 ${Math.min(job.completedChunks || 0, job.totalChunks)}/${job.totalChunks} 段`;
   }
-  if (job.status === "summarizing") return "正在把结论、行动项与风险整理成纪要";
+  if (job.status === "summarizing") return undefined;
   if (job.status === "cancelled") {
     return job.transcriptionComplete
       ? "转写已完成；重试会从说话人识别或纪要阶段继续"
@@ -139,7 +139,6 @@ export function describeImportProgressDetail(job: ImportJob | undefined, now = D
     return job.error || "配置好模型后会自动继续，已归档音频不会丢失";
   }
   if (job.status === "waiting_for_audio_tool") return job.error || "恢复应用内置音频组件后继续";
-  if (job.status === "copying" || job.stage === "copying") return "原文件不会被移动或修改";
   return undefined;
 }
 

@@ -105,7 +105,6 @@ export function NewMeetingDialog({
         <header>
           <div>
             <h2 id="new-meeting-title">新建会议</h2>
-            <p>创建一份会随着讨论持续生长的会议文档。</p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="关闭新建会议" disabled={busy}><X size={18} /></button>
         </header>
@@ -140,7 +139,7 @@ export function NewMeetingDialog({
               <Users size={17} />线下会议
             </button>
           </div>
-          <small>{mode === "online" ? "同时录制麦克风和系统音频。" : "仅录制麦克风，并对现场发言人进行分离。"}</small>
+          <small>{mode === "online" ? "麦克风 + 系统音频" : "仅麦克风，并区分现场发言人"}</small>
         </div>
         <button
           type="button"
@@ -150,7 +149,7 @@ export function NewMeetingDialog({
         >
           <span>
             <strong>补充会议信息</strong>
-            <small>{goal.trim() ? "已填写会议目标" : "参与者与目标，可稍后再补充"}</small>
+            <small>{goal.trim() ? "已填写会议目标" : "参与者与目标"}</small>
           </span>
           <CaretDown size={16} />
         </button>

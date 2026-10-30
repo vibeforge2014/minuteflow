@@ -55,7 +55,6 @@ interface TranscriptViewProps {
   jumpTarget?: { ms: number; nonce: number } | null;
   summaryBusy?: boolean;
   onGenerateSummary?(): void;
-  onOpenSummary?(): void;
   /** 实时转写连续失败后的持久提示；录音结束后也保留，直到用户处理或忽略。 */
   transcriptionFailure?: LiveTranscriptionFailure | null;
   transcriptionIsLocal?: boolean;
@@ -72,7 +71,7 @@ interface TranscriptViewProps {
   onConfigureTranscription?(): void;
 }
 
-export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction, jumpTarget, summaryBusy, onGenerateSummary, onOpenSummary, transcriptionFailure, transcriptionIsLocal = false, onUseLocalWhisper, onChooseTranscriptionService, onDismissTranscriptionFailure, onRetryImport, onCancelImport, onSkipDiarization, onRetranscribe, onConfigureTranscription }: TranscriptViewProps) {
+export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction, jumpTarget, summaryBusy, onGenerateSummary, transcriptionFailure, transcriptionIsLocal = false, onUseLocalWhisper, onChooseTranscriptionService, onDismissTranscriptionFailure, onRetryImport, onCancelImport, onSkipDiarization, onRetranscribe, onConfigureTranscription }: TranscriptViewProps) {
   /** 正在重命名的说话人 id（显示浮层输入框）。 */
   const [speakerEditor, setSpeakerEditor] = useState<string | null>(null);
   /** 改名时是否把这个人注册进本机声纹簿（默认勾选，可显式关闭）。 */
@@ -286,9 +285,6 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     summary: { ...meeting.summary, stale: true }
   });
 
-  // 导入阶段/块计数变化时文本随之更新：以文本为 key 重挂，播放一次 160ms 微淡入。
-  const transcriptStatus = importTranscriptStatus(importJob, meeting.transcript.length);
-
   return (
     <>
       <div className="speaker-strip">
@@ -316,7 +312,6 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           <header>
             <div>
               <strong>发言人管理</strong>
-              <small>改名会从本地音频学习声纹；低置信度时仍保留匿名标签</small>
             </div>
             <button className="icon-button" onClick={() => setManagerOpen(false)} aria-label="关闭发言人管理">
               <X size={15} />
@@ -412,13 +407,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
                 ? "本机模型可能尚未下载完成或正在加载。"
                 : "网络、密钥或服务额度可能有问题。"}
               连续 {transcriptionFailure.consecutive} 次转写没有结果，录音和音频存档不受影响。
-              {stage === "live"
-                ? transcriptionIsLocal
-                  ? "可更换在线服务，或重新检查本地模型。"
-                  : "改用本地 Whisper 后从下一段开始生效，无需停止录音。"
-                : transcriptionIsLocal
-                  ? "可更换在线服务，或重新检查本地模型；设置会用于下一场会议。"
-                  : "可在下一场会议前改用本地 Whisper，避免再次中断。"}
+              {!transcriptionIsLocal && stage === "live" ? "改用本地 Whisper 会从下一段起生效。" : ""}
             </p>
             {transcriptionFailure.message && (
               <small title={transcriptionFailure.message}>{transcriptionFailure.message}</small>
@@ -441,7 +430,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
       {importJob && (isActiveImportJob(importJob) || [
         "failed", "cancelled", "waiting_for_network", "waiting_for_model",
         "waiting_for_summary_model", "waiting_for_audio_tool"
-      ].includes(importJob.status)) ? (
+      ].includes(importJob.status)) && (
         <section
           className={`transcript-import-status transcript-import-status--${importJob.status} content-status-enter`}
           aria-live="polite"
@@ -482,8 +471,6 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           </div>
           <ImportProcessingMeta job={importJob} compact />
         </section>
-      ) : meeting.transcript.length > 0 && (
-        <p className="transcript-hint content-status-enter" key={transcriptStatus}>{transcriptStatus}</p>
       )}
       <div
         className="transcript-list"
@@ -498,11 +485,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           summary={meeting.summary}
           busy={summaryBusy}
           onRefresh={onGenerateSummary}
-          onOpen={onOpenSummary}
         />
-        {meeting.transcript.length > 0 && (
-          <div className="transcript-feed-heading"><span>会议原文</span><small>{stage === "live" ? "实时转录" : `${meeting.transcript.length} 段发言`}</small></div>
-        )}
         {meeting.transcript.length > visibleCount && (
           <button className="load-earlier" onClick={() => setVisibleCount((value) => value + 200)}>
             加载更早的 {Math.min(200, meeting.transcript.length - visibleCount)} 条
@@ -573,9 +556,9 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           <div className="panel-empty">
             <MagicWand size={24} weight="duotone" />
             <p>{importJob
-              ? importTranscriptStatus(importJob, 0)
+              ? importTranscriptStatus(importJob)
               : stage === "review"
-                ? "这场会议暂无可用逐字稿。笔记和已生成的纪要仍会保留。"
+                ? "这场会议没有逐字稿；笔记与纪要仍保留。"
                 : "开始录音后，转录会出现在这里。"}</p>
             {!importJob && stage === "review" && emptyActionLabel && onEmptyAction && (
               <button className="button button--secondary button--small" onClick={onEmptyAction}>
@@ -654,11 +637,10 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
 }
 
 /** 概览只摘录已有纪要，不改写原文，也不会因打开转录页触发模型请求。 */
-function TranscriptOverview({ summary, busy, onRefresh, onOpen }: {
+function TranscriptOverview({ summary, busy, onRefresh }: {
   summary: Meeting["summary"];
   busy?: boolean;
   onRefresh?(): void;
-  onOpen?(): void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -678,7 +660,6 @@ function TranscriptOverview({ summary, busy, onRefresh, onOpen }: {
             try { await navigator.clipboard.writeText(text); setCopyState("copied"); }
             catch { setCopyState("failed"); }
           }}>{copyState === "copied" ? <Check size={17} /> : <Copy size={17} />}</button>}
-          {onOpen && <button className="transcript-overview__open" onClick={onOpen}>查看纪要</button>}
         </div>
       </header>
       {points.length ? <>
@@ -691,12 +672,14 @@ function TranscriptOverview({ summary, busy, onRefresh, onOpen }: {
             {expanded ? "收起概览" : "展开概览"}<CaretDown size={13} />
           </button>
         </>}
-      </> : <p className="transcript-overview__empty">{busy ? "正在整理会议概览…" : "还没有会议概览，生成纪要后会在这里呈现重点。"}</p>}
-      <footer>
-        <span>{busy ? "正在更新…" : points.length ? summary.generationMode === "local" ? "本机基础归纳 · 纪要摘录" : "AI 纪要摘录" : "原文会持续保留在下方"}</span>
-        {summary.stale && !busy && <span className="transcript-overview__stale">有新内容 · 待更新</span>}
-        <span role="status">{copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败，请重试" : ""}</span>
-      </footer>
+      </> : <p className="transcript-overview__empty">{busy ? "正在整理会议概览…" : "还没有纪要。"}</p>}
+      {(busy || (summary.stale && !busy) || copyState !== "idle") && (
+        <footer>
+          {busy && <span>正在更新…</span>}
+          {summary.stale && !busy && <span className="transcript-overview__stale">有新内容 · 待更新</span>}
+          <span role="status">{copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败，请重试" : ""}</span>
+        </footer>
+      )}
     </section>
   );
 }
@@ -727,8 +710,7 @@ function AnimatedTranscriptCopy({ text, animate }: { text: string; animate: bool
 }
 
 /** 导入任务阶段 → 即时状态；已有文本时仍保留状态行，不替换转录内容。 */
-function importTranscriptStatus(job: ImportJob | undefined, segmentCount: number) {
-  if (!job) return segmentCount ? "转录内容已按时间轴排列" : "AI 实时转写中，临时内容仅供参考";
+function importTranscriptStatus(job: ImportJob) {
   if (job.status === "queued" && job.stage === "copying") return "等待归档录音…";
   if (job.status === "copying" || job.stage === "copying") return "正在归档录音…";
   if (job.status === "preparing" || job.stage === "preparing") return "正在准备音频…";
@@ -746,7 +728,7 @@ function importTranscriptStatus(job: ImportJob | undefined, segmentCount: number
   }
   if (job.status === "diarizing") return "转录完成，正在识别不同发言人…";
   if (job.status === "summarizing") return "转录完成，正在整理会议纪要…";
-  return segmentCount ? "转录已完成，点击时间戳可定位播放。" : "录音中没有识别到可显示的语音。";
+  return "录音中没有识别到可显示的语音。";
 }
 
 /** 转写时间戳 → HH:MM:SS / MM:SS（相对录音起点，与播放器时间轴对齐）。 */

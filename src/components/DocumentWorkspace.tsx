@@ -384,7 +384,6 @@ export function DocumentWorkspace({
             onEmptyAction={onEmptyAction}
             summaryBusy={summaryBusy || Boolean(processingStatus)}
             onGenerateSummary={onGenerateSummary}
-            onOpenSummary={() => { setSummaryView("normal"); setWorkspaceView("document"); }}
             transcriptionFailure={transcriptionFailure}
             transcriptionIsLocal={transcriptionIsLocal}
             onUseLocalWhisper={onUseLocalWhisper}
@@ -421,9 +420,7 @@ export function DocumentWorkspace({
         {stage === "prepare" && (
           <section className="preparation-card" aria-labelledby="preparation-title">
             <div className="preparation-card__intro">
-              <span className="eyebrow">会前准备</span>
               <h1 id="preparation-title">一切就绪后，直接开始记录</h1>
-              <p>先确认录音范围、权限和转写方式。缺少转写服务不会影响本地录音。</p>
             </div>
             <div className="readiness-grid">
               {readiness.items.map((item) => (
@@ -434,7 +431,7 @@ export function DocumentWorkspace({
                   <div>
                     <small>{item.label}</small>
                     <strong>{item.value}</strong>
-                    <p>{item.detail}</p>
+                    {item.detail && <p>{item.detail}</p>}
                   </div>
                   {item.id === "microphone" && readiness.microphoneNeedsAttention && (
                     <button className="text-button" onClick={onOpenPermissions}>查看授权</button>
@@ -452,20 +449,9 @@ export function DocumentWorkspace({
             </div>
             <button className="preparation-start" onClick={() => void onStartRecording()}>
               <Microphone size={20} weight="fill" />
-              <span><strong>开始录音</strong><small>{meeting.mode === "online" ? "记录麦克风与系统音频" : "记录现场麦克风声音"}</small></span>
+              <strong>开始录音</strong>
               <CaretRight size={18} weight="bold" />
             </button>
-          </section>
-        )}
-
-        {stage === "live" && (
-          <section className="live-context" aria-label="本次会议目标">
-            <span><i />正在记录</span>
-            <div>
-              {meeting.goals.length
-                ? meeting.goals.slice(0, 3).map((goal) => <span key={goal}>{goal}</span>)
-                : <span>先专注记录，目标可以随时补充</span>}
-            </div>
           </section>
         )}
 
@@ -473,15 +459,15 @@ export function DocumentWorkspace({
           <section className={`review-hero ${recentlyFinalized || processingStatus ? "is-fresh" : ""}`}>
             <div className="review-hero__main">
               <div className="review-hero__head">
-                <span className="eyebrow">{processingStatus
-                  ? importJob?.status === "cancelled"
+                {processingStatus && (
+                  <span className="eyebrow">{importJob?.status === "cancelled"
                     ? "处理已暂停"
                     : importJob?.status === "failed"
                       ? "处理失败"
                       : importJob?.status === "diarizing"
                         ? "识别发言人"
-                        : "录音处理中"
-                  : "会后整理"}</span>
+                        : "录音处理中"}</span>
+                )}
                 {!processingStatus && (
                   <button
                     className="review-hero__view-toggle"
@@ -499,19 +485,15 @@ export function DocumentWorkspace({
               {importJob && processingStatus && <ImportProcessingMeta job={importJob} />}
               <p>{processingStatus
                 ? importJob?.status === "failed" || importJob?.status === "cancelled"
-                  ? "已完成的转写和音频都已保存；继续处理会从当前阶段接着跑。"
+                  ? "已保存完成的内容；重试会从当前阶段继续。"
                   : importJob?.status === "diarizing"
-                    ? "转写已经完整可读，正在本机识别不同发言人。可以先看转写，或跳过这一步直接生成纪要。"
-                    : "处理会在后台继续，你也可以先补充笔记或查看已经出现的转写；长阶段可随时暂停。"
-                : summaryView === "visual"
-                  ? meeting.summary.visualSummary && !meeting.summary.visualSummary.stale
-                    ? "视觉版已基于普通纪要生成；切回普通纪要可以继续编辑结论与行动项。"
-                    : "生成普通纪要后，可以进一步生成视觉版。"
-                  : hasOrdinarySummary
-                    ? `已整理 ${summaryParts.join("、")}。`
-                    : recentlyFinalized
-                      ? "录音已安全保存；需要时再生成最终纪要。"
-                      : "录音和个人记录已保留；需要时再生成最终纪要。"}</p>
+                    ? "转写已就绪，正在本机识别发言人。"
+                    : "处理在后台继续，可随时暂停。"
+                : hasOrdinarySummary
+                  ? summaryParts.join(" · ")
+                  : recentlyFinalized
+                    ? "录音已保存。"
+                    : "还没有纪要。"}</p>
             </div>
             <div className="review-hero__side">
               {importJob?.status === "diarizing" && (
@@ -818,7 +800,7 @@ export function DocumentWorkspace({
             })()
           ) : (
             <div className="section-empty-row">
-              <span>转录产生后，这里会归纳关键结论与进展，不会重复抄录原文。</span>
+              <span>还没有关键结论。</span>
               <button className="text-button" onClick={addKeyPoint}><Plus size={13} />手动添加</button>
             </div>
           )}
@@ -884,7 +866,7 @@ export function DocumentWorkspace({
               );
             }) : (
               <div className="section-empty-row">
-                <span>生成纪要后会自动归纳行动项，也可以先手动添加。</span>
+                <span>还没有行动项。</span>
                 <button className="text-button" onClick={addActionItem}><Plus size={13} />添加行动项</button>
               </div>
             )}

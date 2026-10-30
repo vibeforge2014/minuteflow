@@ -24,15 +24,15 @@ export function ExportMenu({
   };
   return (
     <div className="export-menu">
-      <button onClick={() => exportFormat("md")}><FileText size={17} /><span>Markdown<small>适合继续编辑</small></span></button>
-      <button onClick={() => exportFormat("txt")}><FileText size={17} /><span>纯文本<small>通用文字备份</small></span></button>
-      <button onClick={() => exportFormat("pdf")}><FilePdf size={17} /><span>PDF<small>适合分享和归档</small></span></button>
-      {meeting.summary.visualSummary && !meeting.summary.visualSummary.stale && <button onClick={() => exportFormat("visual-png")}><ImageSquare size={17} /><span>视觉纪要图<small>PNG 信息图，适合直接分享</small></span></button>}
-      <button onClick={() => exportFormat("docx")}><FileDoc size={17} /><span>Word 文档<small>保留会议结构</small></span></button>
-      <button onClick={() => exportFormat("srt")}><Subtitles size={17} /><span>SRT 字幕<small>带时间轴的转录</small></span></button>
-      <button onClick={() => exportFormat("vtt")}><Subtitles size={17} /><span>VTT 字幕<small>适合网页播放器</small></span></button>
-      <button onClick={() => exportFormat("json")}><BracketsCurly size={17} /><span>结构化 JSON<small>用于迁移和二次处理</small></span></button>
-      <button onClick={() => exportFormat("zip")}><Package size={17} /><span>完整备份包<small>纪要、转录与结构化数据</small></span></button>
+      <button onClick={() => exportFormat("md")}><FileText size={17} /><span>Markdown</span></button>
+      <button onClick={() => exportFormat("txt")}><FileText size={17} /><span>纯文本</span></button>
+      <button onClick={() => exportFormat("pdf")}><FilePdf size={17} /><span>PDF</span></button>
+      {meeting.summary.visualSummary && !meeting.summary.visualSummary.stale && <button onClick={() => exportFormat("visual-png")}><ImageSquare size={17} /><span>视觉纪要图</span></button>}
+      <button onClick={() => exportFormat("docx")}><FileDoc size={17} /><span>Word 文档</span></button>
+      <button onClick={() => exportFormat("srt")}><Subtitles size={17} /><span>SRT 字幕</span></button>
+      <button onClick={() => exportFormat("vtt")}><Subtitles size={17} /><span>VTT 字幕</span></button>
+      <button onClick={() => exportFormat("json")}><BracketsCurly size={17} /><span>结构化 JSON</span></button>
+      <button onClick={() => exportFormat("zip")}><Package size={17} /><span>完整备份包</span></button>
     </div>
   );
 }

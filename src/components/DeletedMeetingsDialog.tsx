@@ -45,7 +45,6 @@ export function DeletedMeetingsDialog({
         <header className="dialog__header">
           <div>
             <h2 id="deleted-title">最近删除</h2>
-            <p>会议采用软删除，可随时恢复到会议库。</p>
           </div>
           <button className="icon-button" onClick={onClose} aria-label="关闭">
             <X size={18} />

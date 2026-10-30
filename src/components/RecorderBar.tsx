@@ -107,9 +107,15 @@ export function RecorderBar({
         <div>
           <strong>{formatDuration(visualElapsed)}</strong>
           <span>
-            {silentMic && phase === "recording"
-              ? "未检测到麦克风声音"
-              : phase === "starting" ? "正在申请录音权限" : phase === "stopping" ? "正在完成写盘" : phase === "paused" ? "已暂停" : live ? "录制中" : meeting.status === "complete" ? "会议已结束" : "准备录音"}
+            {phase === "starting"
+              ? "正在申请录音权限"
+              : phase === "stopping"
+                ? ""
+                : phase === "paused"
+                  ? "已暂停"
+                  : live
+                    ? "录制中"
+                    : meeting.status === "complete" ? "会议已结束" : "准备录音"}
           </span>
         </div>
       </div>

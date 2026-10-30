@@ -260,7 +260,6 @@ export function SystemPermissionsDialog({
         <div>
           <span>{copy.eyebrow}</span>
           <h2 id="permission-wall-title">{copy.title}</h2>
-          <p>{copy.description}</p>
         </div>
       </header>
 
@@ -269,7 +268,6 @@ export function SystemPermissionsDialog({
           step={1}
           icon={<Microphone size={21} />}
           title="麦克风"
-          description="录制你的声音，并用于本地或你选择的转写服务。"
           value={status.microphone}
           current={phase === "microphone"}
         />
@@ -277,7 +275,7 @@ export function SystemPermissionsDialog({
           step={2}
           icon={<Monitor size={21} />}
           title="系统音频"
-          description="录制线上会议声音；macOS 将它归在“屏幕与系统音频录制”中，但 MinuteFlow 不保存屏幕画面。"
+          description="macOS 把它归在“屏幕与系统音频录制”中，但 MinuteFlow 不保存屏幕画面。"
           value={status.systemAudioRequired ? status.screen : "granted"}
           current={phase === "screen-settings" || phase === "restart" || phase === "verify"}
           waiting={phase === "screen-settings" && screenSettingsOpened}
@@ -287,7 +285,6 @@ export function SystemPermissionsDialog({
         {phase === "screen-settings" && (
           <section className="permission-wall__stage permission-wall__drag-guide" aria-label="把 MinuteFlow 添加到系统设置">
             <div className="permission-wall__drag-copy">
-              <span>{screenSettingsOpened ? "系统设置已打开" : "如果列表里没有 MinuteFlow"}</span>
               <strong>{screenSettingsOpened ? "在系统设置中完成这 3 步" : "打开设置后，按这 3 步添加"}</strong>
               <ol>
                 <li>从置顶小浮层按住 MinuteFlow 图标</li>
@@ -309,7 +306,7 @@ export function SystemPermissionsDialog({
             <Power size={24} weight="duotone" />
             <div>
               <strong>让新权限生效，需要重新启动一次</strong>
-              <p>如果右侧开关已经打开，点“重启并继续”；MinuteFlow 会保存当前进度，重新打开后直接验证系统音频。</p>
+              <p>开关已打开就点“重启并继续”；进度会保留，重新打开后直接验证系统音频。</p>
             </div>
           </section>
         )}
@@ -329,7 +326,7 @@ export function SystemPermissionsDialog({
             <CheckCircle size={25} weight="fill" />
             <div>
               <strong>两项权限均已准备好</strong>
-              <p>正在进入下一步设置，之后录音、停止和回放都不会再主动打开系统设置。</p>
+              <p>正在进入下一步设置…</p>
             </div>
           </section>
         )}
@@ -344,7 +341,6 @@ export function SystemPermissionsDialog({
           <button className="permission-wall__skip" onClick={onSkip} disabled={checking}>暂不授权，先体验</button>
         ) : <span />}
         <div>
-          <span role="status" aria-live="polite">{copy.progress}</span>
           {phase === "restart" && <button className="button" onClick={openScreenSettings} disabled={checking}>重新打开系统设置</button>}
           {phase === "verify" && <button className="button" onClick={refresh} disabled={checking}><ArrowClockwise size={15} />重新检查权限</button>}
           <button className="button button--primary" onClick={handlePrimary} disabled={checking || completing || phase === "success"}>
@@ -358,38 +354,28 @@ export function SystemPermissionsDialog({
 
 function phaseCopy(phase: PermissionSetupPhase, returningUser: boolean, settingsOpened: boolean) {
   if (phase === "microphone") return {
-    eyebrow: returningUser ? "权限更新 · 第 1 项，共 2 项" : "首次设置 · 第 1 项，共 2 项",
+    eyebrow: returningUser ? "权限更新" : "首次设置",
     title: returningUser ? "先重新确认麦克风权限" : "先允许麦克风",
-    description: returningUser ? "已有权限不会被重置；确认后会继续处理系统音频。" : "完成当前一步后，才会展开系统音频的设置说明。",
-    progress: "当前：麦克风",
     primary: "允许麦克风"
   };
   if (phase === "screen-settings") return {
-    eyebrow: "首次设置 · 第 2 项，共 2 项",
+    eyebrow: "首次设置",
     title: "再允许系统音频",
-    description: "MinuteFlow 会打开正确的 macOS 设置页，并在上方提供可拖动的真实应用图标。",
-    progress: settingsOpened ? "等待在系统设置中完成" : "当前：系统音频",
     primary: settingsOpened ? "重新打开系统设置" : "打开系统设置"
   };
   if (phase === "restart") return {
-    eyebrow: "权限已修改 · 需要重启",
+    eyebrow: "需要重启",
     title: "让系统音频权限生效",
-    description: "macOS 在设置中修改屏幕录制权限后，需要重新启动应用一次。",
-    progress: "进度会自动保留",
     primary: "重启并继续"
   };
   if (phase === "verify") return {
     eyebrow: "最后检查",
     title: "验证系统音频",
-    description: "确认 MinuteFlow 可以听到线上会议声音；整个检查只在本机完成。",
-    progress: "最后一步",
     primary: "验证系统音频"
   };
   return {
     eyebrow: "设置完成",
     title: "录音权限已准备好",
-    description: "两项权限都可以正常使用。",
-    progress: "正在进入下一步…",
     primary: "已完成"
   };
 }
@@ -398,7 +384,7 @@ function PermissionRow({ step, icon, title, description, value, current = false,
   step: number;
   icon: React.ReactNode;
   title: string;
-  description: string;
+  description?: string;
   value: SystemPermissionValue;
   current?: boolean;
   waiting?: boolean;
@@ -412,7 +398,7 @@ function PermissionRow({ step, icon, title, description, value, current = false,
     <div className="permission-wall__icon">{icon}</div>
     <div>
       <div className="permission-wall__title"><small>权限 {step}</small><strong>{title}</strong><span>{ready ? <Check size={13} weight="bold" /> : restart ? <Power size={13} /> : <WarningCircle size={13} />}{label}</span></div>
-      <p>{description}</p>
+      {description && <p>{description}</p>}
     </div>
   </article>;
 }

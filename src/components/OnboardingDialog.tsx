@@ -62,7 +62,6 @@ export function OnboardingDialog({
       <section ref={dialogRef} className="dialog onboarding-dialog onboarding-wizard" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
         <header className="onboarding-wizard__header">
           <div>
-            <span>首次设置 · {step + 1}/{steps.length}</span>
             <h2 id="onboarding-title">{steps[step]}</h2>
           </div>
           <div className="onboarding-wizard__steps" aria-label="设置进度">
@@ -80,42 +79,38 @@ export function OnboardingDialog({
           {step === 1 && (
             <ModelSetupStep
               icon={<Waveform size={28} weight="duotone" />}
-              eyebrow="第一项 · 语音转录"
               title="先让声音变成可靠文字"
-              description="macOS 内置的 Apple 语音识别免费、零下载、开箱即用；也可以选择本地 Whisper 模型或在线服务。MinuteFlow 不会在你开始录音时临时弹出模型设置。"
               ready={Boolean(transcriptionProfile)}
               readyTitle={transcriptionProfile ? `${transcriptionProfile.name} 已启用` : "尚未配置转录模型"}
               readyDescription={transcriptionProfile
                 ? transcriptionProfile.transport === "apple-speech"
-                  ? "系统内置 · 零下载 · 音频不出本机 · 中文优先"
+                  ? "音频不出本机"
                   : `${LOCAL_WHISPER_TRANSPORTS.has(transcriptionProfile.transport) ? "在本机完成转写" : "通过你选择的服务转写"} · ${transcriptionProfile.model || "自动模型"}`
                 : "你仍可继续，但会议只会保存录音，无法自动生成文字稿。"}
               actionLabel={transcriptionProfile ? "检查或更换转写方式" : "去配置转写"}
               onConfigure={() => onConfigureModels("transcription", isMac ? "apple-speech" : "local-whisper")}
             >
               {isMac && (
-                <SetupChoice icon={<Waveform size={20} />} title="Apple 语音识别" description="推荐。免费 · 零下载 · 音频不出本机，中文优先。" recommended onClick={() => onConfigureModels("transcription", "apple-speech")} />
+                <SetupChoice icon={<Waveform size={20} />} title="Apple 语音识别" description="免费 · 零下载 · 音频不出本机 · 中文优先" recommended onClick={() => onConfigureModels("transcription", "apple-speech")} />
               )}
-              <SetupChoice icon={<Cpu size={20} />} title="本地 Whisper" description={isMac ? "想要更高质量的转写时选它：下载本机模型，不联网。" : "推荐。不用联网、音频不出本机；首次使用需下载模型。"} recommended={!isMac} onClick={() => onConfigureModels("transcription", "local-whisper")} />
-              <SetupChoice icon={<Cloud size={20} />} title="在线 Whisper" description="填好服务地址和密钥即可用，适合不方便下载模型的设备。" onClick={() => onConfigureModels("transcription", "online-transcription")} />
+              <SetupChoice icon={<Cpu size={20} />} title="本地 Whisper" description={isMac ? "更高转写质量 · 需下载模型" : "离线 · 音频不出本机 · 需下载模型"} recommended={!isMac} onClick={() => onConfigureModels("transcription", "local-whisper")} />
+              <SetupChoice icon={<Cloud size={20} />} title="在线 Whisper" description="需服务地址与密钥" onClick={() => onConfigureModels("transcription", "online-transcription")} />
             </ModelSetupStep>
           )}
           {step === 2 && (
             <ModelSetupStep
               icon={<Brain size={28} weight="duotone" />}
-              eyebrow="第二项 · 大模型"
               title="把文字整理成可执行纪要"
-              description="配置总结模型后，MinuteFlow 才会生成在线终稿；视觉纪要还需要在设置中开启并通过真实结构测试。"
               ready={Boolean(summaryProfile)}
               readyTitle={summaryProfile ? `${summaryProfile.name} 已启用` : "当前使用本机基础纪要"}
               readyDescription={summaryProfile
                 ? `${summaryProfile.model} · 仅在你主动生成终稿时访问服务`
-                : "不影响录音和转写，纪要会降级为本机规则整理，可稍后补充模型。"}
+                : "纪要会降级为本机规则整理，可稍后补充模型。"}
               actionLabel={summaryProfile ? "检查或更换大模型" : "去配置大模型"}
               onConfigure={() => onConfigureModels("llm")}
             >
-              <SetupChoice icon={<Sparkle size={20} />} title="在线大模型" description="生成高质量结构化终稿，并可启用视觉纪要。" recommended />
-              <SetupChoice icon={<ShieldCheck size={20} />} title="本机基础纪要" description="无需密钥，内容不上传，信息密度较低。" />
+              <SetupChoice icon={<Sparkle size={20} />} title="在线大模型" description="质量更高 · 需配置密钥" recommended />
+              <SetupChoice icon={<ShieldCheck size={20} />} title="本机基础纪要" description="完全离线 · 无需密钥" />
             </ModelSetupStep>
           )}
           {step === 3 && (
@@ -128,8 +123,6 @@ export function OnboardingDialog({
             <ArrowLeft size={15} />返回
           </button>
           <div>
-            {step === 1 && !transcriptionProfile && <span>继续即明确选择“仅保存录音”</span>}
-            {step === 2 && !summaryProfile && <span>继续即使用“本机基础纪要”</span>}
             {step < 3 ? (
               <button className="button button--primary" onClick={() => setStep((current) => Math.min(3, current + 1))}>
                 {step === 0 ? "开始配置" : step === 1 && !transcriptionProfile ? "仅保存录音，继续" : step === 2 && !summaryProfile ? "使用基础纪要，继续" : "继续"}<ArrowRight size={15} />
@@ -147,9 +140,8 @@ export function OnboardingDialog({
 function WelcomeStep() {
   return <div className="onboarding-welcome">
     <div className="onboarding-welcome__mark"><Microphone size={34} weight="duotone" /></div>
-    <span>欢迎使用 MinuteFlow</span>
     <h3>先配置两项能力，会议结束后就能直接拿到纪要</h3>
-    <p>我们会依次检查语音转录和 AI 总结。录音、会议和索引仍默认保存在本机，远程服务只在对应功能被使用时收到必要内容。</p>
+    <p>录音、会议和索引默认保存在本机；远程服务只在对应功能被使用时才会收到必要内容。</p>
     <div className="onboarding-welcome__flow">
       <article><Waveform size={22} /><div><strong>语音转录</strong><small>声音 → 简体中文文字稿</small></div></article>
       <ArrowRight size={17} />
@@ -158,11 +150,9 @@ function WelcomeStep() {
   </div>;
 }
 
-function ModelSetupStep({ icon, eyebrow, title, description, ready, readyTitle, readyDescription, actionLabel, onConfigure, children }: {
+function ModelSetupStep({ icon, title, ready, readyTitle, readyDescription, actionLabel, onConfigure, children }: {
   icon: React.ReactNode;
-  eyebrow: string;
   title: string;
-  description: string;
   ready: boolean;
   readyTitle: string;
   readyDescription: string;
@@ -173,7 +163,7 @@ function ModelSetupStep({ icon, eyebrow, title, description, ready, readyTitle, 
   return <div className="onboarding-model-step">
     <div className="onboarding-model-step__intro">
       <div className="onboarding-model-step__icon">{icon}</div>
-      <div><span>{eyebrow}</span><h3>{title}</h3><p>{description}</p></div>
+      <div><h3>{title}</h3></div>
     </div>
     <div className="onboarding-model-step__choices">{children}</div>
     <div className={`onboarding-model-status ${ready ? "is-ready" : ""}`}>
@@ -210,9 +200,8 @@ function ReadyStep({ transcriptionProfile, summaryProfile }: {
 }) {
   return <div className="onboarding-ready">
     <div className="onboarding-ready__symbol"><CheckCircle size={42} weight="duotone" /></div>
-    <span>设置完成</span>
     <h3>MinuteFlow 已准备好记录下一场会议</h3>
-    <p>之后可以随时从“设置”更换服务。停止录音只会完成本地保存，远程总结仍由你主动发起。</p>
+    <p>远程总结由你主动发起；服务可随时在“设置”中更换。</p>
     <div className="onboarding-ready__summary">
       <article className={transcriptionProfile ? "is-ready" : ""}>
         <Waveform size={20} /><div><strong>语音转录</strong><small>{transcriptionProfile ? transcriptionProfile.name : "未配置 · 仅保存录音"}</small></div>

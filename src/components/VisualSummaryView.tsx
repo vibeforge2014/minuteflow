@@ -17,8 +17,8 @@ export function VisualSummaryView({ meeting, visual, capable, busy, onRetry }: V
         <span><ImageSquare size={28} weight="duotone" /></span>
         <h2>{capable ? "视觉纪要尚未生成" : "当前使用普通纪要"}</h2>
         <p>{capable
-          ? "生成最终纪要后，MinuteFlow 会自动把结论、风险与行动安排排成一张可分享的信息图。"
-          : "在“设置 → AI 总结”中开启视觉纪要并通过结构验证后，最终纪要会自动生成视觉版。"}</p>
+          ? "会随最终纪要一起生成。"
+          : "在「设置 → AI 总结」开启视觉纪要并完成验证。"}</p>
         {capable && (
           <button className="button button--primary" disabled={busy} onClick={onRetry}>
             {busy ? <><span className="button-spinner" />正在生成</> : <><Sparkle size={16} />生成视觉纪要</>}

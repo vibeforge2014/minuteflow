@@ -76,7 +76,7 @@ export function ImportDrawer(props: Props) {
   return (
     <aside className="import-drawer" aria-labelledby="import-drawer-title">
       <header className="import-drawer__header">
-        <div><h2 id="import-drawer-title">导入任务</h2><p>{activeCount ? `${activeCount} 项正在后台处理` : "检查文件并在后台处理"}</p></div>
+        <div><h2 id="import-drawer-title">导入任务</h2>{activeCount > 0 && <p>{activeCount} 项正在后台处理</p>}</div>
         <button className="icon-button" aria-label="收起导入任务" onClick={props.onClose}><X size={19} /></button>
       </header>
 
@@ -103,7 +103,7 @@ export function ImportDrawer(props: Props) {
             ))}
           </div>
 
-          <div className="import-subsection-heading"><strong>可选处理设置</strong><small>不影响文件先归档到本机</small></div>
+          <div className="import-subsection-heading"><strong>可选处理设置</strong></div>
           <div className="import-settings">
             <label>语言<select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动识别（中文/中英混合优先）</option><option value="zh">中文</option><option value="en">English</option></select></label>
             <label>转录模型<select value={sttProfileId} onChange={(event) => setSttProfileId(event.target.value)}><option value="">稍后配置</option>{sttProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
@@ -116,8 +116,8 @@ export function ImportDrawer(props: Props) {
               const totalMs = props.candidates.reduce((sum, file) => sum + (file.durationMs || 0), 0);
               if (!props.candidates.length) return "";
               return totalMs > 0
-                ? `音频合计约 ${formatDuration(totalMs / 1000)}，会在后台分段转录${autoSummarize ? "并生成纪要" : ""}；处理时长取决于录音长度与模型，期间可继续使用其他会议。`
-                : `${props.candidates.length} 个文件会按顺序在后台处理；归档后会显示时长与转录进度。`;
+                ? `合计约 ${formatDuration(totalMs / 1000)} · 后台串行处理，期间可继续使用其他会议。`
+                : `${props.candidates.length} 个文件 · 后台按顺序处理。`;
             })()}
           </p>
           {!sttProfiles.length && <button className="import-model-hint" onClick={props.onConfigure}><GearSix size={16} /><span><strong>尚未配置转录模型</strong>音频仍会先安全归档，配置后自动继续。</span></button>}
@@ -131,7 +131,7 @@ export function ImportDrawer(props: Props) {
       )}
 
       <section className="import-queue">
-        <div className="import-section-title"><span>任务队列</span><small>同一时间处理 1 项</small></div>
+        <div className="import-section-title"><span>任务队列</span></div>
         {!props.jobs.length && <div className="import-empty"><FileAudio size={24} /><p>尚无导入任务</p><button onClick={props.onPick}>选择录音</button></div>}
         {props.jobs.map((job) => (
           <article className={`import-job import-job--${job.status} ${enteringJobs.has(job.id) ? "content-motion-enter" : ""}`} key={job.id} onClick={() => job.meetingId && props.onOpenMeeting(job.meetingId)}>

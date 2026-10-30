@@ -167,7 +167,6 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
           <div className="paywall-mark"><LockKey size={28} weight="duotone" /></div>
           <span>{reason || "解锁完整工作流"}</span>
           <h2 id="paywall-title">会议结束前，重要工作已经完成。</h2>
-          <p>一次购买 MinuteFlow 桌面版，录音、转写、AI 纪要与导出全部解锁。</p>
         </div>
 
         <div className={`paywall-price ${discount ? "is-discounted" : ""}`}>
@@ -226,7 +225,7 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
                 </button>
               </div>
               {discountError && <p className="paywall-inline-error" role="alert">{discountError}</p>}
-              <p className="paywall-field-hint">折扣码在支付页面同样有效，价格以服务端校验结果为准。</p>
+              <p className="paywall-field-hint">价格以服务端校验结果为准。</p>
             </div>
           </div>
         </div>

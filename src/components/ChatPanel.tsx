@@ -331,7 +331,6 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
       <header className="chat-panel__header">
         <div>
           <h2>AI 问答</h2>
-          <p>基于本场会议的转写与纪要回答</p>
         </div>
         <div className="chat-panel__actions">
           {messages.length > 0 && (
@@ -354,7 +353,6 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
         {messages.length === 0 ? (
           <div className="chat-empty">
             <ChatTeardropText size={28} weight="duotone" />
-            <p>问问这场会议的任何内容——重点、决定、待办，或者某段讨论的细节。</p>
             <div className="chat-suggestions" aria-label="猜你想问">
               {suggestions.map((question) => (
                 <button key={question} onClick={() => void send(question)}>{question}</button>

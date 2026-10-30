@@ -108,7 +108,7 @@ function helperCopy(state: HelperState) {
   if (state === "dropped") return {
     tile: "已完成拖动",
     title: "现在打开 MinuteFlow 右侧开关",
-    description: "开关打开后需要重启一次；点下方按钮会保存当前进度。"
+    description: "打开开关后再重启。"
   };
   if (state === "restarting") return {
     tile: "正在保存进度",
@@ -123,6 +123,6 @@ function helperCopy(state: HelperState) {
   return {
     tile: "按住并向上拖动",
     title: "拖到“屏幕与系统音频录制”的应用列表",
-    description: "出现 MinuteFlow 后打开右侧开关；拖不动时，可在访达中定位后用列表下方的“+”添加。"
+    description: "出现后打开右侧开关；拖不动时用列表下方的“+”添加。"
   };
 }

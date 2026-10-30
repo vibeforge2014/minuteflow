@@ -26,7 +26,8 @@ export interface RecordingReadinessItem {
   id: "capture" | "microphone" | "transcription";
   label: string;
   value: string;
-  detail: string;
+  /** 只在权限或能力受限时解释原因；正常态由值本身说明。 */
+  detail?: string;
   tone: "ready" | "attention" | "neutral";
 }
 
@@ -117,9 +118,6 @@ export function buildRecordingReadiness(input: {
         id: "capture",
         label: "录音范围",
         value: input.mode === "online" ? "麦克风 + 系统音频" : "仅麦克风",
-        detail: input.mode === "online"
-          ? "适合线上会议，分别记录你的声音与会议声音。"
-          : "适合线下交流，并保留现场发言内容。",
         tone: "ready"
       },
       {
@@ -133,9 +131,7 @@ export function buildRecordingReadiness(input: {
         id: "transcription",
         label: "实时转写",
         value: input.transcriptionProfileName || "尚未配置",
-        detail: transcriptionReady
-          ? "录音开始后会持续生成转写内容。"
-          : "仍可安全录音，但本次不会产生实时转写。",
+        detail: transcriptionReady ? undefined : "仍可录音，但本次不会产生实时转写。",
         tone: transcriptionReady ? "ready" : "attention"
       }
     ]
@@ -144,13 +140,13 @@ export function buildRecordingReadiness(input: {
 
 function describeMicrophone(value: SystemPermissionValue | null): Pick<RecordingReadinessItem, "value" | "detail" | "tone"> {
   if (value === "granted") {
-    return { value: "已允许", detail: "开始录音时仍会验证真实输入设备。", tone: "ready" };
+    return { value: "已允许", tone: "ready" };
   }
   if (value === "denied" || value === "restricted") {
-    return { value: "需要处理", detail: "系统已阻止访问，请前往系统设置允许麦克风。", tone: "attention" };
+    return { value: "需要处理", detail: "系统已阻止访问。", tone: "attention" };
   }
   if (value === "not-determined") {
     return { value: "开始时确认", detail: "点击开始录音后，系统会请求麦克风权限。", tone: "neutral" };
   }
-  return { value: "正在检查", detail: "开始录音时会再次确认真实麦克风输入。", tone: "neutral" };
+  return { value: "正在检查", tone: "neutral" };
 }

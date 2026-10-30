@@ -28,7 +28,7 @@ export function ImportProcessingMeta({ job, compact = false, showDetail = true, 
 
   const fraction = importProgressFraction(job);
   const detail = job.status === "queued" && queuePosition
-    ? `排队第 ${queuePosition} 位 · 前一项结束后自动开始`
+    ? `排队第 ${queuePosition} 位`
     : describeImportProgressDetail(job, now);
   // 排队与说话人分离都没有细粒度百分比：用流动进度条表示“仍在推进”。
   const indeterminate = job.status === "diarizing" || job.status === "queued";
