@@ -489,6 +489,13 @@ export function DocumentWorkspace({
                   : importJob?.status === "diarizing"
                     ? "转写已就绪，正在本机识别发言人。"
                     : "处理在后台继续，可随时暂停。"
+                : summaryBusy ? (
+                    // 停止录音后滚动纪要可能仍在请求中：这一行是生成期的唯一状态指示。
+                    <span className="review-hero__generating">
+                      <ArrowClockwise size={14} className="spin" />
+                      {hasOrdinarySummary ? "正在更新纪要…" : "正在生成纪要…"}
+                    </span>
+                  )
                 : hasOrdinarySummary
                   ? summaryParts.join(" · ")
                   : recentlyFinalized
@@ -639,7 +646,7 @@ export function DocumentWorkspace({
           icon={<FileText size={20} weight="duotone" />}
           title={stage === "live" ? "会议进展" : "关键结论"}
           badge={
-            <span className={`summary-cadence ${hasOrdinarySummary ? "" : "is-empty"}`}>
+            <span className={`summary-cadence ${hasOrdinarySummary ? "" : "is-empty"} ${stage === "live" && summaryBusy ? "is-generating" : ""}`}>
               <i /> {hasOrdinarySummary
                 ? meeting.summary.generationMode === "local" ? "本机基础归纳" : "AI 自动整理"
                 : "尚未生成"}{stage === "live" ? ` · 约每 ${formatInterval(summaryIntervalSeconds)}` : ""}
@@ -667,7 +674,12 @@ export function DocumentWorkspace({
               转录或笔记已修改，当前纪要需要更新。
             </div>
           )}
-          {meeting.summary.keyPoints.length ? (
+          {summaryBusy && !meeting.summary.keyPoints.length ? (
+            // 生成期且尚无结论：shimmer 骨架占位结论行，内容到位后整体消失。
+            <div className="summary-skeleton" aria-hidden="true">
+              <i style={{ width: "76%" }} /><i style={{ width: "88%" }} /><i style={{ width: "62%" }} />
+            </div>
+          ) : meeting.summary.keyPoints.length ? (
             (() => {
               const KEY_POINT_FOLD_LIMIT = 5;
               const folded = stage !== "live" && !keyPointsExpanded

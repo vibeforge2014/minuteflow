@@ -1001,6 +1001,42 @@ button {
 .summary-cadence.is-empty { color: #8a8079; background: #f7f4f1; }
 .summary-cadence.is-empty i { background: #c3bab2; }
 
+/* 生成中（仅录音中一屏）：徽标圆点转琥珀色脉冲，与录制中的红色点区分语义。 */
+.summary-cadence.is-generating i {
+  background: #e0a33e;
+  animation: cadence-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes cadence-pulse {
+  50% { opacity: .3; }
+}
+
+/* 会后整理生成期：hero 状态行的旋转指示与结论卡的 shimmer 骨架行。 */
+.review-hero__generating {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.summary-skeleton {
+  display: grid;
+  gap: 10px;
+  margin: 2px 0 0 24px;
+}
+
+.summary-skeleton i {
+  height: 15px;
+  border-radius: 7px;
+  background: linear-gradient(100deg, #f1ede7 32%, #fbf8f3 50%, #f1ede7 68%) no-repeat;
+  background-size: 220% 100%;
+  animation: summary-sheen 1.5s ease-in-out infinite;
+}
+
+@keyframes summary-sheen {
+  from { background-position: 110% 0; }
+  to { background-position: -110% 0; }
+}
+
 .text-button {
   display: inline-flex;
   align-items: center;
@@ -6734,6 +6770,13 @@ html[data-surface="permission-helper"] #root {
   .transcript-copy__tail {
     animation: content-fade-enter 140ms ease-out both !important;
     transform: none !important;
+  }
+
+  /* 生成中的持续动画在减弱动态下全部停止：骨架保留为静态占位条。 */
+  .summary-skeleton i,
+  .summary-cadence.is-generating i,
+  .review-hero__generating .spin {
+    animation: none !important;
   }
 
   .toast,

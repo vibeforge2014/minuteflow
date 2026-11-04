@@ -192,7 +192,10 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       if (degraded && degradedReason) setWarning(degradedReason);
       else if (visualDegraded && visualDegradedReason) setWarning(visualDegradedReason);
     } catch (error) {
-      setWarning(error instanceof Error ? error.message : "生成纪要失败");
+      // 「取消生成」触发的 AbortError 是用户主动结束请求，不是失败，静默收尾即可。
+      const abort = (error as { name?: string })?.name === "AbortError"
+        || /abort/i.test(String((error as Error)?.message ?? ""));
+      if (!abort) setWarning(error instanceof Error ? error.message : "生成纪要失败");
     } finally {
       summaryBusyRef.current = false;
       setSummaryBusy(false);
