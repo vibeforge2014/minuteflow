@@ -11,6 +11,7 @@
  * models:download / models:download-url）与 import-queue.mjs 调用。
  * 副作用：网络下载、子进程探测、写模型文件。
  */
+import diarizationModels from "../../shared/diarization-models.json" with { type: "json" };
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
@@ -48,16 +49,6 @@ export const MODEL_DOWNLOAD_SOURCES = {
  * 嵌入模型官方源是 GitHub Release（无同文件 HF 镜像），镜像由官网 dl/models/
  * 自有承接（sync-static-assets 工作流上传，sha256 与官方一致）。
  */
-const DIARIZATION_URLS = {
-  segmentation: {
-    official: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx?download=true",
-    mirror: "https://hf-mirror.com/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx?download=true"
-  },
-  embedding: {
-    official: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx",
-    mirror: "https://zensoft.top/minuteflow/dl/models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx"
-  }
-};
 
 const catalog = [
   {
@@ -285,37 +276,7 @@ const catalog = [
     source: "ggerganov/whisper.cpp",
     license: "MIT"
   },
-  {
-    id: "diarization-pyannote-segmentation",
-    name: "说话人分离模型（Pyannote）",
-    description: "划分「谁在什么时间说话」，仅 1.5MB，与声纹模型搭配使用。",
-    engine: "diarization",
-    format: "ONNX",
-    group: "diarization",
-    sizeBytes: 1_540_506,
-    fileName: "sherpa-onnx-pyannote-segmentation-3-0-int8.onnx",
-    remoteFileName: "model.int8.onnx",
-    digestAlgorithm: "sha256",
-    digest: "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d",
-    source: "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0",
-    license: "MIT",
-    urlsBySource: DIARIZATION_URLS.segmentation
-  },
-  {
-    id: "diarization-eres2netv2-zh",
-    name: "声纹识别模型（3D-Speaker 中文）",
-    description: "记住并区分中文说话人，约 68MB，与分离模型搭配使用。",
-    engine: "diarization",
-    format: "ONNX",
-    group: "diarization",
-    sizeBytes: 71_441_526,
-    fileName: "3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx",
-    digestAlgorithm: "sha256",
-    digest: "bf1a75b9930474cf3389ef415e6e5d38ca96fea4a3a00f7e301d080a58ee2239",
-    source: "k2-fsa/sherpa-onnx speaker-recongition-models",
-    license: "Apache-2.0",
-    urlsBySource: DIARIZATION_URLS.embedding
-  }
+  ...diarizationModels
 ];
 
 /** 打包后可执行文件在 asar 内无法执行，需重定向到 app.asar.unpacked 下的真实文件。 */

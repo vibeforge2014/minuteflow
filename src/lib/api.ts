@@ -7,6 +7,7 @@
  * 所属层：渲染层桥接（环境探测 + 浏览器兜底实现）。
  * 主要导出：api（当前生效的 MeetingAPI 实例）、isElectronRuntime（是否 Electron 环境）。
  */
+import { DIARIZATION_SETUP_MODELS } from "./diarization-setup";
 import { demoMeetings } from "../data/demo";
 import type { CreateMeetingInput, DownloadableModel, ImportCandidate, ImportJob, Meeting, MeetingAPI, MeetingPreferences, MeetingSummary, ModelProfile, VisualSummary } from "../types";
 import { simplifyChinese, simplifySummary } from "./chinese";
@@ -37,7 +38,7 @@ const defaultPreferences: MeetingPreferences = {
  * 浏览器预览与桌面端保持相同的模型目录；预览只展示，真实下载由 Electron 主进程执行。
  * 三组：multilingual 多语言推荐 / quantized 轻量量化 / english 英文专用（体积与桌面端 catalog 一致）。
  */
-const browserModelCatalog: DownloadableModel[] = [
+const browserWhisperCatalog: DownloadableModel[] = [
   ["ggml-tiny", "Whisper Tiny（GGML）", "最快、占用最低，适合快速草稿和低配置设备。", 77_691_713, "ggml-tiny.bin", "multilingual"],
   ["ggml-base", "Whisper Base（GGML）", "轻量日常转写，速度和准确率优于 Tiny。", 147_951_465, "ggml-base.bin", "multilingual"],
   ["ggml-small", "Whisper Small（GGML）", "中英混合表现均衡，推荐大多数会议使用。", 487_601_967, "ggml-small.bin", "multilingual"],
@@ -66,6 +67,8 @@ const browserModelCatalog: DownloadableModel[] = [
   license: "MIT",
   installed: false
 }));
+
+const browserModelCatalog: DownloadableModel[] = [...browserWhisperCatalog, ...DIARIZATION_SETUP_MODELS];
 
 // 深拷贝：把演示数据克隆后再返回，避免调用方修改直接污染模块内的 demoMeetings 常量。
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -404,9 +407,9 @@ const browserApi: MeetingAPI = {
     async list() {
       return JSON.parse(localStorage.getItem(profileKey) || "[]") as ModelProfile[];
     },
-    async save(profile) {
+    async save(profile, apiKey) {
       const profiles = JSON.parse(localStorage.getItem(profileKey) || "[]") as ModelProfile[];
-      const saved = { ...profile, id: profile.id || crypto.randomUUID() };
+      const saved = { ...profile, enabled: true, id: profile.id || crypto.randomUUID(), secretId: apiKey?.trim() ? (profile.secretId || `preview-secret-${crypto.randomUUID()}`) : profile.secretId };
       // 浏览器预览与主进程同语义：同类还没有默认档时保存即默认，同类互不停用。
       const hasOtherDefault = profiles.some((item) => item.id !== saved.id && item.kind === saved.kind && item.isDefault);
       saved.isDefault = profile.isDefault === true || !hasOtherDefault;
@@ -419,7 +422,7 @@ const browserApi: MeetingAPI = {
     async setDefault(kind, id) {
       const profiles = JSON.parse(localStorage.getItem(profileKey) || "[]") as ModelProfile[];
       localStorage.setItem(profileKey, JSON.stringify(
-        profiles.map((item) => ({ ...item, isDefault: item.kind === kind && item.id === id }))
+        profiles.map((item) => item.kind === kind ? { ...item, isDefault: item.id === id } : item)
       ));
     },
     async delete(id) {
@@ -481,19 +484,19 @@ const browserApi: MeetingAPI = {
       return { models: [], runtimes: {} };
     },
     async scanDiarization() {
-      return { segmentation: [], embedding: [] };
+      throw new Error("浏览器预览无法扫描本机模型，请在 MinuteFlow 桌面版中检测。");
     },
     async chooseLocal() {
-      return null;
+      throw new Error("浏览器预览无法读取本机模型路径，请在 MinuteFlow 桌面版中选择模型文件。");
     },
     async catalog() {
       return browserModelCatalog;
     },
     async download() {
-      throw new Error("请在 Electron 桌面应用中下载本地模型。");
+      throw new Error("浏览器预览无法安装本地模型，请在 MinuteFlow 桌面版中下载并配置。");
     },
     async downloadFromUrl() {
-      throw new Error("请在 Electron 桌面应用中下载本地模型。");
+      throw new Error("浏览器预览无法安装本地模型，请在 MinuteFlow 桌面版中下载并配置。");
     },
     onDownloadProgress() { return () => {}; }
   },

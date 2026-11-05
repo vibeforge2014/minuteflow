@@ -6,6 +6,7 @@ const FOCUSABLE_SELECTOR = [
   "input:not([disabled])",
   "select:not([disabled])",
   "textarea:not([disabled])",
+  "summary",
   "[tabindex]:not([tabindex='-1'])"
 ].join(",");
 
@@ -41,7 +42,18 @@ export function useDialogFocus<T extends HTMLElement>(
       const root = dialogRef.current;
       if (!root) return;
       const focusable = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
-        .filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+        .filter((element) => {
+          if (element.tabIndex < 0 || element.matches(":disabled")
+            || element.closest("[hidden], [inert], [aria-hidden='true']")
+            || !element.getClientRects().length || getComputedStyle(element).visibility === "hidden") return false;
+          // Chromium may retain layout rects for controls inside closed details. Only
+          // the direct summary remains reachable, including through nested disclosures.
+          for (let parent = element.parentElement; parent && parent !== root; parent = parent.parentElement) {
+            if (parent.tagName === "DETAILS" && !parent.hasAttribute("open")
+              && !parent.querySelector(":scope > summary")?.contains(element)) return false;
+          }
+          return true;
+        });
       if (!focusable.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];

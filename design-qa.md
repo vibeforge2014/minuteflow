@@ -316,3 +316,120 @@ final result: passed
 - [x] No clipping or overflow at 808 × 800; long content remains scrollable on iPhone/iPad.
 
 final result: passed
+
+---
+
+# Design QA — 完整设置页重构与辅助文字可读性（2026-11-05）
+
+## Evidence and normalization
+
+- Source visual truth: `/Users/zqian15/.codex/generated_images/01a1aa09-d19e-7620-b18e-41998efaca72/exec-d72d65e4-1f00-4898-9caf-e74f96c3bd7b.png` (1487 × 1058 px), the settings direction recorded in `AGENTS.md`.
+- Implementation: `http://127.0.0.1:5173/?preview=desktop`, captured through the Codex in-app browser. CSS viewport and screenshot are 1113 × 938; the browser reports devicePixelRatio 2 but its screenshot export is already normalized to CSS pixels, so the capture was not downsampled again.
+- Dialog: 1040 × 760 CSS px, x=36.5, y=89. Source dialog crop `(164,101)–(1324,961)` is 1160 × 860 px; normalized to the implementation's 1040 × 760 frame. Fractional capture coordinates were rounded to whole pixels. Browser/background chrome is excluded from comparison.
+- Same-route source/implementation: `/tmp/minuteflow-settings-qa-transcription-before.png`, `/tmp/minuteflow-settings-qa-transcription-after.png`.
+- Combined full-view comparison inputs: `/tmp/minuteflow-settings-qa-comparison-before.png` and `/tmp/minuteflow-settings-qa-comparison-after.png` (2080 × 790 px). Both source and implementation are present in each input and were inspected together.
+- Combined focused comparison: `/tmp/minuteflow-settings-qa-focused-after.png` (1640 × 450 px), covering page headings, text hierarchy, section rules, list anatomy and actions at readable scale.
+- Readability correction evidence: `/tmp/minuteflow-settings-qa-general-before.png`, `/tmp/minuteflow-settings-qa-general-after.png`, and `/tmp/minuteflow-settings-qa-contrast-comparison.png` (1556 × 465 px, same glossary/license regions before and after).
+- Existing responsive evidence from the implementation pass: `/tmp/minuteflow-settings-v2-800.png`, `/tmp/minuteflow-settings-v2-mobile.png` (390 × 844), and the in-app-browser mobile form/validation capture. The full implementation pass verified five categories, the addition/editor/back paths, keyboard model selection, multiline terminology and Escape persistence.
+
+## State and intentional constraints
+
+- The source contains illustrative saved transcription profiles; this browser's real local state has no STT profiles and one local-summary profile. Empty groups are intentionally omitted; no fake saved providers were inserted to imitate the source. The missing three rows are a data-state difference, not broken rendering.
+- Source design and implementation share two columns, persistent five-category navigation, a single content pane, warm white/coral surfaces and restrained inset rows. The source image is a direction reference, not a literal data fixture.
+- The implementation retains the recorded compact desktop type contract: 23 px page title, 13 px controls and 12 px secondary copy (saved service titles 14 px). Generated image lettering and the normalized source navigation are larger. This is an explicit density constraint recorded with the implementation, not a claim of pixel-exact ImageGen text matching.
+- The five settings pages retain their actual product functions; general/privacy/update content is an extension of the same shell rather than invented content copied from the STT overview.
+
+## Findings and comparison history
+
+1. **[P2 — fixed] Small secondary copy was too faint.**
+   - Location: glossary hints, licensing/device constraints, page descriptions, provider/model metadata and empty-state copy in `src/components/settings/settings.css`.
+   - Evidence: in-app DOM/computed styles showed 12 px text at `#93887e` and `#9a8e83`, with white-background contrast ratios of approximately 3.46:1 and 3.20:1; the page subtitle used `#817b76` (4.18:1). The combined pre-fix comparison also showed substantially paler secondary copy than the reference direction.
+   - Impact: required constraints and next-step guidance were harder to read, especially at the retained compact desktop text size.
+   - Fix: applied a shared `--settings-muted: #746d66` to these text roles and active text actions, including download metadata, empty-model hints, local-test guidance and empty service states. This yields approximately 5.09:1 on white; small text remains readable on the existing near-white tinted surfaces. The default badge text was deepened separately without changing its peach background.
+   - Post-fix evidence: final computed styles report `rgb(116,109,102)` for page descriptions, glossary hints, licensing constraints and the STT empty state. Same-state screenshots and the combined before/after contrast board show stronger secondary copy while preserving geometry and interaction hierarchy.
+2. **Final comparison:** the normalized full-view and focused source/implementation inputs were re-opened after the fix. No additional actionable P0/P1/P2 findings remain within the recorded typography, real-data and platform constraints.
+
+## Required fidelity surfaces
+
+- **Fonts and typography:** system/PingFang fallback, existing optical weight hierarchy and the 23/13/12 scale are retained. The correction changes colors, not font metrics or wrapping. Sidebar titles, header descriptions, form labels, hints and active text actions remain readable; no browser-default control font was introduced.
+- **Spacing and layout rhythm:** the 192 px category rail, aligned 34 px content gutters, inset rows, fine separators, 17 px dialog radius and scrollable content region remain unchanged. Lists, adding and editing are distinct steps with one return path. The intentional empty state contains no fabricated cards.
+- **Colors and visual tokens:** warm neutral surfaces and coral primary/selected states remain intact. The shared muted token replaces a scattered set of pale grays; errors, verified state and disabled controls keep their semantic treatments.
+- **Image quality and asset fidelity:** this settings surface has no bitmap content assets. Existing Phosphor interface icons and the MinuteFlow wordmark remain sharp and aligned; no CSS drawing, emoji, new logo or rasterized UI was introduced. Source generic icons map to the product's existing icon family rather than becoming custom artwork.
+- **Copy and content:** all five category labels and the distinction between 转录设置, AI 总结 and AI 纪要 are preserved. Local/online consequences and errors remain actionable. The source's sample saved-service text is intentionally replaced by actual stored profile data and the corresponding empty state.
+
+## Verification and residual gaps
+
+- In-app browser captures and computed-style inspection confirmed the corrected values; the preview remains open on 通用设置.
+- The complete implementation pass checked navigation, keyboard focus, adding/back paths, missing-key and endpoint validation, no duplicate validation banner, local model setup, glossary line breaks and Escape persistence. 800 px and 390 px captures confirmed no dialog overflow and usable scrolling/actions.
+- Console review during the implementation pass found one historical Vite hot-reload error from creating a stylesheet before its import existed; it was resolved. The final rendered page had no framework overlay, and the final production build succeeds.
+- Current change is CSS-only plus this report and the durable design note; production build and whitespace checks passed after the final token correction. The prior 189 unit tests and 4 Sites packaging tests passed for the full implementation pass; they were not rerun for a text-color-only change.
+- Real provider requests, macOS/Windows permission transitions, paid activation/refund actions, update installation, native VoiceOver and maximum OS text scaling were not exercised.
+
+## Implementation checklist
+
+- [x] Preserve the two-column shell and separate service-list/add/editor steps.
+- [x] Normalize and inspect combined source/implementation views and a focused region.
+- [x] Correct the P2 secondary-text readability finding.
+- [x] Re-capture at the same state/viewport and verify the final computed text colors.
+- [x] Preserve user configuration; no dummy providers or credentials were saved.
+
+final result: passed
+
+---
+
+# Design QA — 设置草稿续填与键盘边界（2026-11-05）
+
+## Evidence and state
+
+- Visual source for this incremental pass: the previously verified settings shell, captured before editing at `/tmp/minuteflow-settings-draft-before.png` (956 × 664 px). Original art direction remains the settings reference recorded in `AGENTS.md`.
+- Implementation: `/tmp/minuteflow-settings-draft-after.png` (956 × 664 px), same AI 总结 overview, one existing local-summary profile, plus an intentionally edited but unsaved online form. All test drafts were discarded; no test provider or credential was saved to the backend.
+- In-app browser CSS viewport and exported pixel dimensions both equal 956 × 664. The responsive dialog is 924 × 632, x=16, y=16. No density resampling was needed.
+- Combined comparison: `/tmp/minuteflow-settings-draft-comparison.png` (1848 × 662), with matching dialog crops `(16,16)–(940,648)` side by side, inspected together.
+- Focused comparison: `/tmp/minuteflow-settings-draft-focused.png` (1400 × 370), same content region before/after at native size.
+- Final mobile evidence: `/tmp/minuteflow-settings-draft-mobile-final.png` at 390 × 640. A prior 390 × 844 override exceeded the visible host capture height and produced a black compositor region; that capture was rejected as full-frame evidence. The final 640 px capture fits the host surface, shows the entire dialog, and preserves working continue/discard controls.
+
+## Findings and comparison history
+
+1. **[P2 — fixed] Returning from an edited new service had no continuation entry.** Editing a model name and returning showed only saved services; choosing 添加服务 again reset the form. Added a distinct 本次设置草稿 section. Multiple new configurations retain independent session identities; edits to saved profiles retain their own existing row with 未保存更改. These records are renderer-memory state only, cleared when settings closes. Local services that already save immediately do not create redundant pending drafts.
+2. **[P2 — fixed] Escape closed settings from the profile menu.** Escape now dismisses the active menu first and returns focus to 更多操作. The native in-app-browser test confirmed the menu disappears while the settings dialog remains open.
+3. **[P2 — fixed] Hidden disclosure controls broke focus wrapping.** An initial visibility filter based on layout rectangles still admitted Chromium controls inside closed details, leaving Shift+Tab stuck on the first navigation button. Final filtering explicitly checks every closed disclosure ancestor, admits its direct summary, and excludes hidden/inert/disabled controls. Post-fix native Shift+Tab from the first settings button lands on 浏览全部模型与下载选项; Tab returns to 通用设置.
+4. **[P3 — fixed] Discarding a draft removed the focused control.** Focus now moves to the next draft or 添加服务. Restoration of saved edits similarly moves focus back into the form. The mobile discard test confirmed focus lands on 添加服务 rather than the document body.
+
+## Fidelity surfaces and intentional extension
+
+- Typography: existing system/PingFang hierarchy and 14 px service titles / 12 px secondary copy are preserved. The added draft row uses the existing row anatomy; empty custom names fall back to 未命名配置.
+- Layout and spacing: category rail, page heading, gutters, border radii and inset lists match the before image. The only intentional extra content is the draft group above saved services. Continue is one keyboard action per row; the visible trailing label shares that same action, and discard stays independent.
+- Colors: the corrected shared muted-text token remains in use. A restrained warm border identifies transient drafts; saved/default states and semantic error colors remain unchanged.
+- Assets: the only added icon is the existing Phosphor pencil, with the same size/style family as neighboring interface icons. No raster artwork or fabricated product assets were introduced.
+- Copy: 本次设置草稿 communicates the session lifetime; 继续配置, 放弃未保存配置, 未保存更改 and 还原更改 describe actual behavior. Credentials are never displayed in the list or serialized with these drafts.
+
+## Checks and residual gaps
+
+- Browser-verified: model text survives back/resume; separate STT and LLM drafts keep their corresponding model fields; two new forms coexist; discard removes only the selected draft; menu Escape preserves settings; closed-details focus wrapping works both directions; 390 px continue/discard works without horizontal overflow; closing/reopening clears the transient group.
+- Test credentials were dummy values and remained masked. The browser redacts password values even in read-only DOM evaluation, so exact secret-string equality was not claimed as browser evidence. Draft identity and credential-related dirty state have targeted unit coverage.
+- No real online saved profile was present, so saved-profile restoration UI was not exercised against a real credential; baseline restoration logic and verification/default-metadata exclusions were covered by the targeted tests.
+- Type checking, production build, 10 targeted draft/configuration unit tests and 4 Sites packaging tests passed. Core provider calls, operating-system permission changes, activation and update installation were not executed.
+- Full-view and focused before/after inputs were inspected after the final changes. No actionable P0/P1/P2 findings remain in the tested states.
+
+final result: passed
+
+
+---
+
+# Design QA — 添加说话人分离无法操作修复（2026-11-05）
+
+## Evidence and correction
+
+- Before: `/tmp/minuteflow-diarization-before.png`. The browser catalog contained no diarization entries, leaving the recommended-model region empty. File selection returned null and scanning returned empty results without explaining the missing native capability.
+- After: `/tmp/minuteflow-diarization-after.png`, 956 × 664. Both ONNX model slots now render immediately, with model descriptions, size/license metadata, separate file selectors and download buttons, plus 检测本机 and 下载并配置两个模型. The existing settings rail, warm surfaces, typography and inset rows are retained; this is a functional repair rather than a new visual direction.
+- Browser-verified: entering the page shows both slots; detection, file choice and download each produce an explicit desktop-capability message rather than silently doing nothing. A failed download exposes 重试下载. Returning to the list and reopening clears stale operation feedback.
+- Narrow-layout check: at a 390 × 640 viewport, both cards measure 330 px wide with matching 330 px scroll width. File and download actions wrap without horizontal overflow. The host compositor scaled the exported narrow screenshot (`/tmp/minuteflow-diarization-mobile.png`), so it is not claimed as native-density visual evidence. The viewport override was reset and the final desktop page was left open.
+
+## Persistence and validation
+
+- Desktop downloader and renderer now share the same two-model catalog, retaining official download URLs and SHA-256 metadata. Catalog failures have visible retry feedback.
+- Automatic detection merges both paths into one save. Sequential downloads retain the saved id and prior path; explicit model-slot selection removes ambiguous filename inference.
+- Seven targeted tests pass: atomic detection, sequential persistence, installed-model preference, explicit slot mapping, shared browser catalog metadata, immediate rendering, and browser capability errors. Type checking passes. The combined focused/core run previously passed 190 tests before the final immediate-render assertion was added; production build and all four Sites packaging tests passed.
+- Real native file dialogs, model downloads and ONNX inference were not exercised in this browser verification. The browser preview does not fabricate installed models or native file paths.
+
+final result: passed for the tested configuration states

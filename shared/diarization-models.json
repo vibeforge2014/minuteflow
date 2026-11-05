@@ -1,0 +1,39 @@
+[
+  {
+    "id": "diarization-pyannote-segmentation",
+    "name": "说话人分离模型（Pyannote）",
+    "description": "划分「谁在什么时间说话」，仅 1.5MB，与声纹模型搭配使用。",
+    "engine": "diarization",
+    "format": "ONNX",
+    "group": "diarization",
+    "sizeBytes": 1540506,
+    "fileName": "sherpa-onnx-pyannote-segmentation-3-0-int8.onnx",
+    "remoteFileName": "model.int8.onnx",
+    "digestAlgorithm": "sha256",
+    "digest": "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d",
+    "source": "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0",
+    "license": "MIT",
+    "urlsBySource": {
+      "official": "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx?download=true",
+      "mirror": "https://hf-mirror.com/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx?download=true"
+    }
+  },
+  {
+    "id": "diarization-eres2netv2-zh",
+    "name": "声纹识别模型（3D-Speaker 中文）",
+    "description": "记住并区分中文说话人，约 68MB，与分离模型搭配使用。",
+    "engine": "diarization",
+    "format": "ONNX",
+    "group": "diarization",
+    "sizeBytes": 71441526,
+    "fileName": "3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx",
+    "digestAlgorithm": "sha256",
+    "digest": "bf1a75b9930474cf3389ef415e6e5d38ca96fea4a3a00f7e301d080a58ee2239",
+    "source": "k2-fsa/sherpa-onnx speaker-recongition-models",
+    "license": "Apache-2.0",
+    "urlsBySource": {
+      "official": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx",
+      "mirror": "https://zensoft.top/minuteflow/dl/models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx"
+    }
+  }
+]

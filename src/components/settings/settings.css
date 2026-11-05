@@ -1,0 +1,235 @@
+/* Settings use one navigation rail and one reading column on every page. */
+.settings-backdrop { padding: 16px; }
+.settings-backdrop > .settings-dialog {
+  --settings-label: 13px;
+  --settings-detail: 12px;
+  --settings-ink: #302c29;
+  --settings-muted: #746d66;
+  --settings-line: #e8e4e1;
+  width: min(1040px, calc(100vw - 32px));
+  height: min(760px, calc(100dvh - 32px));
+  max-height: calc(100dvh - 32px);
+  border: 1px solid #ddd8d4;
+  border-radius: 17px;
+  color: var(--settings-ink);
+  background: #fff;
+}
+.settings-dialog .settings-layout { display: grid; height: 100%; min-height: 0; grid-template-columns: 192px minmax(0, 1fr); }
+.settings-dialog .settings-nav { display: flex; flex-direction: column; min-width: 0; padding: 28px 13px 22px; background: #f8f6f4; border-color: var(--settings-line); }
+.settings-dialog .settings-nav__title { display: flex; padding: 0 15px 30px; }
+.settings-dialog .settings-nav__title > span { font-size: 22px; letter-spacing: -.025em; font-weight: 650; }
+.settings-dialog .settings-nav__group { display: flex; flex-direction: column; gap: 7px; }
+.settings-dialog .settings-nav button { height: auto; min-height: 43px; padding: 11px 14px; gap: 11px; color: #5d5752; font-size: 13px; font-weight: 500; }
+.settings-dialog .settings-nav button.is-active { background: #f8e7df; color: #b64e36; box-shadow: none; font-weight: 600; }
+.settings-dialog .settings-nav__brand { margin-top: auto; padding: 24px 15px 0; display: flex; align-items: center; gap: 8px; color: var(--settings-muted); font-size: 13px; }
+.settings-dialog .settings-main { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto minmax(0, 1fr); background: #fff; }
+.settings-dialog .settings-header { display: flex; justify-content: space-between; align-items: flex-start; padding: 30px 34px 24px; min-height: 113px; border: 0; gap: 18px; }
+.settings-dialog .settings-header__title { gap: 7px; min-width: 0; }
+.settings-dialog .settings-header h1 { margin: 0; font-size: 23px; line-height: 1.25; font-weight: 650; letter-spacing: -.035em; overflow-wrap: anywhere; }
+.settings-dialog .settings-header__title p { font-size: 12px; color: var(--settings-muted); line-height: 1.6; }
+.settings-dialog .settings-header__actions { display: flex; align-items: center; gap: 6px; flex: none; margin-top: -7px; margin-right: -12px; }
+.settings-dialog .settings-header__actions > .icon-button { color: #8b837d; }
+.settings-dialog .settings-back { align-self: flex-start; display: flex; align-items: center; gap: 4px; padding: 0; margin: -7px 0 5px -3px; border: 0; background: transparent; color: var(--settings-muted); font: inherit; font-size: 12px; }
+.settings-dialog .settings-back:hover { color: var(--accent-strong); }
+.settings-dialog .settings-content { min-width: 0; min-height: 0; overflow-y: auto; background: #fff; padding: 0 34px 32px; scrollbar-gutter: stable; }
+.settings-dialog .settings-content--models { padding: 0; overflow: hidden; }
+.settings-dialog .model-settings { display: block; height: 100%; min-width: 0; border: 0; margin: 0; padding: 0; }
+.settings-dialog .settings-page, .settings-dialog .settings-services-page { max-width: none; margin: 0; }
+.settings-dialog .settings-services-page { height: 100%; overflow-y: auto; padding: 6px 34px 32px; scrollbar-gutter: stable; }
+.settings-dialog h2 { margin: 0; color: #37312d; font-size: 15px; line-height: 1.5; font-weight: 620; letter-spacing: -.01em; }
+.settings-dialog .settings-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 17px; margin-bottom: 22px; border-bottom: 1px solid var(--settings-line); }
+.settings-dialog .settings-add-service { padding: 7px 11px; min-height: 32px; border-color: #db9d8a; color: #b64e36; background: #fff; box-shadow: none; font-size: 12px; border-radius: 8px; }
+.settings-dialog .settings-add-service:hover { background: #fdf3ee; border-color: #c7684e; }
+.settings-dialog .settings-service-group { margin-bottom: 25px; }
+.settings-dialog .settings-service-group > h3 { margin: 0 0 10px; color: var(--settings-muted); font-size: 12px; font-weight: 550; }
+.settings-dialog .settings-service-list { border: 1px solid #e4dfdb; border-radius: 11px; overflow: hidden; }
+.settings-dialog .settings-service-row { position: relative; display: flex; align-items: center; gap: 10px; padding: 0 15px 0 0; min-width: 0; background: #fff; transition: background 140ms ease; }
+.settings-dialog .settings-service-row + .settings-service-row { border-top: 1px solid var(--settings-line); }
+.settings-dialog .settings-service-row:hover, .settings-dialog .settings-service-row:focus-within { background: #fdfaf7; }
+.settings-dialog .settings-service-row__main::after { content: ""; position: absolute; inset: 0; }
+.settings-dialog .settings-service-row__main { display: flex; flex: 1; align-items: center; gap: 13px; min-width: 0; padding: 16px 17px; border: 0; background: transparent; text-align: left; color: #3d3631; }
+.settings-dialog .settings-service-row__main > span:nth-child(2), .settings-dialog .settings-choice > span:nth-child(2) { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.settings-dialog .settings-service-row strong, .settings-dialog .settings-choice strong { font-size: 14px; line-height: 1.45; font-weight: 550; overflow-wrap: anywhere; }
+.settings-dialog .settings-service-row small, .settings-dialog .settings-choice small { color: var(--settings-muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.settings-dialog .settings-service-row small.is-issue { color: #ab583e; }
+.settings-dialog .settings-service-row__icon { display: grid; place-items: center; width: 32px; height: 34px; flex: none; color: #80756c; }
+.settings-dialog .settings-default { padding: 3px 8px; color: #9b4934; background: #fbe9e1; border-radius: 6px; font-size: 11px; white-space: nowrap; }
+.settings-dialog .settings-default-action { position: relative; z-index: 1; padding: 6px 2px; background: transparent; border: 0; color: var(--settings-muted); font: inherit; font-size: 12px; white-space: nowrap; }
+.settings-dialog .settings-default-action:hover { color: var(--accent-strong); }
+.settings-dialog .settings-service-row__open { display: grid; place-items: center; pointer-events: none; color: var(--settings-muted); width: 24px; height: 30px; }
+.settings-dialog .settings-choice { display: flex; width: 100%; align-items: center; gap: 13px; padding: 17px 20px 17px 17px; color: #3d3631; background: #fff; border: 0; text-align: left; transition: background 140ms ease; }
+.settings-dialog .settings-choice + .settings-choice { border-top: 1px solid var(--settings-line); }
+.settings-dialog .settings-choice:hover { background: #fdf6f1; }
+.settings-dialog .settings-choice > svg { flex: none; color: #9b8f84; }
+.settings-dialog .settings-service-group--enhancement { padding-top: 24px; border-top: 1px solid var(--settings-line); margin-top: 30px; }
+.settings-dialog .settings-service-group--enhancement > h3 { color: #37312d; font-size: 15px; margin-bottom: 13px; }
+.settings-dialog .settings-content .settings-empty { padding: 34px 16px; font-size: 13px; color: var(--settings-muted); text-align: center; }
+.settings-dialog .settings-service-chooser { padding-top: 5px; }
+.settings-dialog .profile-editor-wrap { padding: 6px 34px 32px; height: 100%; max-width: none; margin: 0; background: #fff; overflow-y: auto; scrollbar-gutter: stable; animation: settings-pane-in 180ms var(--ease-emphasized) both; }
+.settings-dialog .profile-editor-wrap--remote { display: flex; flex-direction: column; }
+.settings-dialog .profile-editor-wrap--remote > .profile-editor { flex: 1; display: flex; flex-direction: column; }
+.settings-dialog .profile-editor .form-grid { gap: 21px; }
+.settings-dialog .profile-editor .field, .settings-dialog .profile-editor .field > span, .settings-dialog .profile-editor .field > label { font-size: 13px; color: #6c6159; font-weight: 500; }
+.settings-dialog .profile-editor .field input, .settings-dialog .profile-editor .field select { min-height: 39px; font-size: 13px; border-radius: 8px; padding: 9px 11px; }
+.settings-dialog .profile-editor .field small { font-size: 12px; line-height: 1.5; font-weight: 400; }
+.settings-dialog .secret-input input { padding-right: 42px !important; }
+.settings-dialog .profile-editor .model-picker input { padding-right: 120px; }
+.settings-dialog .profile-editor .model-picker--native input { padding-right: 11px; }
+.settings-dialog .model-picker__trigger { font-size: 11px; color: var(--settings-muted); }
+.settings-dialog .model-picker__option { font-size: 12px; padding: 9px 10px; }
+.settings-dialog .model-picker__meta { font-size: 11px; }
+.settings-dialog .advanced-provider-options { margin-top: 21px; margin-bottom: 22px; padding: 0; border: 0; background: transparent; }
+.settings-dialog .advanced-provider-options > summary { font-size: 12px; color: var(--settings-muted); }
+.settings-dialog .advanced-provider-options .field { margin-top: 17px; }
+.settings-dialog .profile-actions { bottom: -32px; margin: 28px -34px -32px; padding: 15px 34px 18px; gap: 9px; background: #fff; border-color: var(--settings-line); box-shadow: 0 -10px 18px #4a302403; }
+.settings-dialog .profile-editor-wrap--remote .profile-actions { margin-top: auto; }
+.settings-dialog .profile-actions .button { min-width: 96px; font-size: 13px; }
+.settings-dialog .profile-actions .button--primary { min-width: 108px; }
+.settings-dialog .profile-actions__hint { font-size: 11px; flex: 1 1 100px; }
+.settings-dialog .connection-status { font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.settings-dialog .visual-capability-setting { margin-top: 6px; margin-bottom: 24px; padding: 16px; border-color: #e8e2dc; background: #fdfaf7; gap: 16px; }
+.settings-dialog .visual-capability-setting strong { font-size: 13px; font-weight: 550; }
+.settings-dialog .visual-capability-setting small { font-size: 12px; }
+.settings-dialog .visual-capability-setting > span { padding: 0; font-size: 11px; color: var(--settings-muted); background: transparent; white-space: normal; max-width: 120px; text-align: right; }
+.settings-dialog .visual-capability-setting > span.is-verified { background: transparent; color: #627867; animation: none; }
+.settings-dialog .settings-preference-section { margin-bottom: 27px; }
+.settings-dialog .settings-preference-section > h2 { margin-bottom: 11px; }
+.settings-dialog .settings-card { margin: 0; border: 1px solid #e4dfdb; border-radius: 11px; background: #fff; }
+.settings-dialog .settings-card > label { padding: 17px 18px; grid-template-columns: minmax(0, 1fr) minmax(140px, 180px); gap: 24px; }
+.settings-dialog .settings-card label > span strong { font-size: 13px; font-weight: 500; }
+.settings-dialog .settings-card label > span small, .settings-dialog .field-hint { font-size: 12px; color: var(--settings-muted); line-height: 1.5; }
+.settings-dialog .settings-card select { font-size: 13px; border-color: #e4dfdb; border-radius: 7px; padding: 8px 10px; color: #62584f; }
+.settings-dialog .settings-card--stacked > label { display: flex; padding: 17px 18px; }
+.settings-dialog .settings-card--stacked textarea { min-height: 105px; border: 0; padding: 0; border-radius: 0; box-shadow: none; color: #4e443c; font-size: 13px; line-height: 1.8; }
+.settings-dialog .settings-card--stacked textarea:focus { box-shadow: none; }
+.settings-dialog .settings-card--stacked:focus-within { border-color: #d19b88; box-shadow: 0 0 0 3px #e76f510b; }
+.settings-dialog .settings-card__action { padding: 17px 18px; gap: 18px; color: var(--settings-muted); font-size: 12px; }
+.settings-dialog .settings-card__action .button { font-size: 12px; padding: 8px 12px; }
+.settings-dialog .license-card__state { color: #677866; font-size: 13px; }
+.settings-dialog .license-card__key { background: transparent; color: #807166; font-size: 12px; }
+.settings-dialog .license-card__confirm { flex-wrap: wrap; }
+.settings-dialog .settings-content .settings-section-note { margin: 0; padding: 0 18px 15px; color: var(--settings-muted); font-size: 12px; }
+.settings-dialog .settings-info-note { display: flex; gap: 11px; padding: 16px 18px; margin-bottom: 28px; background: #faf8f5; border-radius: 10px; color: #998775; }
+.settings-dialog .settings-info-note svg { flex: none; margin-top: 2px; }
+.settings-dialog .settings-info-note p { font-size: 12px; line-height: 1.75; color: var(--settings-muted); }
+.settings-dialog .update-card { padding: 25px; gap: 20px; border-color: #e4dfdb; background: #fff; box-shadow: none; border-radius: 11px; }
+.settings-dialog .update-card__icon { background: #f8eee8; color: #b46e52; border-radius: 12px; }
+.settings-dialog .update-card__eyebrow { font-size: 12px; color: var(--settings-muted); letter-spacing: 0; }
+.settings-dialog .update-card h4 { font-size: 19px; font-weight: 600; }
+.settings-dialog .update-card p { font-size: 13px; color: var(--settings-muted); line-height: 1.75; }
+.settings-dialog .update-card small { font-size: 12px; color: var(--settings-muted); }
+.settings-dialog .update-actions { justify-content: flex-start; margin-top: 20px; }
+.settings-dialog .update-actions .button { font-size: 13px; }
+.settings-dialog .update-security-note { margin-top: 29px; border-top: 1px solid var(--settings-line); padding: 20px 0 0; align-items: flex-start; color: var(--settings-muted); background: transparent; }
+.settings-dialog .update-security-note p { color: var(--settings-muted); font-size: 12px; line-height: 1.75; }
+.settings-dialog .update-security-note svg { color: #a89583; flex: none; }
+.settings-dialog .local-model-manager__heading strong, .settings-dialog .local-model-library-heading strong { font-size: 14px; }
+.settings-dialog .local-model-manager .button { font-size: 12px; }
+.settings-dialog .download-model-card strong { font-size: 13px; }
+.settings-dialog .download-model-card small, .settings-dialog .download-model-card span { font-size: 12px; line-height: 1.6; }
+.settings-dialog .download-model-card { box-shadow: none; border-color: #e5ddd5; background: #fff; padding: 16px; }
+.settings-dialog .download-model-card--recommended { background: #fdf9f5; border-color: #dfc2b1; }
+.settings-dialog .device-info-line { font-size: 12px; margin-block: 16px; }
+.settings-dialog .local-test-row { align-items: flex-start; }
+.settings-dialog .local-test-row small { font-size: 12px; line-height: 1.5; }
+.settings-dialog .profile-menu { margin: 0; }
+.settings-dialog .profile-menu__panel { z-index: 20; }
+.settings-dialog button:focus-visible, .settings-dialog summary:focus-visible { outline: 2px solid #cd7156; outline-offset: 3px; }
+.settings-dialog button:disabled { cursor: default; }
+
+@media (max-width: 780px) {
+  .settings-dialog .settings-layout { grid-template-columns: 166px minmax(0, 1fr); }
+  .settings-dialog .settings-nav { padding-inline: 9px; }
+  .settings-dialog .settings-nav button { font-size: 12px; gap: 8px; padding-inline: 10px; }
+  .settings-dialog .settings-header { padding: 25px 25px 22px; }
+  .settings-dialog .settings-content { padding-inline: 25px; }
+  .settings-dialog .settings-content--models { padding: 0; }
+  .settings-dialog .settings-services-page, .settings-dialog .profile-editor-wrap { padding-inline: 25px; }
+  .settings-dialog .profile-actions { margin-inline: -25px; padding-inline: 25px; }
+  .settings-dialog .settings-card > label { grid-template-columns: minmax(0, 1fr); gap: 13px; }
+  .settings-dialog .settings-card select { justify-self: stretch; width: 100%; }
+  .settings-dialog .settings-card__action { flex-wrap: wrap; }
+  .settings-dialog .settings-service-row { padding-right: 10px; gap: 6px; }
+  .settings-dialog .settings-service-row__main { padding: 16px 12px; gap: 7px; }
+  .settings-dialog .settings-service-row__icon { width: 25px; }
+  .settings-dialog .settings-default-action { font-size: 11px; }
+}
+@media (max-width: 620px) {
+  .settings-backdrop { padding: 8px; }
+  .settings-backdrop > .settings-dialog { width: calc(100vw - 16px); height: calc(100dvh - 16px); max-height: calc(100dvh - 16px); border-radius: 14px; }
+  .settings-dialog .settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .settings-dialog .settings-nav { display: block; padding: 7px; border-right: 0; border-bottom: 1px solid var(--settings-line); overflow-x: auto; }
+  .settings-dialog .settings-nav__title, .settings-dialog .settings-nav__brand { display: none; }
+  .settings-dialog .settings-nav__group { flex-direction: row; gap: 3px; width: max-content; }
+  .settings-dialog .settings-nav button { min-height: 37px; padding: 9px 10px; font-size: 12px; white-space: nowrap; gap: 6px; }
+  .settings-dialog .settings-header { padding: 23px 20px 20px; min-height: 102px; }
+  .settings-dialog .settings-header h1 { font-size: 21px; }
+  .settings-dialog .settings-content { padding-inline: 20px; padding-bottom: 24px; }
+  .settings-dialog .settings-content--models { padding: 0; }
+  .settings-dialog .settings-services-page, .settings-dialog .profile-editor-wrap { padding: 5px 20px 24px; }
+  .settings-dialog .profile-actions { margin-inline: -20px; margin-bottom: -24px; bottom: -24px; padding: 14px 20px 16px; }
+  .settings-dialog .profile-actions__hint { flex-basis: 100%; }
+  .settings-dialog .profile-actions .button { flex: 1; }
+  .settings-dialog .settings-service-row__main, .settings-dialog .settings-choice { padding: 15px 10px; gap: 8px; }
+  .settings-dialog .settings-service-row strong, .settings-dialog .settings-choice strong { font-size: 13px; }
+  .settings-dialog .settings-service-row small, .settings-dialog .settings-choice small { font-size: 11px; }
+  .settings-dialog .settings-service-row__icon { width: 23px; }
+  .settings-dialog .settings-service-row__open { width: 16px; }
+  .settings-dialog .visual-capability-setting { flex-wrap: wrap; gap: 10px; }
+  .settings-dialog .visual-capability-setting > span { margin-left: 24px; text-align: left; max-width: none; }
+  .settings-dialog .update-card { padding: 19px; gap: 13px; grid-template-columns: 40px minmax(0, 1fr); }
+  .settings-dialog .update-card__icon { width: 40px; height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-dialog .profile-editor-wrap { animation: none; }
+  .settings-dialog .settings-choice, .settings-dialog .settings-service-row { transition: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .settings-backdrop { backdrop-filter: none; background: #d4d0cc; }
+}
+
+.settings-dialog .local-model-manager { padding: 0; border: 0; margin: 0; }
+.settings-dialog .recommended-model-list { gap: 0; border: 1px solid #e4dfdb; border-radius: 11px; overflow: hidden; }
+.settings-dialog .recommended-model-list .download-model-card { margin: 0; border: 0; border-radius: 0; animation: none; }
+.settings-dialog .recommended-model-list .download-model-card + .download-model-card { border-top: 1px solid #e8e4e1; }
+.settings-dialog .local-model-catalog-details { margin-top: 19px; border-color: #e8e4e1; }
+.settings-dialog .runtime-chips span { background: #f7f4f1; color: var(--settings-muted); font-size: 11px; }
+
+/* Keep small settings copy readable on white and warm tinted surfaces. */
+.settings-dialog .download-model-card small,
+.settings-dialog .download-model-card span,
+.settings-dialog .local-model-manager__heading small,
+.settings-dialog .local-model-list small,
+.settings-dialog .model-picker__meta,
+.settings-dialog .model-picker__hint,
+.settings-dialog .model-picker__empty,
+.settings-dialog .local-test-row small,
+.settings-dialog .preset-describe,
+.settings-dialog .profile-actions__hint,
+.settings-dialog .settings-hint,
+.settings-dialog .voiceprint-person small,
+.settings-dialog .voiceprint-person-actions { color: var(--settings-muted); }
+
+.settings-dialog .settings-draft-group .settings-service-list { border-color: #e7cbbb; background: #fffdfa; }
+.settings-dialog .settings-draft-group > h3 { color: #986245; }
+.settings-dialog .settings-draft-discard { position: relative; z-index: 1; flex: none; color: var(--settings-muted); }
+.settings-dialog .settings-service-row small.settings-unsaved { color: #9b4934; }
+.settings-dialog .settings-restore { font-size: 12px; white-space: nowrap; padding: 8px 0; }
+.settings-dialog .profile-actions:has(.settings-restore) .profile-actions__hint { flex: 1 0 100%; }
+
+.settings-dialog .settings-draft-resume-label { pointer-events: none; }
+
+.settings-dialog .diarization-setup .local-model-manager__heading { margin-bottom: 20px; }
+.settings-dialog .diarization-setup .local-model-manager__heading > div:first-child { min-width: 0; }
+.settings-dialog .diarization-setup .local-model-actions { flex-wrap: wrap; justify-content: flex-end; }
+.settings-dialog .diarization-slot-list { margin-top: 16px; }
+.settings-dialog .diarization-slot > .diarization-slot__actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.settings-dialog .diarization-slot__ready { display: flex; align-items: center; gap: 5px; color: #477059 !important; font-size: 12px; white-space: nowrap; }
+.settings-dialog .diarization-setup .connection-status { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.settings-dialog .diarization-setup .connection-status .text-button { display: inline-flex; align-items: center; gap: 5px; }
+@media (max-width: 620px) {
+  .settings-dialog .diarization-setup .local-model-manager__heading { flex-direction: column; }
+  .settings-dialog .diarization-setup .local-model-actions { justify-content: flex-start; }
+  .settings-dialog .diarization-slot { grid-template-columns: minmax(0, 1fr); }
+  .settings-dialog .diarization-slot > .diarization-slot__actions { justify-content: flex-start; }
+}
