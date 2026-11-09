@@ -7,15 +7,16 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowsOutSimple,
   BookmarkSimple,
-  CaretDown,
   CheckCircle,
   Gear,
   Microphone,
   Pause,
+  PencilSimple,
   Play,
   SpeakerHigh,
   Stop,
-  WarningCircle
+  WarningCircle,
+  Waveform
 } from "@phosphor-icons/react";
 import type { Meeting, ModelProfile } from "../types";
 import { api } from "../lib/api";
@@ -48,6 +49,7 @@ interface RecorderBarProps {
   onStart(): Promise<void>;
   onPause(): Promise<void>;
   onStop(): Promise<void>;
+  onOpenNotes(): void;
   /** 在当前播放位置打一个笔记标记。 */
   onMark(): void;
 }
@@ -69,6 +71,7 @@ export function RecorderBar({
   onStart,
   onPause,
   onStop,
+  onOpenNotes,
   onMark
 }: RecorderBarProps) {
   const [mini, setMini] = useState(false);
@@ -81,6 +84,11 @@ export function RecorderBar({
   const active = phase === "recording" || phase === "paused";
   // 录制中显示实时计时，空闲时回退为该会议已保存的时长。
   const visualElapsed = live ? elapsed : meeting.durationSeconds;
+  const status = phase === "starting" ? "正在启动录音"
+    : phase === "paused" ? "已暂停"
+    : phase === "stopping" ? "正在保存"
+    : phase === "recording" ? "录制中"
+    : "准备录音";
 
   // 记录最后一次“听到声音”的时刻（真实电平 > 阈值才算）。
   useEffect(() => {
@@ -101,109 +109,103 @@ export function RecorderBar({
   }, [phase]);
 
   return (
-    <div className={`recorder-bar ${mini ? "is-mini" : ""}`}>
-      <div className="record-state" aria-live="polite">
-        <span className={`record-dot ${live ? "is-live" : ""}`} />
-        <div>
-          <strong>{formatDuration(visualElapsed)}</strong>
-          <span>
-            {phase === "starting"
-              ? "正在申请录音权限"
-              : phase === "stopping"
-                ? ""
-                : phase === "paused"
-                  ? "已暂停"
-                  : live
-                    ? "录制中"
-                    : meeting.status === "complete" ? "会议已结束" : "准备录音"}
-          </span>
-        </div>
-      </div>
-
-      {!mini && (
-        <>
-          <Level label="麦克风" icon={<Microphone size={18} />} value={levels.microphone} />
-          {meeting.mode === "online" && <Level label="系统声音" icon={<SpeakerHigh size={18} />} value={levels.system} />}
-          {transcriptionFailed && transcriptionReady ? (
-            <button
-              type="button"
-              className="transcription-status is-error"
-              aria-live="polite"
-              title="实时转写连续失败，点击改用本地 Whisper 或检查本地模型"
-              onClick={onFixTranscription}
-            >
-              <WarningCircle size={14} weight="fill" />
-              转写异常 · 去修复
-            </button>
-          ) : sttProfiles.length > 0 ? (
-            <SttModelPicker
-              profiles={sttProfiles}
-              activeId={activeSttProfileId}
-              activeName={activeSttProfileName}
-              queue={queue}
-              recording={phase === "recording"}
-              onSelect={onSelectSttProfile}
-              onManage={onManageTranscription}
-            />
-          ) : (
-            <button
-              type="button"
-              className="transcription-status is-limited"
-              aria-live="polite"
-              title="配置转写模型后，录音的同时生成逐字稿"
-              onClick={onManageTranscription}
-            >
-              <WarningCircle size={14} weight="fill" />
-              未配置转写 · 去设置
-            </button>
-          )}
-          {silentMic && (
-            <span className="recorder-warning" role="alert">
-              <WarningCircle size={14} weight="fill" />未检测到麦克风声音，请检查输入设备
-            </span>
-          )}
-        </>
+    <div className="recorder-area">
+      {!mini && silentMic && (
+        <span className="recorder-warning" role="alert">
+          <WarningCircle size={14} weight="fill" />未检测到麦克风声音，请检查输入设备
+        </span>
       )}
+      <div className={`recorder-bar ${mini ? "is-mini" : ""}`}>
+        <div className="record-state">
+          <span className={`record-dot ${phase === "recording" ? "is-live" : ""}`} aria-hidden="true" />
+          <strong>{formatDuration(visualElapsed)}</strong>
+          <span className={phase === "paused" || phase === "starting" ? undefined : "sr-only"} role="status">{status}</span>
+        </div>
 
-      <div className="recorder-actions">
-        {!live ? (
-          <button className="record-action record-action--start" onClick={onStart}>
-            <Play size={18} weight="fill" />开始录音
-          </button>
-        ) : phase === "starting" ? (
-          <button className="record-action record-action--stop" onClick={onStop}>
-            <Stop size={18} weight="fill" />取消
-          </button>
-        ) : phase === "stopping" ? (
-          <button className="record-action" disabled>
-            正在保存…
-          </button>
-        ) : active ? (
+        {!mini && (
           <>
-            <button className="record-action" onClick={onMark}><BookmarkSimple size={19} />标记</button>
-            <button className="record-action" onClick={onPause}>
-              {phase === "paused" ? <Play size={18} weight="fill" /> : <Pause size={18} weight="fill" />}
-              {phase === "paused" ? "继续" : "暂停"}
-            </button>
-            {/* 停止是单步操作：音频/转录始终已自动保存，误触可在停止后的
-                「继续录音」提示里一键无损恢复，无需二次确认打断收尾时刻。 */}
-            <button className="record-action record-action--stop" onClick={() => void onStop()}>
-              <Stop size={18} weight="fill" />停止
-            </button>
+            {phase === "recording" && <div className="recorder-levels">
+              <Level label="麦克风" icon={<Microphone size={14} />} value={levels.microphone} />
+              {meeting.mode === "online" && <Level label="系统声音" icon={<SpeakerHigh size={14} />} value={levels.system} />}
+            </div>}
+            {transcriptionFailed && transcriptionReady ? (
+              <button
+                type="button"
+                className="transcription-status is-error"
+                aria-live="polite"
+                aria-label="转写异常，去修复"
+                title="转写异常，去修复"
+                onClick={onFixTranscription}
+              >
+                <WarningCircle size={14} weight="fill" />
+              </button>
+            ) : sttProfiles.length > 0 ? (
+              <SttModelPicker
+                profiles={sttProfiles}
+                activeId={activeSttProfileId}
+                activeName={activeSttProfileName}
+                queue={queue}
+                recording={phase === "recording"}
+                onSelect={onSelectSttProfile}
+                onManage={onManageTranscription}
+              />
+            ) : (
+              <button
+                type="button"
+                className="transcription-status is-limited"
+                aria-live="polite"
+                aria-label="配置转写模型"
+                title="未配置转写模型，去设置"
+                onClick={onManageTranscription}
+              >
+                <WarningCircle size={14} weight="fill" />
+              </button>
+            )}
           </>
-        ) : null}
-        <button
-          className="icon-button recorder-mini"
-          aria-label="切换迷你录音窗口"
-          onClick={async () => {
-            // 本地立即切换视图 + 通知主进程开/关系统级迷你窗（置顶小窗）。
-            const next = !mini;
-            setMini(next);
-            await api.window.toggleMini(next);
-          }}
-        >
-          <ArrowsOutSimple size={17} />
-        </button>
+        )}
+
+        <div className="recorder-actions">
+          {!live ? (
+            <button className="record-action record-action--start" onClick={onStart}>
+              <Play size={18} weight="fill" />开始录音
+            </button>
+          ) : phase === "starting" ? (
+            <button className="record-action record-action--stop" onClick={onStop}>
+              <Stop size={18} weight="fill" />取消
+            </button>
+          ) : phase === "stopping" ? (
+            <button className="record-action" disabled>
+              正在保存…
+            </button>
+          ) : active ? (
+            <>
+              {!mini && <button className="record-action record-action--icon" aria-label="打开笔记" title="打开笔记" onClick={onOpenNotes}><PencilSimple size={18} /></button>}
+              <button className="record-action record-action--icon" aria-label="添加重点标记" title="添加重点标记" onClick={onMark}><BookmarkSimple size={19} /></button>
+              <button className="record-action record-action--icon" aria-label={phase === "paused" ? "继续录音" : "暂停录音"} title={phase === "paused" ? "继续录音" : "暂停录音"} onClick={onPause}>
+                {phase === "paused" ? <Play size={18} weight="fill" /> : <Pause size={18} weight="fill" />}
+              </button>
+              {/* 停止是单步操作：音频/转录始终已自动保存，误触可在停止后的
+                  「继续录音」提示里一键无损恢复，无需二次确认打断收尾时刻。 */}
+              <button className="record-action record-action--stop" onClick={() => void onStop()}>
+                结束
+              </button>
+            </>
+          ) : null}
+          <button
+            className="icon-button recorder-mini"
+            aria-label="切换迷你录音窗口"
+            aria-pressed={mini}
+            title="切换迷你录音窗口"
+            onClick={async () => {
+              // 本地立即切换视图 + 通知主进程开/关系统级迷你窗（置顶小窗）。
+              const next = !mini;
+              setMini(next);
+              await api.window.toggleMini(next);
+            }}
+          >
+            <ArrowsOutSimple size={17} />
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -251,17 +253,15 @@ function SttModelPicker({
     <div className="stt-picker" ref={rootRef}>
       <button
         type="button"
-        className={`transcription-status is-ready stt-picker__trigger ${open ? "is-open" : ""}`}
+        className={`transcription-status ${open ? "is-open" : ""}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-live="polite"
-        title="勾选本场录音使用的转写模型"
+        aria-label={activeName ? `转写模型：${activeName}` : "选择转写模型"}
+        title={activeName ? `转写模型：${activeName}` : "选择转写模型"}
         onClick={() => setOpen((value) => !value)}
       >
-        <CheckCircle size={14} weight="fill" />
-        {activeName ? `转写 · ${activeName}` : "选择转写模型"}
-        {queue > 0 && <em className="stt-picker__queue">{queue}</em>}
-        <CaretDown size={12} weight="bold" />
+        <Waveform size={17} />
+        {queue > 0 && <em className="stt-picker__queue" aria-hidden="true">{queue > 9 ? "9+" : queue}</em>}
       </button>
       {open && (
         <div className="stt-picker__menu" role="menu" aria-label="选择转写模型">
@@ -309,13 +309,10 @@ const TRANSPORT_HINTS: Partial<Record<ModelProfile["transport"], string>> = {
 function Level({ label, icon, value }: { label: string; icon: React.ReactNode; value: number }) {
   const active = Math.round(value * 6);
   return (
-    <div className="audio-level">
-      <span>{icon}</span>
-      <div>
-        <small>{label}</small>
-        <div className="level-bars">
-          {Array.from({ length: 6 }, (_, index) => <i key={index} className={index < active ? "is-active" : ""} />)}
-        </div>
+    <div className="audio-level" title={label} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={6} aria-valuenow={active}>
+      {icon}
+      <div className="level-bars" aria-hidden="true">
+        {Array.from({ length: 6 }, (_, index) => <i key={index} className={index < active ? "is-active" : ""} />)}
       </div>
     </div>
   );

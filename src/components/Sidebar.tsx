@@ -53,7 +53,7 @@ export function Sidebar({ meetings, selectedId, onSelect, onQuickStart, onNew, o
   const enteringMeetingIds = useEnteringItemIds(`library:${search}`, visibleMeetingIds);
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" id="meeting-library" aria-label="会议库">
       <div className="brand">
         <BrandMark className="brand__mark" size={25} />
         <span>MinuteFlow</span>

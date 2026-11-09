@@ -9,7 +9,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowClockwise,
-  ArrowsMerge,
   CaretDown,
   CheckCircle,
   Check,
@@ -18,6 +17,7 @@ import {
   MagicWand,
   PencilSimple,
   Trash,
+  Users,
   WarningCircle,
   X
 } from "@phosphor-icons/react";
@@ -285,30 +285,22 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     summary: { ...meeting.summary, stale: true }
   });
 
+  const speakerButton = (speakers.length > 0 || voiceprints.length > 0) && (
+    <button className="text-button transcript-speakers" aria-expanded={managerOpen} aria-controls={managerOpen ? "transcript-speaker-manager" : undefined} onClick={() => setManagerOpen((value) => !value)}>
+      <Users size={16} />发言人
+    </button>
+  );
+
   return (
     <>
-      <div className="speaker-strip">
-        <span className="speaker-strip__label">发言人</span>
-        {speakers.slice(0, 3).map(([id, name]) => (
-          <button key={id} onClick={() => openSpeakerEditor(id)}>
-            <span className={`speaker-dot speaker-dot--${speakerColor(id)}`} />{name}
-            {voiceprints.some((person) => person.name === name) && (
-              <FingerprintSimple size={12} weight="fill" aria-label="已保存在本地声纹簿" />
-            )}
-          </button>
-        ))}
-        {speakers.length > 3 && (
-          // 超出前 3 个的说话人以 +N 收纳：点开管理面板即可查看/改名全部。
-          <button className="speaker-more" onClick={() => setManagerOpen(true)}>
-            +{speakers.length - 3}
-          </button>
-        )}
-        <button className="speaker-merge" onClick={() => setManagerOpen((value) => !value)}>
-          <ArrowsMerge size={14} />管理
-        </button>
-      </div>
+      {stage === "live" ? (
+        <header className="live-transcript-header">
+          <h2 id="live-transcript-title">转写</h2>
+          {speakerButton}
+        </header>
+      ) : speakerButton}
       {managerOpen && (
-        <section className="speaker-manager">
+        <section className="speaker-manager" id="transcript-speaker-manager" aria-label="发言人管理">
           <header>
             <div>
               <strong>发言人管理</strong>
@@ -475,17 +467,17 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
       <div
         className="transcript-list"
         id="transcript-content"
-        role="tabpanel"
-        aria-labelledby="transcript-tab"
+        role={stage === "live" ? "region" : "tabpanel"}
+        aria-labelledby={stage === "live" ? "live-transcript-title" : "transcript-tab"}
         ref={listRef}
         onScroll={handleTranscriptScroll}
       >
-        <TranscriptOverview
+        {stage !== "live" && <TranscriptOverview
           key={meeting.id}
           summary={meeting.summary}
           busy={summaryBusy}
           onRefresh={onGenerateSummary}
-        />
+        />}
         {meeting.transcript.length > visibleCount && (
           <button className="load-earlier" onClick={() => setVisibleCount((value) => value + 200)}>
             加载更早的 {Math.min(200, meeting.transcript.length - visibleCount)} 条
@@ -559,7 +551,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
               ? importTranscriptStatus(importJob)
               : stage === "review"
                 ? "这场会议没有逐字稿；笔记与纪要仍保留。"
-                : "开始录音后，转录会出现在这里。"}</p>
+                : "等待转写…"}</p>
             {!importJob && stage === "review" && emptyActionLabel && onEmptyAction && (
               <button className="button button--secondary button--small" onClick={onEmptyAction}>
                 {emptyActionLabel}
@@ -648,10 +640,12 @@ function TranscriptOverview({ summary, busy, onRefresh }: {
   const text = points.join("\n");
   useEffect(() => { setCopyState("idle"); }, [text]);
 
+  if (!points.length && !busy) return null;
+
   return (
     <section className={`transcript-overview ${summary.stale ? "is-stale" : ""}`} aria-label="会议概览">
       <header>
-        <h2><MagicWand size={17} weight="duotone" />会议概览</h2>
+        <h2>会议概览</h2>
         <div className="transcript-overview__actions">
           {onRefresh && <button className="icon-button" disabled={busy} title="更新纪要" aria-label="更新会议概览" onClick={onRefresh}>
             <ArrowClockwise size={17} className={busy ? "spin" : ""} />
@@ -672,8 +666,8 @@ function TranscriptOverview({ summary, busy, onRefresh }: {
             {expanded ? "收起概览" : "展开概览"}<CaretDown size={13} />
           </button>
         </>}
-      </> : <p className="transcript-overview__empty">{busy ? "正在整理会议概览…" : "还没有纪要。"}</p>}
-      {(busy || (summary.stale && !busy) || copyState !== "idle") && (
+      </> : null}
+      {(busy || summary.stale || copyState !== "idle") && (
         <footer>
           {busy && <span>正在更新…</span>}
           {summary.stale && !busy && <span className="transcript-overview__stale">有新内容 · 待更新</span>}

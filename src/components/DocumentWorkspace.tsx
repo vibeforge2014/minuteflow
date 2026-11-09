@@ -27,6 +27,7 @@ import {
   DotsThree,
   Trash,
   WarningCircle,
+  X,
   XCircle
 } from "@phosphor-icons/react";
 import { useEditor, EditorContent } from "@tiptap/react";
@@ -47,6 +48,7 @@ import { isActiveImportJob, isRetryableImportJob } from "../lib/import-status";
 import type { ContentChangeKind } from "../lib/content-motion";
 import type { LiveTranscriptionFailure } from "../services/recording";
 import { useEnteringItemIds, useSummaryContentMotion } from "../hooks/useContentMotion";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 
 interface DocumentWorkspaceProps {
   meeting: Meeting;
@@ -89,6 +91,8 @@ interface DocumentWorkspaceProps {
   /** 仅用普通纪要重试视觉版。 */
   onRetryVisualSummary(): void;
   summaryBusy: boolean;
+  liveDocument: "notes" | "summary" | null;
+  onCloseLiveDocument(): void;
 }
 
 export function DocumentWorkspace({
@@ -119,8 +123,17 @@ export function DocumentWorkspace({
   onGenerateSummary,
   onCancelSummary,
   onRetryVisualSummary,
-  summaryBusy
+  summaryBusy,
+  liveDocument,
+  onCloseLiveDocument
 }: DocumentWorkspaceProps) {
+  const showLiveDocument = stage === "live" && liveDocument !== null;
+  const liveDialogRef = useDialogFocus<HTMLElement>(showLiveDocument, { onEscape: onCloseLiveDocument });
+  useEffect(() => {
+    if (!showLiveDocument) return;
+    const section = liveDialogRef.current?.querySelector(`.document-section--${liveDocument}`);
+    section?.scrollIntoView({ block: "start" });
+  }, [liveDialogRef, liveDocument, showLiveDocument]);
   const summaryIntervalSeconds = useMeetingStore((state) => state.preferences.summaryIntervalSeconds);
   const profiles = useMeetingStore((state) => state.profiles);
   const visualCapable = profiles.some((profile) => profile.kind === "llm" && profile.enabled
@@ -163,14 +176,13 @@ export function DocumentWorkspace({
     setHeroMenuOpen(false);
   }, [meeting.id]);
   /** 中央列视图：AI 纪要文档 / 转写。会前只展示文档（还没有转写内容）。 */
-  const [workspaceView, setWorkspaceView] = useState<"document" | "transcript">(
-    stage === "live" ? "transcript" : "document"
-  );
-  // 切换会议或进入新阶段时回到该阶段的默认视图：进行中跟随转写，会前/会后先看纪要。
+  const [workspaceView, setWorkspaceView] = useState<"document" | "transcript">("document");
+  // 会中固定展示转写，会前与会后默认展示文档。
   useEffect(() => {
-    setWorkspaceView(stage === "live" ? "transcript" : "document");
+    setWorkspaceView("document");
   }, [meeting.id, stage]);
-  const showViewSwitch = stage !== "prepare";
+  const showViewSwitch = stage === "review";
+  const showTranscript = stage === "live" || (showViewSwitch && workspaceView === "transcript");
   /** 笔记显示模式：富文本编辑 / Markdown 源码 / 只读预览。 */
   const [noteMode, setNoteMode] = useState<"rich" | "markdown" | "preview">("rich");
   /** 最近导入的 .md 文件名（显示导入成功提示）。 */
@@ -309,9 +321,10 @@ export function DocumentWorkspace({
 
   /** 关键结论回链：切到转写视图、定位并短暂高亮目标段落；有音频时同时请求播放器跳转。 */
   const jumpToTranscript = (ms: number) => {
-    setWorkspaceView("transcript");
+    if (stage === "live") onCloseLiveDocument();
+    else setWorkspaceView("transcript");
     setTranscriptJump({ ms, nonce: Date.now() });
-    onSeek?.(ms);
+    if (stage !== "live") onSeek?.(ms);
   };
 
   /** 更新单个行动项字段；手动改动即锁定该行动项（`action:<id>`），防止 AI 重算时丢失。 */
@@ -344,59 +357,7 @@ export function DocumentWorkspace({
     });
   };
 
-  return (
-    <div className="document-scroll">
-      {showViewSwitch && (
-        <div className="workspace-view-switch-band">
-          <div className="workspace-view-switch" role="tablist" aria-label="中央工作区内容">
-            <button
-              role="tab"
-              id="summary-view-tab"
-              aria-selected={workspaceView === "document"}
-              className={workspaceView === "document" ? "is-active" : ""}
-              onClick={() => setWorkspaceView("document")}
-            >
-              <FileText size={14} />AI 纪要
-            </button>
-            <button
-              role="tab"
-              id="transcript-tab"
-              aria-selected={workspaceView === "transcript"}
-              className={workspaceView === "transcript" ? "is-active" : ""}
-              onClick={() => setWorkspaceView("transcript")}
-            >
-              <NotePencil size={14} />转写
-            </button>
-          </div>
-        </div>
-      )}
-      {workspaceView === "transcript" && showViewSwitch ? (
-        <div className="workspace-transcript">
-          <TranscriptView
-            meeting={meeting}
-            importJob={importJob}
-            stage={stage}
-            onChange={onChange}
-            playbackMs={playbackMs}
-            onSeek={onSeek}
-            jumpTarget={transcriptJump}
-            emptyActionLabel={emptyActionLabel}
-            onEmptyAction={onEmptyAction}
-            summaryBusy={summaryBusy || Boolean(processingStatus)}
-            onGenerateSummary={onGenerateSummary}
-            transcriptionFailure={transcriptionFailure}
-            transcriptionIsLocal={transcriptionIsLocal}
-            onUseLocalWhisper={onUseLocalWhisper}
-            onChooseTranscriptionService={onChooseTranscriptionService}
-            onDismissTranscriptionFailure={onDismissTranscriptionFailure}
-            onRetryImport={onRetryImport}
-            onCancelImport={onCancelImport}
-            onSkipDiarization={onSkipDiarization}
-            onRetranscribe={onRetranscribe}
-            onConfigureTranscription={onConfigureTranscription}
-          />
-        </div>
-      ) : (
+  const meetingDocument = (!showTranscript || showLiveDocument) && (
       <article
         key={`${meeting.id}-${summaryView}`}
         className={`meeting-document meeting-document--${stage} ${summaryView === "visual" ? "meeting-document--visual" : ""}`}
@@ -899,6 +860,75 @@ export function DocumentWorkspace({
           </div>
         </DocumentSection>
       </article>
+  );
+
+  return (
+    <div className="document-scroll">
+      {showViewSwitch && (
+        <div className="workspace-view-switch-band">
+          <div className="workspace-view-switch" role="tablist" aria-label="中央工作区内容">
+            <button
+              role="tab"
+              id="summary-view-tab"
+              aria-selected={workspaceView === "document"}
+              className={workspaceView === "document" ? "is-active" : ""}
+              onClick={() => setWorkspaceView("document")}
+            >
+              <FileText size={14} />AI 纪要
+            </button>
+            <button
+              role="tab"
+              id="transcript-tab"
+              aria-selected={workspaceView === "transcript"}
+              className={workspaceView === "transcript" ? "is-active" : ""}
+              onClick={() => setWorkspaceView("transcript")}
+            >
+              <NotePencil size={14} />转写
+            </button>
+          </div>
+        </div>
+      )}
+      {showTranscript ? (
+        <div className="workspace-transcript">
+          <TranscriptView
+            meeting={meeting}
+            importJob={importJob}
+            stage={stage}
+            onChange={onChange}
+            playbackMs={playbackMs}
+            onSeek={onSeek}
+            jumpTarget={transcriptJump}
+            emptyActionLabel={emptyActionLabel}
+            onEmptyAction={onEmptyAction}
+            summaryBusy={summaryBusy || Boolean(processingStatus)}
+            onGenerateSummary={onGenerateSummary}
+            transcriptionFailure={transcriptionFailure}
+            transcriptionIsLocal={transcriptionIsLocal}
+            onUseLocalWhisper={onUseLocalWhisper}
+            onChooseTranscriptionService={onChooseTranscriptionService}
+            onDismissTranscriptionFailure={onDismissTranscriptionFailure}
+            onRetryImport={onRetryImport}
+            onCancelImport={onCancelImport}
+            onSkipDiarization={onSkipDiarization}
+            onRetranscribe={onRetranscribe}
+            onConfigureTranscription={onConfigureTranscription}
+          />
+        </div>
+      ) : (
+        meetingDocument
+      )}
+      {showLiveDocument && (
+        <div className="modal-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) onCloseLiveDocument();
+        }}>
+          <section ref={liveDialogRef} className="dialog live-document-dialog" role="dialog" aria-modal="true" aria-labelledby="live-document-title">
+            <header>
+              <h2 id="live-document-title">{liveDocument === "notes" ? "会议笔记" : "编辑纪要"}</h2>
+              <button className="icon-button" aria-label="关闭编辑" onClick={onCloseLiveDocument}><X size={19} /></button>
+            </header>
+            <div className="live-document-dialog__scroll">{meetingDocument}</div>
+          </section>
+        </div>
       )}
     </div>
   );

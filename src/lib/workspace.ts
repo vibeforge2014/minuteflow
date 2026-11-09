@@ -38,9 +38,8 @@ export interface RecordingReadiness {
 }
 
 /**
- * 阶段切换时是否自动打开右栏：会前保持专注；会中不再自动展开空的 AI 问答
- * （转写列全宽，聊天按钮入口仍在）；会后只有确有逐字稿或后台处理状态时才打开，
- * 避免空白侧栏挤压纪要正文。
+ * 阶段切换时是否自动打开独立的 AI 问答侧栏。会中问答嵌入实时总结，
+ * 会后只有确有逐字稿或后台处理状态时才默认打开侧栏。
  */
 export function shouldAutoOpenRightPanel(input: {
   stage: WorkspaceStage;

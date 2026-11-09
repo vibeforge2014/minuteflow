@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowClockwise,
+  ChatTeardropText,
   CloudCheck,
   DotsThree,
   Export,
@@ -22,6 +23,7 @@ import {
 import { Sidebar } from "./components/Sidebar";
 import { DocumentWorkspace } from "./components/DocumentWorkspace";
 import { ChatPanel } from "./components/ChatPanel";
+import { LiveSummary } from "./components/LiveSummary";
 import { RecorderBar } from "./components/RecorderBar";
 import { RecordingDock } from "./components/RecordingDock";
 import { NewMeetingDialog } from "./components/NewMeetingDialog";
@@ -83,6 +85,10 @@ export function App() {
   const [paywallReason, setPaywallReason] = useState<string>();
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const libraryButtonRef = useRef<HTMLButtonElement>(null);
+  const [liveDocument, setLiveDocument] = useState<"notes" | "summary" | null>(null);
+  const closeLiveDocument = useCallback(() => setLiveDocument(null), []);
   const [exportOpen, setExportOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   /** 成功提示：可附带一个直达动作（更新提示 → 打开软件更新）。 */
@@ -246,7 +252,6 @@ export function App() {
     [meetings, selectedId]
   );
   // 右侧面板退场保持：关闭后保留 240ms 播放收回动画（与 CSS panel-out 时长一致）。
-  const panelPresence = useExitPresence(Boolean(rightPanelOpen && meeting), 240);
   // 搜索词与清除入口：区分「没有任何会议」和「搜索无结果」两种空状态。
   const search = useMeetingStore((state) => state.search);
   const setSearch = useMeetingStore((state) => state.setSearch);
@@ -275,6 +280,16 @@ export function App() {
       ? "review"
       : deriveWorkspaceStage(meeting.status, selectedRecorderPhase)
     : null;
+  const liveWorkspace = workspaceStage === "live";
+  const panelPresence = useExitPresence(Boolean(rightPanelOpen && meeting && !liveWorkspace), 240);
+  const closeLibrary = useCallback(() => {
+    setLibraryOpen(false);
+    libraryButtonRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (liveWorkspace && libraryOpen) document.getElementById("meeting-search")?.focus();
+  }, [liveWorkspace, libraryOpen]);
   const importProcessingStatus = useMemo(
     () => describeImportProcessing(meetingImportJob),
     [meetingImportJob]
@@ -288,6 +303,10 @@ export function App() {
   const sttProfiles = useMemo(
     () => [...profiles.filter((profile) => profile.kind === "stt")]
       .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault))),
+    [profiles]
+  );
+  const chatProfiles = useMemo(
+    () => profiles.filter((profile) => profile.kind === "llm" && profile.transport !== "local-summary"),
     [profiles]
   );
   /** 当前转写是否跑在本机：失败提示据此把「改用本地 Whisper」换成「检查本地模型」。 */
@@ -325,7 +344,9 @@ export function App() {
     } else if (previous?.meetingId !== meeting.id) {
       setRecentlyFinalizedId(null);
     }
-    setRightPanelOpen(shouldAutoOpenRightPanel({
+    setLibraryOpen(false);
+    setLiveDocument(null);
+    setRightPanelOpen(!window.matchMedia("(max-width: 1040px)").matches && shouldAutoOpenRightPanel({
       stage: workspaceStage,
       transcriptCount: meeting.transcript.length,
       hasProcessingStatus: Boolean(importProcessingStatus)
@@ -396,6 +417,11 @@ export function App() {
   // 自动关闭计时器被反复重置（录音中电平更新让 App 高频重渲染，提示将永远不消失）。
   const dismissToast = useCallback(() => setToast(null), []);
 
+  const generateMeetingSummary = () => {
+    const generate = () => void recorder.generateSummary(liveWorkspace ? false : undefined);
+    if (requirePremium("生成 AI 会议纪要", generate)) generate();
+  };
+
   const handleCreate = async (input: CreateMeetingInput, options?: { startRecording?: boolean }) => {
     const created = await createMeeting(input);
     setNewMeetingOpen(false);
@@ -433,7 +459,8 @@ export function App() {
       const meta = event.metaKey || event.ctrlKey;
       if (meta && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        document.getElementById("meeting-search")?.focus();
+        if (liveWorkspace && !libraryOpen) setLibraryOpen(true);
+        else document.getElementById("meeting-search")?.focus();
         return;
       }
       if (meta && event.key.toLowerCase() === "n") {
@@ -445,11 +472,12 @@ export function App() {
         if (moreOpen) { setMoreOpen(false); return; }
         if (exportOpen) { setExportOpen(false); return; }
         if (importOpen) { setImportOpen(false); return; }
+        if (liveWorkspace && libraryOpen) closeLibrary();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [exportOpen, importOpen, moreOpen]);
+  }, [closeLibrary, exportOpen, importOpen, libraryOpen, liveWorkspace, moreOpen]);
 
   // 导入入口（文件选择器 / 拖拽）：先过付费墙，再把候选文件交给右侧确认抽屉，确认后才入队归档。
   // 把“过墙”与“真正选文件”拆开，激活成功后可以从选文件这一步继续，而不是再弹一次付费墙。
@@ -579,23 +607,24 @@ export function App() {
   // 会让空状态引导在视觉上偏离居中。
   return (
       <div
-        className={`app-shell ${meeting ? "app-shell--document" : ""} ${rightPanelOpen && meeting ? "app-shell--right-open" : ""}`}
+        className={`app-shell ${meeting ? "app-shell--document" : ""} ${liveWorkspace ? "app-shell--live" : rightPanelOpen && meeting ? "app-shell--right-open" : ""} ${liveWorkspace && libraryOpen ? "app-shell--library-open" : ""}`}
       onDragOver={(event) => event.preventDefault()}
       onDrop={handleDrop}
     >
+      {liveWorkspace && libraryOpen && <div className="live-library-scrim" aria-hidden="true" onClick={closeLibrary} />}
       <Sidebar
         meetings={meetings}
         selectedId={selectedId}
-        onSelect={selectMeeting}
+        onSelect={(id) => { if (liveWorkspace) closeLibrary(); selectMeeting(id); }}
         onQuickStart={handleQuickStart}
-        onNew={() => setNewMeetingOpen(true)}
-        onImport={handleImport}
+        onNew={() => { if (liveWorkspace) closeLibrary(); setNewMeetingOpen(true); }}
+        onImport={() => { if (liveWorkspace) closeLibrary(); void handleImport(); }}
         importCount={importJobs.filter((job) => !["complete", "cancelled", "failed"].includes(job.status)).length}
         importIssueCount={importJobs.filter((job) => job.status === "failed").length}
         onToggleFavorite={handleToggleFavorite}
         onDeleteMeeting={handleDeleteMeeting}
-        onTrash={() => setTrashOpen(true)}
-        onSettings={() => openSettings()}
+        onTrash={() => { if (liveWorkspace) closeLibrary(); setTrashOpen(true); }}
+        onSettings={() => { if (liveWorkspace) closeLibrary(); openSettings(); }}
       />
 
       <main className={`main-pane ${workspaceStage ? `main-pane--${workspaceStage}` : ""}`}>
@@ -603,15 +632,22 @@ export function App() {
           <>
             <header className={`document-header document-header--${workspaceStage}`}>
               <div className="document-header__title">
+                {liveWorkspace && (
+                  <button ref={libraryButtonRef} className="icon-button live-library-trigger" aria-label="会议库" aria-expanded={libraryOpen} aria-controls="meeting-library" title="会议库" onClick={() => libraryOpen ? closeLibrary() : setLibraryOpen(true)}>
+                    <SidebarSimple size={19} />
+                  </button>
+                )}
                 <div className="document-header__heading">
                   <input
                     aria-label="会议标题"
                     value={meeting.title}
                     onChange={(event) => handleMeetingChange({ ...meeting, title: event.target.value })}
                   />
-                  <span className={`workspace-stage workspace-stage--${workspaceStage}`}>
-                    {workspaceStage === "prepare" ? "会前准备" : workspaceStage === "live" ? "会议进行中" : "会后整理"}
-                  </span>
+                  {workspaceStage !== "live" && (
+                    <span className={`workspace-stage workspace-stage--${workspaceStage}`}>
+                      {workspaceStage === "prepare" ? "会前准备" : "会后整理"}
+                    </span>
+                  )}
                 </div>
                 <button
                   className={`icon-button ${meeting.favorite ? "is-active" : ""}`}
@@ -624,10 +660,10 @@ export function App() {
                 </button>
               </div>
               <div className="document-header__actions">
-                <span className="save-state">
+                <span className="save-state" title={workspaceStage === "live" ? (saving ? "正在保存" : "已保存到本机") : undefined}>
                   <span className="save-state__content content-status-enter" key={saving ? "saving" : "saved"}>
                     {saving ? <ArrowClockwise size={16} className="spin" /> : <CloudCheck size={17} />}
-                    {saving ? "正在保存" : "已保存到本机"}
+                    <span className={workspaceStage === "live" ? "sr-only" : undefined}>{saving ? "正在保存" : "已保存到本机"}</span>
                   </span>
                 </span>
                 {playerAvailable && (
@@ -641,7 +677,7 @@ export function App() {
                   </button>
                 )}
                 <div className="export-wrap">
-                  <button className="button button--primary button--small" aria-expanded={exportOpen} onClick={() => {
+                  <button className={`button button--small ${workspaceStage === "live" ? "button--secondary" : "button--primary"}`} aria-expanded={exportOpen} onClick={() => {
                     if (requirePremium("导出会议文档与完整备份", openExportMenu)) openExportMenu();
                   }}>
                     <Export size={16} /> 导出
@@ -703,15 +739,15 @@ export function App() {
                     </div>
                   )}
                 </div>
-                <button
+                {!liveWorkspace && <button
                   className={`icon-button ${rightPanelOpen ? "is-active" : ""}`}
                   aria-label={rightPanelOpen ? "关闭 AI 问答侧栏" : "打开 AI 问答侧栏"}
                   aria-pressed={rightPanelOpen}
                   title={rightPanelOpen ? "关闭 AI 问答侧栏" : "围绕这场会议向 AI 提问"}
                   onClick={() => setRightPanelOpen((value) => !value)}
                 >
-                  <SidebarSimple size={19} />
-                </button>
+                  <ChatTeardropText size={19} />
+                </button>}
               </div>
             </header>
 
@@ -772,15 +808,14 @@ export function App() {
               onChooseTranscriptionService={() => openSettings("transcription", "online-transcription")}
               onDismissTranscriptionFailure={recorder.dismissTranscriptionFailure}
               onOpenPermissions={() => setPermissionsOpen(true)}
-              onGenerateSummary={() => {
-                // final 由 hook 按会议状态自动推导：录音/暂停中为滚动增量，会后为终稿总结。
-                if (requirePremium("生成 AI 会议纪要", () => void recorder.generateSummary())) void recorder.generateSummary();
-              }}
+              onGenerateSummary={generateMeetingSummary}
               onCancelSummary={() => void recorder.cancelSummary()}
               onRetryVisualSummary={() => {
                 if (requirePremium("生成视觉会议纪要", () => void recorder.generateVisualSummary())) void recorder.generateVisualSummary();
               }}
               summaryBusy={recorder.summaryBusy}
+              liveDocument={liveDocument}
+              onCloseLiveDocument={closeLiveDocument}
             />
 
             {workspaceStage === "live" && (
@@ -804,6 +839,7 @@ export function App() {
                 }}
                 onPause={recorder.pause}
                 onStop={recorder.stop}
+                onOpenNotes={() => setLiveDocument("notes")}
                 onMark={() => {
                   const time = formatDuration(recorder.elapsed);
                   const marker = `[${time}] 重点标记`;
@@ -854,12 +890,22 @@ export function App() {
         />
       )}
 
-      {meeting && panelPresence.mounted && (
+      {meeting && (liveWorkspace || panelPresence.mounted) && (
         <ChatPanel
           meeting={meeting}
-          closing={panelPresence.closing}
+          profiles={chatProfiles}
+          closing={!liveWorkspace && panelPresence.closing}
           onClose={() => setRightPanelOpen(false)}
           onOpenSettings={() => openSettings("llm")}
+          liveSummary={liveWorkspace ? (
+            <LiveSummary
+              meeting={meeting}
+              busy={recorder.summaryBusy}
+              onRefresh={generateMeetingSummary}
+              onCancel={() => void recorder.cancelSummary()}
+              onEdit={() => setLiveDocument("summary")}
+            />
+          ) : undefined}
         />
       )}
 

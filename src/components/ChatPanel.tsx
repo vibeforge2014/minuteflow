@@ -1,15 +1,15 @@
 /**
  * 右侧 AI 问答面板：围绕当前会议的转写与纪要与大模型对话。
  * - 会话按 meeting.id 存在模块级 Map 里：切换会议/收起面板不丢当次对话（不落盘，刷新即清）。
- * - 空状态展示「猜你想问」：从当前纪要内容推导的建议问题，点按即发送。
+ * - 空状态在输入框上方提供建议问题，点按即发送。
  * - 请求走主进程 chat:send（需已配置在线总结服务并已激活）；失败在气泡内以错误样式呈现，可重试。
  * - 回答按 Markdown 安全渲染（与个人笔记同一管线）；思维链在传输层仍被拆分
  *   （防止内联 <think> 泄入正文），但不再提供「思考过程」展示入口。
- * - 输入区上方的模型胶囊可不动设置直接勾选本次问答使用的 LLM 档案（在线/本机 Ollama）：
+ * - 输入区内可直接勾选本次问答使用的 LLM 档案（在线/本机 Ollama）：
  *   智谱式多可用，勾选随消息发送 profileId，不写库改默认档。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CaretDown, ChatTeardropText, CheckCircle, Eraser, PaperPlaneRight, X } from "@phosphor-icons/react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { ChatTeardropText, CheckCircle, Eraser, PaperPlaneRight, SlidersHorizontal, X } from "@phosphor-icons/react";
 import type { Meeting, ModelProfile } from "../types";
 import { api } from "../lib/api";
 import { markdownToHtml } from "../lib/markdown";
@@ -58,12 +58,11 @@ function suggestedQuestions(meeting: Meeting) {
   if (meeting.summary.decisions.length > 0) questions.push("这次会议确认了哪些决定？");
   if (meeting.summary.actionItems.length > 0) questions.push("行动项分别由谁负责？");
   if (meeting.summary.openQuestions.length > 0) questions.push("还有哪些未决问题？");
-  if (questions.length < 3) questions.push("会议的重点内容是什么？");
-  return questions.slice(0, 4);
+  return questions.slice(0, 2);
 }
 
 /**
- * 输入区上方的模型胶囊 + 切换菜单：智谱式多可用——列出全部在线 LLM 档案，
+ * 输入区内的模型切换菜单：列出全部可用于问答的 LLM 档案，
  * 勾选即本会话问答使用（随消息发送 profileId，主进程优先采用），不再写库改默认。
  * 本地基础纪要不能问答，不在列表里；没有任何档案时引导去设置页配置。
  */
@@ -72,12 +71,12 @@ let lastChatProfileId: string | undefined;
 
 function ChatModelSwitch({
   profiles,
-  selectedId,
+  active,
   onSelect,
   onOpenSettings
 }: {
   profiles: ModelProfile[];
-  selectedId?: string;
+  active?: ModelProfile;
   onSelect(profileId: string): void;
   onOpenSettings?: () => void;
 }) {
@@ -101,37 +100,19 @@ function ChatModelSwitch({
     };
   }, [menuOpen]);
 
-  const active = profiles.find((profile) => profile.id === selectedId)
-    || profiles.find((profile) => profile.isDefault)
-    || profiles[0]
-    || null;
-
-  if (!profiles.length) {
-    return (
-      <button className="chat-model-switch__pill is-empty" onClick={onOpenSettings} title="去设置页配置总结/问答模型">
-        未配置模型 · 去设置
-        <CaretDown size={12} />
-      </button>
-    );
-  }
+  const modelLabel = active ? `问答模型：${active.name}（${active.transport === "ollama" ? "本机" : "在线"}）` : "切换问答模型";
 
   return (
     <div className="chat-model-switch" ref={menuRef}>
       <button
-        className="chat-model-switch__pill"
+        className="icon-button chat-model-switch__trigger"
         onClick={() => setMenuOpen((open) => !open)}
         aria-haspopup="listbox"
         aria-expanded={menuOpen}
-        title="切换问答使用的模型"
+        aria-label={modelLabel}
+        title={modelLabel}
       >
-        <span className={`chat-model-switch__dot ${active ? "" : "is-off"}`} aria-hidden="true" />
-        {active ? active.name : "选择模型"}
-        {active && (
-          <span className={`chat-model-switch__tag ${active.transport === "ollama" ? "is-local" : ""}`}>
-            {active.transport === "ollama" ? "本机" : "在线"}
-          </span>
-        )}
-        <CaretDown size={12} />
+        <SlidersHorizontal size={17} />
       </button>
       {menuOpen && (
         <div className="chat-model-switch__menu" role="listbox" aria-label="切换模型">
@@ -168,37 +149,28 @@ function ChatModelSwitch({
 
 interface ChatPanelProps {
   meeting: Meeting;
+  profiles: ModelProfile[];
   /** 退场动画期间为 true：面板沿滑入方向收回，与栅格轨道收缩同步。 */
   closing?: boolean;
   onClose(): void;
   /** 模型胶囊的「去设置/管理服务」直达 AI 总结页。 */
   onOpenSettings?: () => void;
+  liveSummary?: ReactNode;
 }
 
-export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPanelProps) {
+export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings, liveSummary }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(() => chatSessions.get(meeting.id) ?? []);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [liveChatOpen, setLiveChatOpen] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
-  const suggestions = useMemo(() => suggestedQuestions(meeting), [meeting.id]);
+  const conversationVisible = !liveSummary || (liveChatOpen && messages.length > 0);
   // 问答模型选择（智谱式多可用）：勾选随消息发送 profileId，不写库；模块级变量让面板收起再展开仍记住选择。
-  const [chatProfiles, setChatProfiles] = useState<ModelProfile[]>([]);
   const [chatProfileId, setChatProfileId] = useState<string | undefined>(lastChatProfileId);
 
-  useEffect(() => {
-    let active = true;
-    api.models.list()
-      .then((all) => { if (active) setChatProfiles(all.filter((p) => p.kind === "llm" && p.transport !== "local-summary")); })
-      .catch(() => {});
-    return () => { active = false; };
-  }, []);
-
-  const activeChatProfile = useMemo(
-    () => chatProfiles.find((profile) => profile.id === chatProfileId)
-      || chatProfiles.find((profile) => profile.isDefault)
-      || chatProfiles[0],
-    [chatProfiles, chatProfileId]
-  );
+  const activeChatProfile = profiles.find((profile) => profile.id === chatProfileId)
+    ?? profiles.find((profile) => profile.isDefault)
+    ?? profiles[0];
 
   const selectChatProfile = useCallback((profileId: string) => {
     lastChatProfileId = profileId;
@@ -208,6 +180,7 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
   // 切换会议时载入该会议自己的会话记录。
   useEffect(() => {
     setMessages(chatSessions.get(meeting.id) ?? []);
+    setLiveChatOpen(false);
   }, [meeting.id]);
 
   // 新消息/等待态出现时贴底滚动（跟随最新一问一答）。
@@ -220,7 +193,7 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
       top: list.scrollHeight,
       behavior: streaming || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
     });
-  }, [messages]);
+  }, [conversationVisible, messages]);
 
   /** 当前会议 id 的镜像：发送进行中用户切换会议时，只写会话存储不覆盖正在看的列表。 */
   const meetingIdRef = useRef(meeting.id);
@@ -236,6 +209,7 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
   const send = async (question: string) => {
     const trimmed = question.trim();
     if (!trimmed || busy) return;
+    if (liveSummary) setLiveChatOpen(true);
     setDraft("");
     setBusy(true);
     lastFailedPrompt.current = trimmed;
@@ -327,86 +301,95 @@ export function ChatPanel({ meeting, closing, onClose, onOpenSettings }: ChatPan
   };
 
   return (
-    <aside className={`transcript-panel chat-panel ${closing ? "is-closing" : ""}`} aria-label="AI 问答">
-      <header className="chat-panel__header">
-        <div>
-          <h2>AI 问答</h2>
-        </div>
-        <div className="chat-panel__actions">
-          {messages.length > 0 && (
-            <button
-              className="icon-button"
-              aria-label="清空对话"
-              title="清空这场会议的问答记录"
-              onClick={clearSession}
-            >
-              <Eraser size={16} />
-            </button>
-          )}
-          <button className="icon-button" aria-label="关闭 AI 问答侧栏" onClick={onClose}>
-            <X size={16} />
-          </button>
-        </div>
-      </header>
-
-      <div className="chat-messages" ref={listRef}>
-        {messages.length === 0 ? (
-          <div className="chat-empty">
-            <ChatTeardropText size={28} weight="duotone" />
-            <div className="chat-suggestions" aria-label="猜你想问">
-              {suggestions.map((question) => (
-                <button key={question} onClick={() => void send(question)}>{question}</button>
-              ))}
+    <aside className={`transcript-panel chat-panel ${liveSummary ? "chat-panel--live" : ""} ${closing ? "is-closing" : ""}`} aria-label={liveSummary ? "实时总结与 AI 问答" : "AI 问答"}>
+      {liveSummary}
+      {conversationVisible && (
+        <section className="chat-conversation" aria-label="AI 问答">
+          <header className="chat-panel__header">
+            <div>
+              <h2>AI 问答</h2>
             </div>
-          </div>
-        ) : (
-          messages.map((message) => (
-            <div key={message.id} className={`chat-row chat-row--${message.role} content-fade-enter`}>
-              {message.role === "assistant" && (
-                <span className="chat-avatar" aria-hidden="true"><ChatTeardropText size={15} weight="fill" /></span>
+            <div className="chat-panel__actions">
+              {messages.length > 0 && (
+                <button
+                  className="icon-button"
+                  aria-label="清空对话"
+                  title="清空这场会议的问答记录"
+                  onClick={clearSession}
+                >
+                  <Eraser size={16} />
+                </button>
               )}
-              <div className={`chat-bubble chat-bubble--${message.role} ${message.failed ? "is-failed" : ""}`}>
-                {message.role === "assistant" ? (
-                  message.text ? (
-                    // 回答按 Markdown 安全渲染（marked + DOMPurify，见 lib/markdown），流式期间带打字光标。
-                    <div
-                      className={`chat-bubble__content ${message.pending ? "is-streaming" : ""}`}
-                      dangerouslySetInnerHTML={{ __html: markdownToHtml(message.text) }}
-                    />
-                  ) : message.pending ? (
-                    <span className="chat-typing" aria-label="正在思考" role="status">
-                      <i /><i /><i />
-                    </span>
-                  ) : null
-                ) : message.text}
-                {message.failed && !message.pending && (
-                  <button className="chat-retry" onClick={retryLastFailure}>重试</button>
-                )}
-              </div>
+              <button className="icon-button" aria-label={liveSummary ? "收起问答记录" : "关闭 AI 问答侧栏"} onClick={liveSummary ? () => setLiveChatOpen(false) : onClose}>
+                <X size={16} />
+              </button>
             </div>
-          ))
-        )}
-      </div>
+          </header>
+
+          <div className="chat-messages" ref={listRef}>
+            {messages.map((message) => (
+              <div key={message.id} className={`chat-row chat-row--${message.role} content-fade-enter`}>
+                {message.role === "assistant" && (
+                  <span className="chat-avatar" aria-hidden="true"><ChatTeardropText size={15} weight="fill" /></span>
+                )}
+                <div className={`chat-bubble chat-bubble--${message.role} ${message.failed ? "is-failed" : ""}`}>
+                  {message.role === "assistant" ? (
+                    message.text ? (
+                      // 回答按 Markdown 安全渲染（marked + DOMPurify，见 lib/markdown），流式期间带打字光标。
+                      <div
+                        className={`chat-bubble__content ${message.pending ? "is-streaming" : ""}`}
+                        dangerouslySetInnerHTML={{ __html: markdownToHtml(message.text) }}
+                      />
+                    ) : message.pending ? (
+                      <span className="chat-typing" aria-label="正在思考" role="status">
+                        <i /><i /><i />
+                      </span>
+                    ) : null
+                  ) : message.text}
+                  {message.failed && !message.pending && (
+                    <button className="chat-retry" onClick={retryLastFailure}>重试</button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <footer className="chat-composer">
-        <div className="chat-composer__toolbar">
-          <ChatModelSwitch
-            profiles={chatProfiles}
-            selectedId={activeChatProfile?.id}
-            onSelect={selectChatProfile}
-            onOpenSettings={onOpenSettings}
-          />
-        </div>
+        {!liveSummary && messages.length === 0 && profiles.length > 0 && (
+          <div className="chat-suggestions" role="group" aria-label="建议问题">
+            {suggestedQuestions(meeting).map((question) => (
+              <button key={question} onClick={() => void send(question)}>{question}</button>
+            ))}
+          </div>
+        )}
+        {profiles.length === 0 && onOpenSettings && (
+          <button className="text-button chat-composer__setup" onClick={onOpenSettings}>配置问答模型</button>
+        )}
         <div className="chat-composer__input-row">
+          {liveSummary && messages.length > 0 && !conversationVisible && (
+            <button className="icon-button chat-model-switch__trigger" aria-label="展开问答记录" title="展开问答记录" onClick={() => setLiveChatOpen(true)}>
+              <ChatTeardropText size={17} />
+            </button>
+          )}
+          {profiles.length > 0 && (
+            <ChatModelSwitch
+              profiles={profiles}
+              active={activeChatProfile}
+              onSelect={selectChatProfile}
+              onOpenSettings={onOpenSettings}
+            />
+          )}
           <textarea
             value={draft}
             rows={Math.min(4, Math.max(1, Math.ceil(draft.length / 26)))}
-            placeholder={busy ? "正在回答…" : "问点什么，回车发送"}
+            placeholder={busy ? "正在回答…" : "关于这场会议，想问什么？"}
             aria-label="提问输入框"
             disabled={busy}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 void send(draft);
               }
