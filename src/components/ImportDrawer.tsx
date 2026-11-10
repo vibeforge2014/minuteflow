@@ -8,6 +8,7 @@ import { ArrowClockwise, Check, FileAudio, GearSix, Pause, Trash, X } from "@pho
 import { useEffect, useMemo, useState } from "react";
 import type { ImportCandidate, ImportJob, ModelProfile } from "../types";
 import { useEnteringItemIds } from "../hooks/useContentMotion";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { formatDuration } from "../lib/format";
 import { ImportProcessingMeta } from "./ImportProcessingMeta";
 
@@ -24,7 +25,7 @@ interface Props {
   onEnqueue(items: ImportCandidate[], options: { language: string; sttProfileId?: string; llmProfileId?: string; diarizationEnabled: boolean; autoSummarize: boolean }): Promise<void>;
   onRetry(id: string): void;
   onCancel(id: string): void;
-  /** 说话人识别耗时过长时跳过，先用现有转写继续生成纪要。 */
+  /** 说话人识别耗时过长时跳过，先用现有转录继续生成纪要。 */
   onSkipDiarization(id: string): void;
   /** 从队列移除终态/等待态任务记录（不影响已创建的会议）。 */
   onRemove(id: string): void;
@@ -52,9 +53,11 @@ export function ImportDrawer(props: Props) {
   const [sttProfileId, setSttProfileId] = useState(defaultSttId);
   const [llmProfileId, setLlmProfileId] = useState(defaultLlmId);
   const [diarizationEnabled, setDiarizationEnabled] = useState(true);
-  // 自动纪要曾经被硬编码为 true：想先自己看转写的人没有办法关掉模型调用。
+  // 自动纪要曾经被硬编码为 true：想先自己看转录的人没有办法关掉模型调用。
   const [autoSummarize, setAutoSummarize] = useState(true);
   const [busy, setBusy] = useState(false);
+  // 抽屉同样按对话框管理键盘：Escape 收起、Tab 不跑到背后的工作区。
+  const drawerRef = useDialogFocus<HTMLElement>(props.open, { onEscape: props.onClose });
   const enteringCandidates = useEnteringItemIds("import-candidates", props.candidates.map((file) => file.sourcePath));
   const enteringJobs = useEnteringItemIds("import-jobs", props.jobs.map((job) => job.id));
   // 队列是 FIFO：排队顺位按创建时间计算，和处理 worker 的取用顺序一致。
@@ -74,7 +77,7 @@ export function ImportDrawer(props: Props) {
   const activeCount = props.jobs.filter((job) => !["complete", "cancelled", "failed"].includes(job.status)).length;
 
   return (
-    <aside className="import-drawer" aria-labelledby="import-drawer-title">
+    <aside ref={drawerRef} className="import-drawer" aria-labelledby="import-drawer-title">
       <header className="import-drawer__header">
         <div><h2 id="import-drawer-title">导入任务</h2>{activeCount > 0 && <p>{activeCount} 项正在后台处理</p>}</div>
         <button className="icon-button" aria-label="收起导入任务" onClick={props.onClose}><X size={19} /></button>

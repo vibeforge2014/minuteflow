@@ -123,6 +123,10 @@ export function OnboardingDialog({
             <ArrowLeft size={15} />返回
           </button>
           <div>
+            {/* 首启向导允许直接跳过：模型配置随时可以在设置里补，不必一步步点完。 */}
+            <button type="button" className="text-button onboarding-skip" onClick={onComplete}>
+              跳过，稍后在设置里配置
+            </button>
             {step < 3 ? (
               <button className="button button--primary" onClick={() => setStep((current) => Math.min(3, current + 1))}>
                 {step === 0 ? "开始配置" : step === 1 && !transcriptionProfile ? "仅保存录音，继续" : step === 2 && !summaryProfile ? "使用基础纪要，继续" : "继续"}<ArrowRight size={15} />

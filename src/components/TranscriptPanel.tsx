@@ -10,11 +10,13 @@ import {
   ArrowDown,
   ArrowClockwise,
   CaretDown,
+  CaretUp,
   CheckCircle,
   Check,
   Copy,
   FingerprintSimple,
   MagicWand,
+  MagnifyingGlass,
   PencilSimple,
   Trash,
   Users,
@@ -37,6 +39,7 @@ import {
   isRetryableImportJob
 } from "../lib/import-status";
 import { useStreamingTranscript } from "../hooks/useStreamingTranscript";
+import { shortcutLabel } from "../lib/platform";
 import type { WorkspaceStage } from "../lib/workspace";
 
 interface TranscriptViewProps {
@@ -81,6 +84,22 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   const [mergeTarget, setMergeTarget] = useState("");
   /** 当前渲染的转写条数（从最新往前窗口化，长会议渐进加载）。 */
   const [visibleCount, setVisibleCount] = useState(200);
+  /** 文内查找：⌘F / Ctrl+F 打开，带命中计数、上下跳转与按发言人筛选。 */
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [speakerFilter, setSpeakerFilter] = useState("");
+  const [activeMatch, setActiveMatch] = useState(0);
+  const [searchFocusId, setSearchFocusId] = useState<string | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchTriggerRef = useRef<HTMLButtonElement>(null);
+  const normalizedQuery = query.trim().toLowerCase();
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setQuery("");
+    setSpeakerFilter("");
+    setSearchFocusId(null);
+    window.setTimeout(() => searchTriggerRef.current?.focus(), 0);
+  }, []);
   const [autoScroll, setAutoScroll] = useState(true);
   const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
   const [voiceprints, setVoiceprints] = useState<VoiceprintPerson[]>([]);
@@ -94,14 +113,26 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   const speakers = useMemo(() => Array.from(new Map(
     meeting.transcript.map((segment) => [segment.speakerId, segment.speakerName])
   )), [meeting.transcript]);
-  // 转录流式揭示：导入进行中（任务未终结）或会议进行中时，新到达文本按打字机
+  // 转写流式揭示：导入进行中（任务未终结）或会议进行中时，新到达文本按打字机
   // 节奏逐拍铺开，与 AI 问答同一观感；历史内容与 Reduced Motion 直接透传。
   const importActive = Boolean(importJob) && !["complete", "failed", "cancelled"].includes(importJob?.status ?? "");
   const displayTranscript = useStreamingTranscript(meeting, importActive || stage === "live");
-  const visibleSegments = displayTranscript.slice(-visibleCount);
+  /** 发言人筛选先于窗口化：只加载所选发言人的段落，长会议查找不会把无关内容一起渲染。 */
+  const filteredTranscript = useMemo(
+    () => speakerFilter ? displayTranscript.filter((segment) => segment.speakerId === speakerFilter) : displayTranscript,
+    [displayTranscript, speakerFilter]
+  );
+  /** 命中段落 id（按时间顺序），上下跳转在 filteredTranscript 的窗口里定位。 */
+  const searchMatches = useMemo(
+    () => normalizedQuery
+      ? filteredTranscript.filter((segment) => segment.text.toLowerCase().includes(normalizedQuery)).map((segment) => segment.id)
+      : [],
+    [filteredTranscript, normalizedQuery]
+  );
+  const visibleSegments = filteredTranscript.slice(-visibleCount);
   const visibleSegmentIds = useMemo(() => visibleSegments.map((segment) => segment.id), [visibleSegments]);
   const enteringSegmentIds = useEnteringItemIds(meeting.id, visibleSegmentIds);
-  // 同一批新入场的段落按 0/40/80ms 级联出现，避免整块转录结果齐刷刷闪现。
+  // 同一批新入场的段落按 0/40/80ms 级联出现，避免整块转写结果齐刷刷闪现。
   const enteringSequence = useMemo(
     () => visibleSegments.filter((segment) => enteringSegmentIds.has(segment.id)).map((segment) => segment.id),
     [visibleSegments, enteringSegmentIds]
@@ -121,6 +152,11 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     setSpeakerEditor(null);
     setEditingSegmentId(null);
     setVoiceprintMessage("");
+    setSearchOpen(false);
+    setQuery("");
+    setSpeakerFilter("");
+    setActiveMatch(0);
+    setSearchFocusId(null);
     refreshVoiceprints();
   }, [meeting.id, refreshVoiceprints]);
 
@@ -216,6 +252,65 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     setAutoScroll(distanceFromBottom < 64);
   };
 
+  /** 跳到第 index 个命中：必要时扩窗、暂停尾部跟随、把该段滚到列表约 1/3 处并短暂高亮。 */
+  const jumpToMatch = useCallback((index: number) => {
+    if (!searchMatches.length) return;
+    const next = ((index % searchMatches.length) + searchMatches.length) % searchMatches.length;
+    setActiveMatch(next);
+    const targetId = searchMatches[next];
+    const targetIndex = filteredTranscript.findIndex((segment) => segment.id === targetId);
+    if (targetIndex >= 0) setVisibleCount((count) => Math.max(count, filteredTranscript.length - targetIndex + 20));
+    followGuardUntil.current = performance.now() + 700;
+    setAutoScroll(false);
+    setSearchFocusId(targetId);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const list = listRef.current;
+      const el = list?.querySelector<HTMLElement>(`[data-segment-id="${targetId}"]`);
+      if (!el || !list) return;
+      const top = el.getBoundingClientRect().top - list.getBoundingClientRect().top;
+      list.scrollTo({
+        top: Math.max(0, list.scrollTop + top - list.clientHeight / 3),
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+      });
+    }));
+  }, [searchMatches, filteredTranscript]);
+  const jumpRef = useRef(jumpToMatch);
+  jumpRef.current = jumpToMatch;
+
+  // 输入关键词 / 切换发言人时自动定位第一个命中；录音持续追加段落时不重跑，
+  // 避免把正在查看的第 N 个命中反复拉回开头。
+  useEffect(() => {
+    if (!searchOpen || !normalizedQuery) return;
+    jumpRef.current(0);
+  }, [searchOpen, normalizedQuery, speakerFilter]);
+
+  // ⌘F / Ctrl+F 打开文内查找；Esc 关闭、Enter / Shift+Enter 前后跳转。
+  // 有弹层在前台时让位，不在被遮住的转写视图里抢焦点。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const meta = event.metaKey || event.ctrlKey;
+      if (meta && event.key.toLowerCase() === "f") {
+        if (document.querySelector(".modal-backdrop, .import-drawer")) return;
+        event.preventDefault();
+        setSearchOpen(true);
+        window.setTimeout(() => searchInputRef.current?.focus(), 0);
+        return;
+      }
+      if (!searchOpen) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSearch();
+        return;
+      }
+      if (event.key === "Enter" && document.activeElement === searchInputRef.current) {
+        event.preventDefault();
+        jumpRef.current(activeMatch + (event.shiftKey ? -1 : 1));
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [searchOpen, activeMatch, closeSearch]);
+
   /**
    * 重命名说话人：批量替换其全部段落的显示名，并把纪要标记为过期（stale）。
    * 默认同时从本机音频注册声纹；用户可以在浮层里显式关闭“记住声音”。
@@ -291,14 +386,86 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     </button>
   );
 
+  const transcriptToolbar = (
+    <div className="transcript-toolbar">
+      {speakerButton}
+      <button
+        ref={searchTriggerRef}
+        type="button"
+        className={`text-button transcript-search-trigger ${searchOpen ? "is-active" : ""}`}
+        aria-expanded={searchOpen}
+        aria-controls="transcript-search-bar"
+        title={`在逐字稿中查找（${shortcutLabel("F")}）`}
+        onClick={() => {
+          if (searchOpen) {
+            closeSearch();
+            return;
+          }
+          setSearchOpen(true);
+          window.setTimeout(() => searchInputRef.current?.focus(), 0);
+        }}
+      >
+        <MagnifyingGlass size={15} />查找<kbd>{shortcutLabel("F")}</kbd>
+      </button>
+    </div>
+  );
+
   return (
     <>
       {stage === "live" ? (
         <header className="live-transcript-header">
           <h2 id="live-transcript-title">转写</h2>
-          {speakerButton}
+          {transcriptToolbar}
         </header>
-      ) : speakerButton}
+      ) : transcriptToolbar}
+      {searchOpen && (
+        <div className="transcript-search" id="transcript-search-bar" role="search">
+          <MagnifyingGlass size={15} />
+          <input
+            ref={searchInputRef}
+            type="search"
+            value={query}
+            aria-label="在逐字稿中查找"
+            placeholder="在逐字稿中查找…"
+            onChange={(event) => { setQuery(event.target.value); setActiveMatch(0); }}
+          />
+          <select
+            value={speakerFilter}
+            aria-label="按发言人筛选"
+            onChange={(event) => { setSpeakerFilter(event.target.value); setActiveMatch(0); }}
+          >
+            <option value="">全部发言人</option>
+            {speakers.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
+          <span className="transcript-search__count" role="status">
+            {normalizedQuery
+              ? searchMatches.length ? `${activeMatch + 1} / ${searchMatches.length}` : "无匹配"
+              : `${filteredTranscript.length} 段`}
+          </span>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="上一个匹配"
+            title="上一个匹配（Shift + 回车）"
+            disabled={!searchMatches.length}
+            onClick={() => jumpToMatch(activeMatch - 1)}
+          ><CaretUp size={15} weight="bold" /></button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="下一个匹配"
+            title="下一个匹配（回车）"
+            disabled={!searchMatches.length}
+            onClick={() => jumpToMatch(activeMatch + 1)}
+          ><CaretDown size={15} weight="bold" /></button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="关闭查找"
+            onClick={closeSearch}
+          ><X size={15} /></button>
+        </div>
+      )}
       {managerOpen && (
         <section className="speaker-manager" id="transcript-speaker-manager" aria-label="发言人管理">
           <header>
@@ -467,8 +634,8 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
       <div
         className="transcript-list"
         id="transcript-content"
-        role={stage === "live" ? "region" : "tabpanel"}
-        aria-labelledby={stage === "live" ? "live-transcript-title" : "transcript-tab"}
+        role={stage === "live" ? "region" : undefined}
+        aria-labelledby={stage === "live" ? "live-transcript-title" : undefined}
         ref={listRef}
         onScroll={handleTranscriptScroll}
       >
@@ -478,19 +645,19 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           busy={summaryBusy}
           onRefresh={onGenerateSummary}
         />}
-        {meeting.transcript.length > visibleCount && (
+        {filteredTranscript.length > visibleCount && (
           <button className="load-earlier" onClick={() => setVisibleCount((value) => value + 200)}>
-            加载更早的 {Math.min(200, meeting.transcript.length - visibleCount)} 条
+            加载更早的 {Math.min(200, filteredTranscript.length - visibleCount)} 条
           </button>
         )}
-        {meeting.transcript.length ? visibleSegments.map((segment, index) => {
+        {visibleSegments.length ? visibleSegments.map((segment, index) => {
           const enteringIndex = enteringSequence.indexOf(segment.id);
           const previous = visibleSegments[index - 1];
           const continuation = previous?.speakerId === segment.speakerId && segment.startMs - previous.endMs < 1500;
           return (
             // is-playing：当前播放位置命中的段落整行高亮；data-segment-id 供回放跟随定位。
             <article
-              className={`transcript-item transcript-item--${segment.status} ${continuation ? "is-continuation" : ""} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${jumpHighlightId === segment.id ? "is-jump-highlight" : ""} ${enteringIndex >= 0 ? "content-motion-enter" : ""}`}
+              className={`transcript-item transcript-item--${segment.status} ${continuation ? "is-continuation" : ""} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${jumpHighlightId === segment.id ? "is-jump-highlight" : ""} ${searchFocusId === segment.id ? "is-search-hit" : ""} ${enteringIndex >= 0 ? "content-motion-enter" : ""}`}
               data-segment-id={segment.id}
               key={segment.id}
               style={enteringIndex >= 0 ? { animationDelay: `${Math.min(enteringIndex, 2) * 40}ms` } : undefined}
@@ -525,6 +692,8 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
                     }
                   }}
                 />
+              ) : normalizedQuery ? (
+                <p className="transcript-copy"><HighlightedTranscriptCopy text={segment.text} query={normalizedQuery} /></p>
               ) : (
                 <AnimatedTranscriptCopy text={segment.text} animate={!enteringSegmentIds.has(segment.id)} />
               )}
@@ -547,29 +716,41 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
         }) : (
           <div className="panel-empty">
             <MagicWand size={24} weight="duotone" />
-            <p>{importJob
-              ? importTranscriptStatus(importJob)
-              : stage === "review"
-                ? "这场会议没有逐字稿；笔记与纪要仍保留。"
-                : "等待转写…"}</p>
-            {!importJob && stage === "review" && emptyActionLabel && onEmptyAction && (
-              <button className="button button--secondary button--small" onClick={onEmptyAction}>
-                {emptyActionLabel}
-              </button>
-            )}
-            {!importJob && stage === "review" && onRetranscribe && (
-              <button
-                className="button button--secondary button--small"
-                title="用已归档的录音重新转写这场会议；笔记与手动锁定的纪要内容会保留"
-                onClick={onRetranscribe}
-              >
-                <ArrowClockwise size={15} />从录音重新转录
-              </button>
+            {meeting.transcript.length > 0 && (speakerFilter || normalizedQuery) ? (
+              <>
+                <p>没有符合当前查找或筛选条件的段落。</p>
+                <button
+                  className="button button--secondary button--small"
+                  onClick={() => { setQuery(""); setSpeakerFilter(""); setSearchFocusId(null); }}
+                >清除查找与筛选</button>
+              </>
+            ) : (
+              <>
+                <p>{importJob
+                  ? importTranscriptStatus(importJob)
+                  : stage === "review"
+                    ? "这场会议没有逐字稿；笔记与纪要仍保留。"
+                    : "等待转写…"}</p>
+                {!importJob && stage === "review" && emptyActionLabel && onEmptyAction && (
+                  <button className="button button--secondary button--small" onClick={onEmptyAction}>
+                    {emptyActionLabel}
+                  </button>
+                )}
+                {!importJob && stage === "review" && onRetranscribe && (
+                  <button
+                    className="button button--secondary button--small"
+                    title="用已归档的录音重新转录这场会议；笔记与手动锁定的纪要内容会保留"
+                    onClick={onRetranscribe}
+                  >
+                    <ArrowClockwise size={15} />从录音重新转录
+                  </button>
+                )}
+              </>
             )}
           </div>
         )}
       </div>
-      {meeting.transcript.length > 0 && (!autoScroll || stage === "live" || importActive || playingSegment) && <button
+      {filteredTranscript.length > 0 && (!autoScroll || stage === "live" || importActive || playingSegment) && <button
         className={`follow-control ${autoScroll ? "is-active" : ""}`}
         aria-pressed={autoScroll}
         onClick={() => {
@@ -628,7 +809,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   );
 }
 
-/** 概览只摘录已有纪要，不改写原文，也不会因打开转录页触发模型请求。 */
+/** 概览只摘录已有纪要，不改写原文，也不会因打开转写页触发模型请求。 */
 function TranscriptOverview({ summary, busy, onRefresh }: {
   summary: Meeting["summary"];
   busy?: boolean;
@@ -643,14 +824,14 @@ function TranscriptOverview({ summary, busy, onRefresh }: {
   if (!points.length && !busy) return null;
 
   return (
-    <section className={`transcript-overview ${summary.stale ? "is-stale" : ""}`} aria-label="会议概览">
+    <section className={`transcript-overview ${summary.stale ? "is-stale" : ""}`} aria-label="纪要概览">
       <header>
-        <h2>会议概览</h2>
+        <h2>纪要概览</h2>
         <div className="transcript-overview__actions">
-          {onRefresh && <button className="icon-button" disabled={busy} title="更新纪要" aria-label="更新会议概览" onClick={onRefresh}>
+          {onRefresh && <button className="icon-button" disabled={busy} title="更新纪要" aria-label="更新纪要概览" onClick={onRefresh}>
             <ArrowClockwise size={17} className={busy ? "spin" : ""} />
           </button>}
-          {points.length > 0 && <button className="icon-button" title="复制概览" aria-label="复制会议概览" onClick={async () => {
+          {points.length > 0 && <button className="icon-button" title="复制概览" aria-label="复制纪要概览" onClick={async () => {
             try { await navigator.clipboard.writeText(text); setCopyState("copied"); }
             catch { setCopyState("failed"); }
           }}>{copyState === "copied" ? <Check size={17} /> : <Copy size={17} />}</button>}
@@ -703,7 +884,24 @@ function AnimatedTranscriptCopy({ text, animate }: { text: string; animate: bool
   return <p className={`transcript-copy ${change.kind === "updated" ? "content-motion-update" : ""}`}>{text}</p>;
 }
 
-/** 导入任务阶段 → 即时状态；已有文本时仍保留状态行，不替换转录内容。 */
+/** 文内查找命中片段：用 <mark> 逐段包裹，不改变原文、不影响编辑入口。 */
+function HighlightedTranscriptCopy({ text, query }: { text: string; query: string }) {
+  if (!query) return <>{text}</>;
+  const lower = text.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  let found = lower.indexOf(query);
+  while (found >= 0) {
+    if (found > cursor) parts.push(text.slice(cursor, found));
+    parts.push(<mark className="transcript-hit" key={`hit-${found}`}>{text.slice(found, found + query.length)}</mark>);
+    cursor = found + query.length;
+    found = lower.indexOf(query, cursor);
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return <>{parts}</>;
+}
+
+/** 导入任务阶段 → 即时状态；已有文本时仍保留状态行，不替换转写内容。 */
 function importTranscriptStatus(job: ImportJob) {
   if (job.status === "queued" && job.stage === "copying") return "等待归档录音…";
   if (job.status === "copying" || job.stage === "copying") return "正在归档录音…";

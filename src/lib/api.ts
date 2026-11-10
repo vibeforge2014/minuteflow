@@ -835,7 +835,8 @@ const browserApi: MeetingAPI = {
     async relaunchForPermissionSetup() { return { relaunching: true as const }; },
     closePermissionHelper() {},
     onSuspend() { return () => {}; },
-    onResume() { return () => {}; }
+    onResume() { return () => {}; },
+    onMenuAction() { return () => {}; }
   },
   window: {
     async toggleMini() { return false; },

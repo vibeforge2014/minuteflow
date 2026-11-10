@@ -1,5 +1,5 @@
 /**
- * 桌面工作台根组件：组装左侧会议库、中央会议文档/播放器、右侧转录面板与底部录音条，
+ * 桌面工作台根组件：组装左侧会议库、中央会议文档/播放器、右侧转写面板与底部录音条，
  * 并统一管理各类对话框（新建、设置、导入、付费墙、系统权限、新手引导）与全局 Toast。
  *
  * 所属层：渲染层 UI 编排（组合 store、录音 hook 与 api 事件）。
@@ -12,6 +12,7 @@ import {
   CloudCheck,
   DotsThree,
   Export,
+  FileArrowUp,
   GearSix,
   LockKey,
   PlayCircle,
@@ -94,10 +95,13 @@ export function App() {
   /** 成功提示：可附带一个直达动作（更新提示 → 打开软件更新）。 */
   const [toast, setToast] = useState<{ message: string; action?: { label: string; run: () => void } } | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  /** 仅在主工作区出现的拖放高亮：侧栏投放仍可导入，但不在侧栏显示遮罩。 */
+  const [dragActive, setDragActive] = useState(false);
+  const dragDepth = useRef(0);
   const [importCandidates, setImportCandidates] = useState<ImportCandidate[]>([]);
   const [importJobs, setImportJobs] = useState<ImportJob[]>([]);
   // 任务列表是否已从主进程回填：回填前无法判断“这场会议是否正在处理”，
-  // 重新转录入口必须等它完成，否则页面重载/重挂载时会先闪出一次按钮。
+  // 重新转写入口必须等它完成，否则页面重载/重挂载时会先闪出一次按钮。
   const [importJobsLoaded, setImportJobsLoaded] = useState(false);
   /** 从导入抽屉去配置模型：关闭设置后回到原流程，而不是让用户重新找入口。 */
   const settingsReturnRef = useRef<"import" | null>(null);
@@ -112,9 +116,9 @@ export function App() {
   const failedImports = useRef(new Set<string>());
   const previousWorkspaceRef = useRef<{ meetingId: string; stage: WorkspaceStage } | null>(null);
   const autoLayoutKeyRef = useRef("");
-  // 重新转录的 IPC 在途标记：双击不会创建第二条任务，也不会弹「已有处理中的任务」。
+  // 重新转写的 IPC 在途标记：双击不会创建第二条任务，也不会弹「已有处理中的任务」。
   const retranscribeRequestRef = useRef(false);
-  // 重新转录的应用内确认（替代原生 window.confirm，保持设计系统一致）。
+  // 重新转写的应用内确认（替代原生 window.confirm，保持设计系统一致）。
   const retranscribeConfirm = useConfirmDialog();
 
   /** 统一的提示入口：可附带直达动作（如更新提示一键打开软件更新）。 */
@@ -162,7 +166,7 @@ export function App() {
       setImportJobs((current) => mergeImportJob(current, job));
       if (job.status === "complete" && !completedImports.current.has(job.id)) {
         completedImports.current.add(job.id);
-        notify(`「${job.title}」的转写与纪要已就绪。`, {
+        notify(`「${job.title}」的转录与纪要已就绪。`, {
           label: "打开会议",
           run: () => openImportedMeeting(job.meetingId)
         });
@@ -221,7 +225,7 @@ export function App() {
     return false;
   };
 
-  /** 打开导出菜单（付费墙激活后可从这里继续）。 */
+  /** 打开导出菜单（菜单本身免费；具体格式在菜单内逐项过授权守卫）。 */
   const openExportMenu = useCallback(() => {
     setMoreOpen(false);
     setExportOpen(true);
@@ -401,8 +405,17 @@ export function App() {
   // Flush the recorder when the window closes so the last audio chunk is not
   // lost; the main-process before-quit handler is the backstop.
   // 中文补充：窗口关闭前冲刷录音器，确保最后一个音频块落盘；主进程的 before-quit 是兜底。
+  // 编辑类保存是渲染层内存态，主进程拿不到，只能在这里尽力冲刷（异步，无等待保证）。
+  useEffect(() => {
+    const flushEdits = () => { void useMeetingStore.getState().flushPendingSaves(); };
+    // pagehide 比 beforeunload 更可靠，两个时机都登记一次。
+    window.addEventListener("pagehide", flushEdits);
+    return () => window.removeEventListener("pagehide", flushEdits);
+  }, []);
+
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      void useMeetingStore.getState().flushPendingSaves();
       if (recorder.phase === "recording" || recorder.phase === "paused") {
         event.preventDefault();
         event.returnValue = "";
@@ -440,7 +453,7 @@ export function App() {
     return created;
   };
 
-  /** 免填写的一键开会：自动命名、固定线下麦克风模式（不区分线上线下），创建后立即录音转录。 */
+  /** 免填写的一键开会：自动命名、固定线下麦克风模式，创建后立即开始录音转录。 */
   const handleQuickStart = () => {
     void handleCreate({
       title: quickMeetingTitle(),
@@ -450,22 +463,47 @@ export function App() {
       tags: []
     }, { startRecording: true });
   };
+  // 全局快捷键与原生应用菜单共用同一入口；用 ref 转发最新闭包，避免每次渲染重建监听。
+  const quickStartRef = useRef(() => {});
+  quickStartRef.current = handleQuickStart;
+  const openNewMeetingRef = useRef(() => {});
+  openNewMeetingRef.current = () => setNewMeetingOpen(true);
+  const focusSearchRef = useRef(() => {});
+  focusSearchRef.current = () => {
+    if (liveWorkspace && !libraryOpen) setLibraryOpen(true);
+    else document.getElementById("meeting-search")?.focus();
+  };
 
-  // 全局快捷键：⌘K/Ctrl+K 聚焦会议搜索（与搜索框 kbd 提示一致）、⌘N/Ctrl+N 一键开会
-  // （免填写直接录音，完整表单仍在侧栏「新建会议」的下拉箭头里）；
-  // Esc 依次收起导出/更多菜单与导入抽屉。仅在无输入框抢占的场景下拦截（快捷键本身不冲突输入）。
+  /**
+   * 任意弹层打开时全局 ⌘K / ⌘N 必须让位：否则会在设置对话框背后创建会议并尝试开录，
+   * 或把焦点抢到被遮住的搜索框。除 App 自有状态外还检测 DOM 中的弹层，
+   * 覆盖组件内部自建的确认框、授权框与浮层菜单。
+   */
+  const overlayActive = useCallback(() => Boolean(document.querySelector(
+    ".modal-backdrop, .import-drawer, .speaker-popover, .export-menu, .more-menu, .review-hero__menu"
+  )) || newMeetingOpen || settingsOpen || trashOpen || onboardingOpen || permissionsOpen
+    || paywallOpen || importOpen || Boolean(liveDocument) || retranscribeConfirm.open,
+  [newMeetingOpen, settingsOpen, trashOpen, onboardingOpen, permissionsOpen, paywallOpen, importOpen, liveDocument, retranscribeConfirm.open]);
+
+  // 全局快捷键：⌘K/Ctrl+K 聚焦会议搜索、⌘N/Ctrl+N 快速开始录音（完整表单在侧栏下拉箭头里）；
+  // Escape 依次收起导出/更多菜单与导入抽屉，弹层自身的 Escape 由各自组件处理。
   useEffect(() => {
+    const isTextEntry = (target: EventTarget | null) => {
+      const element = target instanceof HTMLElement ? target : null;
+      return Boolean(element && (element.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName)));
+    };
     const handleKeyDown = (event: KeyboardEvent) => {
       const meta = event.metaKey || event.ctrlKey;
       if (meta && event.key.toLowerCase() === "k") {
+        if (overlayActive()) return;
         event.preventDefault();
-        if (liveWorkspace && !libraryOpen) setLibraryOpen(true);
-        else document.getElementById("meeting-search")?.focus();
+        focusSearchRef.current();
         return;
       }
       if (meta && event.key.toLowerCase() === "n") {
+        if (overlayActive() || isTextEntry(event.target)) return;
         event.preventDefault();
-        handleQuickStart();
+        quickStartRef.current();
         return;
       }
       if (event.key === "Escape") {
@@ -477,7 +515,7 @@ export function App() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [closeLibrary, exportOpen, importOpen, libraryOpen, liveWorkspace, moreOpen]);
+  }, [closeLibrary, exportOpen, importOpen, libraryOpen, liveWorkspace, moreOpen, overlayActive]);
 
   // 导入入口（文件选择器 / 拖拽）：先过付费墙，再把候选文件交给右侧确认抽屉，确认后才入队归档。
   // 把“过墙”与“真正选文件”拆开，激活成功后可以从选文件这一步继续，而不是再弹一次付费墙。
@@ -498,15 +536,68 @@ export function App() {
     if (!requirePremium("导入录音并自动处理", () => void pickImportFiles())) return;
     await pickImportFiles();
   };
+  const importActionRef = useRef(() => {});
+  importActionRef.current = () => void handleImport();
+
+  // 原生应用菜单（文件 / 编辑 / 视图 / 帮助）由主进程转发动作：编辑类 role 由系统
+  // 原生提供，⌘, 偏好设置、检查更新、新建/导入等入口在这里统一落地。
+  useEffect(() => api.system.onMenuAction((action) => {
+    // 已有弹层在前台时不叠加第二个动作（尤其设置、新建表单）。
+    if (overlayActive()) return;
+    switch (action) {
+      case "new-meeting": openNewMeetingRef.current(); break;
+      case "quick-start": quickStartRef.current(); break;
+      case "import": importActionRef.current(); break;
+      case "settings": openSettings(); break;
+      case "check-updates": openSettings("updates"); break;
+      case "focus-search": focusSearchRef.current(); break;
+    }
+  }), [openSettings, overlayActive]);
+
+  /**
+   * 拖放导入在根节点接管（侧栏投放同样有效），但只要有弹层/抽屉在前台就一律拒绝，
+   * 避免在设置或付费墙背后打开导入抽屉。高亮遮罩只出现在中央工作区。
+   * dragDepth 抵消指针穿过子元素时成对的 enter/leave。
+   */
+  const resetDragState = () => { dragDepth.current = 0; setDragActive(false); };
+  const handleDragEnter = (event: React.DragEvent) => {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    // 弹层/抽屉在前台时不在背后显示投放高亮。
+    if (overlayActive()) return;
+    dragDepth.current += 1;
+    setDragActive(true);
+  };
+  const handleDragLeave = (event: React.DragEvent) => {
+    event.preventDefault();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragActive(false);
+  };
+  const handleDragOver = (event: React.DragEvent) => { event.preventDefault(); };
 
   // 拖拽导入走 IPC 把 File 转成主进程可读的候选描述（浏览器兜底实现则直接读 File 元信息）。
   const handleDrop = async (event: React.DragEvent) => {
     event.preventDefault();
+    event.stopPropagation();
+    resetDragState();
+    // 有弹层/抽屉在前台时一律不接管投放，交给浏览器默认行为（已被 dragover 阻止）。
+    if (overlayActive()) return;
     const dropped = Array.from(event.dataTransfer.files);
     if (!dropped.length) return;
     if (!requirePremium("导入录音并自动处理", () => void applyDroppedFiles(dropped))) return;
     await applyDroppedFiles(dropped);
   };
+
+  // 拖出窗口或拖拽被取消时 enter/leave 可能不成对，兜底清掉高亮遮罩。
+  useEffect(() => {
+    const clear = () => resetDragState();
+    window.addEventListener("dragend", clear);
+    window.addEventListener("blur", clear);
+    return () => {
+      window.removeEventListener("dragend", clear);
+      window.removeEventListener("blur", clear);
+    };
+  }, []);
 
   /**
    * 重试导入任务：失败、取消或等待网络时从持久化断点续跑。
@@ -521,7 +612,7 @@ export function App() {
     }
   }, [notify]);
 
-  /** 暂停导入任务：中止在途转录/说话人分离，已完成的转写内容保留，可随时继续。 */
+  /** 暂停导入任务：中止在途转写/说话人分离，已完成的转写内容保留，可随时继续。 */
   const cancelImportJob = useCallback(async (id: string) => {
     try {
       const job = await api.imports.cancel(id);
@@ -608,6 +699,7 @@ export function App() {
   return (
       <div
         className={`app-shell ${meeting ? "app-shell--document" : ""} ${liveWorkspace ? "app-shell--live" : rightPanelOpen && meeting ? "app-shell--right-open" : ""} ${liveWorkspace && libraryOpen ? "app-shell--library-open" : ""}`}
+      // 根节点接管投放（侧栏也可导入），同时阻止浏览器把文件当导航打开。
       onDragOver={(event) => event.preventDefault()}
       onDrop={handleDrop}
     >
@@ -627,7 +719,21 @@ export function App() {
         onSettings={() => { if (liveWorkspace) closeLibrary(); openSettings(); }}
       />
 
-      <main className={`main-pane ${workspaceStage ? `main-pane--${workspaceStage}` : ""}`}>
+      <main
+        className={`main-pane ${workspaceStage ? `main-pane--${workspaceStage}` : ""}`}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+      >
+        {dragActive && (
+          <div className="drop-target" aria-hidden="true">
+            <div className="drop-target__inner">
+              <FileArrowUp size={30} weight="duotone" />
+              <strong>松开以导入录音</strong>
+              <span>音频会归档到会议库，并在后台开始转录</span>
+            </div>
+          </div>
+        )}
         {meeting ? (
           <>
             <header className={`document-header document-header--${workspaceStage}`}>
@@ -677,9 +783,8 @@ export function App() {
                   </button>
                 )}
                 <div className="export-wrap">
-                  <button className={`button button--small ${workspaceStage === "live" ? "button--secondary" : "button--primary"}`} aria-expanded={exportOpen} onClick={() => {
-                    if (requirePremium("导出会议文档与完整备份", openExportMenu)) openExportMenu();
-                  }}>
+                  {/* 菜单本身免费打开：Markdown / 纯文本可直接带走，高级格式才过授权守卫。 */}
+                  <button className={`button button--small ${workspaceStage === "live" ? "button--secondary" : "button--primary"}`} aria-expanded={exportOpen} onClick={openExportMenu}>
                     <Export size={16} /> 导出
                   </button>
                   {exportOpen && (
@@ -687,25 +792,28 @@ export function App() {
                       meeting={meeting}
                       onClose={() => setExportOpen(false)}
                       onDone={(message) => notify(message)}
+                      onError={(message) => notify(`导出失败：${message}`)}
+                      onPremiumRequired={(reason, resume) => requirePremium(reason, resume)}
                     />
                   )}
                 </div>
                 <div className="export-wrap">
                   <button
-                    className="icon-button"
-                    aria-label="更多选项"
+                    className="icon-button icon-button--labeled"
+                    aria-label="更多会议操作"
                     aria-expanded={moreOpen}
-                    title="更多会议操作"
+                    title="会议文件、收藏与删除"
                     onClick={() => {
                       setExportOpen(false);
                       setMoreOpen((value) => !value);
                     }}
                   >
-                    <DotsThree size={22} weight="bold" />
+                    <DotsThree size={20} weight="bold" />
+                    <span>会议操作</span>
                   </button>
                   {moreOpen && (
-                    <div className="more-menu">
-                      <button onClick={async () => {
+                    <div className="more-menu" role="menu" aria-label="更多会议操作">
+                      <button role="menuitem" onClick={async () => {
                         try {
                           await api.recordings.open(meeting.id);
                         } catch (error) {
@@ -715,7 +823,7 @@ export function App() {
                       }}>
                         <FolderOpen size={16} />打开录音文件夹
                       </button>
-                      <button onClick={() => {
+                      <button role="menuitem" onClick={() => {
                         handleMeetingChange({ ...meeting, favorite: !meeting.favorite });
                         setMoreOpen(false);
                       }}>
@@ -723,14 +831,14 @@ export function App() {
                         {meeting.favorite ? "取消收藏" : "添加到收藏"}
                       </button>
                       {workspaceStage === "review" && (
-                        <button onClick={() => {
+                        <button role="menuitem" onClick={() => {
                           setMoreOpen(false);
                           continueRecording();
                         }}>
                           <PlayCircle size={16} />继续录音
                         </button>
                       )}
-                        <button className="is-danger" onClick={() => {
+                        <button role="menuitem" className="is-danger" onClick={() => {
                           setMoreOpen(false);
                           void handleDeleteMeeting(meeting.id);
                         }}>
@@ -859,7 +967,11 @@ export function App() {
             onClear={() => void setSearch("")}
           />
         ) : (
-          <EmptyState onNew={handleQuickStart} onTemplate={() => setNewMeetingOpen(true)} onImport={handleImport} />
+          <EmptyState
+            onNew={handleQuickStart}
+            onTemplate={() => setNewMeetingOpen(true)}
+            onImport={handleImport}
+          />
         )}
       </main>
 
@@ -1002,12 +1114,17 @@ export function App() {
         }}
       />
 
-      {/* 错误与操作反馈分成两条独立 Toast 叠放：store 错误（警告样式）不再吞掉
-          导入/导出等成功提示，反之亦然。 */}
-      {(error || toast) && (
+      {/* 错误与操作反馈分成两条独立通道：store 错误（警告样式）不再吞掉成功提示。
+          带撤销/直达动作的提示贴近底部录音条，避免「结束录音 → 继续录音」的撤销
+          出现在屏幕另一端，也避免在用户还没看到时就消失。 */}
+      {error && (
         <div className="toast-stack">
-          {error && <Toast tone="warning" message={error} onClose={clearError} />}
-          {toast && <Toast message={toast.message} action={toast.action ? { label: toast.action.label, run: toast.action.run } : undefined} onClose={dismissToast} />}
+          <Toast tone="warning" message={error} onClose={clearError} />
+        </div>
+      )}
+      {toast && (
+        <div className={`toast-stack ${toast.action ? "toast-stack--bottom" : ""}`}>
+          <Toast message={toast.message} action={toast.action ? { label: toast.action.label, run: toast.action.run } : undefined} onClose={dismissToast} />
         </div>
       )}
 

@@ -1350,7 +1350,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const title = modelTab && modelView === "add" ? `添加${tab === "llm" ? "总结" : "转录"}服务`
     : modelTab && modelView === "edit" && editing ? editing.name : page.title;
   const description = modelTab && modelView === "edit" && editing
-    ? `${transportInfo?.text ?? ""}${isLocalServiceProfile(editing) ? " · 更改自动保存" : ""}`
+    ? `${transportInfo?.text ?? ""}${isLocalServiceProfile(editing) ? " · 更改后自动保存" : ""}`
     : modelTab && modelView === "add" ? "选择服务的运行方式。" : page.description;
 
   return (
@@ -1646,7 +1646,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                     </>
                   ) : (
                     <div className="settings-card__action">
-                      <span>{licenseStatus?.state === "error" ? (licenseStatus.message || "授权状态读取异常，可稍后重试。") : "尚未激活，录制、转写与 AI 纪要需要解锁后使用"}</span>
+                      <span>{licenseStatus?.state === "error" ? (licenseStatus.message || "授权状态读取异常，可稍后重试。") : "尚未激活，录制、转录与 AI 总结需要解锁后使用"}</span>
                       <button className="button" onClick={handleOpenCheckout}>前往购买页</button>
                     </div>
                   )}

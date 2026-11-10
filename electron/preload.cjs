@@ -166,6 +166,12 @@ contextBridge.exposeInMainWorld("meetingAPI", {
       const listener = () => callback();
       ipcRenderer.on("system:resume", listener);
       return () => ipcRenderer.removeListener("system:resume", listener);
+    },
+    // 原生应用菜单的业务动作（新建 / 导入 / 偏好设置 / 检查更新 / 搜索）。
+    onMenuAction: (callback) => {
+      const listener = (_event, action) => callback(action);
+      ipcRenderer.on("menu:action", listener);
+      return () => ipcRenderer.removeListener("menu:action", listener);
     }
   },
   window: {

@@ -18,6 +18,7 @@ import {
 import type { Meeting } from "../types";
 import { useMeetingStore } from "../store/meetingStore";
 import { formatDuration } from "../lib/format";
+import { shortcutLabel } from "../lib/platform";
 import { groupLibraryMeetings, splitHighlight } from "../lib/library";
 import { BrandMark } from "./BrandMark";
 import { useEnteringItemIds } from "../hooks/useContentMotion";
@@ -52,6 +53,23 @@ export function Sidebar({ meetings, selectedId, onSelect, onQuickStart, onNew, o
   const visibleMeetingIds = useMemo(() => groups.flatMap((group) => group.meetings.map((meeting) => meeting.id)), [groups]);
   const enteringMeetingIds = useEnteringItemIds(`library:${search}`, visibleMeetingIds);
 
+  /** 会议库支持方向键浏览：焦点移动不直接切换会议，Enter/空格仍由按钮原生行为确认。 */
+  const handleMeetingListKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>(".meeting-row"));
+    if (!rows.length) return;
+    event.preventDefault();
+    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? rows.length - 1
+        : event.key === "ArrowDown"
+          ? Math.min(rows.length - 1, current + 1)
+          : Math.max(0, current <= 0 ? 0 : current - 1);
+    rows[next]?.focus();
+  };
+
   return (
     <aside className="sidebar" id="meeting-library" aria-label="会议库">
       <div className="brand">
@@ -59,6 +77,7 @@ export function Sidebar({ meetings, selectedId, onSelect, onQuickStart, onNew, o
         <span>MinuteFlow</span>
       </div>
 
+      {/* 主按钮保持零填写一键开会；完整表单收在右侧下拉箭头里。 */}
       <div className="new-meeting-split">
         <button className="new-meeting" onClick={onQuickStart} title="立即创建会议并开始录音，无需填写任何信息">
           <Microphone size={18} weight="bold" />
@@ -78,6 +97,8 @@ export function Sidebar({ meetings, selectedId, onSelect, onQuickStart, onNew, o
         <MagnifyingGlass size={17} />
         <input
           id="meeting-search"
+          type="search"
+          aria-label="搜索会议或内容"
           value={search}
           placeholder="搜索会议或内容"
           onChange={(event) => setSearch(event.target.value)}
@@ -92,11 +113,11 @@ export function Sidebar({ meetings, selectedId, onSelect, onQuickStart, onNew, o
             <X size={13} weight="bold" />
           </button>
         ) : (
-          <kbd>⌘ K</kbd>
+          <kbd>{shortcutLabel("K")}</kbd>
         )}
       </label>
 
-      <div className="meeting-groups">
+      <div className="meeting-groups" onKeyDown={handleMeetingListKeyDown}>
         {groups.map((group) => (
           <section key={group.key} className={`meeting-group ${group.key === "favorites" ? "meeting-group--favorites" : ""}`}>
             <h2>
@@ -107,6 +128,8 @@ export function Sidebar({ meetings, selectedId, onSelect, onQuickStart, onNew, o
               <div key={meeting.id} className={`meeting-row-wrap ${enteringMeetingIds.has(meeting.id) ? "content-motion-enter" : ""}`}>
                 <button
                   className={`meeting-row ${selectedId === meeting.id ? "is-selected" : ""}`}
+                  aria-current={selectedId === meeting.id ? "page" : undefined}
+                  title={meeting.title}
                   onClick={() => onSelect(meeting.id)}
                 >
                   <span className="meeting-row__title">
@@ -171,8 +194,17 @@ export function Sidebar({ meetings, selectedId, onSelect, onQuickStart, onNew, o
   );
 }
 
-/** 侧栏行内日期显示：MM-DD HH:mm。 */
+/** 侧栏日期优先给相对语义，减少用户在无意义的 MM-DD 数字里找「今天」。 */
 function formatDate(value: string) {
   const date = new Date(value);
-  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  const now = new Date();
+  const startOfDay = (input: Date) => new Date(input.getFullYear(), input.getMonth(), input.getDate()).getTime();
+  const dayDelta = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000);
+  const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  if (dayDelta === 0) return `今天 ${time}`;
+  if (dayDelta === 1) return `昨天 ${time}`;
+  const prefix = date.getFullYear() === now.getFullYear()
+    ? `${date.getMonth() + 1}月${date.getDate()}日`
+    : `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+  return `${prefix} ${time}`;
 }

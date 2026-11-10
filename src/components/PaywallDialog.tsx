@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowClockwise, Check, CheckCircle, Key, LockKey, ShieldCheck, Sparkle, Tag, X } from "@phosphor-icons/react";
 import { api } from "../lib/api";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useExitPresence } from "../hooks/useExitPresence";
 import type { DiscountQuote, LicenseStatus } from "../types";
 
@@ -60,18 +61,13 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
     return () => window.clearTimeout(timer);
   }, [panel, open]);
 
-  // Escape 关闭（成功收尾阶段不打断），与其它对话框一致。
-  useEffect(() => {
-    if (!open) return undefined;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy && !success) {
-        event.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, busy, success, onClose]);
+  // 统一对话框键盘行为：打开时把焦点移入、Tab 留在弹层内、关闭后还给触发控件；
+  // Escape 等同关闭，但激活成功/进行中的收尾阶段不打断。
+  const canCloseRef = useRef(true);
+  canCloseRef.current = !busy && !success;
+  const dialogRef = useDialogFocus<HTMLElement>(open, {
+    onEscape: () => { if (canCloseRef.current) onClose(); }
+  });
 
   // 卸载前清掉成功关窗计时器，避免对已卸载组件调用回调。
   useEffect(() => () => {
@@ -160,7 +156,7 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
   };
 
   return <div className={`modal-backdrop paywall-backdrop ${closing ? "is-closing" : ""}`} onMouseDown={(event) => { if (event.target === event.currentTarget && !busy && !success) onClose(); }}>
-    <section className="dialog paywall-dialog" role="dialog" aria-modal="true" aria-labelledby="paywall-title">
+    <section ref={dialogRef} className="dialog paywall-dialog" role="dialog" aria-modal="true" aria-labelledby="paywall-title">
       <button className="icon-button paywall-close" aria-label="关闭" onClick={onClose} disabled={Boolean(success)}><X size={18} /></button>
       <div className="paywall-scroll">
         <div className="paywall-hero">

@@ -84,7 +84,7 @@ interface DocumentWorkspaceProps {
   onChooseTranscriptionService?(): void;
   onDismissTranscriptionFailure?(): void;
   onOpenPermissions(): void;
-  /** 手动触发 AI 总结（录音中为滚动增量，会后为终稿）。 */
+  /** 手动触发 AI 纪要（录音中为滚动增量，会后为终稿）。 */
   onGenerateSummary(): void;
   /** 取消进行中的总结请求（生成按钮在 busy 态变为“取消”）。 */
   onCancelSummary(): void;
@@ -183,6 +183,18 @@ export function DocumentWorkspace({
   }, [meeting.id, stage]);
   const showViewSwitch = stage === "review";
   const showTranscript = stage === "live" || (showViewSwitch && workspaceView === "transcript");
+  /** 标签页遵循桌面键盘惯例：左右方向键切换，Home/End 到首尾。 */
+  const handleWorkspaceTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const nextView = event.key === "Home"
+      ? "document"
+      : event.key === "End"
+        ? "transcript"
+        : workspaceView === "document" ? "transcript" : "document";
+    setWorkspaceView(nextView);
+    window.setTimeout(() => document.getElementById(nextView === "document" ? "summary-view-tab" : "transcript-tab")?.focus(), 0);
+  };
   /** 笔记显示模式：富文本编辑 / Markdown 源码 / 只读预览。 */
   const [noteMode, setNoteMode] = useState<"rich" | "markdown" | "preview">("rich");
   /** 最近导入的 .md 文件名（显示导入成功提示）。 */
@@ -198,7 +210,7 @@ export function DocumentWorkspace({
   meetingRef.current = meeting;
   onChangeRef.current = onChange;
   // Tiptap 富文本编辑器：内容从 Markdown 渲染而来；每次编辑即时转回 Markdown 持久化，
-  // 同时抽取纯文本行更新 notes（供搜索与 AI 总结使用）。
+  // 同时抽取纯文本行更新 notes（供搜索与 AI 纪要使用）。
   const editor = useEditor({
     extensions: [
       StarterKit,
@@ -360,6 +372,9 @@ export function DocumentWorkspace({
   const meetingDocument = (!showTranscript || showLiveDocument) && (
       <article
         key={`${meeting.id}-${summaryView}`}
+        id="summary-panel"
+        role={showViewSwitch ? "tabpanel" : undefined}
+        aria-labelledby={showViewSwitch ? "summary-view-tab" : undefined}
         className={`meeting-document meeting-document--${stage} ${summaryView === "visual" ? "meeting-document--visual" : ""}`}
       >
         {stage !== "prepare" && <h1 className="sr-only">{meeting.title}</h1>}
@@ -430,6 +445,7 @@ export function DocumentWorkspace({
                         : "录音处理中"}</span>
                 )}
                 {!processingStatus && (
+                  // 安静的文本切换，不再放第二个分段控件在工作区标签旁边。
                   <button
                     className="review-hero__view-toggle"
                     onClick={() => setSummaryView(summaryView === "visual" ? "normal" : "visual")}
@@ -493,27 +509,31 @@ export function DocumentWorkspace({
               {!processingStatus && (summaryBusy ? (
                 <button className="button button--secondary" onClick={onCancelSummary}><XCircle size={16} />取消生成</button>
               ) : (
-                <button className="button button--primary" onClick={onGenerateSummary}>
+                <button
+                  className={`button ${meeting.summary.stale || !hasOrdinarySummary ? "button--primary" : "button--secondary review-hero__generate"}`}
+                  onClick={onGenerateSummary}
+                >
                   <ArrowClockwise size={16} />{meeting.summary.stale ? "更新纪要" : hasOrdinarySummary ? "重新生成纪要" : "生成最终纪要"}
                 </button>
               ))}
               {!processingStatus && onRetranscribe && meeting.status !== "recording" && meeting.status !== "paused" && (
                 <div className="review-hero__more" ref={heroMenuRef}>
                   <button
-                    className="icon-button review-hero__more-button"
+                    className="icon-button icon-button--labeled review-hero__more-button"
                     aria-label="更多纪要操作"
                     aria-haspopup="menu"
                     aria-expanded={heroMenuOpen}
                     onClick={() => setHeroMenuOpen((open) => !open)}
                   >
                     <DotsThree size={20} weight="bold" />
+                    <span>纪要操作</span>
                   </button>
                   {heroMenuOpen && (
                     <div className="review-hero__menu" role="menu" aria-label="更多纪要操作">
                       <button role="menuitem" onClick={() => { setHeroMenuOpen(false); onRetranscribe(); }}>
                         <ArrowClockwise size={14} />重新转录
                       </button>
-                      <small>放弃当前逐字稿，用已归档录音重新转写；笔记与手动锁定的内容会保留。</small>
+                      <small>放弃当前逐字稿，用已归档录音重新转录；笔记与手动锁定的内容会保留。</small>
                     </div>
                   )}
                 </div>
@@ -866,11 +886,12 @@ export function DocumentWorkspace({
     <div className="document-scroll">
       {showViewSwitch && (
         <div className="workspace-view-switch-band">
-          <div className="workspace-view-switch" role="tablist" aria-label="中央工作区内容">
+          <div className="workspace-view-switch" role="tablist" aria-label="中央工作区内容" onKeyDown={handleWorkspaceTabKeyDown}>
             <button
               role="tab"
               id="summary-view-tab"
               aria-selected={workspaceView === "document"}
+              tabIndex={workspaceView === "document" ? 0 : -1}
               className={workspaceView === "document" ? "is-active" : ""}
               onClick={() => setWorkspaceView("document")}
             >
@@ -880,6 +901,7 @@ export function DocumentWorkspace({
               role="tab"
               id="transcript-tab"
               aria-selected={workspaceView === "transcript"}
+              tabIndex={workspaceView === "transcript" ? 0 : -1}
               className={workspaceView === "transcript" ? "is-active" : ""}
               onClick={() => setWorkspaceView("transcript")}
             >
@@ -889,7 +911,7 @@ export function DocumentWorkspace({
         </div>
       )}
       {showTranscript ? (
-        <div className="workspace-transcript">
+        <div className="workspace-transcript" id="transcript-panel" role="tabpanel" aria-labelledby="transcript-tab">
           <TranscriptView
             meeting={meeting}
             importJob={importJob}

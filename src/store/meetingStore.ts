@@ -19,6 +19,18 @@ import type { CreateMeetingInput, Meeting, MeetingPreferences, MeetingSummary, M
  */
 const TRANSCRIPT_FLUSH_INTERVAL_MS = 10_000;
 
+/**
+ * 编辑类更新（标题 / 笔记 / 参与者）的落盘防抖窗口：逐字输入时只保存最后一次，
+ * 避免每敲一个字符就全量 UPSERT、标题栏「正在保存」反复闪烁。
+ */
+const EDIT_SAVE_DEBOUNCE_MS = 400;
+const editSaveTimers = new Map<string, number>();
+/**
+ * 每会议单调递增的修订号：任何内存变更（含 persist=false 的转写追加）都会推进。
+ * 保存请求在真正发出时记录修订号，响应回填前再比对一次，慢响应不会覆盖之后的新内容。
+ */
+const meetingRevisions = new Map<string, number>();
+
 interface MeetingState {
   meetings: Meeting[];
   /** 当前选中的会议 id（会议库高亮项，null 表示空状态）。 */
@@ -53,6 +65,8 @@ interface MeetingState {
   dropProvisionalTranscript(id: string, segmentId?: string): void;
   /** 立即把某会议当前的内存状态（过滤临时段后）持久化；清除其节流定时器。 */
   flushMeeting(id: string): Promise<void>;
+  /** 立即冲刷所有待防抖的编辑（窗口关闭 / 退出前兜底）。 */
+  flushPendingSaves(): Promise<void>;
   /** 整体替换会议纪要（AI 结果合并锁定字段后调用）。 */
   updateSummary(id: string, summary: MeetingSummary): Promise<void>;
   /** 软删除会议（移入“最近删除”），并修正选中项。 */
@@ -207,8 +221,9 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
   /**
    * 会议更新的核心通道（乐观更新）：
    * 1. 用 updater(current) 计算新值并刷新 updatedAt，立即写回内存（编辑零延迟）；
-   * 2. persist=false 时到此为止——高频转写追加等场景由调用方自行决定何时落盘；
-   * 3. persist=true（默认）时置 saving 并调用 api.meetings.save，用持久化结果回填。
+   * 2. 任何内存变更都推进修订号（含 persist=false 的转写追加）；
+   * 3. persist=true（默认）时防抖 400ms 再保存：期间连续输入合并成一次写入，
+   *    请求发出时记录修订号，响应回来若已有更新则丢弃回填，慢响应不会覆盖新内容。
    */
   async updateMeeting(id, updater, persist = true) {
     const current = get().meetings.find((meeting) => meeting.id === id);
@@ -217,17 +232,38 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     set((state) => ({
       meetings: state.meetings.map((meeting) => meeting.id === id ? updated : meeting)
     }));
+    // 修订号覆盖所有变更，而不只是“发起保存”的变更：录音中持续追加的转写
+    // 不能被一次更早发出的标题保存响应覆盖掉。
+    meetingRevisions.set(id, (meetingRevisions.get(id) ?? 0) + 1);
     if (!persist) return;
+    // 用户开始编辑就显示“正在保存”，不能等防抖窗口结束才亮。
     set({ saving: true });
-    try {
-      const saved = await persistMeetingToBackend(updated);
-      set((state) => ({
-        meetings: state.meetings.map((meeting) => meeting.id === id ? saved : meeting),
-        saving: false
-      }));
-    } catch (error) {
-      set({ saving: false, error: error instanceof Error ? error.message : "保存失败" });
-    }
+    const pending = editSaveTimers.get(id);
+    if (pending !== undefined) window.clearTimeout(pending);
+    editSaveTimers.set(id, window.setTimeout(() => {
+      editSaveTimers.delete(id);
+      // 用触发时刻的最新内存态，而不是定时器创建时的快照。
+      const latest = get().meetings.find((meeting) => meeting.id === id);
+      if (!latest) { set({ saving: false }); return; }
+      const sentRevision = meetingRevisions.get(id) ?? 0;
+      void persistMeetingToBackend(latest).then((saved) => {
+        if (meetingRevisions.get(id) !== sentRevision) {
+          // 请求期间又有新内容：丢弃旧回填；只有没有排队中的保存时才熄灭指示器。
+          if (!editSaveTimers.has(id)) set({ saving: false });
+          return;
+        }
+        set((state) => ({
+          meetings: state.meetings.map((meeting) => meeting.id === id ? saved : meeting),
+          saving: false
+        }));
+      }).catch((error) => {
+        if (meetingRevisions.get(id) !== sentRevision) {
+          if (!editSaveTimers.has(id)) set({ saving: false });
+          return;
+        }
+        set({ saving: false, error: error instanceof Error ? error.message : "保存失败" });
+      });
+    }, EDIT_SAVE_DEBOUNCE_MS));
   },
 
   /**
@@ -265,6 +301,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
         ? { ...meeting, transcript: mergeTranscriptSegments(meeting.transcript, segment) }
         : meeting)
     }));
+    meetingRevisions.set(id, (meetingRevisions.get(id) ?? 0) + 1);
   },
 
   /** 移除临时段落：segmentId 省略时清空该会议全部临时段（停止录音时收尾用）。 */
@@ -281,27 +318,48 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
           }
         : meeting)
     }));
+    meetingRevisions.set(id, (meetingRevisions.get(id) ?? 0) + 1);
   },
 
-  /** 立即冲刷某会议的节流落盘：清除定时器后把当前内存态（过滤临时段）持久化并回填。 */
+  /** 立即冲刷某会议的节流落盘：清掉在途防抖，用当前内存态（过滤临时段）持久化并回填。 */
   async flushMeeting(id) {
     const timer = flushTimers.get(id);
     if (timer !== undefined) {
       window.clearTimeout(timer);
       flushTimers.delete(id);
     }
+    const editTimer = editSaveTimers.get(id);
+    if (editTimer !== undefined) {
+      window.clearTimeout(editTimer);
+      editSaveTimers.delete(id);
+    }
     const current = get().meetings.find((meeting) => meeting.id === id);
     if (!current) return;
+    const sentRevision = meetingRevisions.get(id) ?? 0;
     set({ saving: true });
     try {
       const saved = await persistMeetingToBackend(current);
+      if (meetingRevisions.get(id) !== sentRevision) {
+        if (!editSaveTimers.has(id)) set({ saving: false });
+        return;
+      }
       set((state) => ({
         meetings: state.meetings.map((meeting) => meeting.id === id ? saved : meeting),
         saving: false
       }));
     } catch (error) {
+      if (meetingRevisions.get(id) !== sentRevision) {
+        if (!editSaveTimers.has(id)) set({ saving: false });
+        return;
+      }
       set({ saving: false, error: error instanceof Error ? error.message : "保存失败" });
     }
+  },
+
+  /** 冲刷所有还在防抖窗口里的编辑：窗口关闭前尽量把最后一次输入落盘。 */
+  async flushPendingSaves() {
+    const ids = Array.from(editSaveTimers.keys());
+    await Promise.all(ids.map((id) => get().flushMeeting(id)));
   },
 
   /** 替换会议纪要（AI 结果已按 mergeSummaryRevision 合并锁定字段后写入）。 */

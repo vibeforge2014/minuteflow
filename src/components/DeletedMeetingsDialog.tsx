@@ -5,6 +5,7 @@
 import { ArrowCounterClockwise, Trash, X } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useExitPresence } from "../hooks/useExitPresence";
 import type { Meeting } from "../types";
 
@@ -30,12 +31,14 @@ export function DeletedMeetingsDialog({
     });
   }, [open]);
 
+  const dialogRef = useDialogFocus<HTMLElement>(open, { onEscape: onClose });
   const { mounted, closing } = useExitPresence(open, 170);
   if (!mounted) return null;
 
   return (
     <div className={`modal-backdrop ${closing ? "is-closing" : ""}`} role="presentation" onMouseDown={onClose}>
       <section
+        ref={dialogRef}
         className="dialog deleted-dialog"
         role="dialog"
         aria-modal="true"

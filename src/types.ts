@@ -183,7 +183,7 @@ export interface ModelProfile {
   id?: string;
   /** 配置显示名。 */
   name: string;
-  /** 用途：llm=纪要总结，stt=语音转写，diarization=说话人分离。 */
+  /** 用途：llm=纪要总结，stt=语音转录，diarization=说话人分离。 */
   kind: "llm" | "stt" | "diarization";
   /** 调用通道：OpenAI 兼容 chat/audio、Ollama、离线基础纪要、whisper.cpp、Python Whisper、faster-whisper、MLX、sherpa-onnx、Apple Speech（macOS 内置）。 */
   transport: "openai-chat" | "openai-audio" | "ollama" | "local-summary" | "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper" | "sherpa-onnx" | "apple-speech";
@@ -878,6 +878,8 @@ export interface MeetingAPI {
     closePermissionHelper(): void;
     onSuspend(callback: () => void): () => void;
     onResume(callback: () => void): () => void;
+    /** 原生应用菜单动作（menu:action 事件）订阅，浏览器预览为空实现。 */
+    onMenuAction(callback: (action: string) => void): () => void;
   };
   /** 窗口：迷你录音窗开关与状态同步。 */
   window: {

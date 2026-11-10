@@ -14,6 +14,7 @@ import {
   desktopCapturer,
   dialog,
   ipcMain,
+  Menu,
   nativeImage,
   Notification,
   powerMonitor,
@@ -409,6 +410,109 @@ async function createMainWindow() {
     permissionHelperWindow = undefined;
     mainWindow = undefined;
   });
+}
+
+/**
+ * 注册原生应用菜单：补齐 macOS 平台惯例（关于 / ⌘, 偏好设置 / 服务 / 隐藏 / 退出）、
+ * 标准「编辑」role（撤销、复制、粘贴等原生快捷键生效）、窗口与帮助入口。
+ * 业务动作通过 menu:action 转发给渲染层，由 App 统一落到已有的入口函数；
+ * 不与渲染层的 ⌘K / ⌘N 监听重复绑定 accelerator，避免一次按键触发两次。
+ */
+function buildApplicationMenu() {
+  const sendMenuAction = (action) => {
+    const target = BrowserWindow.getFocusedWindow() ?? mainWindow;
+    if (target && !target.isDestroyed() && !target.webContents.isDestroyed()) {
+      target.webContents.send("menu:action", action);
+    }
+  };
+  const isMac = process.platform === "darwin";
+  const preferencesItem = {
+    label: "偏好设置…",
+    accelerator: "CmdOrCtrl+,",
+    click: () => sendMenuAction("settings")
+  };
+  const template = [
+    ...(isMac ? [{
+      label: app.name,
+      submenu: [
+        { role: "about", label: "关于 MinuteFlow" },
+        { type: "separator" },
+        preferencesItem,
+        { type: "separator" },
+        { role: "services", label: "服务" },
+        { type: "separator" },
+        { role: "hide", label: "隐藏 MinuteFlow" },
+        { role: "hideOthers", label: "隐藏其他" },
+        { role: "unhide", label: "显示全部" },
+        { type: "separator" },
+        { role: "quit", label: "退出 MinuteFlow" }
+      ]
+    }] : []),
+    {
+      label: "文件",
+      submenu: [
+        { label: "新建会议…", click: () => sendMenuAction("new-meeting") },
+        {
+          label: "快速开始录音",
+          // 快捷键由渲染层处理；macOS 仅展示提示，避免一次按键触发两次。
+          ...(isMac ? { accelerator: "CmdOrCtrl+N", registerAccelerator: false } : {}),
+          click: () => sendMenuAction("quick-start")
+        },
+        { type: "separator" },
+        { label: "导入录音…", click: () => sendMenuAction("import") },
+        { type: "separator" },
+        ...(isMac ? [] : [preferencesItem, { type: "separator" }]),
+        { role: "close", label: "关闭窗口" }
+      ]
+    },
+    {
+      label: "编辑",
+      submenu: [
+        { role: "undo", label: "撤销" },
+        { role: "redo", label: "重做" },
+        { type: "separator" },
+        { role: "cut", label: "剪切" },
+        { role: "copy", label: "复制" },
+        { role: "paste", label: "粘贴" },
+        { role: "selectAll", label: "全选" }
+      ]
+    },
+    {
+      label: "视图",
+      submenu: [
+        {
+          label: "搜索会议",
+          ...(isMac ? { accelerator: "CmdOrCtrl+K", registerAccelerator: false } : {}),
+          click: () => sendMenuAction("focus-search")
+        },
+        { type: "separator" },
+        { role: "resetZoom", label: "实际大小" },
+        { role: "zoomIn", label: "放大" },
+        { role: "zoomOut", label: "缩小" },
+        { type: "separator" },
+        { role: "togglefullscreen", label: "切换全屏" },
+        ...(process.env.VITE_DEV_SERVER_URL
+          ? [{ type: "separator" }, { role: "reload", label: "重新载入" }, { role: "toggleDevTools", label: "开发者工具" }]
+          : [])
+      ]
+    },
+    {
+      label: "窗口",
+      submenu: [
+        { role: "minimize", label: "最小化" },
+        { role: "zoom", label: "缩放" },
+        { type: "separator" },
+        { role: "front", label: "置于最前" }
+      ]
+    },
+    {
+      label: "帮助",
+      submenu: [
+        { label: "检查更新…", click: () => sendMenuAction("check-updates") }
+      ]
+    }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 /** 当前 Electron 可执行文件所属的 .app；开发模式下对应 Electron.app。 */
@@ -1718,6 +1822,8 @@ app.whenReady().then(async () => {
     console.error("录音保留策略清理失败：", error);
   });
   await createMainWindow();
+  // 原生菜单栏（编辑快捷键、⌘, 偏好设置、检查更新等）随主窗口一起就绪。
+  buildApplicationMenu();
   // 主窗口就绪后立即唤醒导入队列（含因缺模型/组件而暂停等待的任务）。
   wakeImportQueue();
 

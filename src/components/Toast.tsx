@@ -38,11 +38,14 @@ export function Toast({
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
   }, []);
   // 依赖 message：新提示弹出时重置计时器。
+  // 带直达动作的提示（撤销、打开更新页等）给足 15 秒，并由 App 放到贴近触发位置
+  // 的底部浮层；普通成功提示 5 秒、警告 8 秒。
   useEffect(() => {
     if (closing) return;
-    const timer = window.setTimeout(requestClose, tone === "warning" ? 8_000 : 5_000);
+    const timeout = action ? 15_000 : tone === "warning" ? 8_000 : 5_000;
+    const timer = window.setTimeout(requestClose, timeout);
     return () => window.clearTimeout(timer);
-  }, [closing, message, requestClose, tone]);
+  }, [action, closing, message, requestClose, tone]);
   return (
     <div className={`toast ${tone === "warning" ? "toast--warning" : ""} ${closing ? "is-closing" : ""}`} role={tone === "warning" ? "alert" : "status"}>
       {tone === "warning" ? <WarningCircle size={19} weight="fill" /> : <CheckCircle size={19} weight="fill" />}
