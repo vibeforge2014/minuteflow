@@ -23,7 +23,13 @@ export const WHISPER_MODEL_MIN_RAM_GB: Record<string, number> = {
   "ggml-tiny.en": 2,
   "ggml-base.en": 2,
   "ggml-small.en": 4,
-  "ggml-medium.en": 8
+  "ggml-medium.en": 8,
+  // SenseVoice int8 / Parakeet TDT int8 / Qwen3-ASR 0.6B（GPU 或统一内存）。
+  // Qwen3 需 GPU 门控，内存档只约束「有 GPU 的机器要装得下」。
+  "sense-voice-2024-07-17-int8": 4,
+  "parakeet-tdt-v2-en-int8": 8,
+  "parakeet-tdt-v3-euro-int8": 8,
+  "qwen3-asr-0.6b": 8
 };
 
 /** 按内存档位选出这台设备最适合的 Whisper 模型（中文/多语言优先）。 */

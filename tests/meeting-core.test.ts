@@ -1507,11 +1507,15 @@ describe("model provider compatibility", () => {
       "ggml-base.en",
       "ggml-small.en",
       "ggml-medium.en",
+      "sense-voice-2024-07-17-int8",
+      "parakeet-tdt-v2-en-int8",
+      "parakeet-tdt-v3-euro-int8",
+      "qwen3-asr-0.6b",
       "diarization-pyannote-segmentation",
       "diarization-eres2netv2-zh"
     ]);
-    // Whisper 项全部走 whisper-cpp；声纹项单独成组。
-    expect(catalog.filter((model) => model.group !== "diarization")
+    // Whisper 项全部走 whisper-cpp 且单文件；ASR bundle 按族分组。
+    expect(catalog.filter((model) => model.group !== "diarization" && !["sense-voice", "parakeet-tdt", "qwen3-asr"].includes(model.engine))
       .every((model) => model.engine === "whisper-cpp" && model.installed === false)).toBe(true);
     // 摘要算法必须是 sha256（体积与 HuggingFace 官方仓库逐一核对）。
     expect(catalog.every((model) => model.digestAlgorithm === "sha256")).toBe(true);
@@ -1523,6 +1527,50 @@ describe("model provider compatibility", () => {
     expect(catalog.find((model) => model.id === "ggml-large-v3")?.sizeBytes).toBe(3_095_033_483);
     expect(catalog.find((model) => model.id === "ggml-medium-q5_0")?.sizeBytes).toBe(539_212_467);
     expect(catalog.find((model) => model.id === "ggml-medium.en")?.sizeBytes).toBe(1_533_774_781);
+  });
+
+  it("offers SenseVoice / Parakeet / Qwen3-ASR bundles with per-file digests", async () => {
+    const catalog = await listDownloadableModels("/nonexistent/minuteflow-model-catalog");
+    const senseVoice = catalog.find((model) => model.id === "sense-voice-2024-07-17-int8");
+    const parakeetV2 = catalog.find((model) => model.id === "parakeet-tdt-v2-en-int8");
+    const parakeetV3 = catalog.find((model) => model.id === "parakeet-tdt-v3-euro-int8");
+    const qwen3 = catalog.find((model) => model.id === "qwen3-asr-0.6b");
+    // SenseVoice：单模型 + 词表，摘要取自 HuggingFace LFS 元数据。
+    expect(senseVoice).toMatchObject({
+      engine: "sense-voice",
+      group: "sense-voice",
+      format: "ONNX",
+      sizeBytes: 239_549_735,
+      license: "Apache-2.0",
+      installed: false
+    });
+    expect(senseVoice?.files?.map((file) => file.remoteFileName)).toEqual(["model.int8.onnx", "tokens.txt"]);
+    expect(senseVoice?.files?.[0]).toMatchObject({
+      sizeBytes: 239_233_841,
+      digest: "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"
+    });
+    // Parakeet v2/v3：NeMo TDT 三件套 + 词表；v2 纯英文，v3 覆盖欧洲语言。
+    for (const [model, total] of [[parakeetV2, 661_287_426], [parakeetV3, 670_513_304]] as const) {
+      expect(model?.engine).toBe("parakeet-tdt");
+      expect(model?.group).toBe("parakeet");
+      expect(model?.license).toBe("CC-BY-4.0");
+      expect(model?.sizeBytes).toBe(total);
+      expect(model?.files?.map((file) => file.remoteFileName).sort()).toEqual([
+        "decoder.int8.onnx", "encoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"
+      ]);
+      expect(model?.files?.every((file) => /^[0-9a-f]{64}$/.test(file.digest))).toBe(true);
+    }
+    // Qwen3-ASR：PyTorch bundle，逐文件 sha256，模型权重单文件 ~1.9GB。
+    expect(qwen3).toMatchObject({
+      engine: "qwen3-asr",
+      group: "qwen3",
+      license: "Apache-2.0",
+      sizeBytes: 1_880_558_733
+    });
+    expect(qwen3?.files?.find((file) => file.remoteFileName === "model.safetensors")).toMatchObject({
+      sizeBytes: 1_876_091_704,
+      digest: "79d6cbd4c98c7bbffe9db2edac07f56cd6637d0d5944b27f6c2b8353840323ea"
+    });
   });
 
   it("offers verified diarization models with per-source direct URLs", async () => {

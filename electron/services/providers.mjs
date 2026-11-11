@@ -22,6 +22,7 @@ import { z } from "zod";
 import { initWhisper, loadWhisperModule } from "@fugood/whisper.node";
 import { buildBasicKeyPoints, simplifySummary } from "./chinese.mjs";
 import { testAppleSpeech, appleSpeechFixturePath } from "./apple-speech.mjs";
+import { decodeWithSherpaAsr } from "./asr-runtime.mjs";
 
 // ESM 下按需加载 CJS 原生模块（sherpa-onnx-node）。
 const require = createRequire(import.meta.url);
@@ -837,6 +838,28 @@ const MLX_WHISPER_SCRIPT = [
 ].join("\n");
 
 /**
+ * Qwen3-ASR（实验性）的 Python 内置脚本：qwen-asr 包（transformers 后端），
+ * 输出格式与 faster-whisper 兼容（segments 留空，按整块出文）。模型路径是应用内
+ * 下载的 bundle 目录；torch 设备由包自动选择（CUDA / MPS），CPU 已被就绪检查挡下。
+ */
+const QWEN3_ASR_SCRIPT = [
+  "import json, sys",
+  "from qwen_asr import Qwen3ASRModel",
+  "lang_map = {'zh': 'Chinese', 'en': 'English', 'yue': 'Cantonese', 'ja': 'Japanese', 'ko': 'Korean'}",
+  "raw_language = (sys.argv[3] or '').strip()",
+  "language = lang_map.get(raw_language, raw_language) or None",
+  "model = Qwen3ASRModel.from_pretrained(sys.argv[1], dtype='auto', device_map='auto')",
+  "result = model.transcribe(audio=sys.argv[2], language=language)",
+  "if isinstance(result, str):",
+  "    text = result",
+  "elif isinstance(result, (list, tuple)):",
+  "    text = ' '.join([((item.get('text') if isinstance(item, dict) else str(item)) or '') for item in result])",
+  "else:",
+  "    text = getattr(result, 'text', None) or (result.get('text') if isinstance(result, dict) else '') or str(result)",
+  "print(json.dumps({'text': (text or '').strip(), 'language': raw_language or None, 'segments': []}, ensure_ascii=False))"
+].join("\n");
+
+/**
  * Python 系本地转录的公共执行流程（faster-whisper / mlx-whisper 共用）。
  * 副作用：写临时音频文件、拉起 ffmpeg 与 Python 子进程、结束前清理临时文件。
  * 流程：原始音频落临时文件 →（可选）FFmpeg 转 16k 单声道 WAV →
@@ -890,6 +913,14 @@ export async function transcribeWithFasterWhisper(profile, audioBuffer, fileName
 export async function transcribeWithMlxWhisper(profile, audioBuffer, fileName, language = "zh", glossary = [], signal) {
   if (process.platform !== "darwin") throw new Error("MLX-Whisper 仅在 Apple Silicon macOS 上可用。");
   return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, MLX_WHISPER_SCRIPT);
+}
+
+/**
+ * Qwen3-ASR（实验性）转录入口：Python + qwen-asr 运行时，需要 NVIDIA GPU（Windows）
+ * 或 Apple Silicon MPS（macOS）；无 GPU 的场景已被 resolveLocalModelProfile 就绪检查挡下。
+ */
+export async function transcribeWithQwen3Asr(profile, audioBuffer, fileName, language = "zh", glossary = [], signal) {
+  return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, QWEN3_ASR_SCRIPT);
 }
 
 /**
@@ -1481,6 +1512,51 @@ export async function testModelProfile(profile, apiKey) {
     return {
       ok: true,
       message: `Apple 语音识别已就绪（${result.onDeviceUsed ? "本机识别" : "在线识别"}，样例输出「${preview}…」）。`
+    };
+  }
+  if (profile.transport === "sense-voice" || profile.transport === "parakeet-tdt") {
+    // 真实识别测试：用内置中文样例跑一次完整解码（与 apple-speech 的「测试识别」
+    // 同一约定——连接测试必须跑真实请求），同时验证 bundle 文件齐全与 worker 可用。
+    const label = profile.transport === "sense-voice" ? "SenseVoice" : "Parakeet";
+    if (!profile.options?.modelPath) throw new Error("本地模型尚未就绪，请先在转录设置中下载模型。");
+    const fixturePath = appleSpeechFixturePath();
+    if (!fixturePath) throw new Error("识别测试样例缺失，请重新安装应用。");
+    const result = await decodeWithSherpaAsr(profile, fixturePath, {
+      language: profile.transport === "sense-voice" ? "zh" : "",
+      numThreads: 2
+    });
+    const preview = String(result?.text ?? "").replace(/\s+/g, " ").slice(0, 24);
+    return {
+      ok: true,
+      message: `${label} 已就绪（样例输出「${preview || "（无文本）"}」）。`
+    };
+  }
+  if (profile.transport === "qwen3-asr") {
+    // 实验性引擎：测试 = Python 依赖 + GPU 设备 + 模型目录三项检查，不跑真实推理
+    // （0.6B 模型首次加载需要数十秒，不适合放进设置页的同步测试）。
+    if (!profile.options?.modelPath) throw new Error("本地模型尚未就绪，请先在转录设置中下载模型。");
+    await access(profile.options.modelPath);
+    const pythonPath = profile.options?.pythonExecutablePath
+      || profile.options?.executablePath
+      || (process.platform === "win32" ? "python" : "python3");
+    try {
+      await runProcess(pythonPath, ["-c", "import torch, qwen_asr"], { timeoutMs: 30_000 });
+    } catch (error) {
+      throw new Error(`未检测到 Qwen3-ASR 运行时，请先安装：pip install "qwen-asr" torch${error instanceof Error && error.message ? `（${error.message}）` : ""}`);
+    }
+    let device = "";
+    try {
+      const probe = await runProcess(pythonPath, ["-c", "import torch; print('cuda' if torch.cuda.is_available() else ('mps' if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available() else 'cpu'))"], { timeoutMs: 30_000 });
+      device = probe.stdout.trim();
+    } catch {
+      device = "cpu";
+    }
+    if (device !== "cuda" && device !== "mps") {
+      throw new Error("Qwen3-ASR 需要 GPU（NVIDIA CUDA 或 Apple Silicon）；当前 Python torch 仅 CPU 可用，无法启用。");
+    }
+    return {
+      ok: true,
+      message: `Qwen3-ASR 运行时就绪（${device === "cuda" ? "NVIDIA GPU" : "Apple Silicon MPS"}）。首次识别需要加载模型，会稍慢。`
     };
   }
   if (profile.transport === "faster-whisper" || profile.transport === "mlx-whisper") {

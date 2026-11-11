@@ -72,6 +72,13 @@ const LOCAL_WHISPER_RUNTIME_LABELS: Partial<Record<string, string>> = {
   "mlx-whisper": "MLX"
 };
 
+/** 新增的本机 ASR 家族（SenseVoice / Parakeet / Qwen3-ASR）：各自是独立引擎与单例本机服务。 */
+const LOCAL_ASR_TRANSPORTS = ["sense-voice", "parakeet-tdt", "qwen3-asr"] as const;
+const isLocalAsrTransport = (transport: string | undefined) =>
+  !!transport && (LOCAL_ASR_TRANSPORTS as readonly string[]).includes(transport);
+/** Parakeet 目录 id → 展示变体（v2 英文 / v3 欧洲多语）。 */
+const parakeetVariantLabel = (model: string) => (model || "").includes("v3") ? "v3 欧洲语言" : "v2 英文";
+
 /** 视觉纪要验证指纹（与主进程 visualSummaryProfileFingerprint 同构）：
  *  传输协议/地址/模型/兼容协议/聊天端点任一变化即视为未验证，保存或测试时需重新验证。 */
 const visualFingerprint = (profile: ModelProfile) => JSON.stringify({
@@ -86,9 +93,9 @@ const isLocalWhisperTransport = (transport: string | undefined) =>
 /** 已保存档案的排序：默认档置顶，其余保持名称序。 */
 const defaultFirst = (left: ModelProfile, right: ModelProfile) =>
   Number(Boolean(right.isDefault)) - Number(Boolean(left.isDefault));
-/** 本机转写家族：本地 Whisper 四种运行时与 Apple 系统识别。 */
+/** 本机转写家族：本地 Whisper 四种运行时、新 ASR 家族与 Apple 系统识别。 */
 const isLocalSttProfile = (profile: ModelProfile) =>
-  isLocalWhisperTransport(profile.transport) || profile.transport === "apple-speech";
+  isLocalWhisperTransport(profile.transport) || isLocalAsrTransport(profile.transport) || profile.transport === "apple-speech";
 /** 本机总结家族：离线规则纪要与 Ollama。 */
 const isLocalLlmProfile = (profile: ModelProfile) =>
   profile.transport === "local-summary" || profile.transport === "ollama";
@@ -99,6 +106,9 @@ const isLocalServiceProfile = (profile: ModelProfile) =>
 const providerKeyForProfile = (profile: ModelProfile): string => {
   if (isLocalWhisperTransport(profile.transport)) return "whisper";
   if (profile.transport === "apple-speech") return "appleSpeech";
+  if (profile.transport === "sense-voice") return "senseVoice";
+  if (profile.transport === "parakeet-tdt") return "parakeetTdt";
+  if (profile.transport === "qwen3-asr") return "qwen3Asr";
   if (profile.transport === "sherpa-onnx") return "sherpa";
   if (profile.transport === "local-summary") return "localSummary";
   if (profile.transport === "ollama") return "ollama";
@@ -124,7 +134,7 @@ const profileIssue = (profile: ModelProfile): string | null => {
     return profile.options.segmentationModelPath && profile.options.embeddingModelPath ? null : "缺少声纹模型";
   }
   if (profile.transport === "apple-speech" || profile.transport === "local-summary" || profile.transport === "ollama") return null;
-  if (isLocalWhisperTransport(profile.transport)) return profile.options.modelPath ? null : "缺少本地模型";
+  if (isLocalWhisperTransport(profile.transport) || isLocalAsrTransport(profile.transport)) return profile.options.modelPath ? null : "缺少本地模型";
   if (!profile.model) return "缺少模型名称";
   if (!profile.secretId) return "缺少 API Key";
   return null;
@@ -138,7 +148,7 @@ const describeTransport = (profile: ModelProfile): { text: string; online: boole
   }
   if (profile.transport === "sherpa-onnx") return { text: "本机 · 数据不出设备", online: false };
   if (profile.transport === "local-summary") return { text: "本机 · 完全离线", online: false };
-  if (isLocalWhisperTransport(profile.transport)) return { text: "本机 · 音频不出设备", online: false };
+  if (isLocalWhisperTransport(profile.transport) || isLocalAsrTransport(profile.transport)) return { text: "本机 · 音频不出设备", online: false };
   if (profile.transport === "ollama") return { text: "本机 · Ollama 服务", online: false };
   return profile.kind === "stt"
     ? { text: "在线 · 音频发送至服务商", online: true }
@@ -158,6 +168,9 @@ const localProfileName = (profile: ModelProfile): string => {
   if (profile.transport === "apple-speech") return "Apple 语音识别";
   if (profile.transport === "sherpa-onnx") return "本地声纹识别";
   if (profile.transport === "local-summary") return "本机基础纪要";
+  if (profile.transport === "sense-voice") return "SenseVoice 本地";
+  if (profile.transport === "parakeet-tdt") return `Parakeet 本地 · ${parakeetVariantLabel(profile.model)}`;
+  if (profile.transport === "qwen3-asr") return "Qwen3-ASR 本地";
   if (isLocalWhisperTransport(profile.transport)) {
     const label = whisperModelLabel(profile.model);
     return label ? `本地 Whisper · ${label}` : "本地 Whisper";
@@ -302,6 +315,27 @@ const providerPresets: Record<string, Partial<ModelProfile>> = {
     transport: "apple-speech",
     baseUrl: "",
     model: ""
+  },
+  senseVoice: {
+    name: "SenseVoice",
+    kind: "stt",
+    transport: "sense-voice",
+    baseUrl: "",
+    model: "sense-voice-2024-07-17-int8"
+  },
+  parakeetTdt: {
+    name: "Parakeet",
+    kind: "stt",
+    transport: "parakeet-tdt",
+    baseUrl: "",
+    model: "parakeet-tdt-v2-en-int8"
+  },
+  qwen3Asr: {
+    name: "Qwen3-ASR（实验性）",
+    kind: "stt",
+    transport: "qwen3-asr",
+    baseUrl: "",
+    model: "qwen3-asr-0.6b"
   },
   openaiWhisper: {
     name: "OpenAI Whisper",
@@ -1096,14 +1130,14 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
 
   /** 「添加服务」选择：无模型可选的本机服务（Apple / 本机纪要）点选即落库；
    *  其余进入草稿，由模型选择或底部保存完成配置。 */
-  const addService = async (key: "whisper" | "appleSpeech" | "openaiWhisper" | "sherpa" | "localSummary" | "ollama" | "openai") => {
+  const addService = async (key: "whisper" | "appleSpeech" | "senseVoice" | "parakeetTdt" | "qwen3Asr" | "openaiWhisper" | "sherpa" | "localSummary" | "ollama" | "openai") => {
     if (busy) return;
     setModelView("edit");
     setDraftPresetKey(key);
     const preset = providerPresets[key];
     // 本机服务天然只有一份：已有配置时直接打开，不产生同名副本。
     // 在线服务相反——「添加在线服务」就是要新建一份，不复用已有档案。
-    const singleton = key === "whisper" || key === "appleSpeech" || key === "sherpa" || key === "localSummary" || key === "ollama";
+    const singleton = key === "whisper" || key === "appleSpeech" || key === "senseVoice" || key === "parakeetTdt" || key === "qwen3Asr" || key === "sherpa" || key === "localSummary" || key === "ollama";
     const reusable = singleton
       ? profiles
         .filter((profile) => profile.kind === preset.kind && (
@@ -1278,7 +1312,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const serviceItems = (items: ModelProfile[]): SettingsServiceItem[] => items.map((profile) => ({
     profile,
     draft: Boolean(pendingDrafts[settingsDraftKey(profile, "")]),
-    subtitle: profileIssue(profile) ?? (isLocalWhisperTransport(profile.transport) ? `${whisperModelLabel(profile.model)} · 离线识别` : profile.transport === "apple-speech" ? "macOS 内置" : profile.transport === "local-summary" ? "离线规则提取" : profile.model),
+    subtitle: profileIssue(profile) ?? (isLocalWhisperTransport(profile.transport) ? `${whisperModelLabel(profile.model)} · 离线识别` : profile.transport === "apple-speech" ? "macOS 内置" : profile.transport === "sense-voice" ? "中英日韩粤 · 离线识别" : profile.transport === "parakeet-tdt" ? `${parakeetVariantLabel(profile.model)} · 离线识别` : profile.transport === "qwen3-asr" ? "实验性 · 需 GPU" : profile.transport === "local-summary" ? "离线规则提取" : profile.model),
     issue: Boolean(profileIssue(profile))
   }));
   const serviceGroups = tab === "llm" ? [
@@ -1295,6 +1329,9 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     { key: "openai", name: "在线模型", description: "连接服务商或兼容接口 · 需要 API Key", local: false }
   ] : [
     { key: "whisper", name: "本地 Whisper", description: "离线识别 · 需下载模型", local: true },
+    { key: "senseVoice", name: "SenseVoice", description: "中英日韩粤 · 需下载模型", local: true },
+    { key: "parakeetTdt", name: "Parakeet", description: "英文/欧洲语言 · 需下载模型", local: true },
+    { key: "qwen3Asr", name: "Qwen3-ASR", description: "实验性 · 需 GPU · 需下载模型", local: true },
     ...(api.system.platform === "darwin" ? [{ key: "appleSpeech", name: "Apple 语音识别", description: "macOS 内置 · 无需下载模型", local: true }] : []),
     { key: "openaiWhisper", name: "在线模型", description: "上传音频进行转录 · 按服务商计费", local: false }
   ];
@@ -1497,6 +1534,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                       <>
                         <div className="settings-info-note"><Info size={18} /><p>从逐字稿中提取要点、决策与行动项。无需模型、密钥或网络连接。</p></div>
                       </>
+                    ) : isLocalAsrTransport(editing.transport) ? (
+                      <LocalAsrModelManager key={editorGeneration} profile={editing} onChange={updateLocalEditor} />
                     ) : isLocalWhisperTransport(editing.transport) ? (
                       <LocalModelManager key={editorGeneration} profile={editing} onChange={updateLocalEditor} />
                     ) : editing.transport === "apple-speech" ? (
@@ -1747,10 +1786,14 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
 
 /** 在线模型库的分组标题：多语言推荐 / 轻量量化 / 英文专用。 */
 // 只列 Whisper 目录分组；diarization 组在声纹设置页单独渲染，不进这份标签。
+// ASR 家族组（sense-voice / parakeet / qwen3）由 LocalAsrModelManager 按族渲染。
 const MODEL_GROUP_LABELS: Partial<Record<DownloadableModel["group"], string>> = {
   multilingual: "多语言 · 推荐",
   quantized: "轻量量化",
-  english: "英文专用"
+  english: "英文专用",
+  "sense-voice": "SenseVoice · 中英日韩粤",
+  parakeet: "Parakeet · 英文/欧洲语言",
+  qwen3: "Qwen3-ASR · 实验性（需 GPU）"
 };
 
 /** 默认只呈现三个可理解的性能档位；完整官方目录仍保留在高级展开区。 */
@@ -2049,7 +2092,7 @@ function LocalModelManager({
           <button className="button button--small" disabled={busy} onClick={async () => {
             const discovery = scan ?? await api.models.scanLocal();
             setScan(discovery);
-            await applyModel({ path: model.localPath!, name: model.fileName, format: model.format, engine: model.engine as LocalModelFile["engine"], sizeBytes: model.sizeBytes }, discovery.runtimes);
+            await applyModel({ path: model.localPath!, name: model.fileName ?? model.id, format: model.format, engine: model.engine as LocalModelFile["engine"], sizeBytes: model.sizeBytes }, discovery.runtimes);
           }}>{profile.options.modelPath === model.localPath ? "使用中" : "已下载 · 使用"}</button>
         ) : (
           <button className="button button--small" disabled={busy} onClick={() => downloadModel(model.id)}><CloudArrowDown size={15} />{currentProgress ? (currentProgress.status === "downloading" ? `${percent}%` : currentProgress.status === "verifying" ? "校验中" : currentProgress.status === "ready" ? "已就绪" : currentProgress.status === "error" ? "重试" : "准备中") : "下载"}</button>
@@ -2190,4 +2233,235 @@ function formatBytes(bytes: number) {
   if (!bytes) return "未知大小";
   if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
   return `${Math.round(bytes / 1_000_000)} MB`;
+}
+
+/** 新 ASR 家族（SenseVoice / Parakeet / Qwen3-ASR）的呈现配置：blurb、目录分组与推荐条目。 */
+const LOCAL_ASR_FAMILY_CONFIG: Record<string, {
+  heading: string;
+  blurb: string;
+  groups: Array<DownloadableModel["group"]>;
+  recommendedId: string;
+  requireGpu?: boolean;
+}> = {
+  "sense-voice": {
+    heading: "SenseVoice",
+    blurb: "阿里 FunAudioLLM 的离线识别，中文与中英混合表现强、速度极快；识别完全在本机进行。",
+    groups: ["sense-voice"],
+    recommendedId: "sense-voice-2024-07-17-int8"
+  },
+  "parakeet-tdt": {
+    heading: "Parakeet",
+    blurb: "NVIDIA NeMo 的离线识别，英文长会议吞吐极高；v3 覆盖 25 种欧洲语言。识别完全在本机进行。",
+    groups: ["parakeet"],
+    recommendedId: "parakeet-tdt-v2-en-int8"
+  },
+  "qwen3-asr": {
+    heading: "Qwen3-ASR（实验性）",
+    blurb: "通义 Qwen3-ASR 覆盖 30 种语言与 22 种中文方言，嘈杂与歌词场景表现强；实验性引擎，首次识别需加载模型（数十秒）。",
+    groups: ["qwen3"],
+    recommendedId: "qwen3-asr-0.6b",
+    requireGpu: true
+  }
+};
+
+/**
+ * SenseVoice / Parakeet / Qwen3-ASR 的单例本机服务管理器（与 Whisper 的
+ * LocalModelManager 平级）：目录下载（多文件 bundle，逐文件 sha256）、本机
+ * bundle 扫描启用、运行时/GPU 就绪提示。模型路径与引擎写入档案即生效，
+ * 没有保存底栏（本机服务即时生效语义）。
+ */
+function LocalAsrModelManager({
+  profile,
+  onChange
+}: {
+  profile: ModelProfile;
+  onChange(profile: ModelProfile): void;
+}) {
+  const family = LOCAL_ASR_FAMILY_CONFIG[profile.transport] ?? null;
+  const [catalog, setCatalog] = useState<DownloadableModel[]>([]);
+  const [scan, setScan] = useState<LocalModelScanResult | null>(null);
+  const [progress, setProgress] = useState<ModelDownloadProgress | null>(null);
+  const [hardware, setHardware] = useState<HardwareInfo | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const loadProfiles = useMeetingStore((state) => state.loadProfiles);
+
+  useEffect(() => {
+    let active = true;
+    api.models.catalog().then((items) => active && setCatalog(items)).catch(() => {});
+    api.system.hardware().then((info) => active && setHardware(info)).catch(() => {});
+    api.models.scanLocal().then((result) => active && setScan(result)).catch(() => {});
+    const unsubscribe = api.models.onDownloadProgress((next) => setProgress(next));
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  /** 把一个本机 bundle 启用为该族的 stt 档案（模型路径指向 bundle 目录，即存即生效）。 */
+  const applyBundle = async (bundle: LocalModelFile, runtimes = scan?.runtimes) => {
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const nextProfile: ModelProfile = {
+        ...profile,
+        kind: "stt",
+        transport: bundle.engine,
+        name: localProfileName({ ...profile, transport: bundle.engine, model: bundle.name } as ModelProfile),
+        model: bundle.name,
+        enabled: true,
+        options: { ...profile.options, modelPath: bundle.path }
+      };
+      const saved = await api.models.save(nextProfile);
+      onChange(saved);
+      await loadProfiles();
+      const ready = profile.transport === "qwen3-asr"
+        ? runtimes?.pythonTorchDevice === "cuda" || runtimes?.pythonTorchDevice === "mps"
+        : runtimes?.onnxAsr !== false;
+      setSuccess(ready
+        ? `已启用 ${family?.heading ?? bundle.name}，后续会议将使用此模型转写。`
+        : `已启用 ${family?.heading ?? bundle.name}；运行条件尚未满足，启用前请先按下方提示准备环境。`);
+    } catch (applyError) {
+      setError(applyError instanceof Error ? applyError.message : "无法启用本地模型");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 搜索本机 bundle（含已下载目录与用户手动解压的目录）；恰好一个时直接启用。 */
+  const scanBundles = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.models.scanLocal();
+      setScan(result);
+      const matches = result.models.filter((model) => model.engine === profile.transport);
+      if (matches.length === 1 && profile.options.modelPath !== matches[0].path) {
+        await applyBundle(matches[0], result.runtimes);
+      }
+    } catch (scanError) {
+      setError(scanError instanceof Error ? scanError.message : "本地模型搜索失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 应用内下载：完成后重新扫描并自动启用（与 Whisper 目录行为一致）。 */
+  const downloadModel = async (modelId: string) => {
+    setBusy(true);
+    setError(null);
+    setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "preparing", message: "正在准备下载…" });
+    try {
+      const model = await api.models.download(modelId);
+      const discovery = await api.models.scanLocal();
+      setScan(discovery);
+      setCatalog(await api.models.catalog());
+      await applyBundle(model, discovery.runtimes);
+    } catch (downloadError) {
+      const message = downloadError instanceof Error ? downloadError.message : "模型下载失败";
+      setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "error", message: "准备失败，可重试。" });
+      setError(message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!family) {
+    return <section className="local-model-manager"><div className="settings-info-note"><Info size={18} /><p>该引擎暂不支持本机模型管理。</p></div></section>;
+  }
+
+  const engineBundles = (scan?.models ?? []).filter((model) => model.engine === profile.transport);
+  const familyModels = catalog.filter((model) => family && family.groups.includes(model.group));
+  const gpuDevice = scan?.runtimes.pythonTorchDevice;
+  const gpuLine = gpuDevice === "cuda" ? "检测到 NVIDIA GPU（CUDA）"
+    : gpuDevice === "mps" ? "检测到 Apple Silicon（MPS）"
+    : gpuDevice === "cpu" ? "未检测到可用 GPU（当前仅 CPU，无法运行）"
+    : "未检测到 Python torch 环境（安装 qwen-asr 与 torch 后可用）";
+  const runtimeLabels = profile.transport === "qwen3-asr"
+    ? [gpuLine]
+    : [scan?.runtimes.onnxAsr === false ? "内置识别引擎未就绪（请重新安装应用）" : "内置识别引擎已就绪", scan?.runtimes.ffmpeg && "音频处理组件已就绪"].filter((label): label is string => typeof label === "string");
+
+  const renderAsrCard = (model: DownloadableModel, recommended?: boolean) => {
+    const currentProgress = progress?.modelId === model.id ? progress : null;
+    const percent = currentProgress?.totalBytes
+      ? Math.min(100, Math.round(currentProgress.downloadedBytes / currentProgress.totalBytes * 100))
+      : 0;
+    const memoryGB = hardware ? hardware.memoryBytes / 1024 ** 3 : 0;
+    const fit = memoryGB > 0 ? whisperModelFit(model.id, memoryGB) : null;
+    const tooHeavy = fit === "heavy";
+    const minRamGB = WHISPER_MODEL_MIN_RAM_GB[model.id];
+    return (
+      <div className={`download-model-card ${recommended ? "download-model-card--recommended" : ""}`} key={model.id}>
+        <div>
+          {recommended && <em>推荐</em>}
+          {tooHeavy && <em className="is-heavy">内存不足</em>}
+          <strong>{model.name}</strong>
+          <small>{model.description}</small>
+          <span>{model.format} · {formatBytes(model.sizeBytes)} · {model.license}{model.files ? ` · ${model.files.length} 个文件` : ""}{describeRuntimeMemory(model.sizeBytes) && ` · ${describeRuntimeMemory(model.sizeBytes)}`}{tooHeavy && minRamGB ? ` · 建议 ${minRamGB}GB 内存以上` : ""}</span>
+        </div>
+        {model.installed && model.localPath ? (
+          <button className="button button--small" disabled={busy} onClick={() => void applyBundle({ path: model.localPath!, name: model.id, format: model.format, engine: model.engine as LocalModelFile["engine"], sizeBytes: model.sizeBytes })}>
+            {profile.options.modelPath === model.localPath ? "使用中" : "已下载 · 使用"}
+          </button>
+        ) : (
+          <button className="button button--small" disabled={busy} onClick={() => void downloadModel(model.id)}><CloudArrowDown size={15} />{currentProgress ? (currentProgress.status === "downloading" ? `${percent}%` : currentProgress.status === "verifying" ? "校验中" : currentProgress.status === "ready" ? "已就绪" : currentProgress.status === "error" ? "重试" : "准备中") : "下载"}</button>
+        )}
+        {currentProgress && <>
+          <progress max="100" value={currentProgress.status === "ready" ? 100 : percent} aria-label={`${model.name} 下载进度`} />
+          {currentProgress.message && <small>{currentProgress.message}</small>}
+        </>}
+      </div>
+    );
+  };
+
+  return (
+    <section className="local-model-manager">
+      <div className="local-model-manager__heading">
+        <div><strong>{family.heading}</strong></div>
+        <div className="local-model-actions">
+          <button className="button button--small" disabled={busy} onClick={scanBundles}><MagnifyingGlass size={15} />搜索本机</button>
+        </div>
+      </div>
+      <div className="settings-info-note"><Info size={18} /><p>{family.blurb}</p></div>
+      {hardware && (
+        <div className="device-info-line" role="note">
+          <Cpu size={14} weight="duotone" />
+          <span>检测到 {formatHardwareLine(hardware)}</span>
+        </div>
+      )}
+      {runtimeLabels.length > 0 && <div className="runtime-chips">{runtimeLabels.map((label) => <span key={label}>{label}</span>)}</div>}
+      {scan && (
+        <div className="local-model-list">
+          {engineBundles.length ? engineBundles.map((bundle) => (
+            <button key={bundle.path} disabled={busy} className={profile.options.modelPath === bundle.path ? "is-selected" : ""} onClick={() => void applyBundle(bundle, scan.runtimes)}>
+              <Cpu size={18} weight="duotone" />
+              <span><strong>{bundle.name}</strong><small>{bundle.format} · {formatBytes(bundle.sizeBytes)}</small></span>
+              {profile.options.modelPath === bundle.path && <CheckCircle size={17} weight="fill" />}
+            </button>
+          )) : <p className="local-model-empty">本机暂未找到 {family.heading} 模型；可从下方目录下载。</p>}
+        </div>
+      )}
+      <div className="local-model-library-heading">
+        <strong>推荐模型</strong>
+      </div>
+      {familyModels.filter((model) => model.id === family.recommendedId).map((model) => renderAsrCard(model, true))}
+      {familyModels.filter((model) => model.id !== family.recommendedId).length > 0 && (
+        <details className="local-model-catalog-details">
+          <summary>浏览全部 {family.heading} 模型</summary>
+          <div className="local-model-catalog-details__body">
+            {family.groups.map((group) => (
+              <div className="download-model-group" key={group}>
+                <small className="download-model-group__label">{MODEL_GROUP_LABELS[group]}</small>
+                {familyModels.filter((model) => model.group === group && model.id !== family.recommendedId).map((model) => renderAsrCard(model))}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+      {error && <div className="connection-status is-error">{error}</div>}
+      {success && <div className="connection-status is-success">{success}</div>}
+    </section>
+  );
 }

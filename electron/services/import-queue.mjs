@@ -39,18 +39,20 @@ import {
   transcribeWithPythonWhisper,
   transcribeWithWhisperCpp,
   transcribeWithFasterWhisper,
-  transcribeWithMlxWhisper
+  transcribeWithMlxWhisper,
+  transcribeWithQwen3Asr
 } from "./providers.mjs";
+import { decodeWithSherpaAsr, mapSenseVoiceLanguage } from "./asr-runtime.mjs";
 import { applyDiarization, diarizeWithSherpa } from "./diarization.mjs";
 import { transcribeWithAppleSpeech } from "./apple-speech.mjs";
-import { chunkPlanDefaults, importTranscriptionRoute, resolveJobProfile } from "./import-profiles.mjs";
+import { chunkPlanDefaults, importTranscriptionRoute, isLocalModelGatedRoute, resolveJobProfile } from "./import-profiles.mjs";
 import { managedFfmpegPath, resolveLocalModelProfile } from "./local-models.mjs";
 import { simplifyTranscriptResult } from "./chinese.mjs";
 import { groupTranscriptSegments, splitTimedTranscriptText } from "./transcript-grouping.mjs";
 import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "./chunk-planning.mjs";
 
 /** 与 main.mjs 的 transcribeLocally 同构：按 transport 分派本地 Whisper 转录（导入流程不注入术语表）。
- *  Apple Speech 与在线服务不在此列：路由见 import-profiles.mjs 的 importTranscriptionRoute。 */
+ *  Apple Speech / sherpa ASR / Qwen3-ASR 与在线服务不在此列：路由见 import-profiles.mjs 的 importTranscriptionRoute。 */
 function transcribeLocal(profile, audio, fileName, language, signal) {
   switch (profile.transport) {
     case "whisper-python":
@@ -65,12 +67,26 @@ function transcribeLocal(profile, audio, fileName, language, signal) {
 }
 
 /**
+ * sherpa ASR（SenseVoice / Parakeet）的导入块解码：切块本身就是 16k 单声道 WAV
+ * （本路由不加 Apple 滤镜），直接把块文件交给常驻 worker，不写临时文件。
+ * 无字级时间戳：返回整块文本，交给 normalizeImportChunkSegments 按块出段。
+ */
+async function transcribeWithSherpaAsrFile(profile, wavPath, language) {
+  if (!wavPath) throw new Error("转录块文件缺失，请重试。");
+  const result = await decodeWithSherpaAsr(profile, wavPath, {
+    language: profile.transport === "sense-voice" ? mapSenseVoiceLanguage(language) : "",
+    numThreads: 2
+  });
+  return { text: String(result?.text ?? ""), segments: [] };
+}
+
+/**
  * 转录一个导入切块。apple-speech 是本机引擎（切块已是 16k 单声道 WAV，helper 直接
  * 识别，绝不能落进 transcribeRemote——那会拿空 baseUrl 发 HTTP 请求报「网络错误」），
  * 且本机识别对同一音频存在偶发失败：静默重试一次再交给调用方分类（no_speech 跳过 /
  * 其他错误按原语义处理）。长块（30 秒）把 helper 超时放宽到 100 秒。
  */
-async function transcribeImportChunk(route, profile, audio, chunkIndex, language, signal) {
+async function transcribeImportChunk(route, profile, audio, chunkIndex, language, signal, audioFilePath) {
   const fileName = `chunk-${chunkIndex}.wav`;
   const attempts = route === "apple-speech" ? 2 : 1;
   let lastError;
@@ -91,6 +107,12 @@ async function transcribeImportChunk(route, profile, audio, chunkIndex, language
           timeoutMs: 100_000,
           allowServer: profile.options?.allowServer === true
         });
+      }
+      if (route === "sherpa") {
+        return await transcribeWithSherpaAsrFile(profile, audioFilePath, language);
+      }
+      if (route === "qwen3-asr") {
+        return await transcribeWithQwen3Asr(profile, audio, fileName, language, [], signal);
       }
       if (route === "whisper") {
         return await transcribeLocal(profile, audio, fileName, language, signal);
@@ -633,7 +655,7 @@ async function processJob(initial) {
       patchJob(job.id, { status: "waiting_for_model", stage: "transcribing", progress: 0.2 });
       return;
     }
-    if (importTranscriptionRoute(sttProfile.transport) === "whisper") {
+    if (isLocalModelGatedRoute(sttProfile.transport)) {
       const resolution = await resolveLocalProfile(sttProfile);
       if (isJobCancelled(job.id, controller)) return;
       sttProfile = resolution.profile;
@@ -723,7 +745,7 @@ async function processJob(initial) {
         const audio = await readFile(chunkPath);
         let rawResult;
         try {
-          rawResult = await transcribeImportChunk(transcriptionRoute, sttProfile, audio, chunkIndex, language, controller.signal);
+          rawResult = await transcribeImportChunk(transcriptionRoute, sttProfile, audio, chunkIndex, language, controller.signal, chunkPath);
         } catch (error) {
           // 静音块识别不到语音是正常输入，不是失败：按空结果继续，任务不中断。
           if (error?.appleSpeechCode === "no_speech") {

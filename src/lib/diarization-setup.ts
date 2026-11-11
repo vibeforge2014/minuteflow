@@ -17,7 +17,7 @@ export function findDiarizationFiles(profile: ModelProfile, models: Downloadable
   for (const slot of ["segmentation", "embedding"] as const) {
     if (profile.options[diarizationPathKey(slot)]) continue;
     const installed = models.find((model) => model.group === "diarization" && model.installed && model.localPath && diarizationSlotOf(model.id) === slot);
-    const found = installed?.localPath ? { path: installed.localPath, name: installed.fileName } : scan[slot][0];
+    const found = installed?.localPath ? { path: installed.localPath, name: installed.fileName ?? installed.id } : scan[slot][0];
     if (found) files[slot] = found;
   }
   return files;

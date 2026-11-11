@@ -30,7 +30,7 @@ import { Readable } from "node:stream";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { homedir, totalmem, cpus } from "node:os";
+import { homedir, tmpdir, totalmem, cpus } from "node:os";
 import { execFile } from "node:child_process";
 import {
   appendAudioChunk,
@@ -75,8 +75,10 @@ import {
   transcribeWithWhisperCpp,
   transcribeWithPythonWhisper,
   transcribeWithFasterWhisper,
-  transcribeWithMlxWhisper
+  transcribeWithMlxWhisper,
+  transcribeWithQwen3Asr
 } from "./services/providers.mjs";
+import { decodeWithSherpaAsr, mapSenseVoiceLanguage, shutdownLocalAsr } from "./services/asr-runtime.mjs";
 import { simplifyTranscriptResult } from "./services/chinese.mjs";
 import { audioContentType, parseByteRange } from "./services/media.mjs";
 import { normalizeRemoteTranscriptionAudio } from "./services/transcription-audio.mjs";
@@ -232,11 +234,11 @@ function localModelDirectory() {
 }
 
 /**
- * 根据 profile.transport 把本地转录分派到对应的 Whisper 运行时。
+ * 根据 profile.transport 把本地转录分派到对应的运行时。
  * @param {object} profile 已通过就绪检查的本地模型档案
  * @param {Buffer} audio 待转写的音频数据
  * @returns {Promise<{text: string, segments: Array<{startMs,endMs,text}>, duration?: number}>}
- * 副作用：可能拉起子进程（whisper.cpp / python）并写临时文件。
+ * 副作用：可能拉起子进程（whisper.cpp / python / sherpa worker）并写临时文件。
  */
 function transcribeLocally(profile, audio, fileName, language, glossary) {
   switch (profile.transport) {
@@ -246,13 +248,39 @@ function transcribeLocally(profile, audio, fileName, language, glossary) {
       return transcribeWithFasterWhisper(profile, audio, fileName, language, glossary);
     case "mlx-whisper":
       return transcribeWithMlxWhisper(profile, audio, fileName, language, glossary);
+    case "qwen3-asr":
+      return transcribeWithQwen3Asr(profile, audio, fileName, language, glossary);
+    case "sense-voice":
+    case "parakeet-tdt":
+      return transcribeWithSherpaAsr(profile, audio, language);
     default:
       return transcribeWithWhisperCpp(profile, audio, fileName, language, glossary);
   }
 }
 
+/**
+ * SenseVoice / Parakeet 的直播块解码：8 秒块已是 16k 单声道 WAV（录音器归一化），
+ * 落临时文件后交给常驻 sherpa worker；无字级时间戳按整块出段（与导入路径一致）。
+ */
+async function transcribeWithSherpaAsr(profile, audio, language) {
+  const tempPath = path.join(tmpdir(), `${randomUUID()}-live-asr.wav`);
+  await writeFile(tempPath, audio);
+  try {
+    const result = await decodeWithSherpaAsr(profile, tempPath, {
+      language: profile.transport === "sense-voice" ? mapSenseVoiceLanguage(language) : "",
+      numThreads: 2
+    });
+    return { text: String(result?.text ?? ""), segments: [] };
+  } finally {
+    await unlink(tempPath).catch(() => {});
+  }
+}
+
 /** 视为"在本机运行"的转录 transport 集合；命中时需先过 resolveLocalTranscriptionProfile 就绪检查。 */
-const LOCAL_TRANSCRIPTION_TRANSPORTS = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"];
+const LOCAL_TRANSCRIPTION_TRANSPORTS = [
+  "whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper",
+  "sense-voice", "parakeet-tdt", "qwen3-asr"
+];
 
 /**
  * 转录前解析并补全本地模型配置：自动发现缺失的模型文件 / 可执行文件 / FFmpeg 路径，
@@ -1867,6 +1895,7 @@ app.on("before-quit", (event) => {
     }
     recordingFiles.clear();
     await flushSecrets().catch(() => {});
+    shutdownLocalAsr();
     app.exit();
   })();
 });

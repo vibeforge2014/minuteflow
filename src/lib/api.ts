@@ -8,6 +8,7 @@
  * 主要导出：api（当前生效的 MeetingAPI 实例）、isElectronRuntime（是否 Electron 环境）。
  */
 import { DIARIZATION_SETUP_MODELS } from "./diarization-setup";
+import { LOCAL_ASR_SETUP_MODELS } from "./local-asr-setup";
 import { demoMeetings } from "../data/demo";
 import type { CreateMeetingInput, DownloadableModel, ImportCandidate, ImportJob, Meeting, MeetingAPI, MeetingPreferences, MeetingSummary, ModelProfile, VisualSummary } from "../types";
 import { simplifyChinese, simplifySummary } from "./chinese";
@@ -68,7 +69,13 @@ const browserWhisperCatalog: DownloadableModel[] = [
   installed: false
 }));
 
-const browserModelCatalog: DownloadableModel[] = [...browserWhisperCatalog, ...DIARIZATION_SETUP_MODELS];
+const browserModelCatalog: DownloadableModel[] = [
+  ...browserWhisperCatalog,
+  // ASR bundle 目录与 Electron 共享同一份 JSON（shared/local-asr-models.json），
+  // 预览只展示：下载/扫描/启用等本机动作由 Electron 主进程执行。
+  ...LOCAL_ASR_SETUP_MODELS,
+  ...DIARIZATION_SETUP_MODELS
+];
 
 // 深拷贝：把演示数据克隆后再返回，避免调用方修改直接污染模块内的 demoMeetings 常量。
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;

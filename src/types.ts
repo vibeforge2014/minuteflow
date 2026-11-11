@@ -185,8 +185,8 @@ export interface ModelProfile {
   name: string;
   /** 用途：llm=纪要总结，stt=语音转录，diarization=说话人分离。 */
   kind: "llm" | "stt" | "diarization";
-  /** 调用通道：OpenAI 兼容 chat/audio、Ollama、离线基础纪要、whisper.cpp、Python Whisper、faster-whisper、MLX、sherpa-onnx、Apple Speech（macOS 内置）。 */
-  transport: "openai-chat" | "openai-audio" | "ollama" | "local-summary" | "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper" | "sherpa-onnx" | "apple-speech";
+  /** 调用通道：OpenAI 兼容 chat/audio、Ollama、离线基础纪要、whisper.cpp、Python Whisper、faster-whisper、MLX、SenseVoice、Parakeet、Qwen3-ASR、sherpa-onnx、Apple Speech（macOS 内置）。 */
+  transport: "openai-chat" | "openai-audio" | "ollama" | "local-summary" | "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper" | "sense-voice" | "parakeet-tdt" | "qwen3-asr" | "sherpa-onnx" | "apple-speech";
   /** 服务基础地址。 */
   baseUrl: string;
   /** 模型名/本地模型文件名。 */
@@ -490,13 +490,14 @@ export interface RecordingStartResult {
 }
 
 /**
- * 本地模型文件：磁盘扫描或手动选择发现的一个 Whisper 模型；engine 指明应由哪个运行时加载。
+ * 本地模型：磁盘扫描或手动选择发现的一个模型（单文件 Whisper 或目录式 ASR bundle）；
+ * engine 指明应由哪个运行时加载。
  */
 export interface LocalModelFile {
   path: string;
   name: string;
   format: string;
-  engine: "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper";
+  engine: "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper" | "sense-voice" | "parakeet-tdt" | "qwen3-asr";
   sizeBytes: number;
 }
 
@@ -510,6 +511,10 @@ export interface LocalRuntimeDiscovery {
   ffmpeg?: boolean;
   fasterWhisper?: boolean;
   mlxWhisper?: boolean;
+  /** 内置 sherpa-onnx 运行时（SenseVoice / Parakeet 的执行依赖）能否加载。 */
+  onnxAsr?: boolean;
+  /** Python torch 的计算设备：cuda / mps / cpu；torch 不可用为 undefined。 */
+  pythonTorchDevice?: "cuda" | "mps" | "cpu";
 }
 
 /**
@@ -520,6 +525,14 @@ export interface LocalModelScanResult {
   runtimes: LocalRuntimeDiscovery;
 }
 
+/** 多文件模型 bundle 中的一个文件（远端文件名可与本地名不同）。 */
+export interface DownloadableModelFile {
+  remoteFileName: string;
+  fileName: string;
+  sizeBytes: number;
+  digest: string;
+}
+
 /**
  * 可下载模型条目：应用内模型目录中的一项（含分组、来源、许可证、体积与是否已安装）。
  */
@@ -527,19 +540,24 @@ export interface DownloadableModel {
   id: string;
   name: string;
   description: string;
-  engine: "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper" | "diarization";
+  engine: "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper" | "sense-voice" | "parakeet-tdt" | "qwen3-asr" | "diarization";
   format: string;
-  /** 展示分组：多语言推荐 / 轻量量化 / 英文专用 / 说话人分离（仅声纹设置页使用）。 */
-  group: "multilingual" | "quantized" | "english" | "diarization";
+  /** 展示分组：多语言推荐 / 轻量量化 / 英文专用 / SenseVoice / Parakeet / Qwen3-ASR / 说话人分离。 */
+  group: "multilingual" | "quantized" | "english" | "sense-voice" | "parakeet" | "qwen3" | "diarization";
+  /** 模型覆盖的语言（UI 展示）。 */
+  languages?: string;
   sizeBytes: number;
-  fileName: string;
-  source: string;
+  /** 单文件模型（Whisper/diarization）的本地文件名；bundle 模型省略，用 files。 */
+  fileName?: string;
+  source?: string;
   license: string;
   installed: boolean;
   localPath?: string;
   /** 下载完整性校验算法（当前为 sha256）与官方摘要。 */
   digestAlgorithm?: "sha256" | "sha1";
   digest?: string;
+  /** 多文件 bundle（SenseVoice / Parakeet / Qwen3-ASR）：逐文件下载并校验。 */
+  files?: DownloadableModelFile[];
 }
 
 /** 声纹/分离模型本机扫描结果：两个槽位各自命中的文件列表。 */

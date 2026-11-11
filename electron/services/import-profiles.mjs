@@ -8,6 +8,9 @@
 /** 本机 Whisper 四种运行时（whisper.cpp / Python / CT2 / MLX）需要先解析模型文件。 */
 const WHISPER_RUNTIMES = ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"];
 
+/** 本机 sherpa ASR（SenseVoice / Parakeet TDT）：常驻 worker 执行，同样需要解析 bundle。 */
+const SHERPA_ASR_TRANSPORTS = ["sense-voice", "parakeet-tdt"];
+
 /**
  * 通用档案解析：任务显式选择 > 默认档 > 第一条可用档案。
  * 主进程各任务（说话人分离/AI 问答兜底/导入队列）共用这一优先级。
@@ -43,11 +46,19 @@ export function resolveJobProfile(profiles, kind, profileId) {
  * 导入转录块走哪条执行路径。
  * apple-speech 是本机引擎：掉进 remote 路径会拿空 baseUrl 发 HTTP 请求，
  * 表现为「选了 Apple 语音识别却报网络错误」——这里把路由钉死，防止回归。
- * @returns {"apple-speech"|"whisper"|"remote"}
+ * SenseVoice / Parakeet 走 sherpa worker；Qwen3-ASR 走 Python 运行时。
+ * @returns {"apple-speech"|"whisper"|"sherpa"|"qwen3-asr"|"remote"}
  */
 export function importTranscriptionRoute(transport) {
   if (transport === "apple-speech") return "apple-speech";
+  if (SHERPA_ASR_TRANSPORTS.includes(transport)) return "sherpa";
+  if (transport === "qwen3-asr") return "qwen3-asr";
   return WHISPER_RUNTIMES.includes(transport) ? "whisper" : "remote";
+}
+
+/** 需要在转录前跑 resolveLocalModelProfile 就绪检查的本机路由（apple-speech 除外）。 */
+export function isLocalModelGatedRoute(transport) {
+  return ["whisper", "sherpa", "qwen3-asr"].includes(importTranscriptionRoute(transport));
 }
 
 /**

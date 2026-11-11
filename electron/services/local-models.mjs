@@ -1,21 +1,26 @@
 /**
- * 本地 Whisper 模型的发现、下载与运行时装配（Electron 主进程 / 服务层）。
- * 实现"零路径配置"体验：自动扫描常见目录发现 .pt/GGML/GGUF 及目录式模型，
- * 提供带摘要校验的应用内下载，并探测应用托管的 whisper 运行时、Python 环境与 FFmpeg。
+ * 本地转写模型的发现、下载与运行时装配（Electron 主进程 / 服务层）。
+ * 实现"零路径配置"体验：自动扫描常见目录发现 .pt/GGML/GGUF 及目录式模型
+ * （faster-whisper / MLX / SenseVoice / Parakeet / Qwen3-ASR bundle），
+ * 提供带摘要校验的应用内下载（单文件与多文件 bundle 两种形态），并探测应用托管的
+ * whisper 运行时、Python 环境、torch 设备与 FFmpeg。
  * 下载源可在偏好中配置（官方 / hf-mirror.com 镜像 / 自定义 HF 兼容源或 {fileName} 模板），
  * 单源失败自动回退其余预设源；另支持自定义直链下载（无官方摘要，明确不校验）。
  * 主要导出：managedFfmpegPath、ensureManagedLocalRuntime、looksLikeWhisperModel、
  * discoverLocalModels、resolveLocalModelProfile、listDownloadableModels、downloadModel、
- * downloadFromUrl、buildModelDownloadUrl、MODEL_DOWNLOAD_SOURCES、describeLocalModel。
+ * downloadFromUrl、buildModelDownloadUrl、MODEL_DOWNLOAD_SOURCES、describeLocalModel、
+ * localAsrModelDirectory。
  * 被 main.mjs（models:scan-local / models:choose-local / models:catalog /
  * models:download / models:download-url）与 import-queue.mjs 调用。
  * 副作用：网络下载、子进程探测、写模型文件。
  */
 import diarizationModels from "../../shared/diarization-models.json" with { type: "json" };
+import localAsrModels from "../../shared/local-asr-models.json" with { type: "json" };
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
+import { access, mkdir, open, readFile, readdir, rename, rm, stat, unlink } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { loadWhisperModule } from "@fugood/whisper.node";
@@ -26,6 +31,22 @@ const supportedExtensions = new Map([
   [".bin", { format: "GGML / GGUF", engine: "whisper-cpp" }],
   [".gguf", { format: "GGUF", engine: "whisper-cpp" }]
 ]);
+
+/** 下载前需要托管 whisper 运行时的引擎；其余引擎（ONNX/PyTorch bundle）不依赖 whisper.node。 */
+const WHISPER_CATALOG_ENGINES = new Set(["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"]);
+
+/**
+ * SenseVoice / Parakeet / Qwen3-ASR 等 bundle 模型的托管目录（userData/models/asr/<catalogId>/）。
+ * 与 Whisper 单文件目录分开，避免多文件 bundle 与单文件模型互相污染扫描结果。
+ */
+export function localAsrModelDirectory(modelDirectory) {
+  return path.join(path.dirname(modelDirectory), "asr");
+}
+
+/** 目录项是否是多文件 bundle（shared/local-asr-models.json 的 asr 模型）。 */
+function isBundleModel(item) {
+  return Array.isArray(item?.files) && item.files.length > 0;
+}
 
 /**
  * 下载源预设：Hugging Face 官方与 hf-mirror.com 国内镜像（路径完全兼容，
@@ -276,6 +297,7 @@ const catalog = [
     source: "ggerganov/whisper.cpp",
     license: "MIT"
   },
+  ...localAsrModels,
   ...diarizationModels
 ];
 
@@ -333,7 +355,9 @@ async function discoverLocalEnvironment() {
       python: Boolean(python),
       ffmpeg: Boolean(bundledFfmpeg),
       fasterWhisper: await probePythonPackage(python, "faster_whisper"),
-      mlxWhisper: process.platform === "darwin" ? await probePythonPackage(python, "mlx_whisper") : false
+      mlxWhisper: process.platform === "darwin" ? await probePythonPackage(python, "mlx_whisper") : false,
+      onnxAsr: await probeOnnxAsrRuntime(),
+      pythonTorchDevice: await probePythonTorchDevice(python)
     }
   };
 }
@@ -412,6 +436,62 @@ async function describeModelDirectory(dirPath) {
   return null;
 }
 
+/**
+ * 识别目录式 ASR bundle（SenseVoice / Parakeet / Qwen3-ASR），返回目录型描述符：
+ *   - tokens.txt + model(.int8)?.onnx                → sense-voice（SenseVoice 单模型）
+ *   - tokens.txt + encoder/decoder/joiner *.onnx     → parakeet-tdt（NeMo TDT 转置器三件套）
+ *   - config.json 声明 qwen3_asr / Qwen3ASR 架构      → qwen3-asr（PyTorch bundle）
+ * 只认各族的 bundle 特征文件，普通 HuggingFace 模型目录不会被误判；sizeBytes 为目录内
+ * 全部文件之和（目录式模型按内容体量给出，供 UI 展示与推荐估算）。
+ */
+async function describeAsrBundleDirectory(dirPath) {
+  let entries;
+  try {
+    entries = await readdir(dirPath, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const fileNames = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
+  const names = new Set(fileNames);
+  if (!names.has("tokens.txt") && !names.has("config.json")) return null;
+  const onnxFiles = fileNames.filter((name) => name.toLowerCase().endsWith(".onnx"));
+  const engine = (() => {
+    if (names.has("tokens.txt") && (names.has("model.int8.onnx") || names.has("model.onnx"))) return "sense-voice";
+    if (names.has("tokens.txt")
+      && onnxFiles.some((name) => /^encoder\b/i.test(name))
+      && onnxFiles.some((name) => /^decoder\b/i.test(name))
+      && onnxFiles.some((name) => /^joiner\b/i.test(name))) return "parakeet-tdt";
+    return null;
+  })();
+  if (!engine && names.has("config.json")) {
+    try {
+      const config = JSON.parse(await readFile(path.join(dirPath, "config.json"), "utf8"));
+      const isQwen3Asr = config?.model_type === "qwen3_asr"
+        || (Array.isArray(config?.architectures) && config.architectures.some((item) => /Qwen3ASR/i.test(String(item))));
+      if (isQwen3Asr) return buildAsrBundleDescriptor(dirPath, "qwen3-asr", "PyTorch / Safetensors");
+    } catch {
+      return null;
+    }
+  }
+  if (!engine) return null;
+  return buildAsrBundleDescriptor(dirPath, engine, "ONNX");
+}
+
+/** 目录型 ASR 描述符：统计目录内文件总大小（有界， bundle 至多十来个文件）。 */
+async function buildAsrBundleDescriptor(dirPath, engine, format) {
+  let sizeBytes = 0;
+  try {
+    const entries = await readdir(dirPath, { withFileTypes: true });
+    for (const entry of entries.filter((item) => item.isFile())) {
+      const fileStat = await stat(path.join(dirPath, entry.name)).catch(() => null);
+      sizeBytes += fileStat?.size ?? 0;
+    }
+  } catch {
+    return null;
+  }
+  return { path: dirPath, name: path.basename(dirPath), format, engine, sizeBytes };
+}
+
 /** 用 import 探测 Python 包是否已安装（超时即视为未安装），失败/超时都返回 false。 */
 function probePythonPackage(pythonPath, pkg, timeoutMs = 8_000) {
   return new Promise((resolve) => {
@@ -426,6 +506,52 @@ function probePythonPackage(pythonPath, pkg, timeoutMs = 8_000) {
     child.on("error", () => { clearTimeout(timer); finish(false); });
     child.on("close", (code) => { clearTimeout(timer); finish(code === 0); });
   });
+}
+
+/** sherpa-onnx-node 运行时探测（进程内缓存）：SenseVoice / Parakeet 的执行依赖。 */
+let onnxAsrRuntimeProbe = null;
+function probeOnnxAsrRuntime() {
+  if (!onnxAsrRuntimeProbe) {
+    onnxAsrRuntimeProbe = (async () => {
+      try {
+        const require = createRequire(import.meta.url);
+        return Boolean(require("sherpa-onnx-node")?.OfflineRecognizer);
+      } catch {
+        return false;
+      }
+    })();
+  }
+  return onnxAsrRuntimeProbe;
+}
+
+/**
+ * torch 计算设备探测（进程内缓存）：cuda / mps / cpu；torch 不可用返回 undefined。
+ * 仅 Qwen3-ASR 的就绪性判定使用——它只有 PyTorch 运行时，CPU 推理不可接受。
+ */
+let torchDeviceProbe = null;
+function probePythonTorchDevice(pythonPath) {
+  if (!torchDeviceProbe) {
+    torchDeviceProbe = new Promise((resolve) => {
+      if (!pythonPath) return resolve(undefined);
+      let out = "";
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(/^(cuda|mps|cpu)$/m.exec(out)?.[0]);
+      };
+      const child = spawn(pythonPath, ["-c", "import torch; print('cuda' if torch.cuda.is_available() else ('mps' if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available() else 'cpu'))"], {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+      const timer = setTimeout(() => { child.kill("SIGKILL"); finish(); }, 15_000);
+      child.stdout.on("data", (data) => { out += data.toString(); });
+      child.on("error", finish);
+      child.on("close", finish);
+    });
+  }
+  return torchDeviceProbe;
 }
 
 /** 先按大小（≥30MB）与文件名关键词粗筛，过滤同名但非 Whisper 的 .pt/.bin/.gguf 文件。 */
@@ -460,6 +586,11 @@ async function scanDirectory(root, output, state, depth = 0) {
       if (dirDescriptor) {
         output.push(dirDescriptor);
         continue; // Present a model directory as a single model; do not scan inside.
+      }
+      const asrDescriptor = await describeAsrBundleDirectory(target);
+      if (asrDescriptor) {
+        output.push(asrDescriptor);
+        continue;
       }
       if (!entry.name.startsWith(".") || [".cache"].includes(entry.name)) {
         await scanDirectory(target, output, state, depth + 1);
@@ -508,11 +639,11 @@ async function findExecutable(names) {
   return undefined;
 }
 
-/** 扫描全部根目录（去重）收集模型，按中文名排序并按路径去重。 */
+/** 扫描全部根目录（去重）收集模型，按中文名排序并按路径去重。ASR bundle 目录始终参与扫描。 */
 async function scanLocalModels({ roots, modelDirectory }) {
   const models = [];
   const state = { visited: 0 };
-  for (const root of Array.from(new Set([...roots, modelDirectory]))) {
+  for (const root of Array.from(new Set([...roots, modelDirectory, localAsrModelDirectory(modelDirectory)]))) {
     await scanDirectory(root, models, state);
   }
   return Array.from(new Map(models.map((item) => [item.path, item])).values())
@@ -548,7 +679,9 @@ export async function resolveLocalModelProfile(profile, { roots, modelDirectory 
   ]);
   const discovery = { models, runtimes: environment.runtimes };
   const matchingModel = discovery.models.find((model) => model.engine === profile.transport);
-  const isPythonBased = ["whisper-python", "faster-whisper", "mlx-whisper"].includes(profile.transport);
+  const isPythonBased = ["whisper-python", "faster-whisper", "mlx-whisper", "qwen3-asr"].includes(profile.transport);
+  const isSherpaAsr = profile.transport === "sense-voice" || profile.transport === "parakeet-tdt";
+  const isQwen3Asr = profile.transport === "qwen3-asr";
   const options = {
     ...profile.options,
     ...(!profile.options?.modelPath && matchingModel ? { modelPath: matchingModel.path } : {}),
@@ -563,10 +696,16 @@ export async function resolveLocalModelProfile(profile, { roots, modelDirectory 
   const modelReady = Boolean(modelStat && (modelStat.isDirectory() || modelStat.size > 0));
   const runtimeReady = profile.transport === "whisper-cpp"
     ? Boolean(environment.runtimes.managedWhisper || options.executablePath)
-    : Boolean(options.pythonExecutablePath || options.executablePath);
+    : isSherpaAsr
+      ? Boolean(environment.runtimes.onnxAsr)
+      : isQwen3Asr
+        ? Boolean(options.pythonExecutablePath) && (environment.runtimes.pythonTorchDevice === "cuda" || environment.runtimes.pythonTorchDevice === "mps")
+        : Boolean(options.pythonExecutablePath || options.executablePath);
   const missing = [
     !modelReady && "模型文件",
-    !runtimeReady && "本地转写组件",
+    !runtimeReady && (isQwen3Asr && environment.runtimes.pythonTorchDevice === "cpu"
+      ? "GPU（Qwen3-ASR 需要 NVIDIA GPU 或 Apple Silicon，CPU 推理不可用）"
+      : "本地转写组件"),
     !options.ffmpegPath && "音频处理组件"
   ].filter(Boolean);
   return {
@@ -625,7 +764,19 @@ export async function scanDiarizationModels({ roots, modelDirectory }) {
 
 /** 列出可下载模型目录并标注每项是否已安装在本机（models:catalog 通道调用）。 */
 export async function listDownloadableModels(modelDirectory) {
+  const asrDirectory = localAsrModelDirectory(modelDirectory);
   return Promise.all(catalog.map(async ({ repo: _repo, ...item }) => {
+    // 多文件 bundle（SenseVoice / Parakeet / Qwen3-ASR）以目录为安装单位：
+    // 全部文件就位才算已安装，localPath 指向 bundle 目录。
+    if (isBundleModel(item)) {
+      const bundleDirectory = path.join(asrDirectory, item.id);
+      const filesPresent = await Promise.all(item.files.map(async (file) => {
+        const fileStat = await stat(path.join(bundleDirectory, file.fileName)).catch(() => null);
+        return Boolean(fileStat?.size);
+      }));
+      const installed = filesPresent.length > 0 && filesPresent.every(Boolean);
+      return { ...item, installed, localPath: installed ? bundleDirectory : undefined };
+    }
     const localPath = path.join(modelDirectory, item.fileName);
     const fileStat = await stat(localPath).catch(() => null);
     return {
@@ -730,10 +881,11 @@ export async function downloadModel(modelId, modelDirectory, onProgress = () => 
 async function doDownloadModel(modelId, modelDirectory, onProgress = () => {}, sourceOptions = {}) {
   const item = catalog.find((candidate) => candidate.id === modelId);
   if (!item) throw new Error("未找到可下载的模型。");
+  if (isBundleModel(item)) return doDownloadBundleModel(item, modelDirectory, onProgress, sourceOptions);
   onProgress({ modelId, downloadedBytes: 0, totalBytes: item.sizeBytes, status: "preparing", message: "正在准备本地转写组件…" });
-  // whisper 模型下载前确保托管转写运行时就绪；diarization 模型的运行时是内置
-  // sherpa-onnx 组件，不依赖 whisper.node/FFmpeg 探测。
-  if (item.engine !== "diarization") await ensureManagedLocalRuntime();
+  // whisper 模型下载前确保托管转写运行时就绪；diarization 与 ASR bundle 的运行时
+  // 是内置 sherpa-onnx / 用户 Python 环境，不依赖 whisper.node/FFmpeg 探测。
+  if (WHISPER_CATALOG_ENGINES.has(item.engine)) await ensureManagedLocalRuntime();
   await mkdir(modelDirectory, { recursive: true });
   const attempts = resolveSourceAttempts(sourceOptions);
   const failures = [];
@@ -765,6 +917,63 @@ async function doDownloadModel(modelId, modelDirectory, onProgress = () => {}, s
           : null);
     } catch (error) {
       failures.push(`${attempt.label}：${describeDownloadError(error)}`);
+    }
+  }
+  throw new Error(`模型下载失败，已尝试 ${failures.length} 个下载源。${failures.join("；")}`);
+}
+
+/**
+ * 多文件 bundle（SenseVoice / Parakeet / Qwen3-ASR）的下载流程：
+ * 整个 bundle 按"选定源 → 官方 → 镜像"逐源尝试，单源内逐文件流式下载并逐文件
+ * 校验 sha256；任一文件失败即清空半截目录后换下一个源（缺失文件会让扫描与
+ * 就绪性判定失败，不能留下残缺 bundle）。进度按 bundle 总字节累计上报，
+ * modelId 与单文件目录模型共用同一条 models:download-progress 事件流。
+ * @returns {Promise<object>} 下载完成后的目录型模型描述符
+ */
+async function doDownloadBundleModel(item, modelDirectory, onProgress = () => {}, sourceOptions = {}) {
+  const bundleDirectory = path.join(localAsrModelDirectory(modelDirectory), item.id);
+  onProgress({ modelId: item.id, downloadedBytes: 0, totalBytes: item.sizeBytes, status: "preparing", message: "正在准备下载目录…" });
+  const attempts = resolveSourceAttempts(sourceOptions);
+  const failures = [];
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attempt = attempts[index];
+    let completedBytes = 0;
+    try {
+      await mkdir(bundleDirectory, { recursive: true });
+      for (let fileIndex = 0; fileIndex < item.files.length; fileIndex += 1) {
+        const file = item.files[fileIndex];
+        const url = buildModelDownloadUrl({ repo: item.repo, remoteFileName: file.remoteFileName }, attempt.base);
+        if (!url) throw new Error("源地址无效");
+        onProgress({
+          modelId: item.id,
+          downloadedBytes: completedBytes,
+          totalBytes: item.sizeBytes,
+          status: "preparing",
+          message: `正在下载 ${file.remoteFileName}（${fileIndex + 1}/${item.files.length}）…`
+        });
+        const fileBytes = await downloadToFile(url, path.join(bundleDirectory, file.fileName), {
+          modelId: item.id,
+          totalBytes: file.sizeBytes,
+          digestAlgorithm: item.digestAlgorithm,
+          digest: file.digest,
+          downloadingMessage: `正在从${attempt.label}下载 ${file.remoteFileName}…`,
+          // 单文件进度平移到 bundle 总字节区间上，UI 只看到一条连续进度。
+          onProgress: (progress) => onProgress({
+            modelId: item.id,
+            downloadedBytes: completedBytes + Math.min(progress.downloadedBytes, file.sizeBytes),
+            totalBytes: item.sizeBytes,
+            status: progress.status,
+            message: progress.message
+          })
+        });
+        completedBytes += fileBytes;
+      }
+      onProgress({ modelId: item.id, downloadedBytes: item.sizeBytes, totalBytes: item.sizeBytes, status: "ready", message: "模型已就绪。" });
+      return { path: bundleDirectory, name: item.id, format: item.format, engine: item.engine, sizeBytes: item.sizeBytes };
+    } catch (error) {
+      failures.push(`${attempt.label}：${describeDownloadError(error)}`);
+      // 半截 bundle 整体清除，防止扫描把它当成"已安装"。
+      await rm(bundleDirectory, { recursive: true, force: true }).catch(() => {});
     }
   }
   throw new Error(`模型下载失败，已尝试 ${failures.length} 个下载源。${failures.join("；")}`);

@@ -8,7 +8,7 @@
  * 2) 任务显式钉住的档案（含未启用）优先于全局启用项。
  */
 import { describe, expect, it } from "vitest";
-import { chunkPlanDefaults, importTranscriptionRoute, resolveJobProfile } from "../electron/services/import-profiles.mjs";
+import { chunkPlanDefaults, importTranscriptionRoute, isLocalModelGatedRoute, resolveJobProfile } from "../electron/services/import-profiles.mjs";
 
 const appleSpeech = { id: "stt-apple", kind: "stt", transport: "apple-speech", enabled: true };
 const newApiWhisper = { id: "stt-newapi", kind: "stt", transport: "openai", enabled: false };
@@ -51,8 +51,21 @@ describe("importTranscriptionRoute", () => {
     }
   });
 
-  it("OpenAI 兼容等在线传输走 remote", () => {
+  it("SenseVoice / Parakeet 走 sherpa 路径，Qwen3-ASR 走 Python 路径（防误入 remote）", () => {
+    for (const transport of ["sense-voice", "parakeet-tdt"]) {
+      expect(importTranscriptionRoute(transport)).toBe("sherpa");
+    }
+    expect(importTranscriptionRoute("qwen3-asr")).toBe("qwen3-asr");
+    // 未收录的 transport 必须落到 remote，而不是悄悄默认成某个本机引擎。
     expect(importTranscriptionRoute("openai")).toBe("remote");
+  });
+
+  it("本机就绪检查覆盖 whisper / sherpa / qwen3 三条路由（apple-speech 除外）", () => {
+    for (const transport of ["whisper-cpp", "sense-voice", "parakeet-tdt", "qwen3-asr"]) {
+      expect(isLocalModelGatedRoute(transport)).toBe(true);
+    }
+    expect(isLocalModelGatedRoute("apple-speech")).toBe(false);
+    expect(isLocalModelGatedRoute("openai-audio")).toBe(false);
   });
 });
 
