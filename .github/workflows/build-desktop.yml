@@ -51,6 +51,33 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # 正式发布（MINUTEFLOW_RELEASE_BUILD=1）时，把签名证书与公证密钥注入 runner；
+      # 非发布构建跳过，绝不把 ad-hoc 构建误当成可分发产物。
+      - name: Import Developer ID certificate
+        if: ${{ env.MINUTEFLOW_RELEASE_BUILD == '1' }}
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p "$CERT_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$CERT_PASSWORD" "$KEYCHAIN"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/apple-cert.p12"
+          security import "$RUNNER_TEMP/apple-cert.p12" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          # 允许 codesign 非交互式访问私钥（否则签名卡在钥匙串授权弹窗）。
+          security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s -k "$CERT_PASSWORD" "$KEYCHAIN"
+          echo "APPLE_IDENTITY=Developer ID Application: Zhen Qian (LPW4Z3BN69)" >> "$GITHUB_ENV"
+      - name: Materialize App Store Connect API key
+        if: ${{ env.MINUTEFLOW_RELEASE_BUILD == '1' }}
+        env:
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          echo "$API_KEY_P8" > "$RUNNER_TEMP/AuthKey_496SRK4K68.p8"
+          echo "APPLE_NOTARY_KEY_PATH=$RUNNER_TEMP/AuthKey_496SRK4K68.p8" >> "$GITHUB_ENV"
       - run: npm run make
       - uses: actions/upload-artifact@v4
         with:

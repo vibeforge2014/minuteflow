@@ -22,11 +22,16 @@ const siteOnlyAssets = [
 const requireSignedRelease = process.env.MINUTEFLOW_RELEASE_BUILD === "1";
 
 const isMac = process.platform === "darwin";
+// 签名身份：默认不强制。CI 导入 Developer ID 证书后通过 APPLE_IDENTITY 传入证书 CN；
+// 本地验证时同样用该变量指向本机钥匙串里的证书。未设置则退化为 ad-hoc 开发构建。
 const appleIdentity = process.env.APPLE_IDENTITY;
 const appleNotaryProfile = process.env.APPLE_NOTARY_PROFILE;
-const appleApiKeyId = process.env.APPLE_API_KEY_ID;
-const appleApiIssuer = process.env.APPLE_API_ISSUER;
+// issuer / key id 属于非机密标识符；缺省指向本项目的 App Store Connect API 密钥，
+// 仅需再提供 .p8 文件路径（APPLE_NOTARY_KEY_PATH）即可公证。
+const appleApiKeyId = process.env.APPLE_API_KEY_ID || "496SRK4K68";
+const appleApiIssuer = process.env.APPLE_API_ISSUER || "a307ff7b-774c-4ef6-98c4-8031876fa556";
 // 直连 App Store Connect API 的 .p8 路径（keychain profile 缺失时的公证凭据来源）。
+// 这是指向密钥文件的路径，而非密钥内容；不设置默认值，避免把机器专属路径写进仓库。
 const appleNotaryKeyPath = process.env.APPLE_NOTARY_KEY_PATH;
 
 // DMG 公证参数：优先 keychain profile，其次 .p8 直连三元组（与 notarytool CLI 对应）。
@@ -38,14 +43,21 @@ function notarytoolCredentialArgs() {
   return undefined;
 }
 
+// 仅当明确进入发布/公证流程时才启用公证：MINUTEFLOW_RELEASE_BUILD=1（CI 正式发布）
+// 或本地显式 MINUTEFLOW_NOTARIZE=1。这样本地常规 `npm run make` 只做 Developer ID
+// 签名、不上传公证，既快又能验证签名链路；公证只在发布或显式开关时触发。
+const shouldNotarize = requireSignedRelease || process.env.MINUTEFLOW_NOTARIZE === "1";
+
 // 公证凭据：优先 keychain profile，其次 App Store Connect API 密钥三元组。
 // @electron/notarize 的 notarytool 适配层把 appleApiKey 原样传给 CLI 的 --key，
 // 该参数接收 .p8 的「文件路径」（不是内容，也不是 key id）。
-const notarizeOptions = appleNotaryProfile
-  ? { keychainProfile: appleNotaryProfile }
-  : appleNotaryKeyPath && appleApiKeyId && appleApiIssuer
-    ? { appleApiKey: appleNotaryKeyPath, appleApiKeyId, appleApiIssuer }
-    : undefined;
+const notarizeOptions = shouldNotarize
+  ? (appleNotaryProfile
+    ? { keychainProfile: appleNotaryProfile }
+    : appleNotaryKeyPath && appleApiKeyId && appleApiIssuer
+      ? { appleApiKey: appleNotaryKeyPath, appleApiKeyId, appleApiIssuer }
+      : undefined)
+  : undefined;
 
 if (requireSignedRelease && isMac) {
   const missing = [];
@@ -201,11 +213,12 @@ export default {
     },
     postMake: async (_forgeConfig, makeResults) => {
       if (!isMac) return makeResults;
+      // 仅当显式进入公证流程（正式发布或本地 MINUTEFLOW_NOTARIZE=1）才对每个
+      // DMG 提交公证并装订；常规本地构建直接返回，不联网、不等待。
+      if (!shouldNotarize) return makeResults;
       const credentialArgs = notarytoolCredentialArgs();
       if (!credentialArgs) {
-        if (requireSignedRelease) throw new Error("正式发布构建缺少 DMG 公证凭据。");
-        console.warn("[forge] 缺少公证凭据，本次 DMG 未公证，不可发布。");
-        return makeResults;
+        throw new Error("正式发布构建缺少 DMG 公证凭据（APPLE_NOTARY_PROFILE 或 APPLE_NOTARY_KEY_PATH/APPLE_API_KEY_ID/APPLE_API_ISSUER）。");
       }
       let notarized = 0;
       for (const result of makeResults) {
