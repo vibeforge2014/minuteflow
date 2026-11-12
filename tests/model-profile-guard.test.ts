@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertEndpointOverrides,
   assertSafeHttpUrl,
+  assertSafeLocalExecutablePath,
   resolveProfileCredential
 } from "../electron/services/model-profile-guard.mjs";
 
@@ -64,5 +65,22 @@ describe("密钥归属绑定", () => {
     )).toThrow(/重新输入/);
     expect(resolveProfileCredential({ transport: "whisper-cpp", secretId: "secret-1" }, "", savedProfiles))
       .toEqual({ apiKey: "", useStoredSecret: false });
+  });
+});
+
+describe("本地可执行路径校验", () => {
+  it("接受绝对路径的转写程序与 Python 解释器", () => {
+    expect(assertSafeLocalExecutablePath("/opt/homebrew/bin/whisper-cli")).toBe("/opt/homebrew/bin/whisper-cli");
+    expect(assertSafeLocalExecutablePath("/usr/bin/python3")).toBe("/usr/bin/python3");
+    expect(assertSafeLocalExecutablePath("C:\\Python312\\python.exe")).toBe("C:\\Python312\\python.exe");
+  });
+
+  it("拒绝命令名与通用脚本宿主", () => {
+    for (const value of ["python3", "whisper", "", "   "]) {
+      expect(() => assertSafeLocalExecutablePath(value)).toThrow(/绝对路径|不能为空/);
+    }
+    for (const value of ["/bin/sh", "/bin/bash", "/usr/bin/osascript", "/usr/bin/env", "C:\\Windows\\System32\\cmd.exe"]) {
+      expect(() => assertSafeLocalExecutablePath(value)).toThrow(/脚本宿主/);
+    }
   });
 });

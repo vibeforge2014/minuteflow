@@ -7,6 +7,7 @@
  * - watch.ignored：根目录内的发布产物（.build 3GB+）、iOS 构建等不属于渲染层源码，
  *   排除后避免 dev server 监听上万无关文件导致句柄与内存膨胀（曾触发 Vite OOM）。
  */
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -16,6 +17,14 @@ export default defineConfig({
   base: siteBasePath ? `${siteBasePath}/` : "./",
   build: {
     outDir: "dist/client",
+    // 官网（index.html）与桌面工作台（desktop.html）各自独立入口：官网专属的
+    // MarketingSite / marketing.css 不会再混进桌面入口的静态依赖图。
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        desktop: fileURLToPath(new URL("./desktop.html", import.meta.url))
+      }
+    }
   },
   optimizeDeps: {
     include: ["react", "react-dom/client"],

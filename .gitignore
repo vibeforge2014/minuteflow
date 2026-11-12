@@ -20,8 +20,15 @@ ios/**/artifacts/
 # Desktop build staging
 .build/
 
-# Local design QA screenshots
+# Local design QA screenshots / audit snapshots. These are one-off working
+# artifacts (39 files, ~5.2MB) and stay on disk; only the reference image
+# actually used by the site lives in src/assets/ and is tracked.
 /artifacts/
+/audit-*.png
+/design-qa*.png
+/implementation-*.png
+/design-audit-*/
+/.video_agent/
 
 # Apple Speech helper（由 scripts/build-apple-speech.sh 构建，不入库）
 resources/bin/

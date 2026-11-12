@@ -21,6 +21,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run check:main
       - run: npm test
       - run: npm run test:sites
       - run: npm run test:license
@@ -32,6 +33,17 @@ jobs:
       matrix:
         os: [macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
+    # 默认仍产出 ad-hoc 本地构建。把仓库变量 MINUTEFLOW_RELEASE_BUILD 设为 1
+    # 即启用严格模式：macOS 缺少签名身份或公证凭据时打包直接失败，避免把
+    # 不可分发的 DMG 当成"绿色"产物发布。启用前需在 macOS runner 导入 Developer ID
+    # 证书并配置 notarytool keychain profile，同时提供下列 secrets。
+    env:
+      MINUTEFLOW_RELEASE_BUILD: ${{ vars.MINUTEFLOW_RELEASE_BUILD }}
+      APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+      APPLE_NOTARY_PROFILE: ${{ secrets.APPLE_NOTARY_PROFILE }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_NOTARY_KEY_PATH: ${{ secrets.APPLE_NOTARY_KEY_PATH }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

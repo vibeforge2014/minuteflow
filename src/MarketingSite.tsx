@@ -40,7 +40,7 @@ import {
   WindowsLogo,
   X
 } from "@phosphor-icons/react";
-import productWorkspace from "../implementation-1440x1024-final.png";
+import productWorkspace from "./assets/product-workspace.png";
 import { BrandMark } from "./components/BrandMark";
 
 /** 站点路由：首页 / 规格 / 定价 / 购买 / 找回 / 条款 / 隐私 / 退款。 */

@@ -1,8 +1,11 @@
 /**
- * 渲染层入口：挂载 React 根组件，并根据运行环境在「桌面工作台」与「产品官网」之间切换。
+ * 官网渲染层入口（index.html）：静态渲染产品官网，桌面工作台按需 lazy 加载。
  *
  * 所属层：渲染层入口（React root / 路由分流）。
- * 主要导出：无（副作用模块）；内部渲染 Root 组件，按需 lazy 加载 App（桌面端）或 MarketingSite（官网）。
+ * 打包后的桌面应用走独立入口 desktop.html / desktop-main.tsx，不加载本模块，
+ * 因此官网的 MarketingSite 与 marketing.css 不会进入桌面运行时。
+ * 本入口保留 isElectronRuntime 与 ?preview=desktop 分支，供 Vite dev server
+ * 与浏览器本地预览工作台使用（开发期才需要，不进桌面生产包）。
  */
 import { lazy, StrictMode, Suspense, useEffect } from "react";
 import { createRoot, type Root as ReactRoot } from "react-dom/client";

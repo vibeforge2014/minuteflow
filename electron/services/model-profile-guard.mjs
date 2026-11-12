@@ -59,6 +59,34 @@ export function assertEndpointOverrides(profile, baseUrl) {
 }
 
 /**
+ * 渲染层可写本地档案的 executablePath，该值最终会进 spawn。参数虽固定，
+ * 但仍不应允许把主进程指向任意 shell / 脚本宿主。Python 解释器是
+ * whisper-python / faster-whisper / mlx-whisper / qwen3-asr 的合法配置，不列入黑名单。
+ */
+const SCRIPT_HOSTS = new Set([
+  "sh", "bash", "zsh", "dash", "fish", "csh", "tcsh", "ksh",
+  "node", "deno", "bun", "ruby", "perl", "php", "java",
+  "osascript", "cmd", "powershell", "pwsh", "sudo", "env",
+  "curl", "wget", "open", "xdg-open", "npx", "npm", "pnpm", "yarn", "corepack",
+  "wscript", "cscript", "rundll32", "regsvr32", "mshta"
+]);
+
+export function assertSafeLocalExecutablePath(raw, label = "本地可执行文件路径") {
+  if (typeof raw !== "string" || !raw.trim()) throw new Error(`${label}不能为空。`);
+  const value = raw.trim();
+  // 显式配置的路径必须是绝对路径；"python3" 这类 PATH 名由运行时自动回退，
+  // 不应由渲染层写入配置。
+  if (!/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(value)) {
+    throw new Error(`${label}必须填写绝对路径，不能只写命令名。`);
+  }
+  const basename = value.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
+  if (SCRIPT_HOSTS.has(basename)) {
+    throw new Error(`${label}指向了不允许的脚本宿主（${basename}），请填写具体的转写程序或 Python 解释器。`);
+  }
+  return value;
+}
+
+/**
  * 决定本次网络调用可以携带哪个密钥。
  * - 用户现场输入的明文 apiKey：照常使用（地址仍需通过校验）。
  * - 走已存 secretId 时：只有该密钥归属档案的服务域名与本次地址一致才放行，

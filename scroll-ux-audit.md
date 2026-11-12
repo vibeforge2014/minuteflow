@@ -1,5 +1,7 @@
 # Website scroll UX audit · 2026-08-02
 
+> 文中列出的 `audit-scroll-*.png` 截图为本地走查产物，保留在磁盘但不纳入版本库（见 `.gitignore`）。
+
 ## Scope and user goal
 
 - Surface: public product homepage, product specifications, mobile navigation, and the former browser demo boundary.

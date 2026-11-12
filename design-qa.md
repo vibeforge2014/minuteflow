@@ -1,5 +1,7 @@
 # Design QA — MinuteFlow 跨端体验轻量优化（2026-08-31）
 
+> 本文引用的 `design-qa-*.png` / `implementation-*.png` 等截图是本地走查产物，保留在磁盘但不纳入版本库（见 `.gitignore`）。官网实际使用的参考图已收进 `src/assets/product-workspace.png`。
+
 ## Evidence
 
 - Source visual truth: `/Users/zqian15/.codex/generated_images/019fb0bc-fbcb-7e43-9466-3ebdf9e5dba6/call_1Z4kzuiPHEUQd1XCaaJAnBNL.png` (1487 × 1058 px), the selected lightweight-document workspace direction recorded in `AGENTS.md`.

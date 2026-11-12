@@ -9,6 +9,18 @@ import { FusesPlugin } from "@electron-forge/plugin-fuses";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
 import { execFileSync } from "node:child_process";
 
+// 官网专属产物：桌面入口 desktop.html 不引用它们，可安全从安装包剔除。
+// 下面 prePackage 的构建自检会确保这些规则不会误伤桌面入口的依赖。
+const siteOnlyAssets = [
+  /^\/dist\/client\/(?:index\.html|404\.html|og\.png)$/,
+  /^\/dist\/client\/assets\/main-[^/]+\.(?:js|css|map)$/
+];
+
+// 正式发布模式：CI 把仓库变量 MINUTEFLOW_RELEASE_BUILD 设为 1 后，缺少签名
+// 身份或公证凭据必须直接失败，不能产出"绿色"但实际不可分发的 DMG。
+// 本地 ad-hoc 打包（默认）保持原有行为。
+const requireSignedRelease = process.env.MINUTEFLOW_RELEASE_BUILD === "1";
+
 const isMac = process.platform === "darwin";
 const appleIdentity = process.env.APPLE_IDENTITY;
 const appleNotaryProfile = process.env.APPLE_NOTARY_PROFILE;
@@ -35,13 +47,26 @@ const notarizeOptions = appleNotaryProfile
     ? { appleApiKey: appleNotaryKeyPath, appleApiKeyId, appleApiIssuer }
     : undefined;
 
+if (requireSignedRelease && isMac) {
+  const missing = [];
+  if (!appleIdentity) missing.push("APPLE_IDENTITY");
+  if (!notarizeOptions) missing.push("APPLE_NOTARY_PROFILE 或 APPLE_NOTARY_KEY_PATH/APPLE_API_KEY_ID/APPLE_API_ISSUER");
+  if (missing.length) {
+    throw new Error(
+      `MINUTEFLOW_RELEASE_BUILD=1 要求可分发构建，但缺少：${missing.join("、")}。` +
+      "请在 CI 导入签名证书并配置 notarytool 凭据，或关闭严格模式以生成本地调试构建。"
+    );
+  }
+}
+
 // forge 的 osxNotarize 只在 afterSign 公证 .app，产出的 DMG 本身没有公证票；
 // 发布校验脚本要求 DMG 装订票（v0.1.24 起两次靠手动 notarytool submit + stapler 补救）。
 // 这里在 postMake 对每个 DMG 产物自动提交公证并装订校验，使 `npm run make` 一步出可发布产物。
 async function notarizeAndStapleDmg(dmgPath) {
   const credentialArgs = notarytoolCredentialArgs();
   if (!credentialArgs) {
-    console.log("[forge] 缺少公证凭据，跳过 DMG 公证（产出的 DMG 不可发布！）");
+    if (requireSignedRelease) throw new Error("正式发布构建缺少 DMG 公证凭据。");
+    console.warn("[forge] 缺少公证凭据，跳过 DMG 公证（产出的 DMG 不可发布！）");
     return;
   }
   console.log(`[forge] 公证并装订 DMG: ${dmgPath}`);
@@ -70,7 +95,10 @@ export default {
       // Native iOS sources and local release/QA outputs are not desktop app
       // resources. Excluding them also prevents an older installer from being
       // recursively embedded when a release is built from a reused checkout.
-      /^\/(?:ios|release|artifacts|\.build)(?:\/|$)/
+      /^\/(?:ios|release|artifacts|\.build)(?:\/|$)/,
+      // 桌面工作台只加载 dist/client/desktop.html；官网入口及其专属 chunk
+      // （MarketingSite / marketing.css）不再随安装包分发。
+      ...siteOnlyAssets
     ],
     appBundleId: "com.meetingassistant.desktop",
     appCategoryType: "public.app-category.productivity",
@@ -142,8 +170,29 @@ export default {
     },
     // Apple Speech helper 是构建产物（不入库）：打包前确保存在，缺失则现场构建。
     prePackage: async () => {
+      // 多入口构建自检：desktop.html 引用的每个资源都必须存在，且不能被
+      // siteOnlyAssets 规则误排除——否则打包会成功但用户打开是白屏。
+      const { existsSync, readFileSync } = await import("node:fs");
+      const { resolve } = await import("node:path");
+      const clientDir = resolve("dist", "client");
+      const desktopHtml = resolve(clientDir, "desktop.html");
+      if (!existsSync(desktopHtml)) {
+        throw new Error("缺少 dist/client/desktop.html，请先运行 npm run build:renderer。");
+      }
+      const html = readFileSync(desktopHtml, "utf8");
+      const references = [...html.matchAll(/(?:src|href)="\.\/([^"]+)"/g)].map((match) => match[1]);
+      if (!references.some((ref) => /\.js$/.test(ref))) {
+        throw new Error("desktop.html 未引用任何脚本，构建产物不完整。");
+      }
+      for (const ref of references) {
+        if (siteOnlyAssets.some((pattern) => pattern.test(`/dist/client/${ref}`))) {
+          throw new Error(`桌面入口依赖被误判为官网专属资源：${ref}`);
+        }
+        if (!existsSync(resolve(clientDir, ref))) {
+          throw new Error(`桌面入口引用的资源缺失：${ref}`);
+        }
+      }
       if (!isMac) return;
-      const { existsSync } = await import("node:fs");
       const helper = "./resources/bin/mf-apple-speech-darwin-universal";
       if (!existsSync(helper)) {
         console.log("[forge] 构建 Apple Speech helper…");
@@ -153,11 +202,22 @@ export default {
     postMake: async (_forgeConfig, makeResults) => {
       if (!isMac) return makeResults;
       const credentialArgs = notarytoolCredentialArgs();
-      if (!credentialArgs) return makeResults;
+      if (!credentialArgs) {
+        if (requireSignedRelease) throw new Error("正式发布构建缺少 DMG 公证凭据。");
+        console.warn("[forge] 缺少公证凭据，本次 DMG 未公证，不可发布。");
+        return makeResults;
+      }
+      let notarized = 0;
       for (const result of makeResults) {
         for (const artifact of result.artifacts || []) {
-          if (artifact.endsWith(".dmg")) await notarizeAndStapleDmg(artifact);
+          if (artifact.endsWith(".dmg")) {
+            await notarizeAndStapleDmg(artifact);
+            notarized += 1;
+          }
         }
+      }
+      if (requireSignedRelease && notarized === 0) {
+        throw new Error("正式发布构建未产出任何 DMG，无法完成公证装订。");
       }
       return makeResults;
     }

@@ -11,6 +11,7 @@
 import {
   app,
   BrowserWindow,
+  crashReporter,
   desktopCapturer,
   dialog,
   ipcMain,
@@ -42,6 +43,7 @@ import {
   listMeetings,
   listMeetingAudioAssets,
   listMeetingAudioPaths,
+  listPendingAudioChunks,
   listModelProfiles,
   listVoiceprintPeople,
   listVoiceprintSamples,
@@ -64,6 +66,7 @@ import { resolveProfile } from "./services/import-profiles.mjs";
 import {
   assertEndpointOverrides,
   assertSafeHttpUrl,
+  assertSafeLocalExecutablePath,
   resolveProfileCredential
 } from "./services/model-profile-guard.mjs";
 import { deleteSecret, flushSecrets, readSecret, storeSecret, warmSecretCache } from "./services/secrets.mjs";
@@ -86,6 +89,8 @@ import {
 import { decodeWithSherpaAsr, mapSenseVoiceLanguage, shutdownLocalAsr } from "./services/asr-runtime.mjs";
 import { simplifyTranscriptResult } from "./services/chinese.mjs";
 import { audioContentType, parseByteRange } from "./services/media.mjs";
+import { installCrashGuard } from "./services/crash-guard.mjs";
+import { recoverInterruptedRecordings } from "./services/recording-recovery.mjs";
 import { enhanceTranscriptionAudio, normalizeRemoteTranscriptionAudio } from "./services/transcription-audio.mjs";
 import { isSilentPcmWav, isSilenceSkipEnabled, setAudioQualityPreferences } from "./services/audio-quality.mjs";
 import { withSegmentConfidence } from "./services/transcript-confidence.mjs";
@@ -147,9 +152,10 @@ import { groupTranscriptSegments, splitTimedTranscriptText } from "./services/tr
 // 当前文件所在目录：用于定位 preload.cjs 与打包后的前端产物。
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 // 打包后唯一受信任的渲染页面：任意 file:// 页面都算可信会让磁盘上别的 HTML
-// 借 preload 调用全部 IPC。开发环境改用 Vite dev server 的 origin 校验。
+// 借 preload 调用全部 IPC。桌面工作台使用独立的 desktop.html 入口（官网
+// index.html 不随主窗口加载）。开发环境改用 Vite dev server 的 origin 校验。
 const trustedRendererFileUrl = pathToFileURL(
-  path.join(app.getAppPath(), "dist", "client", "index.html")
+  path.join(app.getAppPath(), "dist", "client", "desktop.html")
 ).href;
 // minuteflow-media:// 是音频播放专用自定义协议；必须在 app ready 之前注册为
 // 特权协议，才能支持 fetch 与流式传输（会议播放器按需读取本地音频文件）。
@@ -199,14 +205,8 @@ function notifyImportOutcome(job) {
   notification.show();
 }
 
-// Last-resort handlers so an unawaited rejection (e.g. a progress callback
-// firing after the window closed) is logged instead of swallowed silently.
-process.on("unhandledRejection", (reason) => {
-  console.error("未处理的 Promise 拒绝：", reason);
-});
-process.on("uncaughtException", (error) => {
-  console.error("未捕获的异常：", error);
-});
+// 未处理异常与渲染进程崩溃统一由 crash-guard 落盘、提示并决定是否安全退出，
+// 见 electron/services/crash-guard.mjs（在 app.whenReady 中尽早安装）。
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -306,6 +306,10 @@ const LOCAL_TRANSCRIPTION_TRANSPORTS = [
  */
 async function resolveLocalTranscriptionProfile(profile) {
   if (!LOCAL_TRANSCRIPTION_TRANSPORTS.includes(profile.transport)) return profile;
+  // 渲染层可写 executablePath / pythonExecutablePath，转写前统一过一次路径白名单，
+  // 避免主进程被指向 shell / 脚本宿主。Python 解释器仍允许（多个本地引擎依赖它）。
+  const executable = profile.options?.executablePath || profile.options?.pythonExecutablePath;
+  if (executable) assertSafeLocalExecutablePath(executable);
   const resolution = await resolveLocalModelProfile(profile, {
     modelDirectory: localModelDirectory(),
     roots: [
@@ -458,7 +462,7 @@ async function createMainWindow() {
   if (process.env.VITE_DEV_SERVER_URL) {
     await mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
-    await mainWindow.loadFile(path.join(currentDirectory, "..", "dist", "client", "index.html"));
+    await mainWindow.loadFile(path.join(currentDirectory, "..", "dist", "client", "desktop.html"));
   }
 
   mainWindow.on("closed", () => {
@@ -629,7 +633,7 @@ async function showPermissionHelper() {
     helperUrl.searchParams.set("surface", "permission-helper");
     await permissionHelperWindow.loadURL(helperUrl.toString());
   } else {
-    await permissionHelperWindow.loadFile(path.join(currentDirectory, "..", "dist", "client", "index.html"), {
+    await permissionHelperWindow.loadFile(path.join(currentDirectory, "..", "dist", "client", "desktop.html"), {
       query: { surface: "permission-helper" }
     });
   }
@@ -1426,6 +1430,8 @@ function registerIpc() {
       assertSafeHttpUrl(profile.baseUrl, "模型服务地址");
       assertEndpointOverrides(profile, profile.baseUrl);
     }
+    const executable = profile?.options?.executablePath || profile?.options?.pythonExecutablePath;
+    if (executable) assertSafeLocalExecutablePath(executable);
     let secretId = profile.secretId;
     if (apiKey) secretId = storeSecret(apiKey, secretId);
     const saved = saveModelProfile({ ...profile, secretId });
@@ -1450,7 +1456,9 @@ function registerIpc() {
   });
   // models:test — 测试模型连通性/本地就绪度，设置页"测试"按钮调用。
   trustedHandle("models:test", async (_event, profile, apiKey) => {
-    // 渲染层可构造任意 profile；先校验地址并确认密钥归属，再允许带密钥出网。
+    // 渲染层可构造任意 profile；先校验地址、可执行路径与密钥归属，再允许出网/启动进程。
+    const executable = profile?.options?.executablePath || profile?.options?.pythonExecutablePath;
+    if (executable) assertSafeLocalExecutablePath(executable);
     const credential = resolveProfileCredential(profile, apiKey, listModelProfiles());
     const key = credential.useStoredSecret ? readSecret(profile.secretId) : credential.apiKey;
     const resolved = LOCAL_TRANSCRIPTION_TRANSPORTS.includes(profile.transport)
@@ -1876,6 +1884,15 @@ function registerIpc() {
 }
 
 app.whenReady().then(async () => {
+  // 尽早安装崩溃守卫：后续启动装配中的异常也要能落盘并给出可见反馈。
+  installCrashGuard({
+    app,
+    crashReporter,
+    dialog,
+    Notification,
+    getMainWindow: () => mainWindow,
+    logDirectory: app.getPath("logs")
+  });
   // Windows 通知需要稳定的 AppUserModelID，否则系统会把通知归到 electron.exe。
   if (process.platform === "win32") app.setAppUserModelId("com.meetingassistant.desktop");
   // Resolve any existing Keychain-backed credentials once at app startup so
@@ -1942,6 +1959,24 @@ app.whenReady().then(async () => {
     console.error("录音保留策略清理失败：", error);
   });
   await createMainWindow();
+  // 上次崩溃遗留的 .partial 录音：后台修复并登记为可回放资产，失败一律保留原文件。
+  // 放在窗口创建之后，恢复完成才能给用户发系统通知；不阻塞启动流程。
+  void recoverInterruptedRecordings({
+    listPending: listPendingAudioChunks,
+    ffmpegPath: managedFfmpegPath,
+    finalizeAudioPath,
+    saveAudioAsset,
+    loadMeeting,
+    notify: async (count) => {
+      if (!Notification.isSupported()) return;
+      new Notification({
+        title: "已恢复未完成的录音",
+        body: `上次异常退出遗留的 ${count} 段录音已恢复，可在对应会议中回放。`
+      }).show();
+    }
+  }).catch((error) => {
+    console.error("[recording-recovery] 恢复流程失败：", error);
+  });
   // 原生菜单栏（编辑快捷键、⌘, 偏好设置、检查更新等）随主窗口一起就绪。
   buildApplicationMenu();
   // 主窗口就绪后立即唤醒导入队列（含因缺模型/组件而暂停等待的任务）。

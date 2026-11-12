@@ -692,6 +692,19 @@ export function finalizeAudioPath(sessionId, track, targetPath) {
   `).run(targetPath, sessionId, track);
 }
 
+/**
+ * 列出异常退出后仍指向 .partial 的录音会话（按 session+track 去重）。
+ * 启动时由 recording-recovery 尝试修复并登记为可播放资产。
+ */
+export function listPendingAudioChunks() {
+  return openDatabase().prepare(`
+    SELECT session_id AS sessionId, track, MIN(path) AS path, MIN(meeting_id) AS meetingId
+    FROM audio_chunks
+    WHERE path LIKE '%.partial'
+    GROUP BY session_id, track
+  `).all();
+}
+
 /** 汇总某会议全部音频文件路径（录音块 + 导入/播放资产，去重），导出 zip 与"打开所在位置"用。 */
 export function listMeetingAudioPaths(meetingId) {
   const db = openDatabase();
