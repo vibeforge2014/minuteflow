@@ -10,7 +10,7 @@
  * diarization、local-models、secrets。副作用：复制/转码音频、拉起子进程、网络请求、写库。
  */
 import { app } from "electron";
-import { copyFile, mkdir, readFile, rm, stat } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -50,19 +50,25 @@ import { managedFfmpegPath, resolveLocalModelProfile } from "./local-models.mjs"
 import { simplifyTranscriptResult } from "./chinese.mjs";
 import { groupTranscriptSegments, splitTimedTranscriptText } from "./transcript-grouping.mjs";
 import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "./chunk-planning.mjs";
+import { normalizeGlossary, resolveChunkLanguage, transcriptionLanguageForEngine } from "./transcription-prompt.mjs";
+import { enhanceTranscriptionAudio } from "./transcription-audio.mjs";
+import { isSilenceSkipEnabled, isSilentPcmWav } from "./audio-quality.mjs";
+import { withSegmentConfidence } from "./transcript-confidence.mjs";
 
-/** 与 main.mjs 的 transcribeLocally 同构：按 transport 分派本地 Whisper 转录（导入流程不注入术语表）。
+/** 与 main.mjs 的 transcribeLocally 同构：按 transport 分派本地 Whisper 转录。
+ *  术语表与前文和实时录音链路一致地注入 initial_prompt；此前导入链路传空数组，
+ *  同一批专有名词在「录音」和「导入」两条路径下写法会不一致。
  *  Apple Speech / sherpa ASR / Qwen3-ASR 与在线服务不在此列：路由见 import-profiles.mjs 的 importTranscriptionRoute。 */
-function transcribeLocal(profile, audio, fileName, language, signal) {
+function transcribeLocal(profile, audio, fileName, language, signal, glossary, previousText) {
   switch (profile.transport) {
     case "whisper-python":
-      return transcribeWithPythonWhisper(profile, audio, fileName, language, [], signal);
+      return transcribeWithPythonWhisper(profile, audio, fileName, language, glossary, signal, previousText);
     case "faster-whisper":
-      return transcribeWithFasterWhisper(profile, audio, fileName, language, [], signal);
+      return transcribeWithFasterWhisper(profile, audio, fileName, language, glossary, signal, previousText);
     case "mlx-whisper":
-      return transcribeWithMlxWhisper(profile, audio, fileName, language, [], signal);
+      return transcribeWithMlxWhisper(profile, audio, fileName, language, glossary, signal, previousText);
     default:
-      return transcribeWithWhisperCpp(profile, audio, fileName, language, [], signal);
+      return transcribeWithWhisperCpp(profile, audio, fileName, language, glossary, signal, previousText);
   }
 }
 
@@ -86,7 +92,7 @@ async function transcribeWithSherpaAsrFile(profile, wavPath, language) {
  * 且本机识别对同一音频存在偶发失败：静默重试一次再交给调用方分类（no_speech 跳过 /
  * 其他错误按原语义处理）。长块（30 秒）把 helper 超时放宽到 100 秒。
  */
-async function transcribeImportChunk(route, profile, audio, chunkIndex, language, signal, audioFilePath) {
+async function transcribeImportChunk(route, profile, audio, chunkIndex, language, signal, audioFilePath, glossary = [], previousText = "") {
   const fileName = `chunk-${chunkIndex}.wav`;
   const attempts = route === "apple-speech" ? 2 : 1;
   let lastError;
@@ -102,22 +108,23 @@ async function transcribeImportChunk(route, profile, audio, chunkIndex, language
       if (route === "apple-speech") {
         // 档案级开关：默认本机离线（音频不出设备）；用户显式开启在线识别后走
         // Apple 服务器模型——对难识别音频（术语密集、口音、压缩噪声）质量差距巨大。
-        return await transcribeWithAppleSpeech(profile, audio, fileName, language, [], {
+        return await transcribeWithAppleSpeech(profile, audio, fileName, language, glossary, {
           signal,
           timeoutMs: 100_000,
           allowServer: profile.options?.allowServer === true
         });
       }
       if (route === "sherpa") {
+        // SenseVoice / Parakeet 无 prompt 通道，语言锁定仍通过 language 参数生效。
         return await transcribeWithSherpaAsrFile(profile, audioFilePath, language);
       }
       if (route === "qwen3-asr") {
-        return await transcribeWithQwen3Asr(profile, audio, fileName, language, [], signal);
+        return await transcribeWithQwen3Asr(profile, audio, fileName, language, glossary, signal, previousText);
       }
       if (route === "whisper") {
-        return await transcribeLocal(profile, audio, fileName, language, signal);
+        return await transcribeLocal(profile, audio, fileName, language, signal, glossary, previousText);
       }
-      return await transcribeRemote(profile, readSecret(profile.secretId), audio, fileName, language, [], signal);
+      return await transcribeRemote(profile, readSecret(profile.secretId), audio, fileName, language, glossary, signal, previousText);
     } catch (error) {
       lastError = error;
       if (signal?.aborted) throw error;
@@ -128,6 +135,7 @@ async function transcribeImportChunk(route, profile, audio, chunkIndex, language
 
 // 运行中的任务取消器与子进程句柄：cancelImport 借此中止在途转录/转码。
 const activeControllers = new Map();
+// jobId → Set<ChildProcess>：一个任务可能同时/先后拉起多个 FFmpeg，取消时要全部终止。
 const activeProcesses = new Map();
 // 说话人识别的独立中止器：跳过识别只终止这个阶段，不取消整条导入任务。
 const activeDiarizationSkips = new Map();
@@ -137,6 +145,8 @@ let running = false;
 let notify = () => {};
 // 会议快照变化回调：每完成一个转录块即推给渲染层，右栏无需轮询。
 let notifyMeeting = () => {};
+// 偏好里的自定义术语；由 main.mjs 注入，避免服务层反向依赖主进程模块。
+let getGlossary = async () => [];
 
 const LEGACY_TRANSCRIPTION_CHUNK_MS = 60_000;
 const LEGACY_TRANSCRIPTION_OVERLAP_MS = 1_000;
@@ -266,10 +276,11 @@ const mimeTypes = {
   ".mov": "video/quicktime"
 };
 
-/** 启动时由 main.mjs 注入通知回调（把任务状态变化推给渲染层）。 */
+/** 启动时由 main.mjs 注入通知回调与偏好读取（把任务状态变化推给渲染层）。 */
 export function configureImportQueue(options = {}) {
   notify = options.notify || notify;
   notifyMeeting = options.notifyMeeting || notifyMeeting;
+  if (typeof options.getGlossary === "function") getGlossary = options.getGlossary;
 }
 
 /** 落库并广播一条任务状态。 */
@@ -494,7 +505,9 @@ export function cancelImport(id) {
   const job = loadJob(id);
   if (!job) throw new Error("导入任务不存在。");
   activeControllers.get(id)?.abort();
-  activeProcesses.get(id)?.kill("SIGTERM");
+  for (const child of activeProcesses.get(id) ?? []) {
+    try { child.kill("SIGTERM"); } catch { /* 子进程已退出 */ }
+  }
   return patchJob(id, { status: "cancelled", error: undefined });
 }
 
@@ -589,6 +602,9 @@ export async function runQueue() {
 async function processJob(initial) {
   const controller = new AbortController();
   activeControllers.set(initial.id, controller);
+  // 提升到函数作用域，finally 才能在取消/失败/等待网络等所有提前 return 的路径
+  // 上清理切块目录（此前只有转录全部成功才删，异常任务会留下成百上千个 WAV）。
+  let chunkDirectory;
   try {
     let job = loadJob(initial.id);
     if (!job || job.status === "cancelled") return;
@@ -712,7 +728,7 @@ async function processJob(initial) {
         ? chunkBoundaries.length
         : Math.max(1, Math.ceil(durationMs / chunkDurationMs));
       let completedChunks = Math.min(job.completedChunks || 0, totalChunks);
-      const chunkDirectory = path.join(path.dirname(job.archivedPath), `transcription-${job.id}`);
+      chunkDirectory = path.join(path.dirname(job.archivedPath), `transcription-${job.id}`);
       await mkdir(chunkDirectory, { recursive: true });
       job = patchJob(job.id, {
         status: "transcribing", stage: "transcribing", progress: 0.35,
@@ -721,9 +737,20 @@ async function processJob(initial) {
         chunkBoundaries: useAdaptiveBoundaries ? chunkBoundaries : undefined,
         paragraphingVersion: job.paragraphingVersion || PARAGRAPHING_VERSION
       });
-      const language = job.language === "auto" ? "" : job.language;
+      // 术语表在任务开始时读一次：用户在转录途中编辑术语不会让同一份逐字稿前后
+      // 用词不一致。每块把最近定稿段落作为前文送进 prompt，保持专名与断句风格连续。
+      const glossary = normalizeGlossary(await getGlossary().catch(() => []));
+      const configuredLanguage = transcriptionLanguageForEngine(job.language);
+      // auto 模式原先让每个 10 秒块各自重新判语种，中英混说或只有语气词的块极易
+      // 误判。首块采信引擎结果并落库，后续块固定沿用已锁定语言。
+      let detectedLanguage = String(job.detectedLanguage || "");
       for (let chunkIndex = completedChunks; chunkIndex < totalChunks; chunkIndex += 1) {
         if (controller.signal.aborted || loadJob(job.id)?.status === "cancelled") return;
+        const chunkLanguage = resolveChunkLanguage({ configured: configuredLanguage, detected: detectedLanguage });
+        const previousText = (meeting?.transcript ?? [])
+          .slice(-3)
+          .map((segment) => String(segment.text ?? ""))
+          .join("");
         const nominalStartMs = useAdaptiveBoundaries ? chunkBoundaries[chunkIndex] : chunkIndex * chunkDurationMs;
         const extractionStartMs = Math.max(0, nominalStartMs - (chunkIndex ? chunkOverlapMs : 0));
         const chunkEndMs = useAdaptiveBoundaries
@@ -737,15 +764,28 @@ async function processJob(initial) {
           currentChunkEndMs: chunkEndMs,
           progress: 0.35 + (0.33 * chunkIndex / totalChunks)
         });
+        // 切块只做格式转换，绝不带 loudnorm：静音门限必须在原始 PCM 上算，
+        // 否则被抬升的底噪会让纯静音块看起来「有人说话」。增强作为独立后处理，
+        // 这样所有引擎（不只 Apple Speech）都能吃到同一份处理过的音频。
         await extractTranscriptionChunk(
           job.id, bundledFfmpeg, job.archivedPath, chunkPath,
-          extractionStartMs, chunkEndMs - extractionStartMs, controller.signal,
-          transcriptionRoute === "apple-speech" ? APPLE_SPEECH_CHUNK_FILTERS : []
+          extractionStartMs, chunkEndMs - extractionStartMs, controller.signal
         );
-        const audio = await readFile(chunkPath);
+        let audio = await readFile(chunkPath);
+        const silentChunk = isSilenceSkipEnabled() && isSilentPcmWav(audio);
+        if (!silentChunk) {
+          const original = audio;
+          audio = await enhanceTranscriptionAudio(audio, bundledFfmpeg, controller.signal);
+          // sherpa 运行时直接读切块文件而非内存 buffer，增强后回写保持一致。
+          if (transcriptionRoute === "sherpa" && !audio.equals(original)) {
+            await writeFile(chunkPath, audio);
+          }
+        }
         let rawResult;
         try {
-          rawResult = await transcribeImportChunk(transcriptionRoute, sttProfile, audio, chunkIndex, language, controller.signal, chunkPath);
+          rawResult = silentChunk
+            ? { text: "", segments: [] }
+            : await transcribeImportChunk(transcriptionRoute, sttProfile, audio, chunkIndex, chunkLanguage, controller.signal, chunkPath, glossary, previousText);
         } catch (error) {
           // 静音块识别不到语音是正常输入，不是失败：按空结果继续，任务不中断。
           if (error?.appleSpeechCode === "no_speech") {
@@ -767,8 +807,17 @@ async function processJob(initial) {
             return;
           }
         }
-        const result = simplifyTranscriptResult(rawResult);
+        if (silentChunk) silentChunks += 1;
+        const result = withSegmentConfidence(simplifyTranscriptResult(rawResult));
         if (result.text.trim() || result.segments?.length) speechChunks += 1;
+        if (!configuredLanguage && !detectedLanguage) {
+          const transcriptText = result.text || (result.segments ?? []).map((segment) => segment.text).join("");
+          const locked = resolveChunkLanguage({ resultLanguage: result.language, text: transcriptText });
+          if (locked) {
+            detectedLanguage = locked;
+            job = patchJob(job.id, { detectedLanguage }) || job;
+          }
+        }
         // 用户可能在转录期间编辑标题/笔记/已出现的文本；每块落盘前重读最新会议，
         // 只把本块结果合进去，避免后台快照覆盖前台编辑。
         meeting = loadMeeting(job.meetingId) || meeting;
@@ -1009,6 +1058,9 @@ async function processJob(initial) {
     activeControllers.delete(initial.id);
     activeProcesses.delete(initial.id);
     activeDiarizationSkips.delete(initial.id);
+    if (chunkDirectory) {
+      await rm(chunkDirectory, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 
@@ -1020,7 +1072,7 @@ export function normalizeImportChunkSegments(result, extractionStartMs, nominalS
   const sourceSegments = result.segments?.length
     ? result.segments
     : result.text?.trim()
-      ? [{ startMs: 0, endMs: Math.max(1, chunkEndMs - extractionStartMs), text: result.text.trim() }]
+      ? [{ startMs: 0, endMs: Math.max(1, chunkEndMs - extractionStartMs), text: result.text.trim(), confidence: result.confidence }]
       : [];
   const source = sourceSegments.flatMap((segment) => {
     const startMs = Math.max(0, Number(segment.startMs) || 0);
@@ -1051,7 +1103,8 @@ export function normalizeImportChunkSegments(result, extractionStartMs, nominalS
       speakerName: "发言人1",
       text,
       status: "final",
-      track: "mixed"
+      track: "mixed",
+      ...(segment.confidence === undefined ? {} : { confidence: segment.confidence })
     }];
   });
 }
@@ -1060,52 +1113,98 @@ function normalizeTranscriptText(value) {
   return String(value || "").toLocaleLowerCase().replace(/[\s，。！？、,.!?;；:：'"“”‘’]/g, "");
 }
 
-/** 用 FFmpeg 只读媒体头获取总时长，不依赖系统 ffprobe。 */
-function probeAudioDuration(jobId, executable, input, signal) {
+/** 单个 FFmpeg 子进程最长允许运行 10 分钟；超时后 SIGTERM，3 秒不退再 SIGKILL。 */
+const FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * 托管一个 FFmpeg 子进程。此前每个 job 只登记最后一个子进程句柄（单值 Map），
+ * 取消时杀不到其他仍在跑的进程；且没有任何超时，损坏文件能让单 worker 队列
+ * 永久挂起。这里统一处理：按 job 分组登记全部句柄、超时升级、取消联动，
+ * stderr 用数组累积（长录音 silencedetect 输出下避免每 chunk 拷贝 1MB 字符串）。
+ */
+function spawnFfmpeg(jobId, executable, args, signal, { timeoutMs = FFMPEG_TIMEOUT_MS, keepDetails = 2000 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, ["-hide_banner", "-i", input], { stdio: ["ignore", "ignore", "pipe"] });
-    activeProcesses.set(jobId, child);
-    let details = "";
-    child.stderr.on("data", (chunk) => { details = `${details}${chunk}`.slice(-12_000); });
-    child.on("error", reject);
-    child.on("close", () => {
-      if (activeProcesses.get(jobId) === child) activeProcesses.delete(jobId);
-      if (signal.aborted) return reject(new Error("任务已取消。"));
-      const match = details.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
-      if (!match) return reject(new Error("无法读取录音时长，请确认文件可以正常播放。"));
-      const durationMs = Math.round((Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3])) * 1000);
-      return durationMs > 0 ? resolve(durationMs) : reject(new Error("录音时长为空，无法转录。"));
+    const child = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let handles = activeProcesses.get(jobId);
+    if (!handles) { handles = new Set(); activeProcesses.set(jobId, handles); }
+    handles.add(child);
+    const stderrChunks = [];
+    let stderrLength = 0;
+    let settled = false;
+    let timer;
+    let killTimer;
+    const cleanup = () => {
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      signal?.removeEventListener("abort", onAbort);
+      const set = activeProcesses.get(jobId);
+      set?.delete(child);
+      if (set && set.size === 0) activeProcesses.delete(jobId);
+    };
+    const terminate = (escalate) => {
+      try { child.kill(escalate ? "SIGKILL" : "SIGTERM"); } catch { /* 已退出 */ }
+      if (!escalate && !killTimer) {
+        killTimer = setTimeout(() => {
+          try { child.kill("SIGKILL"); } catch { /* 已退出 */ }
+        }, 3000);
+      }
+    };
+    const onAbort = () => terminate(false);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => terminate(false), timeoutMs);
+    if (signal?.aborted) terminate(false);
+    child.stderr?.on("data", (chunk) => {
+      if (stderrLength >= keepDetails) return;
+      const text = String(chunk);
+      stderrChunks.push(text);
+      stderrLength += text.length;
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    });
+    child.on("close", (code, killedBy) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ code, killedBy, details: stderrChunks.join("").slice(-keepDetails) });
     });
   });
 }
 
-// Apple Speech 对欠响度、带低频隆隆声的录音明显欠驱动（实测 -30dB 的会议 MP3
-// 只识别出约四分之一内容；高通 + 响度归一到广播标准后识别字数翻倍以上）。
-// 仅对 apple-speech 路由在切块时套用；Whisper 类引擎自带稳健前端，不需要。
-const APPLE_SPEECH_CHUNK_FILTERS = ["highpass=f=70", "loudnorm=I=-16:TP=-1.5:LRA=9"];
+/** 用 FFmpeg 只读媒体头获取总时长，不依赖系统 ffprobe。 */
+async function probeAudioDuration(jobId, executable, input, signal) {
+  const { details } = await spawnFfmpeg(
+    jobId, executable, ["-hide_banner", "-i", input], signal, { keepDetails: 12_000 }
+  );
+  if (signal.aborted) throw new Error("任务已取消。");
+  const match = details.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
+  if (!match) throw new Error("无法读取录音时长，请确认文件可以正常播放。");
+  const durationMs = Math.round((Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3])) * 1000);
+  if (!(durationMs > 0)) throw new Error("录音时长为空，无法转录。");
+  return durationMs;
+}
 
 /**
  * 截取并规范化一个 16kHz 单声道 WAV 转录块。
- * filters 非空时先带滤波链截取，失败（非取消）自动回退一次裸切，保证导入不因
- * 滤镜兼容性问题中断。
+ *
+ * 这里刻意只做格式转换、不套音质滤镜：静音门限必须基于原始 PCM，而音质增强
+ * 已上移到 runTranscription 的独立步骤（enhanceTranscriptionAudio），由用户偏好
+ * 统一控制并覆盖所有引擎。filters 参数保留为空数组的兼容通道：万一将来需要在
+ * 切块时加滤镜，失败仍会自动回退一次裸切，保证导入不被滤镜兼容性问题中断。
  */
 async function extractTranscriptionChunk(jobId, executable, input, output, startMs, durationMs, signal, filters = []) {
-  const run = (withFilters) => new Promise((resolve, reject) => {
+  const run = async (withFilters) => {
     const args = ["-y", "-ss", (startMs / 1000).toFixed(3), "-i", input,
       "-t", (durationMs / 1000).toFixed(3), "-vn", "-ac", "1", "-ar", "16000"];
     if (withFilters.length) args.push("-af", withFilters.join(","));
     args.push("-c:a", "pcm_s16le", output);
-    const child = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"] });
-    activeProcesses.set(jobId, child);
-    let details = "";
-    child.stderr.on("data", (chunk) => { details = `${details}${chunk}`.slice(-2_000); });
-    child.on("error", reject);
-    child.on("close", (code, killedBy) => {
-      if (activeProcesses.get(jobId) === child) activeProcesses.delete(jobId);
-      if (code === 0) return resolve();
-      reject(new Error(signal.aborted || killedBy ? "任务已取消。" : `准备转录分段失败：${details.trim()}`));
-    });
-  });
+    const { code, killedBy, details } = await spawnFfmpeg(jobId, executable, args, signal);
+    if (code === 0) return;
+    throw new Error(signal.aborted || killedBy ? "任务已取消。" : `准备转录分段失败：${details.trim()}`);
+  };
   try {
     await run(filters);
   } catch (error) {
@@ -1119,24 +1218,20 @@ async function extractTranscriptionChunk(jobId, executable, input, output, start
  * 供切块边界吸附。尽力而为：启动失败、被取消或解析不到静音都返回空数组，
  * 调用方回落固定网格，静音扫描本身绝不阻断导入。
  */
-function detectSilenceMidpoints(jobId, executable, input, signal, durationMs) {
-  return new Promise((resolve) => {
-    const child = spawn(executable, [
+async function detectSilenceMidpoints(jobId, executable, input, signal, durationMs) {
+  try {
+    const { details } = await spawnFfmpeg(jobId, executable, [
       "-hide_banner", "-i", input,
       "-af", "silencedetect=noise=-35dB:d=0.3", "-vn", "-f", "null", "-"
-    ], { stdio: ["ignore", "ignore", "pipe"] });
-    activeProcesses.set(jobId, child);
-    let details = "";
-    child.stderr.on("data", (chunk) => { details = `${details}${chunk}`.slice(-1_000_000); });
-    child.on("error", () => {
-      if (activeProcesses.get(jobId) === child) activeProcesses.delete(jobId);
-      resolve([]);
+    ], signal, {
+      // 全程扫描比切块慢，按录音时长放宽但仍封顶；失败一律回落到固定网格切块。
+      timeoutMs: Math.min(Math.max(FFMPEG_TIMEOUT_MS, durationMs * 2), 30 * 60 * 1000),
+      keepDetails: 1_000_000
     });
-    child.on("close", () => {
-      if (activeProcesses.get(jobId) === child) activeProcesses.delete(jobId);
-      resolve(signal.aborted ? [] : parseSilenceMidpoints(details, durationMs));
-    });
-  });
+    return signal.aborted ? [] : parseSilenceMidpoints(details, durationMs);
+  } catch {
+    return [];
+  }
 }
 
 /** 与 main.mjs 相同的根目录集合解析本地模型档案（应用托管目录 + 下载/缓存目录）。 */
@@ -1148,16 +1243,13 @@ async function resolveLocalProfile(profile) {
 }
 
 /** 拉起 FFmpeg 转码为 128k AAC 播放副本；句柄登记进 activeProcesses 以支持取消。 */
-function runFfmpeg(jobId, executable, input, output, signal) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, ["-y", "-i", input, "-vn", "-c:a", "aac", "-b:a", "128k", output], { stdio: ["ignore", "ignore", "pipe"] });
-    activeProcesses.set(jobId, child);
-    let details = "";
-    child.stderr.on("data", (chunk) => { details = `${details}${chunk}`.slice(-2000); });
-    child.on("error", reject);
-    child.on("close", (code, killedBy) => {
-      if (activeProcesses.get(jobId) === child) activeProcesses.delete(jobId);
-      code === 0 ? resolve() : reject(new Error(signal.aborted || killedBy ? "任务已取消。" : `FFmpeg 转码失败：${details.trim()}`));
-    });
-  });
+async function runFfmpeg(jobId, executable, input, output, signal) {
+  const { code, killedBy, details } = await spawnFfmpeg(
+    jobId, executable,
+    ["-y", "-i", input, "-vn", "-c:a", "aac", "-b:a", "128k", output],
+    signal
+  );
+  if (code !== 0) {
+    throw new Error(signal.aborted || killedBy ? "任务已取消。" : `FFmpeg 转码失败：${details.trim()}`);
+  }
 }

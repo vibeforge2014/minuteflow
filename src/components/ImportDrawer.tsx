@@ -10,6 +10,7 @@ import type { ImportCandidate, ImportJob, ModelProfile } from "../types";
 import { useEnteringItemIds } from "../hooks/useContentMotion";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { formatDuration } from "../lib/format";
+import { useMeetingStore } from "../store/meetingStore";
 import { ImportProcessingMeta } from "./ImportProcessingMeta";
 
 interface Props {
@@ -49,7 +50,10 @@ export function ImportDrawer(props: Props) {
   const llmProfiles = useMemo(() => props.profiles.filter((profile) => profile.kind === "llm"), [props.profiles]);
   const defaultSttId = () => sttProfiles.find((profile) => profile.isDefault)?.id || sttProfiles[0]?.id || "";
   const defaultLlmId = () => llmProfiles.find((profile) => profile.isDefault)?.id || llmProfiles[0]?.id || "";
-  const [language, setLanguage] = useState("auto");
+  // 默认跟随全局转写语言偏好；未显式设置过语言时仍按「自动识别」（既有行为）。
+  const preferredLanguage = useMeetingStore((state) => state.preferences.transcriptionLanguage) ?? "auto";
+  const [language, setLanguage] = useState<string>(preferredLanguage);
+  useEffect(() => { if (props.open) setLanguage(preferredLanguage); }, [props.open, preferredLanguage]);
   const [sttProfileId, setSttProfileId] = useState(defaultSttId);
   const [llmProfileId, setLlmProfileId] = useState(defaultLlmId);
   const [diarizationEnabled, setDiarizationEnabled] = useState(true);

@@ -29,7 +29,7 @@ import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir, tmpdir, totalmem, cpus } from "node:os";
 import { execFile } from "node:child_process";
 import {
@@ -61,6 +61,11 @@ import {
   softDeleteMeeting
 } from "./database.mjs";
 import { resolveProfile } from "./services/import-profiles.mjs";
+import {
+  assertEndpointOverrides,
+  assertSafeHttpUrl,
+  resolveProfileCredential
+} from "./services/model-profile-guard.mjs";
 import { deleteSecret, flushSecrets, readSecret, storeSecret, warmSecretCache } from "./services/secrets.mjs";
 import {
   chatWithMeetingContext,
@@ -81,7 +86,10 @@ import {
 import { decodeWithSherpaAsr, mapSenseVoiceLanguage, shutdownLocalAsr } from "./services/asr-runtime.mjs";
 import { simplifyTranscriptResult } from "./services/chinese.mjs";
 import { audioContentType, parseByteRange } from "./services/media.mjs";
-import { normalizeRemoteTranscriptionAudio } from "./services/transcription-audio.mjs";
+import { enhanceTranscriptionAudio, normalizeRemoteTranscriptionAudio } from "./services/transcription-audio.mjs";
+import { isSilentPcmWav, isSilenceSkipEnabled, setAudioQualityPreferences } from "./services/audio-quality.mjs";
+import { withSegmentConfidence } from "./services/transcript-confidence.mjs";
+import { resolveChunkLanguage, transcriptionLanguageForEngine } from "./services/transcription-prompt.mjs";
 import { appleSpeechDefaultProfile, shouldSeedAppleSpeechProfile, transcribeWithAppleSpeech } from "./services/apple-speech.mjs";
 import { isTrustedPermissionRequest, isTrustedRendererUrl } from "./services/permissions.mjs";
 import { chooseImportFiles, exportMeeting } from "./services/exports.mjs";
@@ -138,6 +146,11 @@ import { groupTranscriptSegments, splitTimedTranscriptText } from "./services/tr
 
 // 当前文件所在目录：用于定位 preload.cjs 与打包后的前端产物。
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
+// 打包后唯一受信任的渲染页面：任意 file:// 页面都算可信会让磁盘上别的 HTML
+// 借 preload 调用全部 IPC。开发环境改用 Vite dev server 的 origin 校验。
+const trustedRendererFileUrl = pathToFileURL(
+  path.join(app.getAppPath(), "dist", "client", "index.html")
+).href;
 // minuteflow-media:// 是音频播放专用自定义协议；必须在 app ready 之前注册为
 // 特权协议，才能支持 fetch 与流式传输（会议播放器按需读取本地音频文件）。
 protocol.registerSchemesAsPrivileged([{ scheme: "minuteflow-media", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
@@ -214,6 +227,8 @@ const defaultPreferences = {
   summaryCadenceVersion: 1,
   defaultMode: "online",
   glossary: [],
+  audioEnhancement: true,
+  silenceSkip: true,
   retentionDays: null,
   onboardingCompleted: false,
   systemPermissionsCompleted: false,
@@ -240,21 +255,22 @@ function localModelDirectory() {
  * @returns {Promise<{text: string, segments: Array<{startMs,endMs,text}>, duration?: number}>}
  * 副作用：可能拉起子进程（whisper.cpp / python / sherpa worker）并写临时文件。
  */
-function transcribeLocally(profile, audio, fileName, language, glossary) {
+function transcribeLocally(profile, audio, fileName, language, glossary, previousText = "") {
   switch (profile.transport) {
     case "whisper-python":
-      return transcribeWithPythonWhisper(profile, audio, fileName, language, glossary);
+      return transcribeWithPythonWhisper(profile, audio, fileName, language, glossary, undefined, previousText);
     case "faster-whisper":
-      return transcribeWithFasterWhisper(profile, audio, fileName, language, glossary);
+      return transcribeWithFasterWhisper(profile, audio, fileName, language, glossary, undefined, previousText);
     case "mlx-whisper":
-      return transcribeWithMlxWhisper(profile, audio, fileName, language, glossary);
+      return transcribeWithMlxWhisper(profile, audio, fileName, language, glossary, undefined, previousText);
     case "qwen3-asr":
-      return transcribeWithQwen3Asr(profile, audio, fileName, language, glossary);
+      return transcribeWithQwen3Asr(profile, audio, fileName, language, glossary, undefined, previousText);
     case "sense-voice":
     case "parakeet-tdt":
+      // sherpa 系引擎没有 prompt 通道，前文上下文只能靠切块与语言参数间接维持。
       return transcribeWithSherpaAsr(profile, audio, language);
     default:
-      return transcribeWithWhisperCpp(profile, audio, fileName, language, glossary);
+      return transcribeWithWhisperCpp(profile, audio, fileName, language, glossary, undefined, previousText);
   }
 }
 
@@ -328,8 +344,10 @@ async function loadPreferences() {
       summaryCadenceVersion: 1
     };
     if (Number(stored.summaryCadenceVersion) < 1) await persistPreferences(preferences);
+    setAudioQualityPreferences(preferences);
     return preferences;
   } catch {
+    setAudioQualityPreferences(defaultPreferences);
     return defaultPreferences;
   }
 }
@@ -348,6 +366,14 @@ async function persistPreferences(preferences) {
     glossary: Array.isArray(preferences.glossary)
       ? preferences.glossary.map((item) => String(item).trim()).filter(Boolean).slice(0, 500)
       : [],
+    // 语言未显式设置时省略字段：实时录音回落中文、导入回落自动识别，
+    // 保证老用户升级后两条链路的默认行为都不变；用户一选就全链路统一。
+    ...(["zh", "en", "auto"].includes(preferences.transcriptionLanguage)
+      ? { transcriptionLanguage: preferences.transcriptionLanguage }
+      : {}),
+    // 两个音频开关用「显式 false 才关」：旧配置文件没有字段时默认开启。
+    audioEnhancement: preferences.audioEnhancement !== false,
+    silenceSkip: preferences.silenceSkip !== false,
     retentionDays: preferences.retentionDays === null
       ? null
       : Math.max(0, Number(preferences.retentionDays) || 0),
@@ -368,6 +394,8 @@ async function persistPreferences(preferences) {
   await mkdir(path.dirname(target), { recursive: true });
   await writeFile(temporary, `${JSON.stringify(validated, null, 2)}\n`, "utf8");
   await rename(temporary, target);
+  // 实时录音与导入队列都在主进程内，偏好一落盘就同步音频质量开关，下一次切块立即生效。
+  setAudioQualityPreferences(validated);
   return validated;
 }
 
@@ -391,7 +419,7 @@ async function pruneExpiredRecordings() {
  * 生产环境只信任 file: 协议（本地打包产物）。IPC 调用与系统权限申请均以此做白名单。
  */
 function isTrustedRenderer(url) {
-  return isTrustedRendererUrl(url, process.env.VITE_DEV_SERVER_URL);
+  return isTrustedRendererUrl(url, process.env.VITE_DEV_SERVER_URL, trustedRendererFileUrl);
 }
 
 /**
@@ -621,7 +649,8 @@ function configurePermissions() {
       securityOrigin: details?.securityOrigin,
       requestingUrl: details?.requestingUrl,
       isMainFrame: details?.isMainFrame,
-      developmentServerUrl: process.env.VITE_DEV_SERVER_URL
+      developmentServerUrl: process.env.VITE_DEV_SERVER_URL,
+      expectedFileUrl: trustedRendererFileUrl
     });
   });
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
@@ -763,7 +792,9 @@ function registerIpc() {
   // meetings:create — 新建会议（草稿），新建会议入口调用。
   trustedHandle("meetings:create", (_event, input) => createMeeting(input));
   // meetings:save — 保存整场会议（含转录/纪要/笔记），编辑器与各后台流程调用。
-  trustedHandle("meetings:save", (_event, meeting) => saveMeeting(meeting));
+  // 渲染层提交的是内存快照：允许它删掉自己见过的旧段落，但保护快照生成之后
+  // 由后台导入/录音写入的新段落，避免并发写入把逐字稿回滚。
+  trustedHandle("meetings:save", (_event, meeting) => saveMeeting(meeting, { preserveNewerSegments: true }));
   // meetings:delete — 软删除（移入回收站），会议库右键/删除操作调用。
   trustedHandle("meetings:delete", (_event, id) => softDeleteMeeting(id));
   // meetings:restore — 从回收站恢复会议。
@@ -848,9 +879,13 @@ function registerIpc() {
         voiceprints: listVoiceprintSamples()
       });
       if (new Set(turns.map((turn) => turn.speakerId)).size <= 1) return;
+      // 分离可能跑几分钟。必须重新读取会议，用最新快照承载说话人标签，
+      // 否则整场 UPSERT 会把这段时间内用户改过的标题、笔记和逐字稿全部回滚。
+      const latest = loadMeeting(meetingId);
+      if (!latest || latest.deletedAt || !latest.transcript?.length) return;
       const updated = saveMeeting({
-        ...meeting,
-        transcript: groupTranscriptSegments(applyDiarization(meeting.transcript, turns))
+        ...latest,
+        transcript: groupTranscriptSegments(applyDiarization(latest.transcript, turns))
       });
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("imports:meeting-updated", updated);
@@ -1091,21 +1126,47 @@ function registerIpc() {
     const localProfile = isLocal
       ? await resolveLocalTranscriptionProfile(profile)
       : profile;
+    // auto 不能原样下发：whisper.cpp 认 -l auto，Python Whisper 与远程网关会把它当
+    // 非法语言代码。统一转空串让引擎自行检测，再把首块结果回传给渲染层锁定。
+    const engineLanguage = transcriptionLanguageForEngine(payload.language);
+    // 在入口统一归一化成 16k 单声道 WAV：远程网关需要可读的时长元数据、
+    // Apple Speech 不读 WebM、sherpa 只吃 WAV。更重要的是，只有这样所有引擎才能
+    // 共用同一份 PCM 做静音门限，也才能让音质增强覆盖 Whisper / 在线服务。
+    let ffmpegPath;
+    let prepared = { audio, fileName: payload.fileName };
+    let normalizedWav = false;
+    try {
+      ffmpegPath = await managedFfmpegPath();
+      const normalized = await normalizeRemoteTranscriptionAudio(audio, payload.fileName, ffmpegPath);
+      prepared = { audio: normalized.audio, fileName: normalized.fileName };
+      normalizedWav = /\.wav$/i.test(prepared.fileName);
+    } catch (error) {
+      // 音频组件缺失时不能连本地引擎一起拖垮：保留原始块，各分支按原路径处理。
+      console.warn("[stt] 实时音频归一化不可用，回退原始块：", error instanceof Error ? error.message : error);
+    }
+    if (normalizedWav && isSilenceSkipEnabled() && isSilentPcmWav(prepared.audio)) {
+      // 会议里的停顿会被 Whisper 补成「谢谢观看」等幻觉文字；静音块直接出空结果。
+      // 时间轴与按序提交由渲染层维持，空结果不会留下缺口。
+      return { segments: [], language: engineLanguage || undefined };
+    }
+    if (normalizedWav) {
+      prepared.audio = await enhanceTranscriptionAudio(prepared.audio, ffmpegPath);
+    }
     let rawResult;
     if (isAppleSpeech) {
-      // macOS 内置 Apple Speech：无模型就绪检查，浏览器采集格式先归一化为 WAV
-      // （AVFoundation 不读 WebM），再交 helper 本机识别。会议中的自然停顿会让
-      // 系统识别器报 No speech detected：按空块继续，不当失败重试、不留缺口。
+      // macOS 内置 Apple Speech：无模型就绪检查。会议中的自然停顿会让系统识别器报
+      // No speech detected：按空块继续，不当失败重试、不留缺口。
       try {
         rawResult = await transcribeWithAppleSpeech(
           profile,
-          audio,
-          payload.fileName,
-          payload.language,
+          prepared.audio,
+          prepared.fileName,
+          engineLanguage,
           payload.glossary,
           {
+            // 复用入口已解析的组件路径；已是 WAV 时该函数原样返回，不重复转码。
             prepareAudio: async (buffer, name) =>
-              normalizeRemoteTranscriptionAudio(buffer, name, await managedFfmpegPath()),
+              normalizeRemoteTranscriptionAudio(buffer, name, ffmpegPath),
             allowServer: profile.options?.allowServer === true
           }
         );
@@ -1117,31 +1178,37 @@ function registerIpc() {
         }
       }
     } else if (isLocal) {
-      rawResult = await transcribeLocally(localProfile, audio, payload.fileName, payload.language, payload.glossary);
+      rawResult = await transcribeLocally(localProfile, prepared.audio, prepared.fileName, engineLanguage, payload.glossary, payload.previousText);
     } else {
-      // Chromium 的短 WebM 块通常没有 Duration 元数据。部分 New API / OpenAI
-      // 兼容网关会在进入 Whisper 前先解析时长计费并直接 500；上传前转成固定采样率
-      // PCM WAV，让服务端无需完整 EBML parser 也能可靠得到时长。
-      const prepared = await normalizeRemoteTranscriptionAudio(
-        audio,
-        payload.fileName,
-        await managedFfmpegPath()
-      );
+      // 部分 New API / OpenAI 兼容网关会先解析时长计费再进入 Whisper，无 Duration
+      // 元数据的短 WebM 会被直接 500；归一化已在入口完成，这里只在它失败时重试一次。
+      const remoteAudio = normalizedWav
+        ? prepared
+        : await normalizeRemoteTranscriptionAudio(audio, payload.fileName, await managedFfmpegPath());
       rawResult = await transcribeRemote(
         profile,
         readSecret(profile.secretId),
-        prepared.audio,
-        prepared.fileName,
-        payload.language,
-        payload.glossary
+        remoteAudio.audio,
+        remoteAudio.fileName,
+        engineLanguage,
+        payload.glossary,
+        undefined,
+        payload.previousText ?? ""
       );
     }
-    const result = simplifyTranscriptResult(rawResult);
+    const result = withSegmentConfidence(simplifyTranscriptResult(rawResult));
+    // 自动识别模式下把首块语种回传给录音器，后续块固定沿用，避免每个 8 秒块
+    // 各自判语种（尤其中英混说、只有语气词的短块）导致用词漂移。
+    const resolvedLanguage = resolveChunkLanguage({
+      configured: engineLanguage,
+      resultLanguage: result.language,
+      text: result.text || (result.segments ?? []).map((segment) => segment.text).join("")
+    });
     const chunkDurationMs = Math.max(1, payload.endMs - payload.startMs);
     const sourceSegments = result.segments?.length
       ? result.segments
       : result.text.trim()
-        ? [{ startMs: 0, endMs: chunkDurationMs, text: result.text }]
+        ? [{ startMs: 0, endMs: chunkDurationMs, text: result.text, confidence: result.confidence }]
         : [];
     const speakerId = payload.track === "microphone" ? "me" : "remote";
     const speakerName = payload.track === "microphone" ? "我" : "远端发言人";
@@ -1164,7 +1231,8 @@ function registerIpc() {
           track: payload.track,
           ...(segment.confidence === undefined ? {} : { confidence: segment.confidence })
         }));
-      })
+      }),
+      ...(resolvedLanguage ? { language: resolvedLanguage } : {})
     };
   });
 
@@ -1354,6 +1422,10 @@ function registerIpc() {
   // models:save — 保存模型档案；随附的 API Key 经 secrets.mjs 加密入库，
   // 保存后唤醒可能因缺模型而暂停的导入队列。
   trustedHandle("models:save", (_event, profile, apiKey) => {
+    if (typeof profile?.baseUrl === "string" && profile.baseUrl.trim()) {
+      assertSafeHttpUrl(profile.baseUrl, "模型服务地址");
+      assertEndpointOverrides(profile, profile.baseUrl);
+    }
     let secretId = profile.secretId;
     if (apiKey) secretId = storeSecret(apiKey, secretId);
     const saved = saveModelProfile({ ...profile, secretId });
@@ -1378,16 +1450,21 @@ function registerIpc() {
   });
   // models:test — 测试模型连通性/本地就绪度，设置页"测试"按钮调用。
   trustedHandle("models:test", async (_event, profile, apiKey) => {
+    // 渲染层可构造任意 profile；先校验地址并确认密钥归属，再允许带密钥出网。
+    const credential = resolveProfileCredential(profile, apiKey, listModelProfiles());
+    const key = credential.useStoredSecret ? readSecret(profile.secretId) : credential.apiKey;
     const resolved = LOCAL_TRANSCRIPTION_TRANSPORTS.includes(profile.transport)
       ? await resolveLocalTranscriptionProfile(profile)
       : profile;
-    return testModelProfile(resolved, apiKey || readSecret(profile.secretId));
+    return testModelProfile(resolved, key);
   });
   // models:list-models — 拉取在线服务的可用模型列表，设置页模型下拉调用；
   // 未保存密钥时自动回退到已存密钥，原生协议返回 null 由渲染层退回静态建议。
   // Ollama 额外带回每个模型的磁盘体积（/api/tags，尽力而为），渲染层据此按内存标注适配建议。
   trustedHandle("models:list-models", async (_event, profile, apiKey) => {
-    const models = await listRemoteModels(profile, apiKey || readSecret(profile.secretId));
+    const credential = resolveProfileCredential(profile, apiKey, listModelProfiles());
+    const key = credential.useStoredSecret ? readSecret(profile.secretId) : credential.apiKey;
+    const models = await listRemoteModels(profile, key);
     if (profile?.transport !== "ollama") return { models };
     const sizes = await listOllamaModelSizes(profile);
     return Object.keys(sizes).length ? { models, sizes } : { models };
@@ -1515,7 +1592,12 @@ function registerIpc() {
       }
     }
     for (const item of items) recentImportPaths.delete(item.sourcePath);
-    return enqueueImports(items, options);
+    // 导入抽屉未显式指定语言时跟随全局转写语言偏好，与实时录音保持一致。
+    const preferences = await loadPreferences();
+    return enqueueImports(items, {
+      ...options,
+      language: options?.language || preferences.transcriptionLanguage || "auto"
+    });
   });
   // imports:list — 列出导入任务及状态，导入中心/队列面板调用。
   trustedHandle("imports:list", () => listImportJobs());
@@ -1526,7 +1608,13 @@ function registerIpc() {
   // imports:skip-diarization — 跳过说话人识别，保留已完成的转写并继续生成纪要（付费功能）。
   trustedHandle("imports:skip-diarization", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return skipImportDiarization(id); });
   // imports:retranscribe — 对已归档录音的会议重新转写并重建纪要（付费功能），如在线转写失败后改用本地模型。
-  trustedHandle("imports:retranscribe", async (_event, meetingId) => { await requireLicense(); assertUuid(meetingId, "会议 ID"); return enqueueRetranscription(meetingId); });
+  trustedHandle("imports:retranscribe", async (_event, meetingId) => {
+    await requireLicense();
+    assertUuid(meetingId, "会议 ID");
+    // 重新转写也要沿用当前语言偏好，否则换个入口就又变成逐块重新猜语种。
+    const preferences = await loadPreferences();
+    return enqueueRetranscription(meetingId, { language: preferences.transcriptionLanguage || "auto" });
+  });
   // imports:remove — 从队列移除终态/等待态任务记录（付费功能）；进行中任务需先取消。
   trustedHandle("imports:remove", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return removeImportJob(id); });
   // exports:save — 导出会议为 md/txt/json/srt/vtt/docx/pdf/zip（付费功能），导出菜单调用。
@@ -1835,6 +1923,8 @@ app.whenReady().then(async () => {
     const seeded = saveModelProfile(appleSpeechDefaultProfile());
     console.log("[stt] 已为 macOS 预启用 Apple 语音识别出厂默认档案:", seeded.id);
   }
+  // 读取一次偏好，把音频增强/静音跳过开关同步进主进程模块单例（首块录音前就绪）。
+  await loadPreferences();
   // 导入队列的任务状态变化经 imports:job-updated 推送给渲染层（后台执行，不抢焦点）。
   configureImportQueue({
     notify: (job) => {
@@ -1843,7 +1933,9 @@ app.whenReady().then(async () => {
     },
     notifyMeeting: (meeting) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("imports:meeting-updated", meeting);
-    }
+    },
+    // 导入/重转写与实时录音共用同一份自定义术语，避免同一专名两条路径写法不同。
+    getGlossary: async () => (await loadPreferences()).glossary ?? []
   });
   // 按保留策略清理过期音频；失败只记日志，不阻塞启动。
   await pruneExpiredRecordings().catch((error) => {
@@ -1878,16 +1970,46 @@ app.on("window-all-closed", () => {
 });
 
 let isQuitting = false;
-// 退出前冲刷录音写队列并落盘密钥库，保证最后一块音频不丢、密钥不悬在 .tmp 中。
+/** 退出握手最长等待：渲染层无响应时不能把用户永久卡在「关不掉」。 */
+const RENDERER_FLUSH_TIMEOUT_MS = 2500;
+
+/**
+ * 让渲染层先冲刷编辑防抖与 10 秒逐字稿冲刷，再允许进程退出。
+ * ipcRenderer.invoke 在 app.exit() 后不可能完成，所以这里必须由主进程主动
+ * 发信号并等待回执；token 用于丢弃迟到的旧回执，来源必须是主窗口。
+ */
+async function waitForRendererFlush() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  const token = randomUUID();
+  const channel = "app:flush-complete";
+  await new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
+      ipcMain.removeListener(channel, onComplete);
+      resolve();
+    };
+    const onComplete = (event, received) => {
+      if (received !== token || event.sender !== mainWindow.webContents) return;
+      finish();
+    };
+    const timeout = setTimeout(finish, RENDERER_FLUSH_TIMEOUT_MS);
+    ipcMain.on(channel, onComplete);
+    mainWindow.webContents.send("app:flush-before-quit", token);
+  });
+}
+
+// 退出前冲刷渲染层的编辑/逐字稿、录音写队列与密钥库。
 app.on("before-quit", (event) => {
   // Electron does not await async before-quit handlers, so we must
-  // preventDefault, drain the recording write queues synchronously, then exit.
-  // Without this, the last audio chunk can be lost and .partial files are
-  // never renamed on quit-while-recording.
+  // preventDefault, drain everything explicitly, then exit.
   if (isQuitting) return;
   event.preventDefault();
   isQuitting = true;
   void (async () => {
+    await waitForRendererFlush();
     for (const record of recordingFiles.values()) {
       record.closing = true;
       await record.writeQueue.catch(() => {});

@@ -99,15 +99,30 @@ async function docxBuffer(meeting) {
  * @param {string[]} audioPaths 随 ZIP 附带的音频文件路径
  * @returns {Promise<{canceled: boolean, filePath?: string}>}
  */
+/**
+ * 会议标题由用户自由输入，直接用作文件名会带进 `../`、路径分隔符或绝对路径：
+ * 既让保存对话框默认落在非预期目录，也会生成含 ../ 条目的 ZIP（zip-slip）。
+ */
+function safeExportName(title) {
+  const cleaned = String(title ?? "")
+    .replace(/[/\\:*?"<>|\u0000-\u001f]/g, "_")
+    .replace(/\.{2,}/g, ".")
+    .replace(/^[._]+/, "")
+    .trim()
+    .slice(0, 120);
+  return cleaned || "未命名会议";
+}
+
 export async function exportMeeting(meeting, format, parentWindow, audioPaths = []) {
   const extensions = {
     md: "md", txt: "txt", srt: "srt", vtt: "vtt", json: "json",
     docx: "docx", pdf: "pdf", zip: "zip", "visual-png": "png"
   };
   const extension = extensions[format] ?? "md";
+  const safeName = safeExportName(meeting.title);
   const result = await dialog.showSaveDialog(parentWindow, {
     title: "导出会议",
-    defaultPath: `${meeting.title}.${extension}`,
+    defaultPath: `${safeName}.${extension}`,
     filters: [{ name: extension.toUpperCase(), extensions: [extension] }]
   });
   if (result.canceled || !result.filePath) return { canceled: true };
@@ -128,9 +143,9 @@ export async function exportMeeting(meeting, format, parentWindow, audioPaths = 
     await writeFile(result.filePath, `${JSON.stringify(meeting, null, 2)}\n`, "utf8");
   } else if (format === "zip") {
     const zip = new JSZip();
-    zip.file(`${meeting.title}.md`, markdown(meeting));
-    zip.file(`${meeting.title}.json`, JSON.stringify(meeting, null, 2));
-    zip.file(`${meeting.title}.srt`, subtitle(meeting, "srt"));
+    zip.file(`${safeName}.md`, markdown(meeting));
+    zip.file(`${safeName}.json`, JSON.stringify(meeting, null, 2));
+    zip.file(`${safeName}.srt`, subtitle(meeting, "srt"));
     for (const audioPath of audioPaths) {
       const audio = await readFile(audioPath).catch(() => null);
       if (audio) zip.file(`audio/${path.basename(audioPath)}`, audio);

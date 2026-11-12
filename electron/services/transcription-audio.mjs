@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { audioEnhancementFilters } from "./audio-quality.mjs";
 
 const LIVE_CAPTURE_EXTENSIONS = new Set([".webm", ".m4a", ".mp4", ".ogg"]);
 
@@ -49,6 +50,44 @@ function runFfmpeg(command, args, signal) {
     if (signal?.aborted) abort();
     else signal?.addEventListener("abort", abort, { once: true });
   });
+}
+
+/**
+ * 转写前的音质增强（70Hz 高通 + 响度归一），输入输出都是 16k 单声道 PCM WAV。
+ *
+ * 刻意与「格式归一化」分开：静音门限必须在原始 PCM 上算，若先 loudnorm 把底噪
+ * 抬起来，纯静音块会被误判成有人说话，Whisper 就会在静音段继续产生幻觉文字。
+ * 增强是尽力而为的：开关关闭、组件缺失、滤镜不兼容或超时都原样返回，
+ * 绝不因为「优化」把本来能识别的块弄丢。
+ * execute 参数仅用于单元测试替换子进程，正式调用使用托管 FFmpeg runner。
+ */
+export async function enhanceTranscriptionAudio(audioBuffer, ffmpegPath, signal, execute = runFfmpeg) {
+  const source = Buffer.from(audioBuffer);
+  const filters = audioEnhancementFilters();
+  if (!filters.length || !ffmpegPath) return source;
+  if (source.length <= 44 || source.subarray(0, 4).toString("ascii") !== "RIFF") return source;
+  const token = randomUUID();
+  const inputPath = path.join(tmpdir(), `${token}-enhance.wav`);
+  const outputPath = path.join(tmpdir(), `${token}-enhanced.wav`);
+  await writeFile(inputPath, source);
+  try {
+    await execute(ffmpegPath, [
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-i", inputPath,
+      "-vn", "-ar", "16000", "-ac", "1",
+      "-af", filters.join(","),
+      "-c:a", "pcm_s16le", "-f", "wav",
+      outputPath
+    ], signal);
+    const wave = await readFile(outputPath);
+    if (wave.length <= 44 || wave.subarray(0, 4).toString("ascii") !== "RIFF") return source;
+    return wave;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return source;
+  } finally {
+    await Promise.allSettled([unlink(inputPath), unlink(outputPath)]);
+  }
 }
 
 /**

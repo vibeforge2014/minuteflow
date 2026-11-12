@@ -26,6 +26,8 @@ const defaultPreferences: MeetingPreferences = {
   summaryCadenceVersion: 1,
   defaultMode: "online",
   glossary: [],
+  audioEnhancement: true,
+  silenceSkip: true,
   retentionDays: null,
   onboardingCompleted: false,
   systemPermissionsCompleted: false,
@@ -843,7 +845,9 @@ const browserApi: MeetingAPI = {
     closePermissionHelper() {},
     onSuspend() { return () => {}; },
     onResume() { return () => {}; },
-    onMenuAction() { return () => {}; }
+    onMenuAction() { return () => {}; },
+    onFlushBeforeQuit() { return () => {}; },
+    notifyFlushComplete() {}
   },
   window: {
     async toggleMini() { return false; },

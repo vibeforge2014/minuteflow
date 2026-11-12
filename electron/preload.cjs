@@ -172,7 +172,14 @@ contextBridge.exposeInMainWorld("meetingAPI", {
       const listener = (_event, action) => callback(action);
       ipcRenderer.on("menu:action", listener);
       return () => ipcRenderer.removeListener("menu:action", listener);
-    }
+    },
+    // 退出握手：主进程在 app.exit() 前请求冲刷，渲染层写完编辑/逐字稿后回执。
+    onFlushBeforeQuit: (callback) => {
+      const listener = (_event, token) => callback(token);
+      ipcRenderer.on("app:flush-before-quit", listener);
+      return () => ipcRenderer.removeListener("app:flush-before-quit", listener);
+    },
+    notifyFlushComplete: (token) => ipcRenderer.send("app:flush-complete", token)
   },
   window: {
     toggleMini: (enabled) => invoke("window:toggle-mini", enabled),

@@ -17,6 +17,18 @@ import type { Meeting } from "../types";
 import { mergeSummaryRevision } from "../lib/summary";
 import { formatDuration } from "../lib/format";
 
+export interface AudioLevels { microphone: number; system: number }
+
+/**
+ * 实时电平的外部存储：60fps 的采样绝不进入 React state，否则每次采样都会让
+ * App（无 selector 订阅整个 store 时尤甚）连同逐字稿列表一起重渲染。
+ * 消费方 subscribe 后直接改 DOM，current 供首帧取值。
+ */
+export interface LevelSource {
+  current: AudioLevels;
+  subscribe(listener: (levels: AudioLevels) => void): () => void;
+}
+
 export function useMeetingRecorder(meeting: Meeting | undefined) {
   const profiles = useMeetingStore((state) => state.profiles);
   const preferences = useMeetingStore((state) => state.preferences);
@@ -29,8 +41,19 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   // 录音状态机：idle 空闲 / starting 授权与取流中 / recording 录制中 / paused 暂停 / stopping 收尾落盘中。
   const [phase, setPhase] = useState<"idle" | "starting" | "recording" | "paused" | "stopping">("idle");
   const [elapsed, setElapsed] = useState(meeting?.durationSeconds ?? 0);
-  // 实时电平（0-1），由 MeetingRecorder 的 AnalyserNode 回调驱动底部工具条的波形动画。
-  const [levels, setLevels] = useState({ microphone: 0, system: 0 });
+  // 实时电平（0-1）：外部存储 + 订阅，不驱动 React 重渲染（见 LevelSource）。
+  const levelListeners = useRef(new Set<(levels: AudioLevels) => void>());
+  const levelSource = useMemo<LevelSource>(() => ({
+    current: { microphone: 0, system: 0 },
+    subscribe(listener) {
+      levelListeners.current.add(listener);
+      return () => { levelListeners.current.delete(listener); };
+    }
+  }), []);
+  const publishLevels = useCallback((next: AudioLevels) => {
+    levelSource.current = next;
+    for (const listener of levelListeners.current) listener(next);
+  }, [levelSource]);
   // 待完成转写任务数，展示“转录队列”积压。
   const [queue, setQueue] = useState(0);
   const [warning, setWarning] = useState<string | null>(null);
@@ -266,7 +289,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     setTranscriptionFailure(null);
     try {
       const recorder = new MeetingRecorder(target, sttProfile, preferences.glossary, {
-        onLevel: setLevels,
+        onLevel: publishLevels,
         onTranscriptionQueue: setQueue,
         onWarning: setWarning,
         onTranscriptionFailure: (failure) => {
@@ -279,7 +302,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
         onTranscript: (segment) => appendTranscript(target.id, segment),
         onProvisional: (segment) => appendProvisionalTranscript(target.id, segment),
         onProvisionalSettled: (segmentId) => dropProvisionalTranscript(target.id, segmentId)
-      });
+      }, { transcriptionLanguage: preferences.transcriptionLanguage });
       recorderRef.current = recorder;
       await recorder.start();
       // 用户在授权/取流期间按了停止，而取消信号晚于录音器最后一次检查：直接中止会话，
@@ -313,7 +336,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
         setWarning(error instanceof Error ? error.message : "无法开始录音");
       }
     }
-  }, [appendProvisionalTranscript, appendTranscript, dropProvisionalTranscript, meeting, phase, preferences.glossary, restartSummaryTimer, sttProfile, updateMeeting]);
+  }, [appendProvisionalTranscript, appendTranscript, dropProvisionalTranscript, meeting, phase, preferences.glossary, preferences.transcriptionLanguage, publishLevels, restartSummaryTimer, sttProfile, updateMeeting]);
 
   const pause = useCallback(async () => {
     // 绑定录音会议：切换选中项后暂停/继续仍写回正在录的那场。
@@ -373,9 +396,9 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       recordingMeetingRef.current = null;
       setRecordingMeetingId(null);
       setPhase("idle");
-      setLevels({ microphone: 0, system: 0 });
+      publishLevels({ microphone: 0, system: 0 });
     }
-  }, [dropProvisionalTranscript, elapsed, flushMeeting, meeting, phase, resolveRecordingMeeting, updateMeeting]);
+  }, [dropProvisionalTranscript, elapsed, flushMeeting, meeting, phase, publishLevels, resolveRecordingMeeting, updateMeeting]);
 
   useEffect(() => () => {
     if (timerRef.current) window.clearInterval(timerRef.current);
@@ -423,7 +446,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   return {
     phase,
     elapsed,
-    levels,
+    levels: levelSource,
     queue,
     /** 正在录音的会议（录音中切换选中项后仍指向它），供全局录音入口与错误绑定使用。 */
     recordingMeetingId,

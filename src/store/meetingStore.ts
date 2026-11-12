@@ -81,6 +81,14 @@ interface MeetingState {
 
 // 各会议待冲刷的节流定时器（meetingId → timer），模块级保证 store 重建也不悬挂。
 const flushTimers = new Map<string, number>();
+/**
+ * 本次会话内已软删的会议 id：后台导入/分离任务可能仍持有旧快照，完成时会推送
+ * imports:meeting-updated。若不做拦截，这些推送会把已删会议重新插回侧栏。
+ * 列表刷新以数据库为准，刷新后清空（回收站恢复也走刷新）。
+ */
+const deletedMeetingIds = new Set<string>();
+/** 已发出但尚未回执的 meetings:save；退出握手要等这些 IPC 真正落盘。 */
+const inFlightSaves = new Map<string, Promise<unknown>>();
 
 /**
  * 保存会议并在回填时保留仅存在于内存的临时（provisional）段落：
@@ -112,6 +120,8 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     summaryCadenceVersion: 1,
     defaultMode: "online",
     glossary: [],
+    audioEnhancement: true,
+    silenceSkip: true,
     retentionDays: null,
     onboardingCompleted: false,
     systemPermissionsCompleted: false,
@@ -133,6 +143,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
         api.models.list(),
         api.preferences.get()
       ]);
+      deletedMeetingIds.clear();
       set({
         meetings,
         profiles,
@@ -149,6 +160,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
   async refreshMeetings() {
     try {
       const meetings = await api.meetings.list(get().search);
+      deletedMeetingIds.clear();
       set((state) => ({ meetings, selectedId: state.selectedId && meetings.some((item) => item.id === state.selectedId) ? state.selectedId : meetings[0]?.id ?? null }));
     } catch (error) {
       set({ error: error instanceof Error ? error.message : "刷新会议失败" });
@@ -171,6 +183,9 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
   },
 
   mergeImportedMeeting(incoming) {
+    // 主进程 saveMeeting 对已软删会议会原样返回（带 deletedAt），后台任务随后
+    // 仍会推送这份快照；这里双保险，绝不让它把已删会议插回列表。
+    if (deletedMeetingIds.has(incoming.id) || incoming.deletedAt) return;
     set((state) => {
       const current = state.meetings.find((meeting) => meeting.id === incoming.id);
       if (!current) return { meetings: [incoming, ...state.meetings] };
@@ -246,7 +261,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
       const latest = get().meetings.find((meeting) => meeting.id === id);
       if (!latest) { set({ saving: false }); return; }
       const sentRevision = meetingRevisions.get(id) ?? 0;
-      void persistMeetingToBackend(latest).then((saved) => {
+      const savePromise = persistMeetingToBackend(latest).then((saved) => {
         if (meetingRevisions.get(id) !== sentRevision) {
           // 请求期间又有新内容：丢弃旧回填；只有没有排队中的保存时才熄灭指示器。
           if (!editSaveTimers.has(id)) set({ saving: false });
@@ -262,6 +277,10 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
           return;
         }
         set({ saving: false, error: error instanceof Error ? error.message : "保存失败" });
+      });
+      inFlightSaves.set(id, savePromise);
+      void savePromise.finally(() => {
+        if (inFlightSaves.get(id) === savePromise) inFlightSaves.delete(id);
       });
     }, EDIT_SAVE_DEBOUNCE_MS));
   },
@@ -356,10 +375,12 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     }
   },
 
-  /** 冲刷所有还在防抖窗口里的编辑：窗口关闭前尽量把最后一次输入落盘。 */
+  /** 冲刷所有待落盘内容：编辑防抖 + 录音逐字稿的 10 秒节流，退出握手会等它完成。 */
   async flushPendingSaves() {
-    const ids = Array.from(editSaveTimers.keys());
-    await Promise.all(ids.map((id) => get().flushMeeting(id)));
+    const ids = new Set([...editSaveTimers.keys(), ...flushTimers.keys()]);
+    await Promise.all([...ids].map((id) => get().flushMeeting(id)));
+    // 退出前若还有在途的编辑保存（定时器已触发、IPC 未回执），等它落地再回执。
+    await Promise.all(Array.from(inFlightSaves.values()).map((promise) => promise.catch(() => {})));
   },
 
   /** 替换会议纪要（AI 结果已按 mergeSummaryRevision 合并锁定字段后写入）。 */
@@ -369,7 +390,18 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
 
   /** 软删除（移入最近删除）：先持久化删除标记，再从内存列表移除并修正选中项。 */
   async deleteMeeting(id) {
-    await api.meetings.delete(id);
+    // 清掉两类待落盘定时器：否则删除后定时器触发，会用旧快照再写一次会议。
+    const editTimer = editSaveTimers.get(id);
+    if (editTimer !== undefined) { window.clearTimeout(editTimer); editSaveTimers.delete(id); }
+    const flushTimer = flushTimers.get(id);
+    if (flushTimer !== undefined) { window.clearTimeout(flushTimer); flushTimers.delete(id); }
+    deletedMeetingIds.add(id);
+    try {
+      await api.meetings.delete(id);
+    } catch (error) {
+      deletedMeetingIds.delete(id);
+      throw error;
+    }
     set((state) => {
       const meetings = state.meetings.filter((meeting) => meeting.id !== id);
       return {

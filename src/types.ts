@@ -40,6 +40,8 @@ export interface TranscriptSegment {
 /** 一个音频传输块内的原子识别片段；传输块本身不再等同于可见段落。 */
 export interface TranscriptionChunkResult {
   segments: TranscriptSegment[];
+  /** auto 模式下本块实际锁定/推断出的语种（zh/en），供渲染层在后续块固定沿用。 */
+  language?: string;
 }
 
 /**
@@ -355,6 +357,12 @@ export interface MeetingPreferences {
   defaultMode: MeetingMode;
   /** 术语表：转写时传给模型，统一专有名词写法。 */
   glossary: string[];
+  /** 实时转写语言：zh / en / auto；缺省按 zh 处理以兼容旧配置。 */
+  transcriptionLanguage?: "zh" | "en" | "auto";
+  /** 转写前音频增强（70Hz 高通 + 响度归一）；缺省开启。 */
+  audioEnhancement?: boolean;
+  /** 跳过纯静音音频块，避免模型在静音段产生幻觉文字；缺省开启。 */
+  silenceSkip?: boolean;
   /** 会议保留天数；null 表示永久保留。 */
   retentionDays: number | null;
   /** 新手引导是否已完成。 */
@@ -729,6 +737,8 @@ export interface MeetingAPI {
       endMs: number;
       track: AudioTrackKind;
       glossary?: string[];
+      /** 该轨道最近已定稿的文本，作为 initial_prompt 的前文上下文。 */
+      previousText?: string;
     }): Promise<TranscriptionChunkResult>;
   };
   /**
@@ -898,6 +908,10 @@ export interface MeetingAPI {
     onResume(callback: () => void): () => void;
     /** 原生应用菜单动作（menu:action 事件）订阅，浏览器预览为空实现。 */
     onMenuAction(callback: (action: string) => void): () => void;
+    /** 主进程退出前请求冲刷编辑与逐字稿；回调收到握手 token。 */
+    onFlushBeforeQuit(callback: (token: string) => void): () => void;
+    /** 冲刷完成后回执，主进程收到后才真正 app.exit()。 */
+    notifyFlushComplete(token: string): void;
   };
   /** 窗口：迷你录音窗开关与状态同步。 */
   window: {

@@ -40,6 +40,14 @@ import {
 } from "../lib/import-status";
 import { useStreamingTranscript } from "../hooks/useStreamingTranscript";
 import { shortcutLabel } from "../lib/platform";
+import { useMeetingStore } from "../store/meetingStore";
+import { isLowConfidence, countLowConfidence } from "../lib/transcript-confidence";
+import {
+  MAX_SUGGESTION_TEXT_CHARS,
+  applyGlossarySuggestion,
+  findGlossarySuggestions
+} from "../lib/glossary-suggestions";
+import type { GlossarySuggestion } from "../lib/glossary-suggestions";
 import type { WorkspaceStage } from "../lib/workspace";
 
 interface TranscriptViewProps {
@@ -102,6 +110,10 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   }, []);
   const [autoScroll, setAutoScroll] = useState(true);
   const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
+  /** 用户已忽略的术语建议（段落 id + 建议 id），不会自动改字。 */
+  const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(() => new Set());
+  /** 只看引擎标为可能不准的片段，便于会后集中复核。 */
+  const [onlyLowConfidence, setOnlyLowConfidence] = useState(false);
   const [voiceprints, setVoiceprints] = useState<VoiceprintPerson[]>([]);
   const [learningSpeakerId, setLearningSpeakerId] = useState<string | null>(null);
   const [voiceprintMessage, setVoiceprintMessage] = useState("");
@@ -109,6 +121,8 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   /** 关键结论回链定位到的段落 id（短暂高亮后清除）。 */
   const [jumpHighlightId, setJumpHighlightId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  /** 自定义术语：识别时进 prompt，识别后生成可确认的纠错建议。 */
+  const glossary = useMeetingStore((state) => state.preferences.glossary);
   // 从转写中提取去重后的说话人 (id → name) 列表。
   const speakers = useMemo(() => Array.from(new Map(
     meeting.transcript.map((segment) => [segment.speakerId, segment.speakerName])
@@ -118,9 +132,17 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   const importActive = Boolean(importJob) && !["complete", "failed", "cancelled"].includes(importJob?.status ?? "");
   const displayTranscript = useStreamingTranscript(meeting, importActive || stage === "live");
   /** 发言人筛选先于窗口化：只加载所选发言人的段落，长会议查找不会把无关内容一起渲染。 */
+  const lowConfidenceCount = useMemo(() => countLowConfidence(displayTranscript), [displayTranscript]);
   const filteredTranscript = useMemo(
-    () => speakerFilter ? displayTranscript.filter((segment) => segment.speakerId === speakerFilter) : displayTranscript,
-    [displayTranscript, speakerFilter]
+    () => {
+      const bySpeaker = speakerFilter
+        ? displayTranscript.filter((segment) => segment.speakerId === speakerFilter)
+        : displayTranscript;
+      return onlyLowConfidence
+        ? bySpeaker.filter((segment) => isLowConfidence(segment.confidence))
+        : bySpeaker;
+    },
+    [displayTranscript, speakerFilter, onlyLowConfidence]
   );
   /** 命中段落 id（按时间顺序），上下跳转在 filteredTranscript 的窗口里定位。 */
   const searchMatches = useMemo(
@@ -129,14 +151,52 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
       : [],
     [filteredTranscript, normalizedQuery]
   );
-  const visibleSegments = filteredTranscript.slice(-visibleCount);
+  // 窗口切片必须 memo：非 memo 时父组件任意一次重渲染（录音计时、Toast 等）都会
+  // 产生新数组，级联使下面 3 个 useMemo 与 useEnteringItemIds 全部失效。
+  const visibleSegments = useMemo(
+    () => filteredTranscript.slice(-visibleCount),
+    [filteredTranscript, visibleCount]
+  );
   const visibleSegmentIds = useMemo(() => visibleSegments.map((segment) => segment.id), [visibleSegments]);
   const enteringSegmentIds = useEnteringItemIds(meeting.id, visibleSegmentIds);
-  // 同一批新入场的段落按 0/40/80ms 级联出现，避免整块转写结果齐刷刷闪现。
+  // 同一批新入场的段落按 0/40/80ms 级联出现；用 Map 查询，避免批量入场时
+  // 对每段做一次数组 indexOf（近千段时退化为 O(N²)）。
   const enteringSequence = useMemo(
-    () => visibleSegments.filter((segment) => enteringSegmentIds.has(segment.id)).map((segment) => segment.id),
+    () => new Map(visibleSegments
+      .filter((segment) => enteringSegmentIds.has(segment.id))
+      .map((segment, index) => [segment.id, index])),
     [visibleSegments, enteringSegmentIds]
   );
+  /**
+   * 术语纠错建议：只算可见段落，按「段落文本 + 术语表」缓存，长会议滚动不会重复
+   * 做编辑距离。计算用会议里的完整原文（流式揭示期间显示层文本可能只出到一半），
+   * 结果仅展示，确认后才由 applyGlossarySuggestion 改写。
+   */
+  const suggestionCache = useRef(new Map<string, { text: string; key: string; items: GlossarySuggestion[] }>());
+  const glossaryKey = glossary.join("\u0000");
+  const fullTextById = useMemo(
+    () => new Map(meeting.transcript.map((segment) => [segment.id, segment.text])),
+    [meeting.transcript]
+  );
+  const suggestionsBySegment = useMemo(() => {
+    const result = new Map<string, GlossarySuggestion[]>();
+    if (!glossary.length) return result;
+    // 缓存按段落 id 单调增长，长会议滚动会一直堆；超过 500 条直接整体失效重算，
+    // 命中率几乎不变，但内存有上界。
+    if (suggestionCache.current.size > 500) suggestionCache.current.clear();
+    for (const segment of visibleSegments) {
+      if (segment.status !== "final" || editingSegmentId === segment.id) continue;
+      const text = fullTextById.get(segment.id) ?? segment.text;
+      if (!text || text.length > MAX_SUGGESTION_TEXT_CHARS) continue;
+      const cached = suggestionCache.current.get(segment.id);
+      const fresh = !cached || cached.text !== text || cached.key !== glossaryKey;
+      const items = fresh ? findGlossarySuggestions(text, glossary, 2) : cached!.items;
+      if (fresh) suggestionCache.current.set(segment.id, { text, key: glossaryKey, items });
+      const visible = items.filter((item) => !dismissedSuggestions.has(`${segment.id}:${item.id}`));
+      if (visible.length) result.set(segment.id, visible);
+    }
+    return result;
+  }, [glossary, glossaryKey, visibleSegments, fullTextById, dismissedSuggestions, editingSegmentId]);
   const tailSegment = displayTranscript.at(-1);
   const tailSignature = tailSegment ? `${tailSegment.id}:${tailSegment.text.length}:${tailSegment.status}` : "";
 
@@ -157,6 +217,9 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     setSpeakerFilter("");
     setActiveMatch(0);
     setSearchFocusId(null);
+    setDismissedSuggestions(new Set());
+    setOnlyLowConfidence(false);
+    suggestionCache.current.clear();
     refreshVoiceprints();
   }, [meeting.id, refreshVoiceprints]);
 
@@ -407,6 +470,17 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
       >
         <MagnifyingGlass size={15} />查找<kbd>{shortcutLabel("F")}</kbd>
       </button>
+      {lowConfidenceCount > 0 && (
+        <button
+          type="button"
+          className={`text-button transcript-review-filter ${onlyLowConfidence ? "is-active" : ""}`}
+          aria-pressed={onlyLowConfidence}
+          title="只看引擎把握较低的片段，集中对照录音复核"
+          onClick={() => setOnlyLowConfidence((value) => !value)}
+        >
+          <WarningCircle size={15} />存疑 {lowConfidenceCount}
+        </button>
+      )}
     </div>
   );
 
@@ -651,7 +725,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           </button>
         )}
         {visibleSegments.length ? visibleSegments.map((segment, index) => {
-          const enteringIndex = enteringSequence.indexOf(segment.id);
+          const enteringIndex = enteringSequence.get(segment.id) ?? -1;
           const previous = visibleSegments[index - 1];
           const continuation = previous?.speakerId === segment.speakerId && segment.startMs - previous.endMs < 1500;
           return (
@@ -670,6 +744,16 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
                 )}
               </button>
               <button className="transcript-time" aria-label={`定位到 ${formatTranscriptTime(segment.startMs)}`} onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
+              {isLowConfidence(segment.confidence) && (
+                <button
+                  type="button"
+                  className="confidence-flag"
+                  title="引擎对这段的识别把握较低，建议对照录音复核（点击直接编辑）"
+                  onClick={() => setEditingSegmentId(segment.id)}
+                >
+                  <WarningCircle size={12} />可能不准
+                </button>
+              )}
             </div>
             <div className="transcript-bubble">
             <div className="transcript-bubble__content">
@@ -698,6 +782,33 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
                 <AnimatedTranscriptCopy text={segment.text} animate={!enteringSegmentIds.has(segment.id)} />
               )}
               <ProvisionalBadge visible={segment.status === "provisional"} />
+              {!normalizedQuery && editingSegmentId !== segment.id && (suggestionsBySegment.get(segment.id)?.length ?? 0) > 0 && (
+                <div className="glossary-suggestions" aria-label="术语纠错建议">
+                  {suggestionsBySegment.get(segment.id)!.map((suggestion) => (
+                    <span className="glossary-suggestion" key={suggestion.id}>
+                      <span className="glossary-suggestion__text">
+                        「{suggestion.original}」可能应为 <strong>{suggestion.replacement}</strong>
+                      </span>
+                      <button
+                        type="button"
+                        className="glossary-suggestion__apply"
+                        title="用术语表中的写法替换这一处，不会改动其他文字"
+                        onClick={() => {
+                          const source = fullTextById.get(segment.id) ?? segment.text;
+                          updateSegmentText(segment.id, applyGlossarySuggestion(source, suggestion));
+                        }}
+                      >应用</button>
+                      <button
+                        type="button"
+                        className="glossary-suggestion__ignore"
+                        aria-label="忽略这条建议"
+                        title="忽略这条建议"
+                        onClick={() => setDismissedSuggestions((previous) => new Set(previous).add(`${segment.id}:${suggestion.id}`))}
+                      ><X size={12} /></button>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="transcript-item__actions">
               {segment.status !== "provisional" && (
@@ -716,12 +827,12 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
         }) : (
           <div className="panel-empty">
             <MagicWand size={24} weight="duotone" />
-            {meeting.transcript.length > 0 && (speakerFilter || normalizedQuery) ? (
+            {meeting.transcript.length > 0 && (speakerFilter || normalizedQuery || onlyLowConfidence) ? (
               <>
                 <p>没有符合当前查找或筛选条件的段落。</p>
                 <button
                   className="button button--secondary button--small"
-                  onClick={() => { setQuery(""); setSpeakerFilter(""); setSearchFocusId(null); }}
+                  onClick={() => { setQuery(""); setSpeakerFilter(""); setSearchFocusId(null); setOnlyLowConfidence(false); }}
                 >清除查找与筛选</button>
               </>
             ) : (

@@ -23,6 +23,7 @@ import { initWhisper, loadWhisperModule } from "@fugood/whisper.node";
 import { buildBasicKeyPoints, simplifySummary } from "./chinese.mjs";
 import { testAppleSpeech, appleSpeechFixturePath } from "./apple-speech.mjs";
 import { decodeWithSherpaAsr } from "./asr-runtime.mjs";
+import { buildTranscriptionPrompt } from "./transcription-prompt.mjs";
 
 // ESM 下按需加载 CJS 原生模块（sherpa-onnx-node）。
 const require = createRequire(import.meta.url);
@@ -824,7 +825,7 @@ const FASTER_WHISPER_SCRIPT = [
   "from faster_whisper import WhisperModel",
   "model = WhisperModel(sys.argv[1], device='auto', compute_type='auto')",
   "segments, info = model.transcribe(sys.argv[2], language=sys.argv[3] or None, initial_prompt=sys.argv[4] or None, vad_filter=True)",
-  "materialized = [{'start': float(s.start), 'end': float(s.end), 'text': (s.text or '').strip()} for s in segments]",
+  "materialized = [{'start': float(s.start), 'end': float(s.end), 'text': (s.text or '').strip(), 'avg_logprob': getattr(s, 'avg_logprob', None), 'no_speech_prob': getattr(s, 'no_speech_prob', None), 'compression_ratio': getattr(s, 'compression_ratio', None)} for s in segments]",
   "print(json.dumps({'text': ' '.join(s['text'] for s in materialized), 'language': getattr(info, 'language', None), 'segments': materialized}, ensure_ascii=False))"
 ].join("\n");
 
@@ -833,7 +834,7 @@ const MLX_WHISPER_SCRIPT = [
   "import json, sys",
   "import mlx_whisper",
   "result = mlx_whisper.transcribe(sys.argv[2], path_or_hf_repo=sys.argv[1], language=sys.argv[3] or None, initial_prompt=sys.argv[4] or None)",
-  "segments = [{'start': float(s.get('start', 0)), 'end': float(s.get('end', 0)), 'text': (s.get('text') or '').strip()} for s in result.get('segments', [])]",
+  "segments = [{'start': float(s.get('start', 0)), 'end': float(s.get('end', 0)), 'text': (s.get('text') or '').strip(), 'avg_logprob': s.get('avg_logprob'), 'no_speech_prob': s.get('no_speech_prob'), 'compression_ratio': s.get('compression_ratio')} for s in result.get('segments', [])]",
   "print(json.dumps({'text': (result.get('text') or '').strip(), 'language': result.get('language'), 'segments': segments}, ensure_ascii=False))"
 ].join("\n");
 
@@ -866,15 +867,13 @@ const QWEN3_ASR_SCRIPT = [
  * 运行内嵌 Python 脚本（模型路径、语言、术语表提示作为 argv 传入）→ 解析 JSON。
  * @returns {Promise<{text: string, segments: Array, duration?: number}>}
  */
-async function transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, script) {
+async function transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, script, previousText = "") {
   const modelPath = profile.options?.modelPath;
   const pythonPath = profile.options?.pythonExecutablePath
     || profile.options?.executablePath
     || (process.platform === "win32" ? "python" : "python3");
   if (!modelPath) throw new Error("请先选择本地模型目录或填写 Hugging Face 仓库 ID。");
-  const promptSegments = [];
-  if (language === "zh") promptSegments.push("以下是简体中文的会议记录。");
-  if (glossary.length) promptSegments.push(glossary.slice(0, 200).join("，"));
+  const prompt = buildTranscriptionPrompt({ language, glossary, previousText });
   const inputPath = path.join(tmpdir(), `${randomUUID()}-${fileName}`);
   let wavePath = inputPath;
   await writeFile(inputPath, audioBuffer);
@@ -885,17 +884,23 @@ async function transcribeWithPythonPackage(profile, audioBuffer, fileName, langu
     await runProcess(profile.options.ffmpegPath, ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavePath], { signal });
   }
   try {
-    const { stdout } = await runProcess(pythonPath, ["-c", script, modelPath, wavePath, language ?? "", promptSegments.join("")], { env: environment, signal });
+    const { stdout } = await runProcess(pythonPath, ["-c", script, modelPath, wavePath, language ?? "", prompt], { env: environment, signal });
     const payload = JSON.parse(stdout.trim().split("\n").pop());
     const segments = (payload.segments ?? [])
       .map((segment) => ({
         startMs: Math.round((Number(segment.start) || 0) * 1000),
         endMs: Math.round((Number(segment.end) || 0) * 1000),
-        text: String(segment.text ?? "").trim()
+        text: String(segment.text ?? "").trim(),
+        // 原始置信度信号透传，由 withSegmentConfidence 统一折算成 0–1。
+        avgLogprob: segment.avg_logprob,
+        noSpeechProb: segment.no_speech_prob,
+        compressionRatio: segment.compression_ratio
       }))
       .filter((segment) => segment.text);
     return {
       text: (payload.text ?? segments.map((segment) => segment.text).join(" ")).trim(),
+      // 自动识别模式下把本块语种交给队列锁定，后续块不再逐块重新检测。
+      language: payload.language ?? language,
       segments,
       duration: segments.length ? Math.max(...segments.map((segment) => segment.endMs)) / 1000 : undefined
     };
@@ -905,22 +910,22 @@ async function transcribeWithPythonPackage(profile, audioBuffer, fileName, langu
 }
 
 /** faster-whisper（CTranslate2）转录入口，委托 transcribeWithPythonPackage 执行。 */
-export async function transcribeWithFasterWhisper(profile, audioBuffer, fileName, language = "zh", glossary = [], signal) {
-  return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, FASTER_WHISPER_SCRIPT);
+export async function transcribeWithFasterWhisper(profile, audioBuffer, fileName, language = "zh", glossary = [], signal, previousText = "") {
+  return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, FASTER_WHISPER_SCRIPT, previousText);
 }
 
 /** mlx-whisper 转录入口：仅 Apple Silicon macOS 可用，其余平台直接报错。 */
-export async function transcribeWithMlxWhisper(profile, audioBuffer, fileName, language = "zh", glossary = [], signal) {
+export async function transcribeWithMlxWhisper(profile, audioBuffer, fileName, language = "zh", glossary = [], signal, previousText = "") {
   if (process.platform !== "darwin") throw new Error("MLX-Whisper 仅在 Apple Silicon macOS 上可用。");
-  return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, MLX_WHISPER_SCRIPT);
+  return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, MLX_WHISPER_SCRIPT, previousText);
 }
 
 /**
  * Qwen3-ASR（实验性）转录入口：Python + qwen-asr 运行时，需要 NVIDIA GPU（Windows）
  * 或 Apple Silicon MPS（macOS）；无 GPU 的场景已被 resolveLocalModelProfile 就绪检查挡下。
  */
-export async function transcribeWithQwen3Asr(profile, audioBuffer, fileName, language = "zh", glossary = [], signal) {
-  return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, QWEN3_ASR_SCRIPT);
+export async function transcribeWithQwen3Asr(profile, audioBuffer, fileName, language = "zh", glossary = [], signal, previousText = "") {
+  return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, QWEN3_ASR_SCRIPT, previousText);
 }
 
 /**
@@ -978,7 +983,8 @@ export async function transcribeRemote(
   fileName,
   language = "zh",
   glossary = [],
-  signal
+  signal,
+  previousText = ""
 ) {
   // 远程语音识别可能需要等待冷启动或处理较长导入音频。应用端保证至少
   // 330 秒，比推荐的 DSM proxy_read_timeout=300s 多 30 秒缓冲；这也会覆盖旧档案中保存的 120s。
@@ -995,6 +1001,9 @@ export async function transcribeRemote(
     ".mp3": "audio/mpeg",
     ".flac": "audio/flac"
   })[extension] || "application/octet-stream";
+  // 简体引导语 + 前文 + 术语表统一构造；此前远程链路只传术语表，中文用词的
+  // 简繁与专名写法和本地引擎不一致。
+  const prompt = buildTranscriptionPrompt({ language, glossary, previousText });
   const retryBackoffMs = [2_000, 8_000];
   let lastFailure;
   for (let attempt = 0; ; attempt += 1) {
@@ -1004,7 +1013,7 @@ export async function transcribeRemote(
     form.append("model", profile.model);
     if (language) form.append("language", language);
     if (defaultResponseFormat !== "text") form.append("response_format", defaultResponseFormat);
-    if (glossary.length) form.append("prompt", glossary.slice(0, 200).join("，"));
+    if (prompt) form.append("prompt", prompt);
     let response;
     try {
       response = await fetch(apiUrl(profile, "audio/transcriptions", profile.options?.transcriptionEndpoint), {
@@ -1034,7 +1043,10 @@ export async function transcribeRemote(
           segments: (result.segments ?? []).map((segment) => ({
             startMs: Math.round((segment.start ?? 0) * 1000),
             endMs: Math.round((segment.end ?? segment.start ?? 0) * 1000),
-            text: String(segment.text ?? "").trim()
+            text: String(segment.text ?? "").trim(),
+            avgLogprob: segment.avg_logprob,
+            noSpeechProb: segment.no_speech_prob,
+            compressionRatio: segment.compression_ratio
           })).filter((segment) => segment.text)
         };
       }
@@ -1097,7 +1109,8 @@ export async function transcribeWithPythonWhisper(
   fileName,
   language = "zh",
   glossary = [],
-  signal
+  signal,
+  previousText = ""
 ) {
   const modelPath = profile.options?.modelPath;
   const pythonPath = profile.options?.pythonExecutablePath
@@ -1129,13 +1142,16 @@ export async function transcribeWithPythonWhisper(
       modelPath,
       inputPath,
       language,
-      glossary.slice(0, 200).join("，")
+      buildTranscriptionPrompt({ language, glossary, previousText })
     ], { env: environment, signal });
     const result = JSON.parse(stdout.trim().split("\n").at(-1));
     const segments = (result.segments ?? []).map((segment) => ({
       startMs: Math.round(Number(segment.start ?? 0) * 1000),
       endMs: Math.round(Number(segment.end ?? segment.start ?? 0) * 1000),
-      text: String(segment.text ?? "").trim()
+      text: String(segment.text ?? "").trim(),
+      avgLogprob: segment.avg_logprob,
+      noSpeechProb: segment.no_speech_prob,
+      compressionRatio: segment.compression_ratio
     })).filter((segment) => segment.text);
     return {
       text: String(result.text ?? "").trim(),
@@ -1160,7 +1176,8 @@ export async function transcribeWithWhisperCpp(
   fileName,
   language = "zh",
   glossary = [],
-  signal
+  signal,
+  previousText = ""
 ) {
   const whisperPath = profile.options?.executablePath;
   const modelPath = profile.options?.modelPath;
@@ -1169,7 +1186,7 @@ export async function transcribeWithWhisperCpp(
     throw new Error("本地模型尚未就绪，请在转录设置中下载一个模型。");
   }
   if (!whisperPath) {
-    return transcribeWithManagedWhisper(profile, audioBuffer, fileName, language, glossary, signal);
+    return transcribeWithManagedWhisper(profile, audioBuffer, fileName, language, glossary, signal, previousText);
   }
 
   const inputPath = path.join(tmpdir(), `${randomUUID()}-${fileName}`);
@@ -1189,18 +1206,16 @@ export async function transcribeWithWhisperCpp(
     const args = [
       "-m", modelPath,
       "-f", wavePath,
-      "-l", language,
+      // 空串代表「自动识别」：Python / 远程引擎接受空值，whisper.cpp 需要显式 auto。
+      "-l", language || "auto",
       "-oj",
       "-of", outputBase
     ];
     // Whisper defaults to Traditional Chinese for Mandarin even with -l zh.
-    // Prime the decoder with a Simplified-Chinese prompt so the transcript
-    // matches the product's Simplified-first language priority, then append
-    // the user glossary as additional prompt context.
-    const promptSegments = [];
-    if (language === "zh") promptSegments.push("以下是简体中文的会议记录。");
-    if (glossary.length) promptSegments.push(glossary.slice(0, 200).join("，"));
-    if (promptSegments.length) args.push("--prompt", promptSegments.join(""));
+    // 简体引导语、前文上下文与术语表由统一模块按 token 预算组装，避免各引擎
+    // 拼接顺序不一致，也避免长术语表把 prompt 撑爆后被 tokenizer 截断。
+    const prompt = buildTranscriptionPrompt({ language, glossary, previousText });
+    if (prompt) args.push("--prompt", prompt);
     await runProcess(whisperPath, args, { signal });
     const result = JSON.parse(await readFile(`${outputBase}.json`, "utf8"));
     const segments = (result.transcription ?? []).map((item) => ({
@@ -1223,11 +1238,62 @@ export async function transcribeWithWhisperCpp(
 }
 
 /**
+ * whisper.node 上下文按模型路径常驻。此前每个 8/10 秒转录块都 initWhisper +
+ * release，长会议会把几百 MB~数 GB 权重反复从磁盘载入上千次，补转队列永远追不上。
+ * 同一上下文一次只能跑一个转录，用 promise 队列串行；空闲 5 分钟自动释放，
+ * 避免模型常驻吃满内存。
+ */
+const WHISPER_IDLE_RELEASE_MS = 5 * 60 * 1000;
+const whisperContexts = new Map();
+
+function releaseWhisperContext(modelPath, entry) {
+  if (whisperContexts.get(modelPath) !== entry) return;
+  whisperContexts.delete(modelPath);
+  const context = entry.context;
+  entry.context = null;
+  void Promise.resolve(context?.release?.()).catch(() => {});
+}
+
+async function withWhisperContext(modelPath, task) {
+  let entry = whisperContexts.get(modelPath);
+  if (!entry) {
+    entry = { context: null, queue: Promise.resolve(), lastUsedAt: 0, idleTimer: null };
+    whisperContexts.set(modelPath, entry);
+  }
+  if (entry.idleTimer) { clearTimeout(entry.idleTimer); entry.idleTimer = null; }
+  const run = entry.queue.then(async () => {
+    if (!entry.context) {
+      entry.context = await initWhisper({
+        filePath: modelPath,
+        // GPU 加速只在 macOS 启用（Windows 上该后端不稳定），FlashAttention 两平台均可。
+        useGpu: process.platform === "darwin",
+        useFlashAttn: true
+      });
+    }
+    return task(entry.context);
+  });
+  entry.queue = run.then(() => {}, () => {});
+  try {
+    return await run;
+  } finally {
+    entry.lastUsedAt = Date.now();
+    if (entry.idleTimer) clearTimeout(entry.idleTimer);
+    entry.idleTimer = setTimeout(() => {
+      entry.idleTimer = null;
+      if (Date.now() - entry.lastUsedAt >= WHISPER_IDLE_RELEASE_MS - 1000) {
+        releaseWhisperContext(modelPath, entry);
+      }
+    }, WHISPER_IDLE_RELEASE_MS);
+    entry.idleTimer.unref?.();
+  }
+}
+
+/**
  * 应用托管 whisper 运行时（@fugood/whisper.node）的进程内转录，零可执行文件配置。
- * 副作用：临时文件、ffmpeg 子进程、进程内 whisper 上下文（结束必须 release）。
+ * 副作用：临时文件、ffmpeg 子进程、复用的进程内 whisper 上下文。
  * 支持取消：AbortSignal 触发时停止推理并抛"任务已取消"。
  */
-async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, language, glossary, signal) {
+async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, language, glossary, signal, previousText = "") {
   const modelPath = profile.options?.modelPath;
   const ffmpegPath = profile.options?.ffmpegPath;
   if (!modelPath) throw new Error("本地模型尚未就绪，请在转录设置中下载一个模型。");
@@ -1236,8 +1302,6 @@ async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, lang
   const inputPath = path.join(tmpdir(), `${randomUUID()}-${fileName}`);
   const wavePath = `${inputPath}.wav`;
   await writeFile(inputPath, audioBuffer);
-  let context;
-  let transcription;
   let abort;
   try {
     if (ffmpegPath) {
@@ -1248,24 +1312,25 @@ async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, lang
       throw new Error("音频处理组件尚未就绪，请重试或重新安装应用。");
     }
 
-    context = await initWhisper({
-      filePath: modelPath,
-      // GPU 加速只在 macOS 启用（Windows 上该后端不稳定），FlashAttention 两平台均可。
-      useGpu: process.platform === "darwin",
-      useFlashAttn: true
+    const prompt = buildTranscriptionPrompt({ language, glossary, previousText });
+    const result = await withWhisperContext(modelPath, async (context) => {
+      const job = context.transcribeFile(wavePath, {
+        language: language || undefined,
+        prompt: prompt || undefined,
+        // 贪心解码：转录不需要采样随机性，也减少同音词在重复解码间的漂移。
+        temperature: 0
+      });
+      abort = () => { void job.stop(); };
+      signal?.addEventListener("abort", abort, { once: true });
+      try {
+        const value = await job.promise;
+        if (signal?.aborted || value.isAborted) throw new Error("任务已取消。");
+        return value;
+      } finally {
+        if (abort) signal?.removeEventListener("abort", abort);
+        abort = undefined;
+      }
     });
-    const promptSegments = [];
-    if (language === "zh") promptSegments.push("以下是简体中文的会议记录。");
-    if (glossary.length) promptSegments.push(glossary.slice(0, 200).join("，"));
-    transcription = context.transcribeFile(wavePath, {
-      language: language || undefined,
-      prompt: promptSegments.join("") || undefined,
-      temperature: 0
-    });
-    abort = () => { void transcription.stop(); };
-    signal?.addEventListener("abort", abort, { once: true });
-    const result = await transcription.promise;
-    if (signal?.aborted || result.isAborted) throw new Error("任务已取消。");
     const segments = (result.segments ?? []).map((segment) => ({
       // whisper.cpp timestamps are expressed in 10 ms units.
       startMs: Math.round(Number(segment.t0 ?? 0) * 10),
@@ -1280,7 +1345,6 @@ async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, lang
     };
   } finally {
     if (abort) signal?.removeEventListener("abort", abort);
-    await context?.release().catch(() => {});
     await Promise.allSettled([unlink(inputPath), unlink(wavePath)]);
   }
 }

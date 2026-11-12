@@ -177,6 +177,7 @@ import {
   saveJob,
   saveMeeting,
   saveModelProfile,
+  softDeleteMeeting,
   setDefaultModelProfile,
   deleteModelProfile,
   saveVoiceprintSample
@@ -2174,6 +2175,32 @@ describe("database transcript diff persistence", () => {
     // FTS 全文索引随保存同步：新文本可搜到，被删除的文本搜不到。
     expect(listMeetings("已经改写").some((item) => item.id === id)).toBe(true);
     expect(listMeetings("将被删除").some((item) => item.id === id)).toBe(false);
+  });
+
+  it("软删会议不会被迟到的整场保存复活，也不会被写回旧标题", () => {
+    const id = `softdelete-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    saveMeeting(buildMeeting(id, [segment(`${id}-a`, 0, 4_000, "删除前的段落")]));
+    softDeleteMeeting(id);
+    // 模拟删除后仍在途的渲染层防抖保存：带着新标题的旧快照。
+    saveMeeting({ ...buildMeeting(id, [segment(`${id}-a`, 0, 4_000, "删除前的段落")]), title: "迟到的保存" }, { preserveNewerSegments: true });
+    const stored = loadMeeting(id);
+    expect(stored?.deletedAt).toBeTruthy();
+    expect(stored?.title).toBe("产品同步会");
+  });
+
+  it("渲染层旧快照不会删掉快照之后由后台写入的新段落", () => {
+    const id = `concurrent-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    const original = segment(`${id}-a`, 0, 4_000, "原有段落");
+    saveMeeting(buildMeeting(id, [original]));
+    // 渲染层在 1 分钟前生成的快照（真实场景里是防抖窗口开始时的内存态）。
+    const staleSnapshot = {
+      ...buildMeeting(id, [original]),
+      updatedAt: new Date(Date.now() - 60_000).toISOString()
+    };
+    // 后台导入在这之后落盘了一段新转写。
+    saveMeeting(buildMeeting(id, [original, segment(`${id}-new`, 4_000, 8_000, "后台新段落")]));
+    saveMeeting(staleSnapshot, { preserveNewerSegments: true });
+    expect(loadMeeting(id)?.transcript.map((item) => item.text)).toContain("后台新段落");
   });
 
   it("round-trips visual summary JSON without dropping fields from older meeting records", () => {

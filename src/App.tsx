@@ -54,14 +54,16 @@ import { finishPermissionSetup, shouldOpenPermissionSetup } from "./lib/permissi
 export function App() {
   const forceMacPermissionPreview = import.meta.env.DEV
     && new URLSearchParams(window.location.search).get("permissionPreview") === "mac";
+  // 精确订阅各字段：无 selector 的 useMeetingStore() 会让 store 任何字段变化都
+  // 重渲染整棵 App（含逐字稿列表）。actions 引用稳定，取一次即可。
+  const meetings = useMeetingStore((state) => state.meetings);
+  const selectedId = useMeetingStore((state) => state.selectedId);
+  const loading = useMeetingStore((state) => state.loading);
+  const saving = useMeetingStore((state) => state.saving);
+  const error = useMeetingStore((state) => state.error);
+  const profiles = useMeetingStore((state) => state.profiles);
+  const preferences = useMeetingStore((state) => state.preferences);
   const {
-    meetings,
-    selectedId,
-    loading,
-    saving,
-    error,
-    profiles,
-    preferences,
     initialize,
     refreshMeetings,
     selectMeeting,
@@ -71,7 +73,7 @@ export function App() {
     deleteMeeting,
     updatePreferences,
     clearError
-  } = useMeetingStore();
+  } = useMeetingStore.getState();
   // —— 本地 UI 状态：各类弹层开关、导入队列、播放进度等，不进入 Zustand 全局 store ——
   const [newMeetingOpen, setNewMeetingOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -412,6 +414,14 @@ export function App() {
     window.addEventListener("pagehide", flushEdits);
     return () => window.removeEventListener("pagehide", flushEdits);
   }, []);
+
+  // 主进程退出握手：before-quit 会先等这个回执再 app.exit()，避免异步 IPC 的
+  // 最后一次编辑/逐字稿保存还没落盘进程就没了。超时由主进程兜底。
+  useEffect(() => api.system.onFlushBeforeQuit((token) => {
+    void useMeetingStore.getState().flushPendingSaves()
+      .catch(() => {})
+      .finally(() => api.system.notifyFlushComplete(token));
+  }), []);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {

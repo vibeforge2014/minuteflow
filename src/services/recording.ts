@@ -78,6 +78,8 @@ interface PendingBacklogChunk {
   track: CaptureTrack;
   /** 补转尝试次数：驱动 4s/8s/15s 循环节奏。 */
   attempts: number;
+  /** 签发该块时最近已定稿的文本；补转重发时沿用，避免用更新的文本串味。 */
+  previousText?: string;
 }
 
 /** 每条采集轨独立按签发序号提交，网络返回顺序不会改变段落顺序或稳定 id。 */
@@ -156,6 +158,10 @@ export class MeetingRecorder {
   private sttProfile: ModelProfile | undefined;
   private glossary: string[];
   private callbacks: RecordingCallbacks;
+  /** 用户配置的转写语言（zh / en / auto），来自全局偏好。 */
+  private configuredLanguage: string;
+  /** auto 模式下首块识别锁定的语种；后续块固定沿用，避免逐块重新猜语言。 */
+  private detectedLanguage = "";
   /** 主进程录音会话 id，append/stop 都要带上。 */
   private sessionId = "";
   /** 会话开始时间戳（主进程返回），用于把块时间换算为相对会议的 startMs/endMs。 */
@@ -176,6 +182,12 @@ export class MeetingRecorder {
   /** 正在采集的 8 秒独立转写块；停止时立即停掉，不必等满 8 秒。 */
   private standaloneRecorders = new Set<MediaRecorder>();
   private transcriptionStates = new Map<CaptureTrack, TrackTranscriptionState>();
+  /**
+   * 每条轨道最近已定稿的文本尾部。Whisper 系引擎的 initial_prompt 带上前文后，
+   * 专有名词与断句风格会跨块保持一致；两条轨道分开存，避免把远端发言人的话
+   * 塞进麦克风轨的上下文。
+   */
+  private transcriptTails = new Map<CaptureTrack, string>();
   /** 补转队列的顺序重试定时器；积压清空或停止时不再续期。 */
   private backlogTimer: number | null = null;
   /** 连续失败块数；任一块成功即归零，用于避免整场录音只弹一次或每块都弹。 */
@@ -189,12 +201,20 @@ export class MeetingRecorder {
     meeting: Meeting,
     sttProfile: ModelProfile | undefined,
     glossary: string[],
-    callbacks: RecordingCallbacks
+    callbacks: RecordingCallbacks,
+    options: { transcriptionLanguage?: string } = {}
   ) {
     this.meeting = meeting;
     this.sttProfile = sttProfile;
     this.glossary = glossary;
     this.callbacks = callbacks;
+    this.configuredLanguage = options.transcriptionLanguage || "zh";
+  }
+
+  /** 本次请求要下发的语言：显式配置优先；auto 在首块锁定后改用已判定语种。 */
+  private effectiveLanguage() {
+    if (this.configuredLanguage !== "auto") return this.configuredLanguage;
+    return this.detectedLanguage || "auto";
   }
 
   /**
@@ -416,15 +436,17 @@ export class MeetingRecorder {
       this.callbacks.onProvisional(provisional);
       const data = await blob.arrayBuffer();
       const fileName = `${track}-${startMs}.${blob.type.includes("mp4") ? "m4a" : "webm"}`;
+      const previousText = this.transcriptTails.get(track) ?? "";
       const payload = {
         profileId: this.sttProfile.id,
         data,
         fileName,
-        language: "zh",
+        language: this.effectiveLanguage(),
         startMs,
         endMs,
         track,
-        glossary: this.glossary
+        glossary: this.glossary,
+        previousText
       };
       // 入队在途计数 +1，UI 可显示「转写中 N」。
       this.transcriptionQueue += 1;
@@ -468,7 +490,8 @@ export class MeetingRecorder {
               startMs,
               endMs,
               track,
-              attempts: 0
+              attempts: 0,
+              previousText
             });
             this.transcriptionFailureStreak += 1;
             this.callbacks.onTranscriptionFailure?.({
@@ -485,10 +508,16 @@ export class MeetingRecorder {
             consecutive: this.transcriptionFailureStreak,
             atMs: startMs
           });
-        } else if (this.transcriptionFailureStreak > 0) {
+        } else {
+          // auto 模式首块带回引擎判定的语种后即锁定，后续块不再逐块重新检测。
+          if (this.configuredLanguage === "auto" && !this.detectedLanguage && result.language) {
+            this.detectedLanguage = result.language;
+          }
           // 服务恢复：仅在同一条录音内从失败转成功时通知一次，UI 收起提示。
-          this.transcriptionFailureStreak = 0;
-          this.callbacks.onTranscriptionRecovered?.();
+          if (this.transcriptionFailureStreak > 0) {
+            this.transcriptionFailureStreak = 0;
+            this.callbacks.onTranscriptionRecovered?.();
+          }
         }
         state.completed.set(sequence, {
           provisionalId: provisional.id,
@@ -601,12 +630,16 @@ export class MeetingRecorder {
         profileId: this.sttProfile.id,
         data: entry.data,
         fileName: entry.fileName,
-        language: "zh",
+        language: this.effectiveLanguage(),
         startMs: entry.startMs,
         endMs: entry.endMs,
         track: entry.track,
-        glossary: this.glossary
+        glossary: this.glossary,
+        previousText: entry.previousText ?? ""
       });
+      if (this.configuredLanguage === "auto" && !this.detectedLanguage && result.language) {
+        this.detectedLanguage = result.language;
+      }
       if (this.transcriptionFailureStreak > 0) {
         this.transcriptionFailureStreak = 0;
         this.callbacks.onTranscriptionRecovered?.();
@@ -650,6 +683,12 @@ export class MeetingRecorder {
       state.nextCommit += 1;
       this.callbacks.onProvisionalSettled(completed.provisionalId);
       for (const segment of completed.segments) this.callbacks.onTranscript(segment);
+      // 只在按顺序定稿后推进上下文：乱序返回的块不会把后文提前喂给前一块。
+      const text = completed.segments.map((segment) => segment.text ?? "").join("");
+      if (text) {
+        const tail = `${this.transcriptTails.get(track) ?? ""}${text}`;
+        this.transcriptTails.set(track, tail.slice(-240));
+      }
     }
   }
 

@@ -7160,3 +7160,62 @@ html[data-surface="permission-helper"] #root {
   .note-editor__content,
   .summary-detail-grid .summary-detail { transition: none; }
 }
+
+/* ==========================================================================
+   转写复核：低置信度标记 + 可确认的术语纠错建议
+   两者都是「提示」而非自动改写：只有用户点「应用」才会动原文。
+   ========================================================================== */
+.confidence-flag {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+  color: var(--amber);
+  font-size: var(--text-state); font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast);
+}
+.confidence-flag:hover {
+  background: color-mix(in srgb, var(--amber) 20%, transparent);
+  border-color: var(--amber);
+}
+.confidence-flag:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.transcript-review-filter.is-active {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
+
+.glossary-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.glossary-suggestion {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  padding: 4px 5px 4px 9px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--ink-soft);
+  font-size: var(--text-data);
+}
+.glossary-suggestion__text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.glossary-suggestion strong { color: var(--accent-text); font-weight: 650; }
+.glossary-suggestion button {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 999px;
+  background: transparent; color: var(--ink-muted);
+  cursor: pointer;
+}
+.glossary-suggestion button.glossary-suggestion__apply {
+  padding: 3px 8px;
+  background: var(--surface-raised);
+  color: var(--accent-text);
+  font-size: var(--text-state); font-weight: 600;
+  box-shadow: var(--shadow-xs);
+}
+.glossary-suggestion button.glossary-suggestion__apply:hover { background: var(--accent); color: #fff; }
+.glossary-suggestion button.glossary-suggestion__ignore { width: 20px; height: 20px; }
+.glossary-suggestion button.glossary-suggestion__ignore:hover {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+}
+.glossary-suggestion button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

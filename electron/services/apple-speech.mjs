@@ -111,11 +111,14 @@ export function parseHelperOutput(stdout) {
     error.appleSpeechCode = "no_speech";
     throw error;
   }
+  // partial（未定稿）结果传给每段，由置信度归一模块折算成「可能不准」提示。
+  const partial = payload.partial === true;
   return {
     text,
-    segments: segments.length > 0 ? segments : [{ startMs: 0, endMs: 0, text }],
+    segments: (segments.length > 0 ? segments : [{ startMs: 0, endMs: 0, text }])
+      .map((segment) => partial ? { ...segment, partial: true } : segment),
     onDeviceUsed: payload.onDeviceUsed === true,
-    partial: payload.partial === true
+    partial
   };
 }
 

@@ -13,8 +13,9 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { hostname, cpus, platform, arch } from "node:os";
 import path from "node:path";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { deleteSecret, readSecret, storeSecret } from "./secrets.mjs";
+import { signLicenseState, splitSignedState, verifyLicenseStateSignature } from "./license-state-integrity.mjs";
 
 const productId = "minuteflow-desktop";
 /** 激活码在密钥库中的固定条目 ID。 */
@@ -63,21 +64,50 @@ function statePath() {
   return path.join(app.getPath("userData"), "config", "license.json");
 }
 
-/** 读取授权状态 JSON；文件缺失/损坏返回空对象（视作未激活）。 */
+/**
+ * 授权状态完整性：license.json 此前是明文 JSON，本机把它改成
+ * {"status":"licensed","lastVerifiedAt":"<现在>"} 即可解锁全部付费能力。
+ * 签名密钥存放在 secrets.mjs 的加密密钥库里（非同目录明文），状态文件单独被
+ * 篡改时签名校验失败。签名覆盖除 signature 自身外的全部字段。
+ */
+const stateSigningKeyId = "minuteflow-license-state-hmac";
+
+function stateSigningKey() {
+  let key = readSecret(stateSigningKeyId);
+  if (!key) {
+    storeSecret(randomBytes(32).toString("hex"), stateSigningKeyId);
+    key = readSecret(stateSigningKeyId);
+  }
+  return key;
+}
+
+/** 读取授权状态 JSON；签名不符、文件缺失或损坏一律视作未激活。 */
 async function readState() {
   try {
-    return JSON.parse(await readFile(statePath(), "utf8"));
+    const raw = JSON.parse(await readFile(statePath(), "utf8"));
+    const { payload, signature } = splitSignedState(raw);
+    if (verifyLicenseStateSignature(payload, signature, stateSigningKey())) return payload;
+    // 旧版本遗留的无签名状态：只有密钥库里确实存着正式激活码时才兼容一次，
+    // 并标记强制联网复核（见 getLicenseStatus），复核成功即补签，老用户无感。
+    if (raw?.status === "licensed"
+      && raw?.entitlementId !== "temporary-paddle-bridge"
+      && readSecret(licenseSecretId)) {
+      return { ...payload, __legacyUnsigned: true };
+    }
+    return {};
   } catch {
     return {};
   }
 }
 
-/** 原子化写入授权状态（.tmp + rename，权限 0o600），避免崩溃留下半截状态。 */
+/** 原子化写入授权状态（.tmp + rename，权限 0o600），并对内容签名。 */
 async function writeState(value) {
+  const { __legacyUnsigned, signature: _previousSignature, ...payload } = value ?? {};
+  const signed = { ...payload, signature: signLicenseState(payload, stateSigningKey()) };
   const target = statePath();
   const temporary = `${target}.tmp`;
   await mkdir(path.dirname(target), { recursive: true });
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await writeFile(temporary, `${JSON.stringify(signed, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   await rename(temporary, target);
 }
 
@@ -288,6 +318,9 @@ function temporaryLicenseIsValid(state) {
 export async function getLicenseStatus({ refresh = false } = {}) {
   const config = await getConfig();
   const state = await readState();
+  // 遗留的无签名状态只放行到「强制联网复核」这一步，不享受 72h 缓存；
+  // 复核成功会由 writeState 重新签名，之后恢复正常缓存。
+  if (state.__legacyUnsigned) refresh = true;
   if (state.status !== "licensed") return publicStatus(state, config);
   if (state.entitlementId === "temporary-paddle-bridge") {
     if (state.machineFingerprint !== machineFingerprint()) {

@@ -343,8 +343,13 @@ function indexMeeting(db, meeting) {
  * 由 saveMeeting 在事务内调用；写库副作用。
  * @returns {object} 落库后重新读出的完整会议对象
  */
-function persistMeeting(db, meeting) {
+function persistMeeting(db, meeting, options = {}) {
   const timestamp = nowIso();
+  // deleted_at 只能由 softDeleteMeeting / restoreMeeting 改变。渲染层列表里的会议
+  // 不带删除标记，如果整行 UPSERT 把它写成 NULL，删除后迟到的那一次防抖保存就会
+  // 让已删会议「复活」。未显式携带删除标记时沿用库里的原值。
+  const storedDeletedAt = db.prepare("SELECT deleted_at FROM meetings WHERE id = ?").get(meeting.id)?.deleted_at ?? null;
+  const deletedAt = meeting.deletedAt != null ? meeting.deletedAt : storedDeletedAt;
   db.prepare(`
     INSERT INTO meetings(
       id, title, scheduled_at, duration_seconds, status, mode, favorite,
@@ -382,10 +387,10 @@ function persistMeeting(db, meeting) {
     JSON.stringify(meeting.summary ?? {}),
     meeting.createdAt ?? timestamp,
     timestamp,
-    meeting.deletedAt ?? null
+    deletedAt
   );
 
-  persistTranscriptSegments(db, meeting, timestamp);
+  persistTranscriptSegments(db, meeting, timestamp, options.preserveNewerSegments === true);
   const persisted = getMeeting(db, meeting.id);
   return persisted;
 }
@@ -395,16 +400,24 @@ function persistMeeting(db, meeting) {
  * 相比旧的“先删全表再重插”，长会议滚动保存（每 8 秒一条新段落）不再重写全部行，
  * 也保住了未变化段落的 created_at；FTS 是每会议一行的重建，代价与段数无关。
  */
-function persistTranscriptSegments(db, meeting, timestamp) {
+function persistTranscriptSegments(db, meeting, timestamp, preserveNewerSegments = false) {
   const incoming = meeting.transcript ?? [];
-  const existingIds = new Set(
-    db.prepare("SELECT id FROM transcript_segments WHERE meeting_id = ?").all(meeting.id)
-      .map((row) => row.id)
-  );
+  // 渲染层提交的是「某个时刻的内存快照」。它到达主进程之前，后台导入/录音可能
+  // 已按块写入了新段落；若照惯例把不在快照里的 id 全删掉，这些段落就会被回滚。
+  // 该保护只对渲染层 IPC 保存开启：后台自身写库用的是刚刚 loadMeeting 的最新
+  // 快照，必须保留完整的差量删除语义（用户删段落靠它生效）。
+  const snapshotAt = preserveNewerSegments && typeof meeting.updatedAt === "string"
+    ? meeting.updatedAt
+    : "";
+  const existingRows = db.prepare(
+    "SELECT id, created_at FROM transcript_segments WHERE meeting_id = ?"
+  ).all(meeting.id);
   const incomingIds = new Set(incoming.map((segment) => segment.id).filter(Boolean));
   const removeSegment = db.prepare("DELETE FROM transcript_segments WHERE meeting_id = ? AND id = ?");
-  for (const id of existingIds) {
-    if (!incomingIds.has(id)) removeSegment.run(meeting.id, id);
+  for (const row of existingRows) {
+    if (incomingIds.has(row.id)) continue;
+    if (snapshotAt && String(row.created_at ?? "") > snapshotAt) continue;
+    removeSegment.run(meeting.id, row.id);
   }
   const upsertSegment = db.prepare(`
     INSERT INTO transcript_segments(
@@ -565,20 +578,24 @@ export function loadMeeting(id) {
  * @param {object} meeting 完整会议对象（字段缺失处用默认值兜底）
  * @returns {object} 落库后的会议对象
  */
-export function saveMeeting(meeting) {
+export function saveMeeting(meeting, options = {}) {
   meeting = simplifyMeetingAiText(meeting);
   const db = openDatabase();
+  // 已软删的会议拒绝一切普通整场覆盖：既挡住渲染层在途的防抖保存，也挡住
+  // 后台导入/分离任务完成后把会议写回来。恢复走 restoreMeeting 的独立 SQL。
+  const stored = db.prepare("SELECT deleted_at FROM meetings WHERE id = ?").get(meeting.id);
+  if (stored?.deleted_at && !meeting.deletedAt) return getMeeting(db, meeting.id);
   if (transactionInProgress) {
     // A re-entrant save would throw "cannot start a transaction within a
     // transaction". Persist directly without a nested transaction; the outer
     // transaction will make the change durable.
-    return persistMeeting(db, meeting);
+    return persistMeeting(db, meeting, options);
   }
   transactionInProgress = true;
   db.exec("BEGIN");
   let saved;
   try {
-    saved = persistMeeting(db, meeting);
+    saved = persistMeeting(db, meeting, options);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

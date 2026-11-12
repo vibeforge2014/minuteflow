@@ -19,6 +19,7 @@ import {
   Waveform
 } from "@phosphor-icons/react";
 import type { Meeting, ModelProfile } from "../types";
+import type { AudioLevels, LevelSource } from "../hooks/useMeetingRecorder";
 import { api } from "../lib/api";
 import { formatDuration } from "../lib/format";
 
@@ -28,8 +29,8 @@ interface RecorderBarProps {
   phase: "idle" | "starting" | "recording" | "paused" | "stopping";
   /** 已录制秒数（录制中实时更新）。 */
   elapsed: number;
-  /** 双轨实时电平（0-1）。 */
-  levels: { microphone: number; system: number };
+  /** 双轨实时电平（0-1）：订阅式外部存储，60fps 更新不触发 React 重渲染。 */
+  levels: LevelSource;
   /** 在途转写任务数。 */
   queue: number;
   /** 本次会议是否配置了可用的实时转写档案。 */
@@ -90,10 +91,11 @@ export function RecorderBar({
     : phase === "recording" ? "录制中"
     : "准备录音";
 
-  // 记录最后一次“听到声音”的时刻（真实电平 > 阈值才算）。
-  useEffect(() => {
-    if (levels.microphone > 0.01) lastSoundAt.current = Date.now();
-  }, [levels.microphone]);
+  // 记录最后一次“听到声音”的时刻（真实电平 > 阈值才算）。电平以 60fps 到达，
+  // 这里只更新 ref，不 setState，避免整个 App 跟着每帧重渲染。
+  useEffect(() => levels.subscribe((next: AudioLevels) => {
+    if (next.microphone > 0.01) lastSoundAt.current = Date.now();
+  }), [levels]);
 
   // 录制中每秒检查一次静音时长；非录制态（含暂停）不提示。
   useEffect(() => {
@@ -125,8 +127,8 @@ export function RecorderBar({
         {!mini && (
           <>
             {phase === "recording" && <div className="recorder-levels">
-              <Level label="麦克风" icon={<Microphone size={14} />} value={levels.microphone} />
-              {meeting.mode === "online" && <Level label="系统声音" icon={<SpeakerHigh size={14} />} value={levels.system} />}
+              <Level label="麦克风" icon={<Microphone size={14} />} levels={levels} track="microphone" />
+              {meeting.mode === "online" && <Level label="系统声音" icon={<SpeakerHigh size={14} />} levels={levels} track="system" />}
             </div>}
             {transcriptionFailed && transcriptionReady ? (
               <button
@@ -305,14 +307,31 @@ const TRANSPORT_HINTS: Partial<Record<ModelProfile["transport"], string>> = {
   "mlx-whisper": "MLX"
 };
 
-/** 单轨电平表：把 0-1 的 RMS 值点亮为 6 格中的若干格。 */
-function Level({ label, icon, value }: { label: string; icon: React.ReactNode; value: number }) {
-  const active = Math.round(value * 6);
+/**
+ * 单轨电平表：把 0-1 的 RMS 值点亮为 6 格中的若干格。
+ * 订阅电平后直接改 class 与 aria 属性，60fps 更新完全绕过 React 渲染。
+ */
+function Level({ label, icon, levels, track }: {
+  label: string;
+  icon: React.ReactNode;
+  levels: LevelSource;
+  track: keyof AudioLevels;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const barsRef = useRef<(HTMLElement | null)[]>([]);
+  const initialActive = Math.round((levels.current[track] ?? 0) * 6);
+  useEffect(() => levels.subscribe((next) => {
+    const active = Math.round((next[track] ?? 0) * 6);
+    rootRef.current?.setAttribute("aria-valuenow", String(active));
+    barsRef.current.forEach((bar, index) => bar?.classList.toggle("is-active", index < active));
+  }), [levels, track]);
   return (
-    <div className="audio-level" title={label} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={6} aria-valuenow={active}>
+    <div ref={rootRef} className="audio-level" title={label} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={6} aria-valuenow={initialActive}>
       {icon}
       <div className="level-bars" aria-hidden="true">
-        {Array.from({ length: 6 }, (_, index) => <i key={index} className={index < active ? "is-active" : ""} />)}
+        {Array.from({ length: 6 }, (_, index) => (
+          <i key={index} ref={(element) => { barsRef.current[index] = element; }} className={index < initialActive ? "is-active" : ""} />
+        ))}
       </div>
     </div>
   );

@@ -24,6 +24,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { loadWhisperModule } from "@fugood/whisper.node";
+import { assertSafeHttpUrl } from "./model-profile-guard.mjs";
 
 /** 支持的单文件模型扩展名 → 格式与引擎（whisper.cpp 走 GGML/GGUF，Python 走 .pt）。 */
 const supportedExtensions = new Map([
@@ -992,9 +993,8 @@ export async function downloadFromUrl(url, modelDirectory, onProgress = () => {}
   } catch {
     throw new Error("下载链接无效，请输入完整的 http(s) 地址。");
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error("仅支持 http(s) 下载链接。");
-  }
+  // 自定义直链来自渲染层粘贴：拒绝非 http(s) 与云元数据/链路本地地址。
+  assertSafeHttpUrl(parsed.toString(), "下载链接");
   // 文件名取 URL 末段；替换解码后可能混入的路径分隔符，防止写到目标目录之外。
   const fileName = decodeURIComponent(parsed.pathname.split("/").filter(Boolean).pop() ?? "")
     .replace(/[/\\]+/g, "-")
@@ -1024,6 +1024,9 @@ async function doDownloadFromUrl(url, fileName, modelId, modelDirectory, onProgr
     modelId,
     totalBytes: 0,
     onProgress,
+    // 自定义来源本来就没有摘要校验，至少把重定向钉在用户填写的域名上，
+    // 防止一个看似正常的链接 302 到内网/云元数据端点。
+    pinnedHost: new URL(url).hostname,
     downloadingMessage: "正在下载模型（自定义来源，不校验完整性）…"
   });
   onProgress({ modelId, downloadedBytes: sizeBytes, totalBytes: sizeBytes, status: "ready", message: "模型已就绪（自定义来源，未做完整性校验）。" });
@@ -1042,6 +1045,7 @@ async function downloadToFile(url, target, {
   totalBytes = 0,
   digestAlgorithm = null,
   digest = null,
+  pinnedHost = null,
   onProgress = () => {},
   downloadingMessage = "正在下载模型…"
 }) {
@@ -1058,6 +1062,13 @@ async function downloadToFile(url, target, {
     response = await fetch(url, { redirect: "follow", signal: controller.signal });
   } finally {
     clearTimeout(headerTimer);
+  }
+  if (pinnedHost && response.url) {
+    const finalUrl = assertSafeHttpUrl(response.url, "下载重定向地址");
+    if (finalUrl.hostname !== pinnedHost) {
+      controller.abort();
+      throw new Error("下载链接被重定向到其他域名，已取消（请改用直接指向模型文件的地址）。");
+    }
   }
   if (!response.ok || !response.body) {
     controller.abort();
