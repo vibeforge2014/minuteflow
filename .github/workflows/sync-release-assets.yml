@@ -27,7 +27,9 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 安装包 ~680MB，源站 SSH 吞吐波动大：放宽到 90 分钟，
+    # 配合 rsync --append-verify 续传，单次超时后重跑可以续。
+    timeout-minutes: 90
     steps:
       - name: Resolve release tag
         id: tag
@@ -147,10 +149,14 @@ jobs:
           mkdir -p ~/.ssh
           echo "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          SSH_CMD="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new $SSH_USER@$SSH_HOST"
+          SSH_CMD="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 $SSH_USER@$SSH_HOST"
           $SSH_CMD "mkdir -p /var/www/zensoft/sites/minuteflow/dl/$TAG"
           # 按版本目录整体覆盖（幂等），不 --delete：旧版本安装包保留供回滚。
-          rsync -az -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
+          # --append-verify --partial：跨大西洋到源站的 SSH 吞吐不稳（出现过 45 分钟
+          # 传不完一个大文件），半截文件落地续传，整文件校验兜底；--info=progress2
+          # 让日志能看到吞吐；io timeout 120s 让死连接快速失败而不是挂满 job 时限。
+          rsync -az --append-verify --partial --info=progress2 --timeout=120 \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30" \
             release/ "$SSH_USER@$SSH_HOST:/var/www/zensoft/sites/minuteflow/dl/$TAG/"
           # electron-updater feed 常驻稳定路径（不随版本变化），app-update.yml 指向这里。
           if [ -f public/releases/latest-mac.yml ]; then
