@@ -7,11 +7,11 @@
  * 副作用：系统保存/打开对话框、写导出文件（PDF 借助隐藏窗口 printToPDF）。
  */
 import { BrowserWindow, dialog } from "electron";
-import { readFile, writeFile } from "node:fs/promises";
+import { copyFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Document, HeadingLevel, Packer, Paragraph, TextRun } from "docx";
 import JSZip from "jszip";
-import { formatTime, markdown, subtitle } from "./formatters.mjs";
+import { exportNameSuffix, formatTime, markdown, subtitle } from "./formatters.mjs";
 
 /** HTML 转义，防止会议内容中的尖括号破坏 PDF 导出页面结构。 */
 const escapeHtml = (value) => String(value)
@@ -55,8 +55,8 @@ async function visualSummaryPng(meeting) {
 }
 
 /** 生成 PDF 导出用的 A4 打印页面（复用 markdown() 的文本，再转义 + 换行转 <br>）。 */
-function printHtml(meeting) {
-  const md = markdown(meeting);
+function printHtml(meeting, options = {}) {
+  const md = markdown(meeting, options);
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
   @page { size: A4; margin: 18mm; }
   body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; color:#1b1d22; line-height:1.7; font-size:13px; }
@@ -65,12 +65,20 @@ function printHtml(meeting) {
   </style></head><body><div class="content">${escapeHtml(md).replaceAll("\n", "<br>")}</div></body></html>`;
 }
 
-/** 用 docx 库把会议组装为 Word 文档 Buffer（标题 + 各章节 + 完整转录）。 */
-async function docxBuffer(meeting) {
+/**
+ * 用 docx 库把会议组装为 Word 文档 Buffer（标题 + 章节 + 转录）。
+ * options.scope / includeTimestamps / includeSpeakers 与 Markdown 导出同一套语义：
+ * 「纪要文档」只含纪要，「原文转写」只含逐字稿并可按需去掉时间戳或发言人前缀。
+ */
+async function docxBuffer(meeting, options = {}) {
+  const scope = options.scope === "summary" || options.scope === "transcript" ? options.scope : "all";
+  const includeTimestamps = options.includeTimestamps !== false;
+  const includeSpeakers = options.includeSpeakers !== false;
   const children = [
     new Paragraph({ text: meeting.title, heading: HeadingLevel.TITLE }),
     new Paragraph({ children: [new TextRun(`时间：${meeting.scheduledAt}`)] }),
-    new Paragraph({ children: [new TextRun(`参与者：${meeting.participants.join("、") || "未填写"}`)] })
+    new Paragraph({ children: [new TextRun(`参与者：${meeting.participants.join("、") || "未填写"}`)] }),
+    new Paragraph({ children: [new TextRun(`时长：${formatTime(meeting.durationSeconds * 1000)}`)] })
   ];
   const section = (title, values) => {
     children.push(new Paragraph({ text: title, heading: HeadingLevel.HEADING_1 }));
@@ -78,13 +86,24 @@ async function docxBuffer(meeting) {
       children.push(new Paragraph({ text: value, bullet: { level: 0 } }));
     }
   };
-  section("会议目标", meeting.goals);
-  section("我的记录", meeting.notes);
-  section("关键要点", meeting.summary?.keyPoints);
-  section("已确认决策", meeting.summary?.decisions);
-  section("行动项", meeting.summary?.actionItems?.map((item) => `${item.title}｜${item.owner || "待确认"}｜${item.dueDate || "待确认"}`));
-  section("未决问题", meeting.summary?.openQuestions);
-  section("完整转录", meeting.transcript.map((item) => `[${formatTime(item.startMs)}] ${item.speakerName}：${item.text}`));
+  if (scope !== "transcript") {
+    // 与 Markdown 预览保持同一组章节：少一段就会让「预览看到的」和「Word 里有的」不一致。
+    section("会议目标", meeting.goals);
+    section("我的记录", meeting.notes);
+    section("关键要点", meeting.summary?.keyPoints);
+    section("已确认决策", meeting.summary?.decisions);
+    section("行动项", meeting.summary?.actionItems?.map((item) => `${item.title}｜${item.owner || "待确认"}｜${item.dueDate || "待确认"}`));
+    section("未决问题", meeting.summary?.openQuestions);
+    section("风险", meeting.summary?.risks);
+    section("下一步", meeting.summary?.nextSteps);
+  }
+  if (scope !== "summary") {
+    section("完整转录", meeting.transcript.map((item) => {
+      const time = includeTimestamps ? `[${formatTime(item.startMs)}] ` : "";
+      const speaker = includeSpeakers ? `${item.speakerName}：` : "";
+      return `${time}${speaker}${item.text}`;
+    }));
+  }
   const document = new Document({ sections: [{ children }] });
   return Packer.toBuffer(document);
 }
@@ -94,10 +113,10 @@ async function docxBuffer(meeting) {
  * PDF 用隐藏 BrowserWindow 加载打印页再 printToPDF（原生排版，无需外部依赖）；
  * ZIP 打包含 Markdown/JSON/SRT 及全部音频文件；用户取消对话框时返回 { canceled: true }。
  * @param {object} meeting 完整会议对象
- * @param {string} format md/txt/srt/vtt/json/docx/pdf/zip
+ * @param {string} format md/txt/srt/vtt/json/docx/pdf/zip/audio/visual-png
  * @param {BrowserWindow} parentWindow 对话框的父窗口
- * @param {string[]} audioPaths 随 ZIP 附带的音频文件路径
- * @returns {Promise<{canceled: boolean, filePath?: string}>}
+ * @param {Array<{path: string, label?: string}|string>} audioFiles 随导出携带的音频（可带轨道名）
+ * @returns {Promise<{canceled: boolean, filePath?: string, filePaths?: string[]}>}
  */
 /**
  * 会议标题由用户自由输入，直接用作文件名会带进 `../`、路径分隔符或绝对路径：
@@ -113,32 +132,73 @@ function safeExportName(title) {
   return cleaned || "未命名会议";
 }
 
-export async function exportMeeting(meeting, format, parentWindow, audioPaths = []) {
+/**
+ * 归一化音频清单：兼容旧的纯路径数组，并按路径去重
+ * （块记录与音频资产常指向同一个文件，重复复制既慢又会让备份包变大）。
+ */
+export function normalizeAudioFiles(files = []) {
+  const list = files
+    .map((file) => (typeof file === "string" ? { path: file, label: "" } : file))
+    .filter((file) => Boolean(file?.path));
+  return list.filter((file, index) => list.findIndex((item) => item.path === file.path) === index);
+}
+
+/**
+ * 多轨录音（麦克风 + 系统声音）里第 2..n 条轨道的落盘路径：
+ * 与首个文件同目录、同扩展名，文件名追加轨道名（无标签时用序号）。
+ * 目录来自用户刚在保存框里选定的位置，不会写到别处。
+ */
+export function siblingAudioPath(primaryPath, file, index) {
+  const primaryExtension = path.extname(primaryPath);
+  const extension = path.extname(file.path) || primaryExtension;
+  const base = primaryPath.slice(0, primaryPath.length - primaryExtension.length);
+  return `${base}-${file.label || index + 1}${extension}`;
+}
+
+export async function exportMeeting(meeting, format, parentWindow, audioFiles = [], options = {}) {
+  const audio = normalizeAudioFiles(audioFiles);
+  const primaryAudio = audio[0];
+  if (format === "audio" && !primaryAudio) throw new Error("这场会议没有可导出的录音文件。");
+  const audioExtension = primaryAudio ? (path.extname(primaryAudio.path).replace(/^\./, "") || "wav") : "wav";
   const extensions = {
     md: "md", txt: "txt", srt: "srt", vtt: "vtt", json: "json",
-    docx: "docx", pdf: "pdf", zip: "zip", "visual-png": "png"
+    docx: "docx", pdf: "pdf", zip: "zip", "visual-png": "png", audio: audioExtension
   };
   const extension = extensions[format] ?? "md";
   const safeName = safeExportName(meeting.title);
+  // 同一场会议会导出多种交付物：按范围加后缀，避免「纪要」和「转写」互相覆盖。
+  const suffix = ["md", "txt", "docx", "pdf"].includes(format) ? exportNameSuffix(options.scope) : "";
+  // 多轨录音的默认文件名也带轨道名，避免与另一条轨道同名覆盖。
+  const audioSuffix = format === "audio" && audio.length > 1 && primaryAudio.label ? `-${primaryAudio.label}` : "";
   const result = await dialog.showSaveDialog(parentWindow, {
     title: "导出会议",
-    defaultPath: `${safeName}.${extension}`,
+    defaultPath: `${safeName}${suffix}${audioSuffix}.${extension}`,
     filters: [{ name: extension.toUpperCase(), extensions: [extension] }]
   });
   if (result.canceled || !result.filePath) return { canceled: true };
 
   if (format === "visual-png") {
     await writeFile(result.filePath, await visualSummaryPng(meeting));
+  } else if (format === "audio") {
+    // 原始音频原样带出：不转码、不重新封装。多轨会议逐条导出，
+    // 否则「系统声音」那条轨会被静默丢掉。
+    const written = [];
+    for (const [index, file] of audio.entries()) {
+      const target = index === 0 ? result.filePath : siblingAudioPath(result.filePath, file, index);
+      await copyFile(file.path, target);
+      written.push(target);
+    }
+    return { canceled: false, filePath: written[0], filePaths: written };
   } else if (format === "pdf") {
     const window = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
-    await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(printHtml(meeting))}`);
+    await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(printHtml(meeting, options))}`);
     const buffer = await window.webContents.printToPDF({ printBackground: true, pageSize: "A4" });
     window.destroy();
     await writeFile(result.filePath, buffer);
   } else if (format === "docx") {
-    await writeFile(result.filePath, await docxBuffer(meeting));
+    await writeFile(result.filePath, await docxBuffer(meeting, options));
   } else if (format === "srt" || format === "vtt") {
-    await writeFile(result.filePath, subtitle(meeting, format), "utf8");
+    await writeFile(result.filePath, subtitle(meeting, format, options), "utf8");
   } else if (format === "json") {
     await writeFile(result.filePath, `${JSON.stringify(meeting, null, 2)}\n`, "utf8");
   } else if (format === "zip") {
@@ -146,13 +206,13 @@ export async function exportMeeting(meeting, format, parentWindow, audioPaths = 
     zip.file(`${safeName}.md`, markdown(meeting));
     zip.file(`${safeName}.json`, JSON.stringify(meeting, null, 2));
     zip.file(`${safeName}.srt`, subtitle(meeting, "srt"));
-    for (const audioPath of audioPaths) {
-      const audio = await readFile(audioPath).catch(() => null);
-      if (audio) zip.file(`audio/${path.basename(audioPath)}`, audio);
+    for (const file of audio) {
+      const contents = await readFile(file.path).catch(() => null);
+      if (contents) zip.file(`audio/${path.basename(file.path)}`, contents);
     }
     await writeFile(result.filePath, await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" }));
   } else {
-    await writeFile(result.filePath, markdown(meeting), "utf8");
+    await writeFile(result.filePath, markdown(meeting, options), "utf8");
   }
   return { canceled: false, filePath: result.filePath };
 }

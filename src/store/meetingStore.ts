@@ -69,6 +69,12 @@ interface MeetingState {
   flushPendingSaves(): Promise<void>;
   /** 整体替换会议纪要（AI 结果合并锁定字段后调用）。 */
   updateSummary(id: string, summary: MeetingSummary): Promise<void>;
+  /**
+   * 批量改写段落文本：transform 在 store 内部的「最新」转写上执行，返回 null 表示不改。
+   * 用于查找替换与撤销——渲染层持有的 meeting 是渲染快照，直接用它回写会丢掉
+   * 录音期间刚追加/更新的段落。返回实际改写的段落数（同步返回）。
+   */
+  patchTranscript(id: string, transform: (segment: TranscriptSegment) => string | null): number;
   /** 软删除会议（移入“最近删除”），并修正选中项。 */
   deleteMeeting(id: string): Promise<void>;
   /** 直接替换档案列表（设置页本地编辑后的同步）。 */
@@ -231,6 +237,32 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
       set({ saving: false, error: error instanceof Error ? error.message : "创建会议失败" });
       throw error;
     }
+  },
+
+  /**
+   * 批量改写段落文本（查找替换 / 撤销替换）。
+   * 改写逻辑作为 transform 传入，在 store 最新状态上执行：录音持续追加段落时，
+   * 用渲染层快照回写会覆盖掉刚到的内容。没有任何段落被改动时直接返回 0，
+   * 不动 state（否则会把纪要无端标成过期）。
+   */
+  patchTranscript(id, transform) {
+    const current = get().meetings.find((meeting) => meeting.id === id);
+    if (!current) return 0;
+    // 同步完成读数与写回：中间没有 await，不会有新段落插进来。
+    const replacements = new Map<string, string>();
+    for (const segment of current.transcript) {
+      const text = transform(segment);
+      if (text !== null && text !== segment.text) replacements.set(segment.id, text);
+    }
+    if (!replacements.size) return 0;
+    void get().updateMeeting(id, (latest) => ({
+      ...latest,
+      transcript: latest.transcript.map((segment) =>
+        replacements.has(segment.id) ? { ...segment, text: replacements.get(segment.id)! } : segment),
+      // 逐字稿被改写后，已生成的纪要不再对应原文，需要重新生成。
+      summary: { ...latest.summary, stale: true }
+    }));
+    return replacements.size;
   },
 
   /**

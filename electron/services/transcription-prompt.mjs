@@ -5,8 +5,9 @@
  * 中文约等于 224 字），且内容会直接影响解码器的用词、简繁与专有名词写法。
  * 因此把三类上下文按优先级压进固定预算：
  *   1. 简体引导语（仅语言已确定为 zh 时；auto 首块不引导，避免语种被带偏）
- *   2. 上一块已定稿文本的尾部（保持专名、断句风格连续，抑制同音词漂移）
- *   3. 用户术语表（专有名词优先，超出预算的条目截掉）
+ *   2. 模型初始提示词（最多 80 字）
+ *   3. 上一块已定稿文本的尾部（保持专名、断句风格连续，抑制同音词漂移）
+ *   4. 用户术语表（专有名词优先，超出预算的条目截掉）
  *
  * 收口前各引擎各拼各的：远程接口只传术语表、whisper.cpp 额外加简体引导语，
  * 而导入/重转写链路三者都不传，导致同一场会议换条路径识别用词就不一致。
@@ -59,13 +60,14 @@ export function tailTranscriptText(text = "", maxChars = PREVIOUS_TEXT_MAX_CHARS
 
 /**
  * 构造送入识别引擎的提示词。返回空串表示「不要传 prompt 参数」。
- * 预算按优先级分配：引导语 → 前文 → 术语表；任何一项放不下就整段舍弃，
+ * 预算按优先级分配：引导语 → 初始提示词 → 前文 → 术语表；任何一项放不下就整段舍弃，
  * 绝不把术语截成半个词（半个专名反而会诱导模型写错）。
  */
 export function buildTranscriptionPrompt({
   language = "",
   glossary = [],
   previousText = "",
+  initialPrompt = "",
   maxChars = DEFAULT_PROMPT_MAX_CHARS
 } = {}) {
   const budget = Math.max(0, Number(maxChars) || 0);
@@ -76,6 +78,9 @@ export function buildTranscriptionPrompt({
   const parts = [];
   const withPart = (candidate) => [...parts, candidate].join(" ").length <= budget;
   if (hint && withPart(hint)) parts.push(hint);
+  const initial = Array.from(String(initialPrompt ?? "").trim()).slice(0, 80).join("");
+  const remaining = Math.max(0, budget - parts.join(" ").length - (parts.length ? 1 : 0));
+  if (initial && remaining) parts.push(initial.slice(0, remaining));
   const tail = tailTranscriptText(previousText);
   if (tail && withPart(tail)) parts.push(tail);
   let termsText = "";
@@ -105,6 +110,7 @@ export function normalizeLanguage(value) {
   const raw = String(value ?? "").trim().toLowerCase();
   if (raw.startsWith("zh") || raw === "chinese" || raw === "mandarin") return "zh";
   if (raw.startsWith("en") || raw === "english") return "en";
+  if (["ja", "ko", "yue"].includes(raw)) return raw;
   return "";
 }
 

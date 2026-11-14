@@ -1,3 +1,4 @@
+import { TranscriptionOptionsSection } from "./settings/TranscriptionOptionsSection";
 /**
  * 设置：统一的分类导航与单列内容，服务管理按列表 → 添加 / 编辑分步呈现。
  * 五个标签页：AI 总结（llm）、转录设置（stt）、通用设置、存储与隐私、软件更新（macOS / Windows）。
@@ -475,7 +476,7 @@ type StatusTone = "info" | "success" | "error";
 const profileStatusKey = (tab: SettingsTab, profile: ModelProfile | null) =>
   [tab, profileConfigurationKey(profile)].join("|");
 
-export function SettingsDialog({ open, initialTab, initialFocus, onClose, licenseStatus, onLicenseStatusChange, recordingActive = false }: { open: boolean; initialTab?: SettingsTab; initialFocus?: SettingsFocus; onClose(): void; licenseStatus: LicenseStatus | null; onLicenseStatusChange(status: LicenseStatus): void; recordingActive?: boolean }) {
+export function SettingsDialog({ open, initialTab, initialFocus, onClose, licenseStatus, onLicenseStatusChange, recordingActive = false, importActive = false }: { open: boolean; initialTab?: SettingsTab; initialFocus?: SettingsFocus; onClose(): void; licenseStatus: LicenseStatus | null; onLicenseStatusChange(status: LicenseStatus): void; recordingActive?: boolean; importActive?: boolean }) {
   const profiles = useMeetingStore((state) => state.profiles);
   const setProfiles = useMeetingStore((state) => state.setProfiles);
   const preferences = useMeetingStore((state) => state.preferences);
@@ -484,6 +485,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   /** 当前设置页。 */
   const [tab, setTab] = useState<SettingsTab>("general");
   /** 正在编辑的服务配置（列表选中项或新建草稿）。 */
+  const [transcriptionInvalid, setTranscriptionInvalid] = useState(false);
   const [editing, setEditing] = useState<ModelProfile | null>(null);
   const [pendingDrafts, setPendingDrafts] = useState<Record<string, SettingsProfileDraft>>({});
   const draftSession = useRef<SettingsDraftSession>({ id: "", baseline: null });
@@ -966,7 +968,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
    *  勾选了视觉纪要但未通过真实验证时，保存过程顺带完成验证——失败留在弹窗内给出原因，
    *  杜绝「已保存却静默不生效」；保存成功即关闭弹窗，收回动画就是“已保存”的反馈。 */
   const saveProfile = async () => {
-    if (!editing || busy) return;
+    if (!editing || busy || transcriptionInvalid) return;
     // 本机档案不需要命名：名称跟着模型自动更新。
     let toSave = isLocalServiceProfile(editing) ? { ...editing, name: localProfileName(editing) } : editing;
     toSave = { ...toSave, enabled: true, name: toSave.name.trim(), baseUrl: toSave.baseUrl.trim(), model: toSave.model.trim() };
@@ -1041,6 +1043,29 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
       setBusy(false);
       setBusyAction(null);
     }
+  };
+
+  const updateTranscriptionOptions = async (options: ModelProfile["options"]) => {
+    if (!editing) return;
+    const previous = editing;
+    const next = {...editing, options};
+    setEditing(next);
+    if (!isLocalWhisperTransport(editing.transport) && !isLocalAsrTransport(editing.transport) && editing.transport !== "apple-speech") return;
+    const scope = editorScope;
+    setBusy(true);
+    try {
+      const saved = mergeSavedProfile(await api.models.save(next));
+      if (latestEditorScope.current === scope) {
+        setEditing(saved);
+        pushStatus("已生效，无需再保存。", "success", profileStatusKey(tab, saved));
+      }
+      await loadProfiles();
+    } catch (error) {
+      if (latestEditorScope.current === scope) {
+        setEditing(previous);
+        pushStatus(error instanceof Error ? error.message : "保存失败", "error", profileStatusKey(tab, previous));
+      }
+    } finally { setBusy(false); }
   };
 
   /** 本机服务（Apple 在线识别）改动即写入：保存失败回滚开关并用红字说明。 */
@@ -1630,6 +1655,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                         </details>
                       </>
                     )}
+                    {editing.kind === "stt" && <TranscriptionOptionsSection key={`transcription-options:${editorGeneration}`} profile={editing} disabled={busy} onValidityChange={setTranscriptionInvalid} onChange={options => void updateTranscriptionOptions(options)} />}
                     {tab === "llm" && editing.transport !== "local-summary" && (
                       <section className="visual-capability-setting">
                         <label>
@@ -1663,7 +1689,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                         <small className="profile-actions__hint">{profileDirty ? "有未保存的更改" : !editing.id && !profiles.some((profile) => profile.kind === editing.kind) ? "首个服务将自动设为默认" : "保存后用于新任务"}</small>
                         {profileDirty && editing.id && <button type="button" className="text-button settings-restore" disabled={busy} onClick={restoreProfile}>还原更改</button>}
                         <button className="button" disabled={busy} onClick={testProfile}>{busyAction === "test" ? "正在测试…" : "测试连接"}</button>
-                        <button className="button button--primary" disabled={busy} onClick={saveProfile}>{busyAction === "save" ? "正在保存…" : "保存配置"}</button>
+                        <button className="button button--primary" disabled={busy || transcriptionInvalid} onClick={saveProfile}>{busyAction === "save" ? "正在保存…" : "保存配置"}</button>
                       </div>
                     )}
                   </div>
@@ -1678,7 +1704,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                   <label><span><strong>AI 会议纪要间隔</strong></span><select value={preferences.summaryIntervalSeconds} onChange={(event) => updatePreferences({ ...preferences, summaryIntervalSeconds: Number(event.target.value) })}><option value="60">约每 1 分钟</option><option value="120">约每 2 分钟</option><option value="300">约每 5 分钟</option></select></label>
                 </div></section>
                 <section className="settings-preference-section"><h2>转写准确率</h2><div className="settings-card">
-                  <label><span><strong>转写语言</strong><small>明确语种可避免简繁与中英混说误判；自动识别会在首个有效片段锁定语种</small></span><select value={preferences.transcriptionLanguage ?? "zh"} onChange={(event) => updatePreferences({ ...preferences, transcriptionLanguage: event.target.value as "zh" | "en" | "auto" })}><option value="zh">中文（简体）</option><option value="en">English</option><option value="auto">自动识别</option></select></label>
+                  <label><span><strong>默认转写语言</strong><small>模型未单独设置时使用</small></span><select value={preferences.transcriptionLanguage ?? "zh"} onChange={(event) => updatePreferences({ ...preferences, transcriptionLanguage: event.target.value as "zh" | "en" | "auto" })}><option value="zh">中文（简体）</option><option value="en">English</option><option value="auto">自动识别</option></select></label>
                   <label><span><strong>音频增强</strong><small>高通滤除低频噪声并统一响度；音量偏低或底噪明显的录音提升最明显</small></span><select value={preferences.audioEnhancement === false ? "off" : "on"} onChange={(event) => updatePreferences({ ...preferences, audioEnhancement: event.target.value === "on" })}><option value="on">开启（推荐）</option><option value="off">关闭</option></select></label>
                   <label><span><strong>跳过静音片段</strong><small>纯静音块不送模型，避免生成「谢谢观看」等不存在的文字</small></span><select value={preferences.silenceSkip === false ? "off" : "on"} onChange={(event) => updatePreferences({ ...preferences, silenceSkip: event.target.value === "on" })}><option value="on">开启（推荐）</option><option value="off">关闭</option></select></label>
                   <p className="settings-section-note">设置即时生效于下一次录音与导入切块；已完成的逐字稿不会改动。低置信度片段与术语疑似误写会在逐字稿中标注，由你确认后才修改原文。</p>
@@ -1764,13 +1790,13 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                     <>
                       <button
                         className="button button--primary"
-                        disabled={recordingActive || installingUpdate}
+                        disabled={recordingActive || importActive || installingUpdate}
                         onClick={restartToUpdate}
                       >
                         <ArrowClockwise size={16} className={installingUpdate ? "spin" : ""} />
                         {installingUpdate ? "正在更新…" : `立即重启并更新到 ${updateReadyVersion}`}
                       </button>
-                      {recordingActive && <small className="update-actions__note">录音进行中，结束后可重启</small>}
+                      {(recordingActive || importActive) && <small className="update-actions__note">{recordingActive ? "录音进行中，结束后可重启" : "音频导入处理中，结束后可重启"}</small>}
                     </>
                   ) : updateState?.status === "available" && (
                     <>

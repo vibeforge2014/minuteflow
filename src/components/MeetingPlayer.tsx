@@ -21,10 +21,11 @@ interface MeetingPlayerProps {
   onClose(): void;
   onAvailabilityChange(available: boolean): void;
   onTimeChange(ms: number): void;
+  onPlayingChange(playing: boolean): void;
   onError(message: string): void;
 }
 
-export function MeetingPlayer({ meetingId, durationSeconds, seekToMs, open, onClose, onAvailabilityChange, onTimeChange, onError }: MeetingPlayerProps) {
+export function MeetingPlayer({ meetingId, durationSeconds, seekToMs, open, onClose, onAvailabilityChange, onTimeChange, onPlayingChange, onError }: MeetingPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [url, setUrl] = useState("");
   const [playing, setPlaying] = useState(false);
@@ -32,6 +33,11 @@ export function MeetingPlayer({ meetingId, durationSeconds, seekToMs, open, onCl
   const [duration, setDuration] = useState(durationSeconds);
   const [rate, setRate] = useState(rememberedPlaybackRate);
   const [mediaError, setMediaError] = useState<string | null>(null);
+
+  useEffect(() => {
+    onPlayingChange(open && playing);
+  }, [open, playing, onPlayingChange]);
+  useEffect(() => () => onPlayingChange(false), [onPlayingChange]);
 
   // 会议切换时重新拉取播放资产；先清空 url 让播放器隐藏（无录音的会议不显示）。
   useEffect(() => {
@@ -125,6 +131,7 @@ export function MeetingPlayer({ meetingId, durationSeconds, seekToMs, open, onCl
         onPause={() => setPlaying(false)}
         onEnded={() => { setPlaying(false); onClose(); }}
         onError={() => {
+          setPlaying(false);
           const message = "这段录音无法读取，播放器已停止。";
           setMediaError(message);
           onError(message);

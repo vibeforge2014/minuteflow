@@ -185,6 +185,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       if (sourceThroughMs - previousThroughMs < 30_000 && newSegments < 4) return;
     }
     const baseNotes = JSON.stringify(current.notes);
+    const template = preferences.summaryTemplate ?? "general";
     summaryBusyRef.current = true;
     setSummaryBusy(true);
     try {
@@ -198,7 +199,8 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
           goals: current.goals,
           notes: current.notes,
           transcript: finalTranscript,
-          previousSummary: current.summary
+          previousSummary: current.summary,
+          template
         }
       });
       const latest = meetingRef.current;
@@ -209,6 +211,8 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
         .filter((segment) => segment.status === "final")
         .reduce((maximum, segment) => Math.max(maximum, segment.endMs), 0);
       const merged = mergeSummaryRevision(latest.summary, summary);
+      // 记录本次归纳视角：本机兜底纪要也沿用用户选择的模板说明，界面据此显示模板标签。
+      merged.template = template;
       merged.stale = latestThroughMs > (summary.sourceThroughMs ?? sourceThroughMs)
         || JSON.stringify(latest.notes) !== baseNotes;
       await updateSummary(current.id, merged);
@@ -223,7 +227,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       summaryBusyRef.current = false;
       setSummaryBusy(false);
     }
-  }, [llmProfile?.id, resolveRecordingMeeting, updateMeeting, updateSummary]);
+  }, [llmProfile?.id, preferences.summaryTemplate, resolveRecordingMeeting, updateMeeting, updateSummary]);
 
   /** 只根据已经保存的普通纪要重试视觉版，不重复发送完整转录。 */
   const generateVisualSummary = useCallback(async () => {
@@ -243,7 +247,10 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       if (!latest || latest.id !== current.id) return;
       await updateSummary(current.id, { ...latest.summary, visualSummary });
     } catch (error) {
-      setWarning(error instanceof Error ? error.message : "生成视觉纪要失败");
+      // 与普通纪要一致：用户取消不是失败，不弹告警。
+      const abort = (error as { name?: string })?.name === "AbortError"
+        || /abort/i.test(String((error as Error)?.message ?? ""));
+      if (!abort) setWarning(error instanceof Error ? error.message : "生成视觉纪要失败");
     } finally {
       summaryBusyRef.current = false;
       setSummaryBusy(false);

@@ -502,6 +502,9 @@ button {
 .import-submit { width: 100%; justify-content: center; margin-top: 14px; }
 /* 导入预期：说明后台处理节奏与耗时变量，避免把“导入”理解成一次性等待。 */
 .import-expectation { margin: 12px 4px 0; padding: 9px 11px; border-radius: 9px; background: var(--surface-raised); color: var(--ink-soft); font-size: var(--text-state); line-height: 1.6; }
+/* 任务级配置摘要：把档案、语言与参数摊开说明，并明确「不回写档案」。 */
+.import-profile-summary { margin: 10px 4px 0; padding: 8px 11px; border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--accent-soft) 45%, var(--surface)); color: var(--ink-soft); font-size: var(--text-state); line-height: 1.65; }
+.import-profile-summary span { margin-right: 6px; color: var(--accent-text); font-weight: 700; }
 .import-duplicate-note { margin: 9px 4px 0; color: var(--ink-muted); text-align: center; font-size: var(--text-state); }
 .import-queue { padding: 17px 20px 24px; overflow: auto; flex: 1; }
 .import-empty { min-height: 150px; display: grid; place-items: center; align-content: center; gap: 7px; color: var(--ink-muted); border: 1px dashed var(--line); border-radius: 14px; }
@@ -2259,49 +2262,6 @@ button.transcription-status.is-error { color: var(--accent-text); background: va
 
 .export-wrap {
   position: relative;
-}
-
-.export-menu {
-  position: absolute;
-  z-index: 50;
-  top: 41px;
-  right: 0;
-  width: 240px;
-  max-height: min(440px, calc(100vh - 110px));
-  overflow-y: auto;
-  padding: 7px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  box-shadow: 0 16px 40px rgba(24, 29, 39, 0.14);
-}
-
-.export-menu button {
-  width: 100%;
-  min-height: 47px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 9px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  text-align: left;
-}
-
-.export-menu button:hover {
-  background: var(--surface-raised);
-}
-
-.export-menu button > svg {
-  color: var(--blue);
-}
-
-.export-menu button span {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 12px;
 }
 
 /* 菜单打开时的透明遮罩：拦截外部点击（z-index 低于导出菜单 50 / 更多菜单 52）。 */
@@ -5441,6 +5401,37 @@ html[data-surface="permission-helper"] #root {
 
 .review-hero__more { position: relative; }
 
+/* 纪要模板：与生成按钮同一行，视觉上作为「生成方式的说明」而不是独立设置项。 */
+.review-hero__template {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: var(--text-state);
+  transition: border-color 160ms var(--ease-out-ui), background 160ms var(--ease-out-ui);
+}
+
+.review-hero__template:hover { border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); background: var(--surface-raised); }
+.review-hero__template:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+
+.review-hero__template select {
+  max-width: 132px;
+  padding: 2px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: var(--text-state);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.review-hero__template select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
 .review-hero__more-button {
   width: 36px;
   height: 36px;
@@ -6337,6 +6328,54 @@ html[data-surface="permission-helper"] #root {
 
 .chat-send:disabled { color: var(--muted); background: var(--surface-raised); cursor: not-allowed; }
 
+/* 回答进行中：发送键变成「停止」。用描边而非实心，避免和「发送」抢同一种强调色。 */
+.chat-send--stop {
+  color: var(--ink-soft);
+  background: var(--surface-raised);
+  border: 1px solid color-mix(in srgb, var(--line) 80%, var(--ink-muted));
+}
+
+.chat-send--stop:hover:not(:disabled) { background: var(--sidebar); color: var(--ink); }
+
+/* 回答中的 [mm:ss] 回链：看起来像时间标签，点击回到原文播放位置。 */
+.chat-cite {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 1px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-text);
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  line-height: 1.6;
+  vertical-align: baseline;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-out-ui), color 140ms var(--ease-out-ui);
+}
+
+.chat-cite:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.chat-cite:active { transform: scale(0.96); }
+.chat-cite:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* 主动停止：中性提示，不用失败的红橙色。 */
+.chat-stopped-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chat-stopped {
+  color: var(--ink-muted);
+  font-size: var(--text-data);
+}
+
+.chat-stopped-row .chat-retry { margin-top: 0; }
+
+.chat-bubble.is-stopped { border-color: color-mix(in srgb, var(--line) 85%, transparent); }
+
 /* Recording is a focused split workspace. Each column scrolls independently. */
 .app-shell--live {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -6755,7 +6794,7 @@ html[data-surface="permission-helper"] #root {
 .transcript-search {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 6px;
   margin: 0 4px 12px;
   padding: 6px 8px;
@@ -6765,13 +6804,78 @@ html[data-surface="permission-helper"] #root {
   color: var(--ink-muted);
 }
 
-.transcript-search input[type="search"] {
+.transcript-search__row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 26px;
+}
+
+/* 替换行与查找行之间用一条极淡的分隔线区分「定位」与「改写」。 */
+.transcript-search__replace {
+  padding-top: 5px;
+  border-top: 1px dashed color-mix(in srgb, var(--line) 78%, transparent);
+}
+
+.transcript-search input[type="search"],
+.transcript-search input[type="text"] {
   flex: 1 1 auto;
   min-width: 90px;
+  padding: 2px 0;
   border: 0;
   background: transparent;
   color: var(--ink);
   font-size: var(--text-label);
+}
+
+.transcript-search input[type="text"]::placeholder,
+.transcript-search input[type="search"]::placeholder { color: var(--ink-muted); }
+
+.transcript-replace__action {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: var(--text-state);
+  transition: border-color .16s ease, color .16s ease, background .16s ease, transform .12s ease;
+}
+
+.transcript-replace__action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: var(--surface-raised);
+  color: var(--accent-text);
+}
+
+.transcript-replace__action:active:not(:disabled) { transform: scale(.97); }
+.transcript-replace__action:disabled { opacity: .45; cursor: not-allowed; }
+
+.transcript-replace__undo {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  color: var(--accent-text);
+  font-size: var(--text-state);
+}
+
+.transcript-replace__undo:hover { background: var(--accent-soft); }
+
+.transcript-search__notice {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+  color: var(--ink-muted);
+  font-size: var(--text-state);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .transcript-search select {
@@ -6799,20 +6903,160 @@ html[data-surface="permission-helper"] #root {
 /* 带撤销/直达动作的提示贴近底部录音条；普通提示与错误仍在顶部。 */
 .toast-stack--bottom { top: auto; bottom: 96px; }
 
-/* 导出菜单按用途分组，避免九个格式平铺。 */
-.export-menu__group { display: grid; gap: 1px; padding: 4px 0; }
-.export-menu__group + .export-menu__group { border-top: 1px solid var(--line); }
-.export-menu__group button { min-height: 36px; }
-.export-menu__label {
-  padding: 3px 9px;
-  color: var(--ink-muted);
-  font-size: var(--text-state);
-  font-weight: 700;
-  letter-spacing: .03em;
+/* 导出对话框：左侧按交付物分组，右侧预览与选项；预览文本等宽、可滚动。 */
+.export-dialog {
+  width: min(880px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  max-height: min(760px, calc(100vh - 56px));
 }
 
-/* 同屏两个 ··· 菜单各带可见标签，避免承载不同操作却长得一模一样。 */
-.icon-button--labeled,
+.export-dialog__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.export-dialog__header h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 17px;
+  letter-spacing: -.01em;
+}
+
+.export-dialog__header h2 svg { color: var(--accent); }
+.export-dialog__header p { margin: 6px 0 0; color: var(--ink-muted); font-size: var(--text-label); }
+
+.export-dialog__body {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.export-dialog__groups {
+  overflow-y: auto;
+  padding: 12px 10px 16px;
+  border-right: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.export-dialog__group + .export-dialog__group { margin-top: 10px; }
+
+.export-dialog__group-head {
+  display: grid;
+  gap: 2px;
+  padding: 6px 10px 6px;
+}
+
+.export-dialog__group-head strong { font-size: var(--text-label); color: var(--ink-soft); }
+.export-dialog__group-head span { font-size: var(--text-state); color: var(--ink-muted); }
+
+.export-dialog__item {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--ink-soft);
+  text-align: left;
+  transition: background 150ms var(--ease-out-ui), border-color 150ms var(--ease-out-ui), transform 120ms var(--ease-out-ui);
+}
+
+.export-dialog__item:hover { background: var(--surface); }
+.export-dialog__item:active { transform: scale(.99); }
+.export-dialog__item svg { flex: 0 0 auto; margin-top: 2px; color: var(--ink-muted); }
+.export-dialog__item span { display: grid; gap: 2px; min-width: 0; }
+.export-dialog__item strong { font-size: var(--text-label); font-weight: 650; }
+.export-dialog__item small { color: var(--ink-muted); font-size: var(--text-state); line-height: 1.5; }
+
+.export-dialog__item.is-active {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface));
+  color: var(--accent-text);
+}
+
+.export-dialog__item.is-active svg { color: var(--accent-text); }
+.export-dialog__item.is-active small { color: color-mix(in srgb, var(--accent-text) 72%, var(--ink-muted)); }
+
+.export-dialog__preview {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 16px 18px 14px;
+}
+
+.export-dialog__preview-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.export-dialog__preview-head strong { font-size: var(--text-label); color: var(--ink-soft); }
+.export-dialog__preview-head span { color: var(--ink-muted); font-size: var(--text-state); }
+
+.export-dialog__preview-text {
+  flex: 1 1 auto;
+  min-height: 200px;
+  max-height: none;
+  margin: 10px 0 0;
+  padding: 14px 16px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--ink-soft);
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.export-dialog__preview-empty {
+  margin: 10px 0 0;
+  padding: 18px 16px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--ink-muted);
+  font-size: var(--text-label);
+  line-height: 1.7;
+}
+
+.export-dialog__options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 10px;
+  color: var(--ink-muted);
+  font-size: var(--text-state);
+}
+
+.export-dialog__options label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-soft); }
+
+.export-dialog__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 20px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.export-dialog__note { flex: 1 1 auto; color: var(--ink-muted); font-size: var(--text-state); }
+
+@media (max-width: 780px) {
+  .export-dialog { width: calc(100vw - 24px); }
+  .export-dialog__body { grid-template-columns: 1fr; }
+  .export-dialog__groups { max-height: 44vh; border-right: 0; border-bottom: 1px solid var(--line); }
+  .export-dialog__note { display: none; }
+}
+
+/* 同屏两个 ··· 菜单各带可见标签，避免承载不同操作却长得一模一样。 */.icon-button--labeled,
 .review-hero__more-button.icon-button--labeled {
   width: auto;
   display: inline-flex;
@@ -7124,13 +7368,10 @@ html[data-surface="permission-helper"] #root {
 
 /* —— 浮层与录音条：同一套阴影、圆角和表面语言 —— */
 .more-menu,
-.export-menu,
 .review-hero__menu { border-color: var(--line-soft); border-radius: 12px; box-shadow: var(--shadow-lg); }
 .more-menu button,
-.export-menu button,
 .review-hero__menu button { border-radius: 7px; }
 .more-menu button:hover,
-.export-menu button:hover,
 .review-hero__menu button:hover { background: var(--surface-hover); }
 .recorder-bar { border-color: var(--line-soft); box-shadow: 0 10px 30px rgba(50, 37, 29, .12), 0 2px 8px rgba(50, 37, 29, .06); }
 .toast { border-color: var(--line-soft); box-shadow: var(--shadow-lg); }

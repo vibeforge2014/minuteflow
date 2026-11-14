@@ -332,43 +332,61 @@ export function buildSpeechWindows(spans, {
 }
 
 /**
- * 平均链接层次聚类：每窗一个初始簇，反复合并簇间平均相似度最高且 ≥ threshold
- * 的一对，直到没有合格对。返回与 embeddings 同序的簇下标数组（0..N-1）。
- * 窗数 ≤ 几百（一场一小时的会议约千余窗以内），O(n²) 完全够用。
+ * 平均链接层次聚类。缓存两两余弦相似度，使用 nearest-neighbor chain
+ * 找互为最近邻的簇，按成员数增量更新平均链接距离。
+ * 平均链接具有 reducibility，链式合并与全局最高相似度合并产生相同分组。
+ * 时间 O(n²·d + n²)，空间 O(n²)，不在每轮重算成员声纹。
  */
 export function assignWindowsToClusters(embeddings, { threshold = WINDOW_CLUSTER_THRESHOLD } = {}) {
   const vectors = (embeddings ?? []).map((vector) => (vector?.length ? vector : null));
-  const groups = vectors.map((_, index) => (vectors[index] ? [index] : null));
-  for (;;) {
-    let best = null;
-    for (let left = 0; left < groups.length; left += 1) {
-      if (!groups[left]) continue;
-      for (let right = left + 1; right < groups.length; right += 1) {
-        if (!groups[right]) continue;
-        let total = 0;
-        let pairs = 0;
-        for (const i of groups[left]) {
-          for (const j of groups[right]) {
-            total += cosineSimilarity(vectors[i], vectors[j]);
-            pairs += 1;
-          }
-        }
-        const similarity = pairs ? total / pairs : -1;
-        if (similarity >= threshold && (!best || similarity > best.similarity)) {
-          best = { similarity, left, right };
-        }
+  const n = vectors.length;
+  const groups = vectors.map((vector, index) => vector ? [index] : null);
+  const active = new Set(groups.flatMap((group, index) => group ? [index] : []));
+  const similarities = Array.from({ length: n }, () => new Float64Array(n));
+  for (const i of active) {
+    for (const j of active) {
+      if (j <= i) continue;
+      similarities[i][j] = similarities[j][i] = cosineSimilarity(vectors[i], vectors[j]);
+    }
+  }
+  const chain = [];
+  while (active.size) {
+    if (!chain.length) chain.push(active.values().next().value);
+    const left = chain[chain.length - 1];
+    const previous = chain.length > 1 ? chain[chain.length - 2] : -1;
+    let right = previous;
+    let best = previous >= 0 ? similarities[left][previous] : -Infinity;
+    for (const candidate of active) {
+      if (candidate !== left && similarities[left][candidate] > best) {
+        right = candidate;
+        best = similarities[left][candidate];
       }
     }
-    if (!best) break;
-    groups[best.left].push(...groups[best.right]);
-    groups[best.right] = null;
+    if (right < 0 || best < threshold) {
+      // 当前簇与所有剩余簇都低于阈值；保留为最终簇。
+      active.delete(left);
+      chain.pop();
+    } else if (right === previous) {
+      chain.pop();
+      chain.pop();
+      const leftSize = groups[left].length;
+      const rightSize = groups[right].length;
+      for (const other of active) {
+        if (other === left || other === right) continue;
+        const similarity = (similarities[left][other] * leftSize + similarities[right][other] * rightSize) / (leftSize + rightSize);
+        similarities[left][other] = similarities[other][left] = similarity;
+      }
+      groups[left].push(...groups[right]);
+      groups[right] = null;
+      active.delete(right);
+    } else {
+      chain.push(right);
+    }
   }
-  // 簇编号按簇内最早窗口的时间顺序分配，保证同一输出里 speaker 序号稳定。
-  const ordered = groups
-    .filter(Boolean)
+  const ordered = groups.filter(Boolean)
     .map((members) => ({ first: Math.min(...members), members }))
     .sort((left, right) => left.first - right.first);
-  const labels = new Array(vectors.length).fill(-1);
+  const labels = new Array(n).fill(-1);
   ordered.forEach((group, clusterIndex) => {
     for (const member of group.members) labels[member] = clusterIndex;
   });

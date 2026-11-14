@@ -34,7 +34,7 @@ import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import TurndownService from "turndown";
-import type { ImportJob, Meeting } from "../types";
+import type { ImportJob, Meeting, SummaryTemplateId } from "../types";
 import { api } from "../lib/api";
 import { lockSummaryField, removeSummaryListItem, toggleSummaryLock } from "../lib/summary";
 import { formatDuration, formatInterval } from "../lib/format";
@@ -49,6 +49,7 @@ import type { ContentChangeKind } from "../lib/content-motion";
 import type { LiveTranscriptionFailure } from "../services/recording";
 import { useEnteringItemIds, useSummaryContentMotion } from "../hooks/useContentMotion";
 import { useDialogFocus } from "../hooks/useDialogFocus";
+import { SUMMARY_TEMPLATES, summaryTemplateById } from "../../shared/summary-templates.mjs";
 
 interface DocumentWorkspaceProps {
   meeting: Meeting;
@@ -68,6 +69,7 @@ interface DocumentWorkspaceProps {
   onRetranscribe?(): void;
   /** 当前播放位置（毫秒），转写视图中用于歌词式高亮。 */
   playbackMs?: number;
+  playbackPlaying?: boolean;
   /** 点击转写时间戳时请求播放器跳转。 */
   onSeek?(ms: number): void;
   /** 空逐字稿在会后提供唯一、明确的恢复动作（继续录音）。 */
@@ -90,6 +92,9 @@ interface DocumentWorkspaceProps {
   onCancelSummary(): void;
   /** 仅用普通纪要重试视觉版。 */
   onRetryVisualSummary(): void;
+  /** 纪要模板：只改归纳视角，不改纪要结构；生成前可选。 */
+  summaryTemplate: SummaryTemplateId;
+  onSummaryTemplateChange(template: SummaryTemplateId): void;
   summaryBusy: boolean;
   liveDocument: "notes" | "summary" | null;
   onCloseLiveDocument(): void;
@@ -108,6 +113,7 @@ export function DocumentWorkspace({
   onSkipDiarization,
   onRetranscribe,
   playbackMs = 0,
+  playbackPlaying = false,
   onSeek,
   emptyActionLabel,
   onEmptyAction,
@@ -123,6 +129,8 @@ export function DocumentWorkspace({
   onGenerateSummary,
   onCancelSummary,
   onRetryVisualSummary,
+  summaryTemplate,
+  onSummaryTemplateChange,
   summaryBusy,
   liveDocument,
   onCloseLiveDocument
@@ -474,7 +482,7 @@ export function DocumentWorkspace({
                     </span>
                   )
                 : hasOrdinarySummary
-                  ? summaryParts.join(" · ")
+                  ? `${summaryParts.join(" · ")}${meeting.summary.template && meeting.summary.template !== "general" ? ` · ${summaryTemplateById(meeting.summary.template).label}` : ""}`
                   : recentlyFinalized
                     ? "录音已保存。"
                     : "还没有纪要。"}</p>
@@ -509,12 +517,28 @@ export function DocumentWorkspace({
               {!processingStatus && (summaryBusy ? (
                 <button className="button button--secondary" onClick={onCancelSummary}><XCircle size={16} />取消生成</button>
               ) : (
-                <button
-                  className={`button ${meeting.summary.stale || !hasOrdinarySummary ? "button--primary" : "button--secondary review-hero__generate"}`}
-                  onClick={onGenerateSummary}
-                >
-                  <ArrowClockwise size={16} />{meeting.summary.stale ? "更新纪要" : hasOrdinarySummary ? "重新生成纪要" : "生成最终纪要"}
-                </button>
+                <>
+                  <label className="review-hero__template" title="模板只改变归纳视角（先看什么、怎么写行动项），纪要结构与编辑方式不变">
+                    <span>纪要模板</span>
+                    <select
+                      value={summaryTemplate}
+                      aria-label="选择纪要模板"
+                      onChange={(event) => onSummaryTemplateChange(event.target.value as SummaryTemplateId)}
+                    >
+                      {SUMMARY_TEMPLATES.map((template) => (
+                        <option key={template.id} value={template.id} title={template.description}>
+                          {template.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    className={`button ${meeting.summary.stale || !hasOrdinarySummary ? "button--primary" : "button--secondary review-hero__generate"}`}
+                    onClick={onGenerateSummary}
+                  >
+                    <ArrowClockwise size={16} />{meeting.summary.stale ? "更新纪要" : hasOrdinarySummary ? "重新生成纪要" : "生成最终纪要"}
+                  </button>
+                </>
               ))}
               {!processingStatus && onRetranscribe && meeting.status !== "recording" && meeting.status !== "paused" && (
                 <div className="review-hero__more" ref={heroMenuRef}>
@@ -918,6 +942,7 @@ export function DocumentWorkspace({
             stage={stage}
             onChange={onChange}
             playbackMs={playbackMs}
+            playbackPlaying={playbackPlaying}
             onSeek={onSeek}
             jumpTarget={transcriptJump}
             emptyActionLabel={emptyActionLabel}

@@ -8,8 +8,8 @@
  * - 输入区内可直接勾选本次问答使用的 LLM 档案（在线/本机 Ollama）：
  *   智谱式多可用，勾选随消息发送 profileId，不写库改默认档。
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ChatTeardropText, CheckCircle, Eraser, PaperPlaneRight, SlidersHorizontal, X } from "@phosphor-icons/react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { ChatTeardropText, CheckCircle, Eraser, PaperPlaneRight, SlidersHorizontal, Square, X } from "@phosphor-icons/react";
 import type { Meeting, ModelProfile } from "../types";
 import { api } from "../lib/api";
 import { markdownToHtml } from "../lib/markdown";
@@ -23,6 +23,8 @@ export interface ChatMessage {
   reasoning?: string;
   pending?: boolean;
   failed?: boolean;
+  /** 用户主动停止：保留已生成的内容，按正常结束呈现，不是错误。 */
+  stopped?: boolean;
 }
 
 /** meeting.id → 当次会话的问答记录（内存态，随窗口关闭清空）。 */
@@ -52,13 +54,44 @@ function transcriptToContextText(meeting: Meeting) {
     : body;
 }
 
-/** 从纪要推导「猜你想问」：优先指向本场会议实际存在的内容。 */
+/**
+ * 从纪要推导「猜你想问」：指向会议真正需要交付的东西——谁做什么、还没定下什么、
+ * 已经确认了什么，而不是泛泛的「总结一下」。
+ */
 function suggestedQuestions(meeting: Meeting) {
-  const questions = ["用三句话总结这场会议"];
+  const questions: string[] = [];
+  if (meeting.summary.actionItems.length > 0) questions.push("谁负责哪些事项，分别什么时候交付？");
+  if (meeting.summary.openQuestions.length > 0) questions.push("还有哪些未决问题需要跟进？");
   if (meeting.summary.decisions.length > 0) questions.push("这次会议确认了哪些决定？");
-  if (meeting.summary.actionItems.length > 0) questions.push("行动项分别由谁负责？");
-  if (meeting.summary.openQuestions.length > 0) questions.push("还有哪些未决问题？");
-  return questions.slice(0, 2);
+  questions.push("这次会议确认了什么？", "下一步要做什么？");
+  return Array.from(new Set(questions)).slice(0, 3);
+}
+
+/** 回答里的 [mm:ss] / [h:mm:ss] 时间戳 → 可点击回链（点击后跳到原文播放位置）。 */
+const CITATION_PATTERN = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g;
+
+function citationToMs(label: string) {
+  const parts = label.split(":").map((part) => Number(part));
+  if (parts.some((part) => !Number.isFinite(part))) return null;
+  const seconds = parts.length === 3
+    ? parts[0] * 3600 + parts[1] * 60 + parts[2]
+    : parts[0] * 60 + parts[1];
+  return seconds * 1000;
+}
+
+/**
+ * 只改写 HTML 的文本节点（按标签切开处理），避免把 class/href 里的内容当成时间戳。
+ * 注入的标记由本函数生成、只含数字，其余内容仍来自 markdownToHtml 的净化结果。
+ */
+function linkifyCitations(html: string) {
+  return html.split(/(<[^>]*>)/).map((part) => {
+    if (part.startsWith("<")) return part;
+    return part.replace(CITATION_PATTERN, (match, label: string) => {
+      const ms = citationToMs(label);
+      if (ms === null) return match;
+      return `<button type="button" class="chat-cite" data-ms="${ms}" title="回到原文 ${label}">${label}</button>`;
+    });
+  }).join("");
 }
 
 /**
@@ -155,10 +188,12 @@ interface ChatPanelProps {
   onClose(): void;
   /** 模型胶囊的「去设置/管理服务」直达 AI 总结页。 */
   onOpenSettings?: () => void;
+  /** 点击回答里的 [mm:ss] 回链：跳到该时刻（由外层负责打开播放器并定位）。 */
+  onSeek?(ms: number): void;
   liveSummary?: ReactNode;
 }
 
-export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings, liveSummary }: ChatPanelProps) {
+export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings, onSeek, liveSummary }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(() => chatSessions.get(meeting.id) ?? []);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -200,6 +235,10 @@ export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings,
   meetingIdRef.current = meeting.id;
   // 最近一次失败提问的原文，供「重试」按钮原样重发。
   const lastFailedPrompt = useRef("");
+  /** 当前回答的 streamId：停止按钮据此中止主进程请求（id 由渲染层生成，先于 invoke 就绪）。 */
+  const activeStreamId = useRef<string | null>(null);
+  /** 用户点了「停止」：用于区分主动停止与真实失败，避免把取消渲染成红色错误。 */
+  const stopRequested = useRef(false);
 
   const commitMessages = (next: ChatMessage[]) => {
     chatSessions.set(meeting.id, next);
@@ -220,12 +259,29 @@ export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings,
       { id: newMessageId(), role: "user", text: trimmed },
       { id: pendingId, role: "assistant", text: "", pending: true }
     ]);
+    // 渲染层先定 streamId，停止按钮才能在首个增量到达前就生效。
+    const streamId = newMessageId();
+    activeStreamId.current = streamId;
+    stopRequested.current = false;
     // 打字机平滑队列（Codex 观感）：传输层增量先入缓冲，按真实模型的生成速度出字——
     // 约 40 字/秒起步、随缓冲增大提速（160 字/秒封顶），130 字回答约 3-4 秒铺完；
     // 出字在标点处断句并小停（句号 ~120ms、逗号 ~40ms），带自然呼吸而不是机械节拍器。
     const buffer = { content: "", reasoning: "" };
     let drainTimer: number | null = null;
     let pauseTicks = 0;
+    /**
+     * 截断打字机队列：保留已经显示出来的内容，丢弃仍在缓冲里的尾巴。
+     * 用户点「停止」时调用——请求可能已经结束，此时 chat:cancel 无从中止，
+     * 只能从这里停掉吐字，否则按钮看起来完全没反应。
+     */
+    const truncateDrain = () => {
+      if (drainTimer !== null) {
+        window.clearInterval(drainTimer);
+        drainTimer = null;
+      }
+      buffer.content = "";
+      buffer.reasoning = "";
+    };
     const patchPending = (patch: (message: ChatMessage) => ChatMessage) => {
       commitMessages((chatSessions.get(meeting.id) ?? messages).map((message) =>
         message.id === pendingId ? patch(message) : message));
@@ -264,40 +320,77 @@ export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings,
         buffer.reasoning += delta.reasoning ?? "";
         buffer.content += delta.content ?? "";
         startDrain();
-      }, activeChatProfile?.id);
+      }, activeChatProfile?.id, streamId);
       // 流结束后等平滑队列吐完再落最终结果，避免结尾突兀地整段校正。
+      // 这段等待同样可被「停止」打断：请求已结束，只能截断缓冲队列。
       await new Promise<void>((resolve) => {
         const check = () => {
+          if (stopRequested.current) {
+            truncateDrain();
+            resolve();
+            return;
+          }
           if (!buffer.content && !buffer.reasoning && drainTimer === null) resolve();
           else window.setTimeout(check, 30);
         };
         check();
       });
+      if (stopRequested.current) {
+        patchPending((message) => ({ ...message, pending: false, failed: false, stopped: true }));
+        return;
+      }
       patchPending((message) =>
         ({ ...message, text: result.answer, reasoning: result.reasoning || undefined, pending: false, failed: false }));
     } catch (error) {
       if (drainTimer !== null) window.clearInterval(drainTimer);
+      const aborted = stopRequested.current
+        || (error as { name?: string })?.name === "AbortError"
+        || /abort/i.test(String((error as Error)?.message ?? ""));
+      if (aborted) {
+        // 主动停止是用户的决定，不是失败：保留已生成的内容并标「已停止」，不弹红色错误。
+        patchPending((message) => ({ ...message, pending: false, failed: false, stopped: true }));
+        return;
+      }
       const reason = error instanceof Error ? error.message : String(error);
       patchPending((message) =>
         ({ ...message, text: reason.replace(/^Error invoking remote method '[^']+':\s*/, ""), pending: false, failed: true }));
       // 发送失败不丢字：把问题放回输入框，用户可直接改后重发或点气泡上的「重试」。
       setDraft(trimmed);
     } finally {
+      activeStreamId.current = null;
+      stopRequested.current = false;
       setBusy(false);
     }
   };
 
-  /** 重试上一条失败的提问：移除失败气泡后原样重发。 */
+  /** 停止当前回答：通知主进程中止请求，界面等 catch 里的 aborted 分支收尾。 */
+  const stopAnswer = () => {
+    const streamId = activeStreamId.current;
+    if (!streamId) return;
+    stopRequested.current = true;
+    void api.chat.cancel(streamId).catch(() => {});
+  };
+
+  /** 重试上一条失败或被停止的提问：移除对应气泡后原样重发。 */
   const retryLastFailure = () => {
     const prompt = lastFailedPrompt.current;
     if (!prompt || busy) return;
-    commitMessages(messages.filter((message) => !(message.role === "assistant" && message.failed)));
+    commitMessages(messages.filter((message) =>
+      !(message.role === "assistant" && (message.failed || message.stopped))));
     void send(prompt);
   };
 
   const clearSession = () => {
     chatSessions.delete(meeting.id);
     setMessages([]);
+  };
+
+  /** 点击回答中的时间戳回链：换算成毫秒交给外层定位播放器。 */
+  const handleCitationClick = (event: MouseEvent<HTMLDivElement>) => {
+    const target = (event.target as HTMLElement).closest<HTMLElement>(".chat-cite");
+    if (!target) return;
+    const ms = Number(target.dataset.ms);
+    if (Number.isFinite(ms)) onSeek?.(ms);
   };
 
   return (
@@ -332,13 +425,15 @@ export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings,
                 {message.role === "assistant" && (
                   <span className="chat-avatar" aria-hidden="true"><ChatTeardropText size={15} weight="fill" /></span>
                 )}
-                <div className={`chat-bubble chat-bubble--${message.role} ${message.failed ? "is-failed" : ""}`}>
+                <div className={`chat-bubble chat-bubble--${message.role} ${message.failed ? "is-failed" : ""} ${message.stopped ? "is-stopped" : ""}`}>
                   {message.role === "assistant" ? (
                     message.text ? (
                       // 回答按 Markdown 安全渲染（marked + DOMPurify，见 lib/markdown），流式期间带打字光标。
+                      // 渲染后把 [mm:ss] 变成可点击回链，点一下回到原文。
                       <div
                         className={`chat-bubble__content ${message.pending ? "is-streaming" : ""}`}
-                        dangerouslySetInnerHTML={{ __html: markdownToHtml(message.text) }}
+                        onClick={handleCitationClick}
+                        dangerouslySetInnerHTML={{ __html: linkifyCitations(markdownToHtml(message.text)) }}
                       />
                     ) : message.pending ? (
                       <span className="chat-typing" aria-label="正在思考" role="status">
@@ -346,7 +441,12 @@ export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings,
                       </span>
                     ) : null
                   ) : message.text}
-                  {message.failed && !message.pending && (
+                  {message.stopped && !message.pending ? (
+                    <div className="chat-stopped-row">
+                      <span className="chat-stopped">已停止</span>
+                      <button className="chat-retry" onClick={retryLastFailure}>重新提问</button>
+                    </div>
+                  ) : message.failed && !message.pending && (
                     <button className="chat-retry" onClick={retryLastFailure}>重试</button>
                   )}
                 </div>
@@ -395,14 +495,25 @@ export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings,
               }
             }}
           />
-          <button
-            className="chat-send"
-            aria-label="发送问题"
-            disabled={busy || draft.trim().length === 0}
-            onClick={() => void send(draft)}
-          >
-            <PaperPlaneRight size={16} weight="fill" />
-          </button>
+          {busy ? (
+            <button
+              className="chat-send chat-send--stop"
+              aria-label="停止回答"
+              title="停止回答（已生成的内容会保留）"
+              onClick={stopAnswer}
+            >
+              <Square size={14} weight="fill" />
+            </button>
+          ) : (
+            <button
+              className="chat-send"
+              aria-label="发送问题"
+              disabled={draft.trim().length === 0}
+              onClick={() => void send(draft)}
+            >
+              <PaperPlaneRight size={16} weight="fill" />
+            </button>
+          )}
         </div>
       </footer>
     </aside>

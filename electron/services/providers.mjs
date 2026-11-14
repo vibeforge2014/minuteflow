@@ -1,3 +1,5 @@
+import { transcriptionDecodingOptions, whisperCliDecodingArgs, pythonDecodingOptions } from "../../shared/transcription-options.mjs";
+import { summaryTemplateById } from "../../shared/summary-templates.mjs";
 /**
  * 转录与纪要的模型调用层（Electron 主进程 / 服务层）。
  * 封装三类能力：远程 OpenAI 兼容接口的转录与纪要（含 New API 网关预设、
@@ -435,18 +437,22 @@ function windowTranscriptLines(lines) {
 /**
  * 构造中文会议纪要提示词：拼接转录（带时间戳与说话人）、目标、人工笔记与上一版纪要。
  * final=true 要求生成最终纪要；否则只根据新增内容滚动更新且不删除已确认的人工内容。
- * @param {object} input 会议上下文（title/goals/notes/transcript/previousSummary）
+ * input.template 选择归纳视角（通用/周会/访谈/复盘），只影响提示词里的关注点，
+ * 不改变要求模型输出的 JSON 结构。
+ * @param {object} input 会议上下文（title/goals/notes/transcript/previousSummary/template）
  * @returns {string} 提示词文本
  */
 export function buildSummaryPrompt(input, final = false) {
   const transcript = windowTranscriptLines(input.transcript
     .map((segment) => `[${formatTime(segment.startMs)}] ${segment.speakerName}: ${segment.text}`));
+  const template = summaryTemplateById(input.template);
   return [
     "你是一名严谨的中文会议纪要助手。",
     "所有内容必须使用简体中文。请归纳和压缩信息，合并重复观点，不要逐句复述转录。",
     final
       ? "请基于完整会议内容生成最终纪要。"
       : "请只根据新增内容更新滚动纪要，不要删除已经确认的人工内容。",
+    `本次纪要模板：${template.label}。${template.guidance}`,
     "必须返回 JSON，不要使用 Markdown 代码块。",
     "结构：topics, keyPoints, decisions, actionItems, openQuestions, risks, nextSteps。",
     "keyPoints 每项是 {\"text\": \"要点标题｜一句完整结论\", \"evidenceTime\": \"mm:ss\"}：text 内用全角竖线「｜」分隔，竖线前是 6–14 字的要点标题（这条结论的核心，读者扫标题即可抓住重点，不要写成「讨论重点」这类类别名），竖线后是提炼后的完整结论（约 15–45 字，不要照抄原话），一行只表达一条结论，不要类别标签开头，不要 Markdown 符号；evidenceTime 引用转录行开头的时间戳，仅当结论对应某个明确时刻时提供。",
@@ -538,6 +544,8 @@ export function buildChatSystemPrompt(context) {
     "你是 MinuteFlow 的会议问答助手，根据下方会议材料回答用户关于这场会议的问题。",
     "要求：使用简体中文；优先依据会议内容作答，条目简短；引用发言时注明发言人；",
     "会议材料中没有的信息要明确说明“会议中没有提到”，不要编造。",
+    "下方转写每行以 [mm:ss] 开头。回答涉及具体发言、决定或行动项时，在相应句子末尾附上原文时间戳，格式严格为 [mm:ss]（长会议可用 [h:mm:ss]），界面会把它们变成可点击的回链；只引用转写里真实出现过的时间戳，不要推测或编造。",
+    "回答行动项时说明负责人与截止时间，材料里没写的用「待确认」标注。",
     "回答会按 Markdown 渲染：可用简短列表、加粗和小标题组织内容，不要输出表格、HTML 或长代码块。",
     `会议标题：${String(context.title ?? "")}`,
     `参与者：${Array.isArray(context.participants) ? context.participants.join("、") : ""}`,
@@ -824,7 +832,8 @@ const FASTER_WHISPER_SCRIPT = [
   "import json, sys",
   "from faster_whisper import WhisperModel",
   "model = WhisperModel(sys.argv[1], device='auto', compute_type='auto')",
-  "segments, info = model.transcribe(sys.argv[2], language=sys.argv[3] or None, initial_prompt=sys.argv[4] or None, vad_filter=True)",
+  "options = json.loads(sys.argv[5])",
+  "segments, info = model.transcribe(sys.argv[2], language=sys.argv[3] or None, initial_prompt=sys.argv[4] or None, vad_filter=True, **options)",
   "materialized = [{'start': float(s.start), 'end': float(s.end), 'text': (s.text or '').strip(), 'avg_logprob': getattr(s, 'avg_logprob', None), 'no_speech_prob': getattr(s, 'no_speech_prob', None), 'compression_ratio': getattr(s, 'compression_ratio', None)} for s in segments]",
   "print(json.dumps({'text': ' '.join(s['text'] for s in materialized), 'language': getattr(info, 'language', None), 'segments': materialized}, ensure_ascii=False))"
 ].join("\n");
@@ -833,7 +842,8 @@ const FASTER_WHISPER_SCRIPT = [
 const MLX_WHISPER_SCRIPT = [
   "import json, sys",
   "import mlx_whisper",
-  "result = mlx_whisper.transcribe(sys.argv[2], path_or_hf_repo=sys.argv[1], language=sys.argv[3] or None, initial_prompt=sys.argv[4] or None)",
+  "options = json.loads(sys.argv[5])",
+  "result = mlx_whisper.transcribe(sys.argv[2], path_or_hf_repo=sys.argv[1], language=sys.argv[3] or None, initial_prompt=sys.argv[4] or None, **options)",
   "segments = [{'start': float(s.get('start', 0)), 'end': float(s.get('end', 0)), 'text': (s.get('text') or '').strip(), 'avg_logprob': s.get('avg_logprob'), 'no_speech_prob': s.get('no_speech_prob'), 'compression_ratio': s.get('compression_ratio')} for s in result.get('segments', [])]",
   "print(json.dumps({'text': (result.get('text') or '').strip(), 'language': result.get('language'), 'segments': segments}, ensure_ascii=False))"
 ].join("\n");
@@ -873,7 +883,7 @@ async function transcribeWithPythonPackage(profile, audioBuffer, fileName, langu
     || profile.options?.executablePath
     || (process.platform === "win32" ? "python" : "python3");
   if (!modelPath) throw new Error("请先选择本地模型目录或填写 Hugging Face 仓库 ID。");
-  const prompt = buildTranscriptionPrompt({ language, glossary, previousText });
+  const prompt = buildTranscriptionPrompt({ language, glossary, previousText, initialPrompt: profile.options?.initialPrompt });
   const inputPath = path.join(tmpdir(), `${randomUUID()}-${fileName}`);
   let wavePath = inputPath;
   await writeFile(inputPath, audioBuffer);
@@ -884,7 +894,7 @@ async function transcribeWithPythonPackage(profile, audioBuffer, fileName, langu
     await runProcess(profile.options.ffmpegPath, ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavePath], { signal });
   }
   try {
-    const { stdout } = await runProcess(pythonPath, ["-c", script, modelPath, wavePath, language ?? "", prompt], { env: environment, signal });
+    const { stdout } = await runProcess(pythonPath, ["-c", script, modelPath, wavePath, language ?? "", prompt, JSON.stringify(pythonDecodingOptions(profile))], { env: environment, signal });
     const payload = JSON.parse(stdout.trim().split("\n").pop());
     const segments = (payload.segments ?? [])
       .map((segment) => ({
@@ -1003,7 +1013,7 @@ export async function transcribeRemote(
   })[extension] || "application/octet-stream";
   // 简体引导语 + 前文 + 术语表统一构造；此前远程链路只传术语表，中文用词的
   // 简繁与专名写法和本地引擎不一致。
-  const prompt = buildTranscriptionPrompt({ language, glossary, previousText });
+  const prompt = buildTranscriptionPrompt({ language, glossary, previousText, initialPrompt: profile.options?.initialPrompt });
   const retryBackoffMs = [2_000, 8_000];
   let lastFailure;
   for (let attempt = 0; ; attempt += 1) {
@@ -1014,6 +1024,8 @@ export async function transcribeRemote(
     if (language) form.append("language", language);
     if (defaultResponseFormat !== "text") form.append("response_format", defaultResponseFormat);
     if (prompt) form.append("prompt", prompt);
+    const decoding = transcriptionDecodingOptions(profile);
+    if (decoding.temperature !== undefined) form.append("temperature", String(decoding.temperature));
     let response;
     try {
       response = await fetch(apiUrl(profile, "audio/transcriptions", profile.options?.transcriptionEndpoint), {
@@ -1128,6 +1140,7 @@ export async function transcribeWithPythonWhisper(
     "options = {'verbose': False, 'fp16': False}",
     "if sys.argv[3]: options['language'] = sys.argv[3]",
     "if sys.argv[4]: options['initial_prompt'] = sys.argv[4]",
+    "options.update(json.loads(sys.argv[5]))",
     "result = model.transcribe(sys.argv[2], **options)",
     "print(json.dumps({'text': result.get('text', ''), 'language': result.get('language'), 'segments': result.get('segments', [])}, ensure_ascii=False))"
   ].join("\n");
@@ -1142,7 +1155,8 @@ export async function transcribeWithPythonWhisper(
       modelPath,
       inputPath,
       language,
-      buildTranscriptionPrompt({ language, glossary, previousText })
+      buildTranscriptionPrompt({ language, glossary, previousText, initialPrompt: profile.options?.initialPrompt }),
+      JSON.stringify(pythonDecodingOptions(profile))
     ], { env: environment, signal });
     const result = JSON.parse(stdout.trim().split("\n").at(-1));
     const segments = (result.segments ?? []).map((segment) => ({
@@ -1214,8 +1228,9 @@ export async function transcribeWithWhisperCpp(
     // Whisper defaults to Traditional Chinese for Mandarin even with -l zh.
     // 简体引导语、前文上下文与术语表由统一模块按 token 预算组装，避免各引擎
     // 拼接顺序不一致，也避免长术语表把 prompt 撑爆后被 tokenizer 截断。
-    const prompt = buildTranscriptionPrompt({ language, glossary, previousText });
+    const prompt = buildTranscriptionPrompt({ language, glossary, previousText, initialPrompt: profile.options?.initialPrompt });
     if (prompt) args.push("--prompt", prompt);
+    args.push(...whisperCliDecodingArgs(profile));
     await runProcess(whisperPath, args, { signal });
     const result = JSON.parse(await readFile(`${outputBase}.json`, "utf8"));
     const segments = (result.transcription ?? []).map((item) => ({
@@ -1312,13 +1327,14 @@ async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, lang
       throw new Error("音频处理组件尚未就绪，请重试或重新安装应用。");
     }
 
-    const prompt = buildTranscriptionPrompt({ language, glossary, previousText });
+    const prompt = buildTranscriptionPrompt({ language, glossary, previousText, initialPrompt: profile.options?.initialPrompt });
     const result = await withWhisperContext(modelPath, async (context) => {
       const job = context.transcribeFile(wavePath, {
         language: language || undefined,
         prompt: prompt || undefined,
-        // 贪心解码：转录不需要采样随机性，也减少同音词在重复解码间的漂移。
-        temperature: 0
+        // 未设置的参数沿用托管运行时默认值。原生绑定固定贪心策略，不暴露无效束宽。
+        temperature: transcriptionDecodingOptions(profile).temperature,
+        temperatureInc: transcriptionDecodingOptions(profile).temperatureStep
       });
       abort = () => { void job.stop(); };
       signal?.addEventListener("abort", abort, { once: true });

@@ -50,20 +50,24 @@ contextBridge.exposeInMainWorld("meetingAPI", {
   chat: {
     // 流式问答：传入 onDelta 时生成 streamId 并订阅 chat:delta 增量（按 id 过滤），
     // invoke 结束（成功/失败）后注销监听；不传 onDelta 则保持一次性返回。
-    send: (question, history, context, onDelta, profileId) => {
+    // streamId 也可由渲染层预先给出：这样「停止回答」能按同一个 id 中止主进程请求。
+    send: (question, history, context, onDelta, profileId, streamId) => {
       if (typeof onDelta !== "function") {
-        return invoke("chat:send", { question, history, context, profileId });
+        return invoke("chat:send", { question, history, context, profileId, streamId });
       }
-      const streamId = (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
-        ? globalThis.crypto.randomUUID()
-        : `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const id = typeof streamId === "string" && streamId
+        ? streamId
+        : (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+          ? globalThis.crypto.randomUUID()
+          : `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const listener = (_event, payload) => {
-        if (payload?.id === streamId) onDelta({ content: payload.content, reasoning: payload.reasoning });
+        if (payload?.id === id) onDelta({ content: payload.content, reasoning: payload.reasoning });
       };
       ipcRenderer.on("chat:delta", listener);
-      return invoke("chat:send", { streamId, question, history, context, profileId })
+      return invoke("chat:send", { streamId: id, question, history, context, profileId })
         .finally(() => ipcRenderer.removeListener("chat:delta", listener));
-    }
+    },
+    cancel: (streamId) => invoke("chat:cancel", streamId)
   },
   models: {
     list: () => invoke("models:list"),
@@ -115,7 +119,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     }
   },
   exports: {
-    save: (meeting, format) => invoke("exports:save", meeting, format)
+    save: (meeting, format, options) => invoke("exports:save", meeting, format, options)
   },
   preferences: {
     get: () => invoke("preferences:get"),

@@ -7,6 +7,8 @@
  * 所属层：渲染层服务（音视频采集与转写调度）。
  * 主要导出：MeetingRecorder。
  */
+import { shouldShowTranscriptionPlaceholder } from "./audio-activity";
+import { resolveTranscriptionLanguage } from "../lib/transcription-presets";
 import { api } from "../lib/api";
 import { isMicrophonePermissionError, MICROPHONE_PERMISSION_REQUIRED, shouldRequestMicrophone } from "../lib/permissions";
 import type { AudioTrackKind, Meeting, ModelProfile, TranscriptSegment, TranscriptionChunkResult } from "../types";
@@ -213,7 +215,8 @@ export class MeetingRecorder {
 
   /** 本次请求要下发的语言：显式配置优先；auto 在首块锁定后改用已判定语种。 */
   private effectiveLanguage() {
-    if (this.configuredLanguage !== "auto") return this.configuredLanguage;
+    const configured = resolveTranscriptionLanguage(undefined, this.sttProfile?.options, this.configuredLanguage);
+    if (configured !== "auto") return configured;
     return this.detectedLanguage || "auto";
   }
 
@@ -437,8 +440,13 @@ export class MeetingRecorder {
         status: "provisional",
         track
       };
-      this.callbacks.onProvisional(provisional);
       const data = await blob.arrayBuffer();
+      const showPlaceholder = await shouldShowTranscriptionPlaceholder(data, (copy) => {
+        if (!this.audioContext || this.audioContext.state === "closed") this.audioContext = new AudioContext();
+        return this.audioContext.decodeAudioData(copy);
+      });
+      if (this.stopTranscription) break;
+      if (showPlaceholder) this.callbacks.onProvisional(provisional);
       const fileName = `${track}-${startMs}.${blob.type.includes("mp4") ? "m4a" : "webm"}`;
       const previousText = this.transcriptTails.get(track) ?? "";
       const payload = {
@@ -516,7 +524,7 @@ export class MeetingRecorder {
           });
         } else {
           // auto 模式首块带回引擎判定的语种后即锁定，后续块不再逐块重新检测。
-          if (this.configuredLanguage === "auto" && !this.detectedLanguage && result.language) {
+          if (resolveTranscriptionLanguage(undefined, this.sttProfile?.options, this.configuredLanguage) === "auto" && !this.detectedLanguage && result.language) {
             this.detectedLanguage = result.language;
           }
           // 服务恢复：仅在同一条录音内从失败转成功时通知一次，UI 收起提示。
@@ -546,6 +554,7 @@ export class MeetingRecorder {
    * 已有补转积压时立即唤醒排空循环（profileId 在发送时重新解析，新档案即刻生效）。
    */
   updateSttProfile(profile: ModelProfile | undefined) {
+    if (this.sttProfile?.id !== profile?.id || this.sttProfile?.options?.transcriptionLanguage !== profile?.options?.transcriptionLanguage) this.detectedLanguage = "";
     this.sttProfile = profile;
     if (profile && this.transcriptionStates.size === 0) {
       for (const binding of this.bindings) {
@@ -644,7 +653,7 @@ export class MeetingRecorder {
         glossary: this.glossary,
         previousText: entry.previousText ?? ""
       });
-      if (this.configuredLanguage === "auto" && !this.detectedLanguage && result.language) {
+      if (resolveTranscriptionLanguage(undefined, this.sttProfile?.options, this.configuredLanguage) === "auto" && !this.detectedLanguage && result.language) {
         this.detectedLanguage = result.language;
       }
       if (this.transcriptionFailureStreak > 0) {
@@ -724,7 +733,7 @@ export class MeetingRecorder {
 
   /** 启动 rAF 电平表：每条轨接一个 AnalyserNode，按 RMS 计算输入电平（×4.5 增益后截断到 1）。 */
   private startLevelMeter() {
-    this.audioContext = new AudioContext();
+    if (!this.audioContext || this.audioContext.state === "closed") this.audioContext = new AudioContext();
     const analysers = new Map<CaptureTrack, AnalyserNode>();
     for (const binding of this.bindings) {
       const analyser = this.audioContext.createAnalyser();

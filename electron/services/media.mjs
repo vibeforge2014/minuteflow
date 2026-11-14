@@ -29,3 +29,7 @@ export function audioContentType(filePath) {
     webm: "audio/webm"
   })[extension] || "application/octet-stream";
 }
+/** 导入资产用 UUID；现场录音资产用 session UUID + 固定轨道名。 */
+export function isMediaAssetId(id) {
+  return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?::(?:microphone|system))?$/i.test(id);
+}

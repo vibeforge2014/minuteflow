@@ -30,7 +30,7 @@ import { RecordingDock } from "./components/RecordingDock";
 import { NewMeetingDialog } from "./components/NewMeetingDialog";
 import { quickMeetingTitle } from "./lib/format";
 import { SettingsDialog, type SettingsFocus, type SettingsTab } from "./components/SettingsDialog";
-import { ExportMenu } from "./components/ExportMenu";
+import { ExportDialog } from "./components/ExportDialog";
 import { Toast } from "./components/Toast";
 import { EmptyState } from "./components/EmptyState";
 import { ConfirmDialog, useConfirmDialog } from "./components/ConfirmDialog";
@@ -47,7 +47,7 @@ import { api } from "./lib/api";
 import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Meeting } from "./types";
 import { BrandMark } from "./components/BrandMark";
 import { buildRecordingReadiness, deriveWorkspaceStage, isLocalTranscriptionTransport, shouldAutoOpenRightPanel, type WorkspaceStage } from "./lib/workspace";
-import { describeImportProcessing, mergeImportJob, mergeImportJobs, selectMeetingImportJob } from "./lib/import-status";
+import { describeImportProcessing, isActiveImportJob, mergeImportJob, mergeImportJobs, selectMeetingImportJob } from "./lib/import-status";
 import type { SystemPermissionStatus } from "./types";
 import { finishPermissionSetup, shouldOpenPermissionSetup } from "./lib/permissions";
 
@@ -108,6 +108,7 @@ export function App() {
   /** 从导入抽屉去配置模型：关闭设置后回到原流程，而不是让用户重新找入口。 */
   const settingsReturnRef = useRef<"import" | null>(null);
   const [playbackMs, setPlaybackMs] = useState(0);
+  const [playbackPlaying, setPlaybackPlaying] = useState(false);
   const [seekToMs, setSeekToMs] = useState<number | null>(null);
   const [playerAvailable, setPlayerAvailable] = useState(false);
   const [playerOpen, setPlayerOpen] = useState(false);
@@ -127,6 +128,20 @@ export function App() {
   const notify = useCallback((message: string, action?: { label: string; run: () => void }) => {
     setToast(action ? { message, action } : { message });
   }, []);
+
+  /**
+   * 统一的时间戳跳转：转写段落与 AI 回答里的 [mm:ss] 回链共用同一入口。
+   * 没有可用音频（未录制/文件缺失）时不打开播放器，避免出现必然报错的空播放器。
+   */
+  const seekTo = useCallback((ms: number) => {
+    if (!playerAvailable) {
+      notify("这场会议没有可回放的音频文件；时间戳仍可作为内容定位使用。");
+      return;
+    }
+    setPlayerOpen(true);
+    setSeekToMs(null);
+    requestAnimationFrame(() => setSeekToMs(ms));
+  }, [notify, playerAvailable]);
 
   /** 打开设置，可选直达某个标签页与具体配置表单。 */
   const openSettings = useCallback((tab?: SettingsTab, focus?: SettingsFocus) => {
@@ -272,6 +287,7 @@ export function App() {
   useEffect(() => {
     setPlayerOpen(false);
     setPlayerAvailable(false);
+    setPlaybackPlaying(false);
     setPlaybackMs(0);
     setSeekToMs(null);
   }, [meeting?.id]);
@@ -289,8 +305,8 @@ export function App() {
   // 无录音时给「立即重启并更新」直达动作；录音中改为「查看」——设置页的重启按钮
   // 此时本就禁用并附「结束后可重启」说明，绝不打断录音。
   useEffect(() => api.updates.onReady(({ version }) => {
-    if (recorder.phase !== "idle") {
-      notify(`新版本 ${version} 已下载，录音结束后可重启安装。`, {
+    if (recorder.phase !== "idle" || importJobs.some(isActiveImportJob)) {
+      notify(`新版本 ${version} 已下载，当前任务结束后可重启安装。`, {
         label: "查看",
         run: () => openSettings("updates")
       });
@@ -302,7 +318,7 @@ export function App() {
         void api.updates.restartToUpdate().catch(() => openSettings("updates"));
       }
     });
-  }), [notify, openSettings, recorder.phase]);
+  }), [notify, openSettings, recorder.phase, importJobs]);
   const workspaceStage = meeting
     ? meetingImportJob && selectedRecorderPhase === "idle"
       ? "review"
@@ -815,19 +831,10 @@ export function App() {
                   </button>
                 )}
                 <div className="export-wrap">
-                  {/* 菜单本身免费打开：Markdown / 纯文本可直接带走，高级格式才过授权守卫。 */}
-                  <button className={`button button--small ${workspaceStage === "live" ? "button--secondary" : "button--primary"}`} aria-expanded={exportOpen} onClick={openExportMenu}>
+                  {/* 打开导出对话框本身免费：具体格式在对话框里逐项过授权守卫。 */}
+                  <button className={`button button--small ${workspaceStage === "live" ? "button--secondary" : "button--primary"}`} aria-expanded={exportOpen} aria-haspopup="dialog" onClick={openExportMenu}>
                     <Export size={16} /> 导出
                   </button>
-                  {exportOpen && (
-                    <ExportMenu
-                      meeting={meeting}
-                      onClose={() => setExportOpen(false)}
-                      onDone={(message) => notify(message)}
-                      onError={(message) => notify(`导出失败：${message}`)}
-                      onPremiumRequired={(reason, resume) => requirePremium(reason, resume)}
-                    />
-                  )}
                 </div>
                 <div className="export-wrap">
                   <button
@@ -904,6 +911,7 @@ export function App() {
               }}
               onAvailabilityChange={setPlayerAvailable}
               onTimeChange={setPlaybackMs}
+              onPlayingChange={setPlaybackPlaying}
               onError={notify}
             />
 
@@ -920,16 +928,8 @@ export function App() {
               onSkipDiarization={(id) => void skipImportDiarizationJob(id)}
               onRetranscribe={importJobsLoaded ? () => void handleRetranscribe() : undefined}
               playbackMs={playbackMs}
-              onSeek={(ms) => {
-                // 没有可用音频（未录制/文件缺失）时不打开播放器，避免出现一个必然报错的空播放器。
-                if (!playerAvailable) {
-                  notify("这场会议没有可回放的音频文件；转录时间戳仍可作为内容定位使用。");
-                  return;
-                }
-                setPlayerOpen(true);
-                setSeekToMs(null);
-                requestAnimationFrame(() => setSeekToMs(ms));
-              }}
+              playbackPlaying={playbackPlaying}
+              onSeek={seekTo}
               emptyActionLabel={workspaceStage === "review" ? "继续录音" : undefined}
               onEmptyAction={workspaceStage === "review" ? continueRecording : undefined}
               onChange={handleMeetingChange}
@@ -953,6 +953,8 @@ export function App() {
               onRetryVisualSummary={() => {
                 if (requirePremium("生成视觉会议纪要", () => void recorder.generateVisualSummary())) void recorder.generateVisualSummary();
               }}
+              summaryTemplate={preferences.summaryTemplate ?? "general"}
+              onSummaryTemplateChange={(template) => void updatePreferences({ ...preferences, summaryTemplate: template })}
               summaryBusy={recorder.summaryBusy}
               liveDocument={liveDocument}
               onCloseLiveDocument={closeLiveDocument}
@@ -1041,6 +1043,7 @@ export function App() {
           closing={!liveWorkspace && panelPresence.closing}
           onClose={() => setRightPanelOpen(false)}
           onOpenSettings={() => openSettings("llm")}
+          onSeek={seekTo}
           liveSummary={liveWorkspace ? (
             <LiveSummary
               meeting={meeting}
@@ -1058,7 +1061,18 @@ export function App() {
         onClose={() => setNewMeetingOpen(false)}
         onCreate={handleCreate}
       />
-      <SettingsDialog open={settingsOpen} initialTab={settingsTab} initialFocus={settingsFocus} licenseStatus={licenseStatus} onLicenseStatusChange={setLicenseStatus} recordingActive={recorder.phase !== "idle"} onClose={() => {
+      {meeting && (
+        <ExportDialog
+          open={exportOpen}
+          meeting={meeting}
+          hasAudio={playerAvailable}
+          onClose={() => setExportOpen(false)}
+          onDone={(message) => notify(message)}
+          onError={(message) => notify(`导出失败：${message}`)}
+          onPremiumRequired={(reason, resume) => requirePremium(reason, resume)}
+        />
+      )}
+      <SettingsDialog open={settingsOpen} initialTab={settingsTab} initialFocus={settingsFocus} licenseStatus={licenseStatus} onLicenseStatusChange={setLicenseStatus} recordingActive={recorder.phase !== "idle"} importActive={importJobs.some(isActiveImportJob)} onClose={() => {
         setSettingsOpen(false);
         // 首次配置期间从设置返回时继续留在向导当前步骤，不提前写入完成标记。
         if (!preferences.onboardingCompleted) setOnboardingOpen(true);
@@ -1114,6 +1128,7 @@ export function App() {
         candidates={importCandidates}
         jobs={importJobs}
         profiles={profiles}
+        transcriptionLanguage={preferences.transcriptionLanguage}
         onClose={() => setImportOpen(false)}
         onPick={handleImport}
         onChange={setImportCandidates}

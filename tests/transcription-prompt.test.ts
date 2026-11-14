@@ -144,3 +144,16 @@ describe("transcriptionLanguageForEngine", () => {
     expect(transcriptionLanguageForEngine("yue")).toBe("yue");
   });
 });
+
+describe('per-model initial prompt',()=>{
+  it('keeps the Simplified Chinese hint and gives initial prompt priority over history/terms',()=>{
+    const prompt=buildTranscriptionPrompt({language:'zh',initialPrompt:'医疗会议术语'.repeat(20),previousText:'历史内容'.repeat(30),glossary:['术语表'],maxChars:50});
+    expect(prompt).toMatch(/^以下是简体中文的会议记录。 医疗会议术语/);
+    expect(prompt.length).toBeLessThanOrEqual(50);
+    expect(prompt).not.toContain('历史内容');expect(prompt).not.toContain('术语表');
+  });
+  it('caps initial prompt at 80 characters and preserves legacy behavior when absent',()=>{
+    expect(buildTranscriptionPrompt({language:'en',initialPrompt:'a'.repeat(100)})).toBe('a'.repeat(80));
+    expect(buildTranscriptionPrompt({language:'en',initialPrompt:'abc',previousText:'previous',glossary:['term']})).toBe('abc previous term');
+  });
+});

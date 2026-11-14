@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowClockwise,
+  ArrowUUpLeft,
   CaretDown,
   CaretUp,
   CheckCircle,
@@ -18,17 +19,18 @@ import {
   MagicWand,
   MagnifyingGlass,
   PencilSimple,
+  Swap,
   Trash,
   Users,
   WarningCircle,
   Waveform,
   X
 } from "@phosphor-icons/react";
-import type { ImportJob, Meeting, VoiceprintPerson } from "../types";
+import type { ImportJob, Meeting, TranscriptSegment, VoiceprintPerson } from "../types";
 import { api } from "../lib/api";
 import { ConfirmDialog, useConfirmDialog } from "./ConfirmDialog";
 import { findPlayingSegment } from "../lib/workspace";
-import { mergeSpeakerLabels } from "../lib/transcript";
+import { countOccurrences, mergeSpeakerLabels, replaceOccurrences } from "../lib/transcript";
 import { classifyTextChange } from "../lib/content-motion";
 import type { LiveTranscriptionFailure } from "../services/recording";
 import { useEnteringItemIds } from "../hooks/useContentMotion";
@@ -58,6 +60,7 @@ interface TranscriptViewProps {
   onChange(meeting: Meeting): void;
   /** 当前播放位置（毫秒），用于高亮同步段落。 */
   playbackMs?: number;
+  playbackPlaying?: boolean;
   /** 点击时间戳时请求播放器跳转。 */
   onSeek?(ms: number): void;
   /** 空逐字稿在会后提供唯一、明确的恢复动作。 */
@@ -83,7 +86,9 @@ interface TranscriptViewProps {
   onConfigureTranscription?(): void;
 }
 
-export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, onSeek, emptyActionLabel, onEmptyAction, jumpTarget, summaryBusy, onGenerateSummary, transcriptionFailure, transcriptionIsLocal = false, onUseLocalWhisper, onChooseTranscriptionService, onDismissTranscriptionFailure, onRetryImport, onCancelImport, onSkipDiarization, onRetranscribe, onConfigureTranscription }: TranscriptViewProps) {
+export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, playbackPlaying = false, onSeek, emptyActionLabel, onEmptyAction, jumpTarget, summaryBusy, onGenerateSummary, transcriptionFailure, transcriptionIsLocal = false, onUseLocalWhisper, onChooseTranscriptionService, onDismissTranscriptionFailure, onRetryImport, onCancelImport, onSkipDiarization, onRetranscribe, onConfigureTranscription }: TranscriptViewProps) {
+  /** 段落批量改写（查找替换 / 撤销）走 store：在最新转写上执行，不会被渲染快照覆盖。 */
+  const patchTranscript = useMeetingStore((state) => state.patchTranscript);
   /** 正在重命名的说话人 id（显示浮层输入框）。 */
   const [speakerEditor, setSpeakerEditor] = useState<string | null>(null);
   /** 改名时是否把这个人注册进本机声纹簿（默认勾选，可显式关闭）。 */
@@ -96,6 +101,17 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   /** 文内查找：⌘F / Ctrl+F 打开，带命中计数、上下跳转与按发言人筛选。 */
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
+  /**
+   * 校对替换：替换内容 + 上一次替换的撤销快照（只保留最近一次，避免误撤更早的修改）。
+   * 快照记录每段的「替换前 / 替换后」文本，撤销时只有仍等于「替换后」的段落才回滚。
+   */
+  const [replaceText, setReplaceText] = useState("");
+  const [replaceNotice, setReplaceNotice] = useState("");
+  const [undoState, setUndoState] = useState<{
+    /** 本次替换实际改写的处数，用于撤销提示。 */
+    occurrences: number;
+    entries: Array<{ id: string; before: string; after: string }>;
+  } | null>(null);
   const [speakerFilter, setSpeakerFilter] = useState("");
   const [activeMatch, setActiveMatch] = useState(0);
   const [searchFocusId, setSearchFocusId] = useState<string | null>(null);
@@ -107,6 +123,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     setQuery("");
     setSpeakerFilter("");
     setSearchFocusId(null);
+    setReplaceNotice("");
     window.setTimeout(() => searchTriggerRef.current?.focus(), 0);
   }, []);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -118,7 +135,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   const [voiceprints, setVoiceprints] = useState<VoiceprintPerson[]>([]);
   const [learningSpeakerId, setLearningSpeakerId] = useState<string | null>(null);
   const [voiceprintMessage, setVoiceprintMessage] = useState("");
-  const voiceprintConfirm = useConfirmDialog();
+  const confirmDialog = useConfirmDialog();
   /** 关键结论回链定位到的段落 id（短暂高亮后清除）。 */
   const [jumpHighlightId, setJumpHighlightId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -201,6 +218,105 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   const tailSegment = displayTranscript.at(-1);
   const tailSignature = tailSegment ? `${tailSegment.id}:${tailSegment.text.length}:${tailSegment.status}` : "";
 
+  /**
+   * 校对替换：命中预览与原地改写。
+   * 范围与查找一致（发言人与「可能不准」筛选之后的段落），计数按出现次数而非段落数，
+   * 让「全部替换」在点下之前就能看到会影响多少处。
+   * 改写本身交给 store 在最新转写上执行（见 onPatchTranscript）：录音持续追加段落时，
+   * 用渲染快照回写会把刚到的内容抹掉。
+   */
+  const replaceNeedle = query.trim();
+  const replacePreview = useMemo(() => {
+    if (!replaceNeedle) return { segments: 0, occurrences: 0 };
+    let segments = 0;
+    let occurrences = 0;
+    for (const segment of filteredTranscript) {
+      const hits = countOccurrences(fullTextById.get(segment.id) ?? segment.text, replaceNeedle);
+      if (hits > 0) {
+        segments += 1;
+        occurrences += hits;
+      }
+    }
+    return { segments, occurrences };
+  }, [filteredTranscript, fullTextById, replaceNeedle]);
+
+  /**
+   * 应用一次替换：改写函数交给 store 在最新转写上执行，并留下最近一次的撤销快照。
+   * scopeIds 限定改写范围（与查找的发言人/低置信筛选一致），mode 决定每段改一处还是全部。
+   * 返回实际改写的处数与快照；没有命中（例如段落刚被新转写覆盖）时返回 null。
+   */
+  const applyReplacement = (scopeIds: Set<string>, mode: "first" | "all") => {
+    const snapshot: Array<{ id: string; before: string; after: string }> = [];
+    const changed = patchTranscript(meeting.id, (segment) => {
+      if (!scopeIds.has(segment.id)) return null;
+      const result = replaceOccurrences(segment.text, replaceNeedle, replaceText, mode);
+      if (!result.count) return null;
+      snapshot.push({ id: segment.id, before: segment.text, after: result.text });
+      return result.text;
+    });
+    if (!changed || !snapshot.length) {
+      setReplaceNotice("没有可替换的命中：这段转写可能刚刚更新");
+      return null;
+    }
+    // 处数按「替换前文本」统计，single 模式每段只算一处。
+    const occurrences = mode === "first"
+      ? snapshot.length
+      : snapshot.reduce((sum, entry) => sum + countOccurrences(entry.before, replaceNeedle), 0);
+    const notice = `已替换 ${occurrences} 处，可撤销`;
+    setUndoState({ occurrences, entries: snapshot });
+    setReplaceNotice(notice);
+    return { occurrences, snapshot };
+  };
+
+  /** 替换当前定位到的这一处（命中段里只改第一处，其余留给下一次点击确认）。 */
+  const replaceCurrentMatch = () => {
+    if (!replaceNeedle || !searchMatches.length) return;
+    const targetId = searchMatches[Math.min(activeMatch, searchMatches.length - 1)];
+    const applied = applyReplacement(new Set([targetId]), "first");
+    if (!applied) return;
+    // 该段已无命中时把光标顺到下一段，连续校对不用再点「下一个」。
+    if (!countOccurrences(applied.snapshot[0].after, replaceNeedle)) jumpToMatch(activeMatch);
+  };
+
+  /** 全部替换：先给出命中段落数与处数的确认预览，替换后可一键撤销。 */
+  const replaceAllMatches = async () => {
+    if (!replaceNeedle || !replacePreview.occurrences) return;
+    const accepted = await confirmDialog.confirm({
+      title: `全部替换「${replaceNeedle}」？`,
+      body: `将在 ${replacePreview.segments} 个段落中替换 ${replacePreview.occurrences} 处为「${replaceText || "（空）"}」，替换后可以一次性撤销。`,
+      confirmLabel: `替换 ${replacePreview.occurrences} 处`
+    });
+    if (!accepted) return;
+    applyReplacement(new Set(filteredTranscript.map((segment) => segment.id)), "all");
+  };
+
+  /**
+   * 撤销最近一次替换：只回滚「当前仍是替换结果」的段落。
+   * 录音/转写可能已经在替换之后更新了这些段落，盲目套用旧快照会把新内容抹掉，
+   * 因此逐段比较后再交换，被跳过的段落会在提示里说明。
+   */
+  const undoReplacement = () => {
+    if (!undoState) return;
+    const entries = new Map(undoState.entries.map((entry) => [entry.id, entry]));
+    let skipped = 0;
+    const restored = patchTranscript(meeting.id, (segment) => {
+      const entry = entries.get(segment.id);
+      if (!entry) return null;
+      if (segment.text !== entry.after) {
+        skipped += 1;
+        return null;
+      }
+      return entry.before;
+    });
+    if (!restored) {
+      setReplaceNotice("这些段落已随转写更新，没有可回滚的内容");
+    } else {
+      const undone = skipped ? `${restored} 段` : `${undoState.occurrences} 处`;
+      setReplaceNotice(`已撤销上次替换（${undone}）${skipped ? `；${skipped} 段转写已更新，未回滚` : ""}`);
+    }
+    setUndoState(null);
+  };
+
   const refreshVoiceprints = useCallback(() => {
     api.voiceprints.list().then(setVoiceprints).catch(() => setVoiceprints([]));
   }, []);
@@ -215,6 +331,9 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     setVoiceprintMessage("");
     setSearchOpen(false);
     setQuery("");
+    setReplaceText("");
+    setReplaceNotice("");
+    setUndoState(null);
     setSpeakerFilter("");
     setActiveMatch(0);
     setSearchFocusId(null);
@@ -348,6 +467,11 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     jumpRef.current(0);
   }, [searchOpen, normalizedQuery, speakerFilter]);
 
+  // 替换后命中数会变少：把光标收回到有效范围，避免显示「5 / 3」这种越界计数。
+  useEffect(() => {
+    setActiveMatch((current) => (searchMatches.length ? Math.min(current, searchMatches.length - 1) : 0));
+  }, [searchMatches.length]);
+
   // ⌘F / Ctrl+F 打开文内查找；Esc 关闭、Enter / Shift+Enter 前后跳转。
   // 有弹层在前台时让位，不在被遮住的转写视图里抢焦点。
   useEffect(() => {
@@ -410,7 +534,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
 
   /** 删除本地声纹不会改动历史逐字稿，只影响后续自动识别。 */
   const forgetVoiceprint = async (name: string) => {
-    if (!(await voiceprintConfirm.confirm({
+    if (!(await confirmDialog.confirm({
       title: `忘记“${name}”的声纹？`,
       body: "只删除本机保存的声纹样本，历史会议中的姓名不会改变。",
       confirmLabel: "忘记声纹"
@@ -437,12 +561,18 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     setMergeTarget("");
   };
 
-  const updateSegmentText = (segmentId: string, text: string) => onChange({
-    ...meeting,
-    transcript: meeting.transcript.map((item) =>
-      item.id === segmentId ? { ...item, text } : item),
-    summary: { ...meeting.summary, stale: true }
-  });
+  const updateSegmentText = (segmentId: string, text: string) => {
+    // 手动改写后旧的替换快照不再可信：撤销只保证能回到「上一次替换前」，
+    // 中间夹了人工编辑时会连编辑一起回退，所以直接作废。
+    setUndoState(null);
+    setReplaceNotice("");
+    onChange({
+      ...meeting,
+      transcript: meeting.transcript.map((item) =>
+        item.id === segmentId ? { ...item, text } : item),
+      summary: { ...meeting.summary, stale: true }
+    });
+  };
 
   const speakerButton = (speakers.length > 0 || voiceprints.length > 0) && (
     <button className="text-button transcript-speakers" aria-expanded={managerOpen} aria-controls={managerOpen ? "transcript-speaker-manager" : undefined} onClick={() => setManagerOpen((value) => !value)}>
@@ -517,50 +647,95 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
       </header>
       {searchOpen && (
         <div className="transcript-search" id="transcript-search-bar" role="search">
-          <MagnifyingGlass size={15} />
-          <input
-            ref={searchInputRef}
-            type="search"
-            value={query}
-            aria-label="在逐字稿中查找"
-            placeholder="在逐字稿中查找…"
-            onChange={(event) => { setQuery(event.target.value); setActiveMatch(0); }}
-          />
-          <select
-            value={speakerFilter}
-            aria-label="按发言人筛选"
-            onChange={(event) => { setSpeakerFilter(event.target.value); setActiveMatch(0); }}
-          >
-            <option value="">全部发言人</option>
-            {speakers.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
-          </select>
-          <span className="transcript-search__count" role="status">
-            {normalizedQuery
-              ? searchMatches.length ? `${activeMatch + 1} / ${searchMatches.length}` : "无匹配"
-              : `${filteredTranscript.length} 段`}
-          </span>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="上一个匹配"
-            title="上一个匹配（Shift + 回车）"
-            disabled={!searchMatches.length}
-            onClick={() => jumpToMatch(activeMatch - 1)}
-          ><CaretUp size={15} weight="bold" /></button>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="下一个匹配"
-            title="下一个匹配（回车）"
-            disabled={!searchMatches.length}
-            onClick={() => jumpToMatch(activeMatch + 1)}
-          ><CaretDown size={15} weight="bold" /></button>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="关闭查找"
-            onClick={closeSearch}
-          ><X size={15} /></button>
+          <div className="transcript-search__row">
+            <MagnifyingGlass size={15} />
+            <input
+              ref={searchInputRef}
+              type="search"
+              value={query}
+              aria-label="在逐字稿中查找"
+              placeholder="在逐字稿中查找…"
+              onChange={(event) => { setQuery(event.target.value); setActiveMatch(0); setReplaceNotice(""); }}
+            />
+            <select
+              value={speakerFilter}
+              aria-label="按发言人筛选"
+              onChange={(event) => { setSpeakerFilter(event.target.value); setActiveMatch(0); }}
+            >
+              <option value="">全部发言人</option>
+              {speakers.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+            </select>
+            <span className="transcript-search__count" role="status">
+              {normalizedQuery
+                ? searchMatches.length ? `${activeMatch + 1} / ${searchMatches.length}` : "无匹配"
+                : `${filteredTranscript.length} 段`}
+            </span>
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="上一个匹配"
+              title="上一个匹配（Shift + 回车）"
+              disabled={!searchMatches.length}
+              onClick={() => jumpToMatch(activeMatch - 1)}
+            ><CaretUp size={15} weight="bold" /></button>
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="下一个匹配"
+              title="下一个匹配（回车）"
+              disabled={!searchMatches.length}
+              onClick={() => jumpToMatch(activeMatch + 1)}
+            ><CaretDown size={15} weight="bold" /></button>
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="关闭查找"
+              onClick={closeSearch}
+            ><X size={15} /></button>
+          </div>
+          <div className="transcript-search__row transcript-search__replace">
+            <Swap size={15} aria-hidden="true" />
+            <input
+              type="text"
+              value={replaceText}
+              aria-label="替换为"
+              placeholder="替换为…"
+              onChange={(event) => { setReplaceText(event.target.value); setReplaceNotice(""); }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                if (event.metaKey || event.ctrlKey) void replaceAllMatches();
+                else replaceCurrentMatch();
+              }}
+            />
+            <button
+              type="button"
+              className="text-button transcript-replace__action"
+              disabled={!searchMatches.length}
+              title="替换当前定位到的一处"
+              onClick={replaceCurrentMatch}
+            >替换</button>
+            <button
+              type="button"
+              className="text-button transcript-replace__action"
+              disabled={!replacePreview.occurrences}
+              title={replacePreview.occurrences
+                ? `在 ${replacePreview.segments} 个段落中替换 ${replacePreview.occurrences} 处（⌘/Ctrl + 回车）`
+                : "当前没有可替换的命中"}
+              onClick={() => void replaceAllMatches()}
+            >
+              全部替换{replacePreview.occurrences ? `（${replacePreview.occurrences}）` : ""}
+            </button>
+            {undoState && (
+              <button
+                type="button"
+                className="text-button transcript-replace__undo"
+                title={`撤销上次替换（${undoState.occurrences} 处）`}
+                onClick={undoReplacement}
+              ><ArrowUUpLeft size={14} />撤销</button>
+            )}
+            <span className="transcript-search__notice" role="status">{replaceNotice}</span>
+          </div>
         </div>
       )}
       {managerOpen && (
@@ -769,7 +944,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
                 )}
               </button>
               <button className="transcript-time" aria-label={`定位到 ${formatTranscriptTime(segment.startMs)}`} onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
-              {playingSegment?.id === segment.id && (
+              {playbackPlaying && playingSegment?.id === segment.id && (
                 <span className="transcript-playing" aria-label="正在播放当前段落">
                   <span className="transcript-playing__bars" aria-hidden="true"><i /><i /><i /></span>
                   正在播放
@@ -951,7 +1126,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           </label>
         </div>
       )}
-      <ConfirmDialog open={voiceprintConfirm.open} request={voiceprintConfirm.request} onSettle={voiceprintConfirm.settle} />
+      <ConfirmDialog open={confirmDialog.open} request={confirmDialog.request} onSettle={confirmDialog.settle} />
     </>
   );
 }

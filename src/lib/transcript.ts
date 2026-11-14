@@ -138,6 +138,54 @@ export function mergeTranscriptSegments(
   return groupTranscriptSegments([...withoutSupersededProvisional, incoming]);
 }
 
+/**
+ * 统计 needle 在 text 中的出现次数（不区分大小写）。
+ * 与面板查找同一口径（查找统一按小写包含判断），供「全部替换」的命中预览使用。
+ */
+export function countOccurrences(text: string, needle: string): number {
+  if (!text || !needle) return 0;
+  const haystack = text.toLowerCase();
+  const target = needle.toLowerCase();
+  let count = 0;
+  let from = 0;
+  for (;;) {
+    const index = haystack.indexOf(target, from);
+    if (index < 0) break;
+    count += 1;
+    from = index + target.length;
+  }
+  return count;
+}
+
+/**
+ * 把 text 中的 needle 替换为 replacement（字面量，不走正则，避免用户输入的
+ * `$&`、`\\1` 之类被当成替换模式）。不区分大小写地定位，替换内容原样写入。
+ * mode="first" 只替换第一处；count 返回实际替换次数。
+ */
+export function replaceOccurrences(
+  text: string,
+  needle: string,
+  replacement: string,
+  mode: "first" | "all" = "all"
+): { text: string; count: number } {
+  if (!text || !needle) return { text, count: 0 };
+  const haystack = text.toLowerCase();
+  const target = needle.toLowerCase();
+  let result = "";
+  let from = 0;
+  let count = 0;
+  for (;;) {
+    const index = haystack.indexOf(target, from);
+    if (index < 0) break;
+    result += text.slice(from, index) + replacement;
+    from = index + target.length;
+    count += 1;
+    if (mode === "first") break;
+  }
+  result += text.slice(from);
+  return { text: result, count };
+}
+
 /** 说话人合并：把 sourceId 的全部段落改指到 targetId/targetName（用户在转录面板上手动归并说话人时调用）。 */
 export function mergeSpeakerLabels(
   segments: TranscriptSegment[],

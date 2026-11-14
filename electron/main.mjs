@@ -1,3 +1,5 @@
+import { resolveTranscriptionLanguage } from "../shared/transcription-options.mjs";
+import { SUMMARY_TEMPLATE_IDS } from "../shared/summary-templates.mjs";
 /**
  * Electron 主进程入口（装配层）。
  * 负责创建主窗口、配置系统权限与受信任页面白名单、注册全部 prefixed IPC 通道
@@ -88,7 +90,7 @@ import {
 } from "./services/providers.mjs";
 import { decodeWithSherpaAsr, mapSenseVoiceLanguage, shutdownLocalAsr } from "./services/asr-runtime.mjs";
 import { simplifyTranscriptResult } from "./services/chinese.mjs";
-import { audioContentType, parseByteRange } from "./services/media.mjs";
+import { audioContentType, isMediaAssetId, parseByteRange } from "./services/media.mjs";
 import { installCrashGuard } from "./services/crash-guard.mjs";
 import { recoverInterruptedRecordings } from "./services/recording-recovery.mjs";
 import { enhanceTranscriptionAudio, normalizeRemoteTranscriptionAudio } from "./services/transcription-audio.mjs";
@@ -172,6 +174,9 @@ let activeUpdateDownload = null;
 const recordingFiles = new Map();
 // 进行中的总结请求（AbortController），键为 meetingId；summary:cancel 据此中止对应请求。
 const activeSummaryRequests = new Map();
+// 进行中的问答请求（AbortController），键为 streamId；chat:cancel 据此停止该次回答，
+// 已生成的增量保留在渲染层，取消不是失败。
+const activeChatRequests = new Map();
 // 偏好设置写入串行队列：并发触发 preferences:save 时按提交顺序落盘，避免相互覆盖。
 let preferenceWriteQueue = Promise.resolve();
 // File paths the renderer obtained from a native dialog within this session.
@@ -223,10 +228,30 @@ function assertUuid(value, label) {
     throw new Error(`${label}格式无效。`);
   }
 }
+/**
+ * 导出用的音频清单：优先已归档的音频资产（带轨道名），回退到块记录
+ * （录音中断只留下 .partial 时仍可导出）。按路径去重——双轨会议必须两条都给，
+ * 只取第一条会把「系统声音」整条丢掉。
+ * @param {string} meetingId 会议 id
+ * @returns {Array<{path: string, label: string}>}
+ */
+function meetingExportAudioFiles(meetingId) {
+  const trackLabel = { microphone: "麦克风", system: "系统声音", mixed: "混音" };
+  const assets = listMeetingAudioAssets(meetingId)
+    .map((asset) => ({ path: asset.path, label: trackLabel[asset.track] ?? "" }))
+    .filter((file) => Boolean(file.path));
+  const source = assets.length
+    ? assets
+    : listMeetingAudioPaths(meetingId).map((filePath) => ({ path: filePath, label: "" }));
+  return source.filter((file, index) => source.findIndex((item) => item.path === file.path) === index);
+}
+
 /** 偏好设置默认值；字段集合需与 persistPreferences 的校验白名单保持一致。 */
 const defaultPreferences = {
   summaryIntervalSeconds: 60,
   summaryCadenceVersion: 1,
+  // 纪要模板：渲染层选项与主进程白名单共用 shared/summary-templates.mjs 的 id 集合。
+  summaryTemplate: "general",
   defaultMode: "online",
   glossary: [],
   audioEnhancement: true,
@@ -368,6 +393,11 @@ async function persistPreferences(preferences) {
   const validated = {
     summaryIntervalSeconds: Math.max(30, Number(preferences.summaryIntervalSeconds) || 60),
     summaryCadenceVersion: 1,
+    // 纪要模板必须原样落盘：漏掉这一项时 preferences:save 的回执会把渲染层的选择
+    // 覆盖回默认值，用户看到的就是「选了又跳回去」。
+    summaryTemplate: SUMMARY_TEMPLATE_IDS.includes(preferences.summaryTemplate)
+      ? preferences.summaryTemplate
+      : "general",
     defaultMode: preferences.defaultMode === "offline" ? "offline" : "online",
     glossary: Array.isArray(preferences.glossary)
       ? preferences.glossary.map((item) => String(item).trim()).filter(Boolean).slice(0, 500)
@@ -1182,7 +1212,7 @@ function registerIpc() {
       : profile;
     // auto 不能原样下发：whisper.cpp 认 -l auto，Python Whisper 与远程网关会把它当
     // 非法语言代码。统一转空串让引擎自行检测，再把首块结果回传给渲染层锁定。
-    const engineLanguage = transcriptionLanguageForEngine(payload.language);
+    const engineLanguage = transcriptionLanguageForEngine(resolveTranscriptionLanguage(payload.language, profile.options, (await loadPreferences()).transcriptionLanguage));
     // 在入口统一归一化成 16k 单声道 WAV：远程网关需要可读的时长元数据、
     // Apple Speech 不读 WebM、sherpa 只吃 WAV。更重要的是，只有这样所有引擎才能
     // 共用同一份 PCM 做静音门限，也才能让音质增强覆盖 Whisper / 在线服务。
@@ -1297,7 +1327,7 @@ function registerIpc() {
           Math.min(chunkDurationMs, Number(segment.endMs) || chunkDurationMs)
         );
         return splitTimedTranscriptText(segment.text, relativeStartMs, relativeEndMs).map((fragment) => ({
-          id: `live:${payload.track}:${payload.startMs}:${fragmentIndex++}`,
+          id: `${payload.meetingId || randomUUID()}:live:${payload.track}:${payload.startMs}:${fragmentIndex++}`,
           startMs: payload.startMs + fragment.startMs,
           endMs: Math.min(payload.endMs, payload.startMs + fragment.endMs),
           speakerId,
@@ -1329,7 +1359,9 @@ function registerIpc() {
       goals: Array.isArray(input.goals) ? input.goals.map((item) => String(item)) : [],
       notes: Array.isArray(input.notes) ? input.notes.map((item) => String(item)) : [],
       transcript: input.transcript.filter((segment) => segment && typeof segment.text === "string"),
-      previousSummary: input.previousSummary ?? {}
+      previousSummary: input.previousSummary ?? {},
+      // 模板只接受白名单 id：旧数据/手工载荷里的未知值回落为通用会议，而不是让提示词带进自由文本。
+      template: SUMMARY_TEMPLATE_IDS.includes(input.template) ? input.template : undefined
     };
     const sourceThroughMs = sanitized.transcript.reduce(
       (maximum, segment) => Math.max(maximum, Number(segment.endMs) || 0),
@@ -1446,7 +1478,26 @@ function registerIpc() {
           try { event.sender.send("chat:delta", { id: streamId, ...delta }); } catch (error) { sendErrors += 1; if (sendErrors === 1) console.log(`[chat] send error: ${error?.message ?? error}`); }
         }
       : null;
-    const result = await chatWithMeetingContext(profile, readSecret(profile.secretId), { question, history, context }, pushDelta);
+    const result = await (async () => {
+      // 支持「停止」：按 streamId 登记 AbortController，chat:cancel 中止同一次请求。
+      const controller = streamId ? new AbortController() : null;
+      if (streamId && controller) {
+        // 同一 id 重复发送（例如重试复用）时先中止旧请求，避免两条流写进同一个气泡。
+        activeChatRequests.get(streamId)?.abort();
+        activeChatRequests.set(streamId, controller);
+      }
+      try {
+        return await chatWithMeetingContext(
+          profile,
+          readSecret(profile.secretId),
+          { question, history, context },
+          pushDelta,
+          controller?.signal
+        );
+      } finally {
+        if (streamId && controller && activeChatRequests.get(streamId) === controller) activeChatRequests.delete(streamId);
+      }
+    })();
     // 诊断日志（stdout）：streamId 缺失=preload 没带回调；deltas=1 且 chars 巨大=网关忽略 stream 整包返回；
     // firstDelta 很晚=网关缓冲 SSE。渲染层是否收到取决于 chat:delta 推送是否抛错。
     console.log(`[chat] ${profile.name} id=${streamId ?? "-"} deltas=${deltaCount} chars=${deltaChars} sendErrors=${sendErrors} firstDelta=+${firstDeltaMs}ms answer=${result.content.length}字 总耗时=${Date.now() - startedAt}ms`);
@@ -1457,6 +1508,14 @@ function registerIpc() {
       reasoning: result.reasoning ? result.reasoning.slice(0, 20_000) : undefined,
       profileName: profile.name
     };
+  });
+
+  // chat:cancel — 停止一次进行中的回答（无付费墙）：中止该 streamId 的请求，
+  // 渲染层把「已停止」作为正常结束呈现，不当作错误。
+  trustedHandle("chat:cancel", (_event, streamId) => {
+    const controller = typeof streamId === "string" ? activeChatRequests.get(streamId) : undefined;
+    controller?.abort();
+    return { cancelled: Boolean(controller) };
   });
 
   // summary:generate-visual — 仅用已保存的普通纪要重试视觉版，不读取或上传完整转录。
@@ -1676,7 +1735,7 @@ function registerIpc() {
     const preferences = await loadPreferences();
     return enqueueImports(items, {
       ...options,
-      language: options?.language || preferences.transcriptionLanguage || "auto"
+      language: resolveTranscriptionLanguage(options?.language, resolveProfile(listModelProfiles(), "stt", options?.sttProfileId)?.options, preferences.transcriptionLanguage)
     });
   });
   // imports:list — 列出导入任务及状态，导入中心/队列面板调用。
@@ -1693,14 +1752,19 @@ function registerIpc() {
     assertUuid(meetingId, "会议 ID");
     // 重新转写也要沿用当前语言偏好，否则换个入口就又变成逐块重新猜语种。
     const preferences = await loadPreferences();
-    return enqueueRetranscription(meetingId, { language: preferences.transcriptionLanguage || "auto" });
+    return enqueueRetranscription(meetingId, { defaultLanguage: preferences.transcriptionLanguage || "zh" });
   });
   // imports:remove — 从队列移除终态/等待态任务记录（付费功能）；进行中任务需先取消。
   trustedHandle("imports:remove", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return removeImportJob(id); });
-  // exports:save — 导出会议为 md/txt/json/srt/vtt/docx/pdf/zip（付费功能），导出菜单调用。
-  trustedHandle("exports:save", async (_event, meeting, format) => {
+  // exports:save — 导出会议为 md/txt/json/srt/vtt/docx/pdf/zip/audio（付费功能），导出对话框调用。
+  // options 收敛到白名单：scope 三选一、两个布尔，避免渲染层把任意对象带进排版层。
+  trustedHandle("exports:save", async (_event, meeting, format, options) => {
     await requireLicense();
-    return exportMeeting(meeting, format, mainWindow, listMeetingAudioPaths(meeting.id));
+    return exportMeeting(meeting, format, mainWindow, meetingExportAudioFiles(meeting.id), {
+      scope: ["all", "summary", "transcript"].includes(options?.scope) ? options.scope : "all",
+      includeTimestamps: options?.includeTimestamps !== false,
+      includeSpeakers: options?.includeSpeakers !== false
+    });
   });
   // preferences:get — 读取偏好设置，设置页加载时调用。
   trustedHandle("preferences:get", () => loadPreferences());
@@ -1813,6 +1877,10 @@ function registerIpc() {
   // 主进程从不自发重启，退出时由 autoInstallOnAppQuit 兜底安装。
   trustedHandle("updates:restart-to-update", async () => {
     if (process.platform !== "darwin") throw new Error("当前平台通过安装包完成升级。");
+    if (recordingFiles.size) throw new Error("录音进行中，请结束录音后再重启更新。");
+    if (listImportJobs().some((job) => ["queued", "copying", "preparing", "transcribing", "diarizing", "summarizing"].includes(job.status))) {
+      throw new Error("音频导入处理中，请等待完成或停止任务后再重启更新。");
+    }
     await installMacUpdate();
     return { installing: true };
   });
@@ -1982,7 +2050,7 @@ app.whenReady().then(async () => {
   // 直接把 Range 转给 file:// 在部分 Electron 版本会得到不可播放的空响应。
   protocol.handle("minuteflow-media", async (request) => {
     const id = new URL(request.url).pathname.split("/").filter(Boolean).pop();
-    if (!id || !UUID_PATTERN.test(id)) return new Response("Not found", { status: 404 });
+    if (!isMediaAssetId(id)) return new Response("Not found", { status: 404 });
     const asset = loadAudioAsset(id);
     if (!asset) return new Response("Not found", { status: 404 });
     const filePath = asset.playbackPath || asset.path;

@@ -409,7 +409,9 @@ const browserApi: MeetingAPI = {
         ? (JSON.parse(localStorage.getItem(profileKey) || "[]") as ModelProfile[]).find((item) => item.id === profileId)?.name
         : undefined;
       return { answer, reasoning, profileName: profileName ?? "浏览器预览" };
-    }
+    },
+    // 浏览器预览没有真实流可中止：返回 false，界面按「已停止」收尾即可。
+    async cancel() { return { cancelled: false }; }
   },
   models: {
     // 档案读写同样落在 localStorage；test 仅模拟 500ms 后返回成功。
@@ -676,10 +678,26 @@ const browserApi: MeetingAPI = {
   },
   exports: {
     // 无系统保存框，用 Blob + <a download> 触发浏览器下载。
-    async save(meeting, format) {
+    // 浏览器预览只支持文本类导出：范围/时间戳/发言人按桌面端同一套语义裁剪。
+    async save(meeting, format, options) {
+      const scope = options?.scope ?? "all";
+      const includeTimestamps = options?.includeTimestamps !== false;
+      const includeSpeakers = options?.includeSpeakers !== false;
+      const lines = [`# ${meeting.title}`, ""];
+      if (scope !== "transcript") {
+        lines.push(...meeting.summary.keyPoints.map((item) => `- ${item}`));
+      }
+      if (scope !== "summary") {
+        lines.push("", "## 完整转录");
+        lines.push(...meeting.transcript.map((segment) => {
+          const time = includeTimestamps ? `[${segment.startMs}] ` : "";
+          const speaker = includeSpeakers ? `${segment.speakerName}：` : "";
+          return `- ${time}${speaker}${segment.text}`;
+        }));
+      }
       const content = format === "json"
         ? JSON.stringify(meeting, null, 2)
-        : `# ${meeting.title}\n\n${meeting.summary.keyPoints.map((item) => `- ${item}`).join("\n")}`;
+        : lines.join("\n");
       const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");

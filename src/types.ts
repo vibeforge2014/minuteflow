@@ -107,6 +107,12 @@ export interface VisualSummary {
 }
 
 /**
+ * 纪要模板 id：只改归纳视角（提示词关注点），不改变纪要结构。
+ * 定义在 shared/summary-templates.mjs，渲染层与主进程共用。
+ */
+export type SummaryTemplateId = "general" | "weekly" | "interview" | "retro";
+
+/**
  * AI 会议纪要：结构化的会议产出，分为主题、要点、决定、行动项、待澄清问题、风险与下一步。
  * stale 表示转写有更新而纪要尚未重新生成；manualLocks 记录用户手动锁定、AI 不得覆盖的字段键。
  */
@@ -129,6 +135,8 @@ export interface MeetingSummary {
   risks: string[];
   /** 下一步计划。 */
   nextSteps: string[];
+  /** 本次纪要采用的模板（缺省视为通用会议），用于在界面上说明归纳视角。 */
+  template?: SummaryTemplateId;
   /** 纪要最近一次生成/更新的时间。 */
   updatedAt?: string;
   /** 当前纪要由在线模型或本机基础归纳生成。 */
@@ -197,6 +205,14 @@ export interface ModelProfile {
   secretId?: string;
   options: {
     /** 请求超时（毫秒）。 */
+    transcriptionLanguage?: "auto" | "zh" | "en" | "ja" | "ko" | "yue";
+    initialPrompt?: string;
+    temperature?: number;
+    temperatureStep?: number;
+    beamSize?: number;
+    noSpeechThreshold?: number;
+    logprobThreshold?: number;
+    entropyThreshold?: number;
     timeoutMs?: number;
     /** 本地 whisper.cpp 可执行文件路径（仅高级排查场景使用，正常流程不出现）。 */
     executablePath?: string;
@@ -351,6 +367,8 @@ export interface CreateMeetingInput {
 export interface MeetingPreferences {
   /** 滚动 AI 纪要的生成间隔（秒）。 */
   summaryIntervalSeconds: number;
+  /** 上一次选择的纪要模板；下次生成沿用，缺省为通用会议。 */
+  summaryTemplate?: SummaryTemplateId;
   /** 智能滚动纪要节奏版本；升级时把旧默认值迁移为约 1 分钟。 */
   summaryCadenceVersion?: number;
   /** 新建会议的默认形式（online/offline）。 */
@@ -684,6 +702,15 @@ export interface VoiceprintPerson {
  * models 模型档案与本地模型管理、notes 笔记导入、imports 音频导入队列、exports 导出、
  * preferences 偏好读写、licensing 授权、updates 应用更新、system 平台与权限事件、window 迷你窗控制。
  */
+export interface ExportOptions {
+  /** 交付物范围：all=纪要+转写，summary=只导出纪要，transcript=只导出逐字稿。 */
+  scope?: "all" | "summary" | "transcript";
+  /** 逐字稿是否带 [HH:mm:ss] 时间戳（字幕格式恒带）。 */
+  includeTimestamps?: boolean;
+  /** 逐字稿与字幕是否带「发言人：」前缀。 */
+  includeSpeakers?: boolean;
+}
+
 export interface MeetingAPI {
   /** 会议 CRUD：列表（可搜索、可含最近删除）、读取、创建、保存、软删除与恢复。 */
   meetings: {
@@ -761,6 +788,8 @@ export interface MeetingAPI {
         notes: string[];
         transcript: TranscriptSegment[];
         previousSummary: MeetingSummary;
+        /** 纪要模板：只影响提示词的归纳视角，不改变返回结构。 */
+        template?: SummaryTemplateId;
       };
     }): Promise<MeetingSummary & {
       degraded?: boolean;
@@ -796,7 +825,9 @@ export interface MeetingAPI {
       /** 流式增量回调：content/reasoning 为可直接渲染的追加片段（思考过程先于正文）。 */
       onDelta?: (delta: { content?: string; reasoning?: string }) => void,
       /** 本条消息使用的 LLM 档案 id（任务时勾选）；缺省走默认档。 */
-      profileId?: string
+      profileId?: string,
+      /** 调用方生成的流 id：传了才能用 cancel(streamId) 中途停止本次回答。 */
+      streamId?: string
     ): Promise<{
       /** Markdown 回答正文（渲染层用安全管线渲染）。 */
       answer: string;
@@ -804,6 +835,8 @@ export interface MeetingAPI {
       reasoning?: string;
       profileName?: string;
     }>;
+    /** 停止进行中的回答：主进程中止该 stream 的请求，已生成的部分保留。 */
+    cancel(streamId: string): Promise<{ cancelled: boolean }>;
   };
   models: {
     list(): Promise<ModelProfile[]>;
@@ -863,7 +896,13 @@ export interface MeetingAPI {
   };
   /** 导出：把会议另存为指定格式（主进程弹出系统保存框）。 */
   exports: {
-    save(meeting: Meeting, format: string): Promise<{ canceled: boolean; filePath?: string }>;
+    /** 导出为指定格式；options 只对 md/txt/docx/pdf（范围、时间戳、发言人）与字幕（发言人）生效。 */
+    save(meeting: Meeting, format: string, options?: ExportOptions): Promise<{
+      canceled: boolean;
+      filePath?: string;
+      /** 音频导出：多轨会议会写出多个文件，这里是全部落盘路径（首项同 filePath）。 */
+      filePaths?: string[];
+    }>;
   };
   preferences: {
     get(): Promise<MeetingPreferences>;

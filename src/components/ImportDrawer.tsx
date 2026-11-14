@@ -10,7 +10,7 @@ import type { ImportCandidate, ImportJob, ModelProfile } from "../types";
 import { useEnteringItemIds } from "../hooks/useContentMotion";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { formatDuration } from "../lib/format";
-import { useMeetingStore } from "../store/meetingStore";
+
 import { ImportProcessingMeta } from "./ImportProcessingMeta";
 
 interface Props {
@@ -20,6 +20,8 @@ interface Props {
   /** 后台任务队列（含历史任务）。 */
   jobs: ImportJob[];
   profiles: ModelProfile[];
+  /** 全局默认转写语言（设置页「默认转写语言」），档案未单独设置时沿用。 */
+  transcriptionLanguage?: string;
   onClose(): void;
   onPick(): void;
   onChange(items: ImportCandidate[]): void;
@@ -32,6 +34,33 @@ interface Props {
   onRemove(id: string): void;
   onOpenMeeting(id: string): void;
   onConfigure(): void;
+}
+
+const LANGUAGE_LABELS: Record<string, string> = {
+  auto: "自动识别", zh: "中文", en: "English", ja: "日本語", ko: "한국어", yue: "粤语"
+};
+
+/** 本次任务的语言与解码参数摘要：值来自所选档案，抽屉里显式改的只有语言。 */
+function describeTaskProfile(profile: ModelProfile | undefined, language: string, globalLanguage: string) {
+  if (!profile) return "尚未选择转录档案；音频会先安全归档。";
+  const profileLanguage = profile.options?.transcriptionLanguage;
+  // 与主进程 resolveTranscriptionLanguage 同序：本次指定 → 档案 → 全局默认 → 中文。
+  const effective = language || profileLanguage || globalLanguage || "zh";
+  const languageLabel = LANGUAGE_LABELS[effective] ?? effective;
+  const languageSource = language ? "本次指定" : profileLanguage ? "沿用档案" : "沿用默认设置";
+  // 预设与档案参数是同一套映射（见 lib/transcription-presets.ts）：这里据实际参数反推，
+  // 不做额外承诺，避免出现「界面说准确优先、实际跑的是别的参数」。
+  const beam = profile.options?.beamSize;
+  const temperature = profile.options?.temperature;
+  const tuning = typeof beam === "number" && beam >= 5
+    ? "准确优先参数"
+    : typeof beam === "number" && beam <= 1
+      ? "速度优先参数"
+      : undefined;
+  const parts = [`语言 ${languageLabel}（${languageSource}）`];
+  if (tuning) parts.push(tuning);
+  if (typeof temperature === "number") parts.push(`temperature ${temperature}`);
+  return `「${profile.name}」· ${parts.join(" · ")}`;
 }
 
 /** 任务状态 → 用户可读文案；waiting_* 是可恢复的等待态（缺组件，或网络波动自动断点续跑）。 */
@@ -50,15 +79,20 @@ export function ImportDrawer(props: Props) {
   const llmProfiles = useMemo(() => props.profiles.filter((profile) => profile.kind === "llm"), [props.profiles]);
   const defaultSttId = () => sttProfiles.find((profile) => profile.isDefault)?.id || sttProfiles[0]?.id || "";
   const defaultLlmId = () => llmProfiles.find((profile) => profile.isDefault)?.id || llmProfiles[0]?.id || "";
-  // 默认跟随全局转写语言偏好；未显式设置过语言时仍按「自动识别」（既有行为）。
-  const preferredLanguage = useMeetingStore((state) => state.preferences.transcriptionLanguage) ?? "auto";
-  const [language, setLanguage] = useState<string>(preferredLanguage);
-  useEffect(() => { if (props.open) setLanguage(preferredLanguage); }, [props.open, preferredLanguage]);
+  const [language, setLanguage] = useState("");
+  useEffect(() => { if (props.open) setLanguage(""); }, [props.open]);
   const [sttProfileId, setSttProfileId] = useState(defaultSttId);
   const [llmProfileId, setLlmProfileId] = useState(defaultLlmId);
   const [diarizationEnabled, setDiarizationEnabled] = useState(true);
   // 自动纪要曾经被硬编码为 true：想先自己看转录的人没有办法关掉模型调用。
   const [autoSummarize, setAutoSummarize] = useState(true);
+  const selectedStt = sttProfiles.find((profile) => profile.id === sttProfileId);
+  // 档案没设语言时，实际跑的是设置页的全局默认语言（主进程 resolveTranscriptionLanguage），
+  // 这里必须同步显示它，否则界面承诺「自动识别」、实际按中文跑。
+  const globalLanguage = props.transcriptionLanguage || "zh";
+  const inheritedLanguage = selectedStt?.options?.transcriptionLanguage || globalLanguage;
+  const inheritedLanguageLabel = LANGUAGE_LABELS[inheritedLanguage] ?? inheritedLanguage;
+  const inheritedLanguageSource = selectedStt?.options?.transcriptionLanguage ? "档案" : "默认设置";
   const [busy, setBusy] = useState(false);
   // 抽屉同样按对话框管理键盘：Escape 收起、Tab 不跑到背后的工作区。
   const drawerRef = useDialogFocus<HTMLElement>(props.open, { onEscape: props.onClose });
@@ -110,14 +144,19 @@ export function ImportDrawer(props: Props) {
             ))}
           </div>
 
-          <div className="import-subsection-heading"><strong>可选处理设置</strong></div>
+          <div className="import-subsection-heading"><strong>本次任务设置</strong></div>
           <div className="import-settings">
-            <label>语言<select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="auto">自动识别（中文/中英混合优先）</option><option value="zh">中文</option><option value="en">English</option></select></label>
+            <label>语言<select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="">沿用{inheritedLanguageSource}（{inheritedLanguageLabel}）</option><option value="auto">自动识别</option><option value="zh">中文</option><option value="en">English</option></select></label>
             <label>转录模型<select value={sttProfileId} onChange={(event) => setSttProfileId(event.target.value)}><option value="">稍后配置</option>{sttProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
             <label>总结模型<select value={llmProfileId} onChange={(event) => setLlmProfileId(event.target.value)}><option value="">稍后配置</option>{llmProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
             <label className="import-check"><input type="checkbox" checked={diarizationEnabled} onChange={(event) => setDiarizationEnabled(event.target.checked)} />识别不同发言人</label>
             <label className="import-check"><input type="checkbox" checked={autoSummarize} onChange={(event) => setAutoSummarize(event.target.checked)} />转录后自动生成纪要</label>
           </div>
+          {/* 任务级配置摘要：让用户在执行前就看清「用哪个档案、什么语言、什么参数」，
+              同时说明这里的改动只作用于本次导入，不会回写档案默认值。 */}
+          <p className="import-profile-summary">
+            <span>本次使用</span>{describeTaskProfile(selectedStt, language, globalLanguage)}。只影响这一次导入，不改动档案默认值。
+          </p>
           <p className="import-expectation">
             {(() => {
               const totalMs = props.candidates.reduce((sum, file) => sum + (file.durationMs || 0), 0);

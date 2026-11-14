@@ -1,3 +1,4 @@
+import { resolveTranscriptionLanguage } from "../../shared/transcription-options.mjs";
 /**
  * 音频导入的持久化后台队列（Electron 主进程 / 服务层）。
  * 单 worker 串行处理导入任务：复制归档 →（部分格式）生成播放副本 → 转录 →
@@ -224,7 +225,7 @@ async function maybeUpdateRollingSummary(job, meeting, profiles, signal) {
     : undefined;
   let summary;
   let generationMode = "local";
-  if (llmProfile) {
+  if (llmProfile && llmProfile.transport !== "local-summary") {
     try {
       summary = await summarizeWithOpenAICompatible(
         llmProfile,
@@ -377,7 +378,7 @@ export async function enqueueImports(items, options = {}) {
       title: meeting.title,
       mimeType: item.mimeType,
       sizeBytes: item.sizeBytes,
-      language: options.language || "auto",
+      language: resolveTranscriptionLanguage(options.language, resolveJobProfile(listModelProfiles(), "stt", options.sttProfileId)?.options, options.defaultLanguage),
       sttProfileId: options.sttProfileId,
       llmProfileId: options.llmProfileId,
       diarizationEnabled: options.diarizationEnabled !== false,
@@ -450,7 +451,7 @@ export async function enqueueRetranscription(meetingId, options = {}) {
     sizeBytes: asset.byteLength,
     durationMs: asset.durationMs,
     title: meeting.title,
-    language: options.language || "auto",
+    language: resolveTranscriptionLanguage(options.language, resolveJobProfile(listModelProfiles(), "stt", options.sttProfileId)?.options, options.defaultLanguage),
     sttProfileId: options.sttProfileId,
     llmProfileId: options.llmProfileId,
     diarizationEnabled: options.diarizationEnabled !== false,
@@ -964,7 +965,7 @@ async function processJob(initial) {
       };
       let summary;
       let generationMode = "local";
-      if (llmProfile) {
+      if (llmProfile && llmProfile.transport !== "local-summary") {
         try {
           summary = await summarizeWithOpenAICompatible(
             llmProfile,

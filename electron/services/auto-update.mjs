@@ -42,6 +42,9 @@ let downloadedVersion = "";
  * null 表示空闲。
  */
 let downloadSession = null;
+// Native Squirrel 没有取消 API。放弃本地准备后，不复用其内部挂起的
+// downloadPromise；本次应用生命周期改走经过校验的 DMG 下载兜底。
+let nativeRecoveryRequired = false;
 
 /**
  * CJS 互操作加载 electron-updater：其入口用 defineProperty getter 导出具名导出，
@@ -60,7 +63,7 @@ export function macDownloadedUpdateVersion() {
 
 /** 进行中下载的进度快照（供 updates:get-state 水合设置页）；空闲返回 null。 */
 export function macDownloadSnapshot() {
-  if (!downloadSession) return null;
+  if (!downloadSession || downloadSession.state.cancelRequested || downloadSession.failed) return null;
   const { state } = downloadSession;
   return progressSnapshot(state, "downloading", downloadSession.retryRequested ? RETRY_MESSAGE : "");
 }
@@ -138,40 +141,9 @@ async function getUpdater() {
       error: (...args) => console.error("[auto-update]", ...args)
     };
     updaterInstance = autoUpdater;
-    autoUpdater.on("download-progress", (progress) => {
-      const session = downloadSession;
-      if (!session) return;
-      mergeProgress(session.state, progress);
-      emitProgress(session, progressSnapshot(session.state, "downloading", session.retryRequested ? RETRY_MESSAGE : ""));
-    });
-    autoUpdater.on("update-downloaded", (info) => {
-      const session = downloadSession;
-      const version = String(info?.version || session?.state.version || downloadedVersion || "");
-      if (!version) return;
-      if (session) {
-        // 安装准备阶段超时曾标记失败，但 native 侧最终完成：以就绪为准恢复。
-        session.failed = "";
-        emitReady(session, version);
-      } else {
-        // 会话已结束（极少见：native 阶段晚到）也要把 ready 通知发出去。
-        downloadedVersion = version;
-      }
-    });
-    // 取消兜底：executeDownload 内部的 CancellationError 也会触发这里。
-    // 只有用户主动取消才算 cancelled——停滞重连同样会取消底层传输，不能提示「已取消」。
-    autoUpdater.on("update-cancelled", () => {
-      const session = downloadSession;
-      if (session?.state.cancelRequested) emitCancelled(session);
-    });
-    // 必须注册 error 监听：EventEmitter 无 'error' 监听时会抛异常，
-    // 且下载失败需要在设置页可见，而不是静默停在「正在下载」。
+    // 保留一个日志监听，避免会话清理后晚到的 error 导致 EventEmitter 抛异常。
     autoUpdater.on("error", (error) => {
-      console.error("[auto-update] 更新器错误：", error?.message || error);
-      const session = downloadSession;
-      // 取消了就不算错误（CancellationError 也会走 dispatchError）。
-      if (session && !session.state.cancelRequested && !isCancellationError(error)) {
-        emitError(session, error instanceof Error ? error.message : "自动更新失败。");
-      }
+      if (!isCancellationError(error)) console.error("[auto-update] 更新器错误：", error?.message || error);
     });
     return autoUpdater;
   } catch (error) {
@@ -221,10 +193,12 @@ function startWatchdog(session) {
     if (verdict === "retry") {
       session.retryRequested = true;
       emitProgress(session, progressSnapshot(session.state, "downloading", RETRY_MESSAGE), { force: true });
+      session.interrupt?.(new Error("__RETRY_DOWNLOAD__"));
       session.token.cancel();
     } else if (verdict === "fail") {
       session.failed = session.state.finalizing ? FINALIZE_ERROR_MESSAGE : STALL_ERROR_MESSAGE;
       emitError(session, session.failed);
+      session.interrupt?.(new Error(session.failed));
       session.token.cancel();
     }
   }, WATCHDOG_INTERVAL_MS);
@@ -244,34 +218,69 @@ function stopWatchdog(session) {
  */
 async function runDownloadSession(session) {
   const autoUpdater = await getUpdater();
-  if (!autoUpdater) throw new Error(MAC_AUTO_UPDATE_FALLBACK);
+  if (!autoUpdater || nativeRecoveryRequired) throw new Error(MAC_AUTO_UPDATE_FALLBACK);
   try {
-    const feed = await checkMacUpdateFeed();
-    if (session.state.cancelRequested) {
-      emitCancelled(session);
-      return { version: session.state.version, cancelled: true };
-    }
+    if (session.state.cancelRequested) return { version: session.state.version, cancelled: true };
+    // 检查 feed 和原生安装准备都可能不响应 CancellationToken，应用侧必须有独立出口。
+    const interrupted = new Promise((_, reject) => { session.interrupt = reject; });
+    const feed = await Promise.race([checkMacUpdateFeed(), interrupted]);
+    if (session.state.cancelRequested) return { version: session.state.version, cancelled: true };
     if (!feed.available) throw new Error(MAC_AUTO_UPDATE_FALLBACK);
-    if (!session.state.version) session.state.version = feed.version;
+    session.state.version = feed.version;
     if (downloadedVersion) {
       emitReady(session, downloadedVersion);
       return { version: downloadedVersion };
     }
     startWatchdog(session);
     while (true) {
+      let detach = () => {};
       try {
-        await autoUpdater.downloadUpdate(session.token);
-        break;
+        const attemptInterrupted = new Promise((_, reject) => { session.interrupt = reject; });
+        let nativeReady;
+        const nativeFinished = new Promise((resolve) => { nativeReady = resolve; });
+        const onProgress = (progress) => {
+          if (downloadSession !== session || session.state.cancelRequested) return;
+          mergeProgress(session.state, progress);
+          emitProgress(session, progressSnapshot(session.state, "downloading"));
+        };
+        const onDownloaded = () => {
+          // electron-updater 的事件仅表示 ZIP 已交给本地代理，尚未验证安装就绪。
+          session.state.finalizing = true;
+          session.state.lastProgressAt = Date.now();
+        };
+        const onNativeReady = () => nativeReady();
+        const onError = (error) => {
+          if (!isCancellationError(error)) session.interrupt?.(error);
+        };
+        autoUpdater.on("download-progress", onProgress);
+        autoUpdater.on("update-downloaded", onDownloaded);
+        autoUpdater.on("error", onError);
+        autoUpdater.nativeUpdater?.on("update-downloaded", onNativeReady);
+        detach = () => {
+          autoUpdater.removeListener("download-progress", onProgress);
+          autoUpdater.removeListener("update-downloaded", onDownloaded);
+          autoUpdater.removeListener("error", onError);
+          autoUpdater.nativeUpdater?.removeListener("update-downloaded", onNativeReady);
+        };
+        await Promise.race([
+          (async () => {
+            await autoUpdater.downloadUpdate(session.token);
+            if (autoUpdater.nativeUpdater) await nativeFinished;
+          })(),
+          attemptInterrupted
+        ]);
+        emitReady(session, session.state.version);
+        return { version: downloadedVersion };
       } catch (error) {
-        if (session.failed) throw new Error(session.failed);
-        // 用户取消优先于一切（停滞重连也会以 CancellationError 结束，必须排在它前面判断）。
-        if (session.state.cancelRequested) {
-          emitCancelled(session);
-          return { version: session.state.version, cancelled: true };
+        if (session.state.finalizing) {
+          nativeRecoveryRequired = true;
+          autoUpdater.closeServerIfExists?.();
         }
-        if (session.retryRequested) {
-          if (session.state.attempt >= MAX_DOWNLOAD_ATTEMPTS) throw error;
-          // 停滞重连：重置进度与 token，从零重新下载一次。
+        if (session.state.cancelRequested) return { version: session.state.version, cancelled: true };
+        if (session.failed) throw new Error(session.failed);
+        if (session.retryRequested && session.state.attempt < MAX_DOWNLOAD_ATTEMPTS) {
+          // HTTP 阶段取消会使 SDK 清理内部 downloadPromise；先让它完成清理再重试。
+          if (autoUpdater.downloadPromise) await autoUpdater.downloadPromise.catch(() => {});
           session.retryRequested = false;
           session.state.attempt += 1;
           session.state.finalizing = false;
@@ -284,18 +293,17 @@ async function runDownloadSession(session) {
           emitProgress(session, progressSnapshot(session.state, "downloading", RETRY_MESSAGE), { force: true });
           continue;
         }
-        if (isCancellationError(error)) {
-          // 不是本会话发起的取消（例如应用退出时清理）：按取消结算，不当错误。
-          emitCancelled(session);
-          return { version: session.state.version, cancelled: true };
-        }
         throw error;
+      } finally {
+        detach();
       }
     }
-    const resolved = downloadedVersion || session.state.version;
-    if (!downloadedVersion) downloadedVersion = resolved;
-    return { version: resolved };
+  } catch (error) {
+    if (session.state.cancelRequested) return { version: session.state.version, cancelled: true };
+    emitError(session, error?.message === MAC_AUTO_UPDATE_FALLBACK ? "自动更新暂不可用，可从官网下载安装包。" : error?.message);
+    throw error;
   } finally {
+    session.interrupt = null;
     stopWatchdog(session);
   }
 }
@@ -333,11 +341,14 @@ export async function downloadMacUpdate({ version = "", onProgress = null, onRea
     onReady: typeof onReady === "function" ? onReady : null
   };
   if (typeof onProgress === "function") session.listeners.add(onProgress);
-  const { CancellationToken } = await importElectronUpdater().catch(() => ({}));
-  if (!CancellationToken) throw new Error(MAC_AUTO_UPDATE_FALLBACK);
-  session.token = new CancellationToken();
   downloadSession = session;
-  session.promise = runDownloadSession(session).finally(() => {
+  session.promise = (async () => {
+    const { CancellationToken } = await importElectronUpdater().catch(() => ({}));
+    if (!CancellationToken) throw new Error(MAC_AUTO_UPDATE_FALLBACK);
+    session.token = new CancellationToken();
+    if (session.state.cancelRequested) return { version, cancelled: true };
+    return runDownloadSession(session);
+  })().finally(() => {
     stopWatchdog(session);
     if (downloadSession === session) downloadSession = null;
     session.listeners.clear();
@@ -352,6 +363,7 @@ export async function cancelMacDownload() {
   session.state.cancelRequested = true;
   session.retryRequested = false;
   emitCancelled(session);
+  session.interrupt?.(new Error("cancelled"));
   session.token?.cancel();
   return { cancelled: true };
 }
@@ -367,6 +379,8 @@ export async function installMacUpdate() {
 export function disposeMacUpdater() {
   if (downloadSession) {
     stopWatchdog(downloadSession);
+    downloadSession.state.cancelRequested = true;
+    downloadSession.interrupt?.(new Error("cancelled"));
     downloadSession.token?.cancel();
     downloadSession = null;
   }

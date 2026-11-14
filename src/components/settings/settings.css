@@ -233,3 +233,10 @@
   .settings-dialog .diarization-slot { grid-template-columns: minmax(0, 1fr); }
   .settings-dialog .diarization-slot > .diarization-slot__actions { justify-content: flex-start; }
 }
+
+.transcription-options { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line-soft); }
+.transcription-options h3 { margin: 0 0 12px; font-size: 14px; }
+.transcription-option { display: grid; grid-template-columns: minmax(0, 1fr) minmax(130px, 45%); align-items: start; gap: 16px; margin: 14px 0; font-size: 13px; }
+.transcription-options small, .transcription-options p { display: block; color: var(--settings-muted); font-size: 12px; line-height: 1.6; }
+.transcription-option input, .transcription-option select, .transcription-option textarea { box-sizing: border-box; width: 100%; font: inherit; padding: 8px 10px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.transcription-option textarea { resize: vertical; }

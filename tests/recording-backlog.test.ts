@@ -224,4 +224,25 @@ describe("实时转写补转队列", () => {
     expect(events.transcript.length).toBeGreaterThanOrEqual(1);
     await recorder.stop(20);
   });
+  it("30 秒静音不挂占位，后续人声恢复占位与正文，模型语言覆盖全局", async () => {
+    let speech = false;
+    (AudioContext.prototype as unknown as {decodeAudioData: (buffer: ArrayBuffer) => Promise<unknown>}).decodeAudioData = async () => ({
+      numberOfChannels: 1, getChannelData: () => new Float32Array(1600).fill(speech ? .1 : 0)
+    });
+    processChunk.mockImplementation(async (payload: {startMs:number}) => ({segments: speech ? [{id:`voice-${payload.startMs}`,startMs:payload.startMs,endMs:payload.startMs+3000,text:'开始讨论',speakerId:'me',speakerName:'我',status:'final',track:'microphone'}] : []}));
+    const {recorder,events} = makeRecorder({id:'quiet-stt'});
+    recorder.updateSttProfile({id:'quiet-stt',kind:'stt',options:{transcriptionLanguage:'en'}} as never);
+    await recorder.start();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(processChunk.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(events.provisional).toHaveLength(0);
+    expect(events.transcript).toHaveLength(0);
+    expect(processChunk.mock.calls.every(([payload]) => payload.language === 'en')).toBe(true);
+    speech = true;
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(events.provisional.length).toBeGreaterThan(0);
+    expect(events.transcript.length).toBeGreaterThan(0);
+    await recorder.stop(38);
+  });
+
 });
