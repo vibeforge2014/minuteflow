@@ -6,8 +6,9 @@
  *
  * 协议：parentPort 收到 { id, audioFilePath, ffmpegPath, segmentationModel,
  * embeddingModel, clustering, voiceprintSamples, voiceprintThreshold,
- * voiceprintMargin }；回 { id, ok: true, turns } 或 { id, ok: false, error }。
- * 样本向量只在本机进程间传递，不出设备。
+ * voiceprintMargin, transcriptSpans }；回 { id, ok: true, turns } 或
+ * { id, ok: false, error }。带 transcriptSpans（直播录音的转写区间）时跳过
+ * pyannote 检出、改用窗口化声纹聚类。样本向量只在本机进程间传递，不出设备。
  */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -16,10 +17,13 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
 import {
+  assignWindowsToClusters,
+  buildSpeechWindows,
   computeClusterCentroids,
   computeVoiceprintEmbedding,
   matchVoiceprint,
-  mergeDiarizationClusters
+  mergeDiarizationClusters,
+  windowsToTurns
 } from "./diarization-core.mjs";
 
 const require = createRequire(import.meta.url);
@@ -75,39 +79,80 @@ async function diarize(request, reportProgress) {
   reportProgress({ phase: "preparing" });
   const waveAsset = await ensureWave(audioFilePath, sherpaOnnx, ffmpegPath);
   try {
-    reportProgress({ phase: "loading" });
-    const diarizer = new sherpaOnnx.OfflineSpeakerDiarization({
-      segmentation: { pyannote: { model: segmentationModel } },
-      embedding: { model: embeddingModel },
-      clustering: {
-        numClusters: request.clustering?.numClusters ?? -1,
-        threshold: request.clustering?.threshold ?? 0.5
-      },
-      minDurationOn: 0.2,
-      minDurationOff: 0.5
-    });
     const wave = sherpaOnnx.readWave(waveAsset.filePath, false);
-    // 模型只接受其固有采样率（16k），不匹配直接报错而不是静默产出错误结果。
-    if (diarizer.sampleRate !== wave.sampleRate) {
-      throw new Error(`说话人模型需要 ${diarizer.sampleRate}Hz 音频，实际为 ${wave.sampleRate}Hz。`);
-    }
-    reportProgress({
-      phase: "analyzing",
-      audioDurationMs: Math.round((wave.samples.length / Math.max(1, wave.sampleRate)) * 1000)
-    });
-    const rawTurns = diarizer.process(wave.samples).map((turn) => ({
-      startMs: Math.round((turn.start ?? turn.startSeconds ?? 0) * 1000),
-      endMs: Math.round((turn.end ?? turn.endSeconds ?? 0) * 1000),
-      speakerId: `speaker-${Number(turn.speaker ?? turn.speakerId ?? 0) + 1}`
-    }));
-    // 阈值聚类在真实嘈杂音频上常把同一人劈成多个簇：算出簇心后做后处理合并。
-    reportProgress({ phase: "refining" });
-    const centroidEmbeddings = computeClusterCentroids(sherpaOnnx, embeddingModel, wave, rawTurns);
-    const turns = mergeDiarizationClusters(rawTurns, centroidEmbeddings);
     const samples = (request.voiceprintSamples ?? []).map((sample) => ({
       name: sample.name,
       embedding: Float32Array.from(sample.embedding ?? [])
     }));
+    // 直播录音走「转写区间当 VAD」的窗口化路径：pyannote 在 WebRTC NS/AGC
+    // 处理过的远场多人音频上只检出零头（实测 452s 里 24s），窗口化后真实说话人
+    // 才能分开。导入音频（近场、检出充分）继续走 pyannote 全量路径。
+    let turns;
+    if (request.transcriptSpans?.length) {
+      reportProgress({ phase: "loading" });
+      const windows = buildSpeechWindows(request.transcriptSpans);
+      if (!windows.length) return [];
+      const extractor = new sherpaOnnx.SpeakerEmbeddingExtractor({
+        model: embeddingModel,
+        numThreads: 2,
+        debug: false,
+        provider: "cpu"
+      });
+      reportProgress({
+        phase: "analyzing",
+        audioDurationMs: Math.round((wave.samples.length / Math.max(1, wave.sampleRate)) * 1000)
+      });
+      const embeddings = [];
+      for (const window of windows) {
+        const start = Math.max(0, Math.floor(window.startMs * wave.sampleRate / 1000));
+        const end = Math.min(wave.samples.length, Math.ceil(window.endMs * wave.sampleRate / 1000));
+        // 转写区间可能超出归档音频末尾：不足 1 秒的切片不喂模型（eres2net 会报
+        // num_frames:0），按无效窗口参与聚类。
+        if (end - start < wave.sampleRate) {
+          embeddings.push(null);
+          continue;
+        }
+        const stream = extractor.createStream();
+        stream.acceptWaveform({ sampleRate: wave.sampleRate, samples: wave.samples.subarray(start, end) });
+        const embedding = extractor.compute(stream, false);
+        embeddings.push(embedding?.length ? Float32Array.from(embedding) : null);
+      }
+      reportProgress({ phase: "refining" });
+      // 初筛宁粗勿碎（0.5），再复用导入链路的簇心合并 + 碎片归并收口——
+      // 真实直播录音上 4s 窗初筛 + merge 恰好还原真实的说话人数。
+      const clustered = windowsToTurns(windows, assignWindowsToClusters(embeddings));
+      const centroids = computeClusterCentroids(sherpaOnnx, embeddingModel, wave, clustered);
+      turns = mergeDiarizationClusters(clustered, centroids);
+    } else {
+      reportProgress({ phase: "loading" });
+      const diarizer = new sherpaOnnx.OfflineSpeakerDiarization({
+        segmentation: { pyannote: { model: segmentationModel } },
+        embedding: { model: embeddingModel },
+        clustering: {
+          numClusters: request.clustering?.numClusters ?? -1,
+          threshold: request.clustering?.threshold ?? 0.5
+        },
+        minDurationOn: 0.2,
+        minDurationOff: 0.5
+      });
+      // 模型只接受其固有采样率（16k），不匹配直接报错而不是静默产出错误结果。
+      if (diarizer.sampleRate !== wave.sampleRate) {
+        throw new Error(`说话人模型需要 ${diarizer.sampleRate}Hz 音频，实际为 ${wave.sampleRate}Hz。`);
+      }
+      reportProgress({
+        phase: "analyzing",
+        audioDurationMs: Math.round((wave.samples.length / Math.max(1, wave.sampleRate)) * 1000)
+      });
+      const rawTurns = diarizer.process(wave.samples).map((turn) => ({
+        startMs: Math.round((turn.start ?? turn.startSeconds ?? 0) * 1000),
+        endMs: Math.round((turn.end ?? turn.endSeconds ?? 0) * 1000),
+        speakerId: `speaker-${Number(turn.speaker ?? turn.speakerId ?? 0) + 1}`
+      }));
+      // 阈值聚类在真实嘈杂音频上常把同一人劈成多个簇：算出簇心后做后处理合并。
+      reportProgress({ phase: "refining" });
+      const centroidEmbeddings = computeClusterCentroids(sherpaOnnx, embeddingModel, wave, rawTurns);
+      turns = mergeDiarizationClusters(rawTurns, centroidEmbeddings);
+    }
     if (!samples.length) return turns;
 
     reportProgress({ phase: "naming" });

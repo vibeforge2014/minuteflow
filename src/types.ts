@@ -487,6 +487,8 @@ export interface AppUpdateCheckResult {
   update?: AppUpdateInfo;
   /** macOS 自动更新已下载并校验就绪的版本号；存在时设置页显示「立即重启并更新」。 */
   readyVersion?: string;
+  /** macOS 后台下载进行中的实时快照；设置页重开时据此水合进度，而不是误显示「下载并安装」。 */
+  downloading?: AppUpdateDownloadProgress;
 }
 
 /**
@@ -736,6 +738,8 @@ export interface MeetingAPI {
       startMs: number;
       endMs: number;
       track: AudioTrackKind;
+      /** 所属会议：线下模式下主进程据此做逐块说话人标注（线上模式忽略）。 */
+      meetingId?: string;
       glossary?: string[];
       /** 该轨道最近已定稿的文本，作为 initial_prompt 的前文上下文。 */
       previousText?: string;
@@ -881,12 +885,20 @@ export interface MeetingAPI {
     check(): Promise<AppUpdateCheckResult>;
     openDownload(): Promise<{ opened: true }>;
     /** 在应用内下载并打开经校验的安装包（不静默替换当前应用）。 */
-    download(): Promise<{ opened: boolean; path: string; fileName: string } | { autoUpdate: true; version: string }>;
+    download(): Promise<
+      | { opened: boolean; path: string; fileName: string }
+      | { autoUpdate: true; version: string }
+      | { cancelled: true; version: string }
+    >;
     /** macOS 自动更新：原地替换并重启到已下载就绪的新版本（录音期间由 UI 禁用）。 */
     restartToUpdate(): Promise<{ installing: true }>;
     cancelDownload(): Promise<{ cancelled: boolean }>;
     onDownloadProgress(callback: (progress: AppUpdateDownloadProgress) => void): () => void;
     onAvailable(callback: (result: AppUpdateCheckResult) => void): () => void;
+    /** macOS 自动更新已下载就绪：全局 toast（重启安装）与系统通知的入口。 */
+    onReady(callback: (result: { version: string }) => void): () => void;
+    /** 系统通知点击：直达「设置 → 软件更新」。 */
+    onOpenSettings(callback: () => void): () => void;
   };
   /** 系统能力：平台标识、权限查询/申请路由到系统设置、系统睡眠/唤醒事件订阅。 */
   system: {

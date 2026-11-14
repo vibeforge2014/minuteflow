@@ -6,15 +6,42 @@
  * - feed 指向打包时写进 Contents/Resources/app-update.yml 的 zensoft.top 稳定地址；
  * - 仅在 darwin + 打包环境下可用，其余情况返回 null/抛错，调用方回退旧的手动 DMG 流程；
  * - electron-updater 依赖 electron，必须懒加载：纯 Node 侧测试导入本模块不得触发加载。
+ *
+ * 下载会话（用户反馈修复）：
+ * - 进度事件节流转发；`updates:get-state` 通过 macDownloadSnapshot() 暴露进行中快照；
+ * - 停滞看门狗：90s 无进度自动重连一次，仍无进展则给出可读错误并停止；
+ * - 取消闭环：cancel 立即推送 cancelled 事件，CancellationError 不再当失败；
+ * - 下载完成统一走 onReady 回调（主进程发 toast 事件 + 系统通知）。
  */
+import { compareVersions } from "./updates.mjs";
+import {
+  createDownloadSession,
+  mergeProgress,
+  evaluateDownloadHealth,
+  progressSnapshot
+} from "./update-download-state.mjs";
+
+/** 进度转发最小间隔（状态转换不受限）。 */
+const PROGRESS_THROTTLE_MS = 200;
+/** 看门狗检查间隔。 */
+const WATCHDOG_INTERVAL_MS = 10_000;
+/** 停滞自动重连一次；第二次仍停滞时停下并提示手动下载。 */
+const MAX_DOWNLOAD_ATTEMPTS = 2;
+const STALL_ERROR_MESSAGE = "更新下载长时间无进展，已停止。可稍后重试，或从官网下载安装包。";
+const FINALIZE_ERROR_MESSAGE = "更新已下载，但安装准备超时。可重启应用后重新检查更新。";
+const RETRY_MESSAGE = "网络较慢，正在重新连接…";
 
 let updaterInstance = null;
 let updaterLoadFailed = false;
-let downloadInFlight = null;
+/** 已下载待安装的新版本号；空串表示当前没有就绪的更新。 */
 let downloadedVersion = "";
-// electron-updater 事件只注册一次，转发给当前下载会话设置的 onProgress。
-let activeProgressHandler = null;
-let downloadCancellationToken = null;
+
+/**
+ * 当前下载会话：
+ * { state, token, listeners:Set<fn>, promise, lastEmitAt, watchdog, retryRequested, failed, abandoned }
+ * null 表示空闲。
+ */
+let downloadSession = null;
 
 /**
  * CJS 互操作加载 electron-updater：其入口用 defineProperty getter 导出具名导出，
@@ -29,6 +56,57 @@ async function importElectronUpdater() {
 /** 已下载待安装的新版本号；空串表示当前没有就绪的更新。 */
 export function macDownloadedUpdateVersion() {
   return downloadedVersion;
+}
+
+/** 进行中下载的进度快照（供 updates:get-state 水合设置页）；空闲返回 null。 */
+export function macDownloadSnapshot() {
+  if (!downloadSession) return null;
+  const { state } = downloadSession;
+  return progressSnapshot(state, "downloading", downloadSession.retryRequested ? RETRY_MESSAGE : "");
+}
+
+/** 会话内广播一条进度。 */
+function emitProgress(session, payload, { force = false } = {}) {
+  const now = Date.now();
+  if (!force && payload.status === "downloading" && now - session.lastEmitAt < PROGRESS_THROTTLE_MS) {
+    return;
+  }
+  session.lastEmitAt = now;
+  for (const listener of session.listeners) {
+    try {
+      listener(payload);
+    } catch (error) {
+      console.warn("[auto-update] 进度回调失败：", error?.message || error);
+    }
+  }
+}
+
+/** 会话内广播一次 status=ready（幂等）。 */
+function emitReady(session, version) {
+  if (session.state.readyEmitted) return;
+  session.state.readyEmitted = true;
+  downloadedVersion = version || downloadedVersion;
+  emitProgress(session, { status: "ready", version: downloadedVersion, receivedBytes: 0, totalBytes: 0, fraction: 1 }, { force: true });
+  session.onReady?.(downloadedVersion);
+}
+
+/** 会话内广播一次 status=cancelled（幂等）。 */
+function emitCancelled(session) {
+  if (session.state.cancelledEmitted) return;
+  session.state.cancelledEmitted = true;
+  emitProgress(session, progressSnapshot(session.state, "cancelled", "已取消下载。"), { force: true });
+}
+
+/** 会话内广播一次 status=error（幂等）。 */
+function emitError(session, message) {
+  if (session.state.errorEmitted) return;
+  session.state.errorEmitted = true;
+  emitProgress(session, progressSnapshot(session.state, "error", message || "自动更新下载失败。"), { force: true });
+}
+
+/** electron-updater 的 CancellationError（builder-util-runtime）只带 message "cancelled"。 */
+function isCancellationError(error) {
+  return error?.message === "cancelled" || error?.name === "CancellationError";
 }
 
 /**
@@ -61,17 +139,39 @@ async function getUpdater() {
     };
     updaterInstance = autoUpdater;
     autoUpdater.on("download-progress", (progress) => {
-      activeProgressHandler?.({
-        status: "downloading",
-        version: "",
-        receivedBytes: Math.round(progress.transferred || 0),
-        totalBytes: Math.round(progress.total || 0),
-        fraction: progress.total ? progress.transferred / progress.total : 0
-      });
+      const session = downloadSession;
+      if (!session) return;
+      mergeProgress(session.state, progress);
+      emitProgress(session, progressSnapshot(session.state, "downloading", session.retryRequested ? RETRY_MESSAGE : ""));
     });
     autoUpdater.on("update-downloaded", (info) => {
-      downloadedVersion = String(info?.version || downloadedVersion || "");
-      activeProgressHandler?.({ status: "ready", version: downloadedVersion, receivedBytes: 0, totalBytes: 0, fraction: 1 });
+      const session = downloadSession;
+      const version = String(info?.version || session?.state.version || downloadedVersion || "");
+      if (!version) return;
+      if (session) {
+        // 安装准备阶段超时曾标记失败，但 native 侧最终完成：以就绪为准恢复。
+        session.failed = "";
+        emitReady(session, version);
+      } else {
+        // 会话已结束（极少见：native 阶段晚到）也要把 ready 通知发出去。
+        downloadedVersion = version;
+      }
+    });
+    // 取消兜底：executeDownload 内部的 CancellationError 也会触发这里。
+    // 只有用户主动取消才算 cancelled——停滞重连同样会取消底层传输，不能提示「已取消」。
+    autoUpdater.on("update-cancelled", () => {
+      const session = downloadSession;
+      if (session?.state.cancelRequested) emitCancelled(session);
+    });
+    // 必须注册 error 监听：EventEmitter 无 'error' 监听时会抛异常，
+    // 且下载失败需要在设置页可见，而不是静默停在「正在下载」。
+    autoUpdater.on("error", (error) => {
+      console.error("[auto-update] 更新器错误：", error?.message || error);
+      const session = downloadSession;
+      // 取消了就不算错误（CancellationError 也会走 dispatchError）。
+      if (session && !session.state.cancelRequested && !isCancellationError(error)) {
+        emitError(session, error instanceof Error ? error.message : "自动更新失败。");
+      }
     });
     return autoUpdater;
   } catch (error) {
@@ -84,7 +184,7 @@ async function getUpdater() {
 /**
  * 向 feed 询问一次更新（独立于官网清单检查，作为下载前置步骤）。
  * 返回 { available, version }；feed 不可达或没有更新时 available=false，
- * 调用方据此回退官网清单 + 手动 DMG 流程。
+ * 调用方据此回退官网清单 + 手动 DMG 流程。只有 feed 版本严格大于当前版本才算可用。
  */
 export async function checkMacUpdateFeed() {
   const autoUpdater = await getUpdater();
@@ -92,53 +192,167 @@ export async function checkMacUpdateFeed() {
   try {
     const result = await autoUpdater.checkForUpdates();
     const info = result?.updateInfo;
-    return { available: Boolean(info?.version), version: String(info?.version || "") };
+    const version = String(info?.version || "");
+    let currentVersion = "";
+    try {
+      currentVersion = String((await import("electron")).app.getVersion() || "");
+    } catch {
+      currentVersion = "";
+    }
+    let newer = false;
+    try {
+      newer = Boolean(version) && (!currentVersion || compareVersions(version, currentVersion) > 0);
+    } catch {
+      newer = Boolean(version) && version !== currentVersion;
+    }
+    return { available: newer, version };
   } catch (error) {
     console.warn("[auto-update] feed 检查失败，将回退手动下载：", error?.message || error);
     return { available: false, version: "" };
   }
 }
 
+/** 启动停滞看门狗（每个会话只跑一个定时器）。 */
+function startWatchdog(session) {
+  stopWatchdog(session);
+  session.watchdog = setInterval(() => {
+    if (downloadSession !== session) return stopWatchdog(session);
+    const verdict = evaluateDownloadHealth(session.state);
+    if (verdict === "retry") {
+      session.retryRequested = true;
+      emitProgress(session, progressSnapshot(session.state, "downloading", RETRY_MESSAGE), { force: true });
+      session.token.cancel();
+    } else if (verdict === "fail") {
+      session.failed = session.state.finalizing ? FINALIZE_ERROR_MESSAGE : STALL_ERROR_MESSAGE;
+      emitError(session, session.failed);
+      session.token.cancel();
+    }
+  }, WATCHDOG_INTERVAL_MS);
+  if (typeof session.watchdog.unref === "function") session.watchdog.unref();
+}
+
+function stopWatchdog(session) {
+  if (session.watchdog) {
+    clearInterval(session.watchdog);
+    session.watchdog = null;
+  }
+}
+
+/**
+ * 单会话下载驱动：feed 检查 → downloadUpdate → 失败重连（一次）。
+ * 取消时 resolve {cancelled:true} 而不是抛错；失败抛错由调用方处理。
+ */
+async function runDownloadSession(session) {
+  const autoUpdater = await getUpdater();
+  if (!autoUpdater) throw new Error(MAC_AUTO_UPDATE_FALLBACK);
+  try {
+    const feed = await checkMacUpdateFeed();
+    if (session.state.cancelRequested) {
+      emitCancelled(session);
+      return { version: session.state.version, cancelled: true };
+    }
+    if (!feed.available) throw new Error(MAC_AUTO_UPDATE_FALLBACK);
+    if (!session.state.version) session.state.version = feed.version;
+    if (downloadedVersion) {
+      emitReady(session, downloadedVersion);
+      return { version: downloadedVersion };
+    }
+    startWatchdog(session);
+    while (true) {
+      try {
+        await autoUpdater.downloadUpdate(session.token);
+        break;
+      } catch (error) {
+        if (session.failed) throw new Error(session.failed);
+        // 用户取消优先于一切（停滞重连也会以 CancellationError 结束，必须排在它前面判断）。
+        if (session.state.cancelRequested) {
+          emitCancelled(session);
+          return { version: session.state.version, cancelled: true };
+        }
+        if (session.retryRequested) {
+          if (session.state.attempt >= MAX_DOWNLOAD_ATTEMPTS) throw error;
+          // 停滞重连：重置进度与 token，从零重新下载一次。
+          session.retryRequested = false;
+          session.state.attempt += 1;
+          session.state.finalizing = false;
+          session.state.receivedBytes = 0;
+          session.state.totalBytes = 0;
+          session.state.fraction = 0;
+          session.state.lastProgressAt = Date.now();
+          const { CancellationToken } = await importElectronUpdater();
+          session.token = new CancellationToken();
+          emitProgress(session, progressSnapshot(session.state, "downloading", RETRY_MESSAGE), { force: true });
+          continue;
+        }
+        if (isCancellationError(error)) {
+          // 不是本会话发起的取消（例如应用退出时清理）：按取消结算，不当错误。
+          emitCancelled(session);
+          return { version: session.state.version, cancelled: true };
+        }
+        throw error;
+      }
+    }
+    const resolved = downloadedVersion || session.state.version;
+    if (!downloadedVersion) downloadedVersion = resolved;
+    return { version: resolved };
+  } finally {
+    stopWatchdog(session);
+  }
+}
+
 /**
  * 后台静默下载（或复用进行中/已完成的下载）。onProgress 收到与
  * updates:download-progress 相同结构的 payload（status: downloading | ready）。
- * 失败时抛错，由调用方决定是否回退手动 DMG 流程。
+ * onReady：本次下载被确认就绪时调用一次（主进程据此发 toast/系统通知）。
+ * 失败时抛错，由调用方决定是否回退手动 DMG 流程；取消时 resolve {cancelled:true}。
  * updater 本身不可用（模块加载失败等）与 feed 不可用同待遇：抛回退哨兵，
  * 让用户至少拿到官网直链手动下载，而不是「本机暂不支持自动更新」死胡同。
  */
-export async function downloadMacUpdate({ version = "", onProgress = () => {} } = {}) {
-  if (downloadInFlight) return downloadInFlight;
-  const autoUpdater = await getUpdater();
-  if (!autoUpdater) throw new Error(MAC_AUTO_UPDATE_FALLBACK);
-  downloadInFlight = (async () => {
-    try {
-      const feed = await checkMacUpdateFeed();
-      if (!feed.available) throw new Error("__FALLBACK_MANUAL__");
-      if (downloadedVersion) {
-        // 已下载完成：直接回报 ready，避免重复下载。
-        onProgress({ status: "ready", version: downloadedVersion, receivedBytes: 0, totalBytes: 0, fraction: 1 });
-        return { version: downloadedVersion };
-      }
-      activeProgressHandler = (payload) => onProgress({ ...payload, version: payload.version || version || feed.version });
-      const { CancellationToken } = await importElectronUpdater();
-      downloadCancellationToken = new CancellationToken();
-      const result = await autoUpdater.downloadUpdate(downloadCancellationToken);
-      const resolved = downloadedVersion || String(result || feed.version);
-      if (!downloadedVersion) downloadedVersion = resolved;
-      return { version: resolved };
-    } finally {
-      downloadInFlight = null;
-      activeProgressHandler = null;
-      downloadCancellationToken = null;
+export async function downloadMacUpdate({ version = "", onProgress = null, onReady = null } = {}) {
+  if (downloadSession) {
+    // 加入进行中的会话：只补挂监听，不打断既有下载。
+    if (typeof onProgress === "function") downloadSession.listeners.add(onProgress);
+    if (typeof onReady === "function") {
+      const previous = downloadSession.onReady;
+      downloadSession.onReady = (readyVersion) => {
+        previous?.(readyVersion);
+        onReady(readyVersion);
+      };
     }
-  })();
-  return downloadInFlight;
+    return downloadSession.promise;
+  }
+  const session = {
+    state: createDownloadSession({ version }),
+    token: null,
+    listeners: new Set(),
+    promise: null,
+    lastEmitAt: 0,
+    watchdog: null,
+    retryRequested: false,
+    failed: "",
+    onReady: typeof onReady === "function" ? onReady : null
+  };
+  if (typeof onProgress === "function") session.listeners.add(onProgress);
+  const { CancellationToken } = await importElectronUpdater().catch(() => ({}));
+  if (!CancellationToken) throw new Error(MAC_AUTO_UPDATE_FALLBACK);
+  session.token = new CancellationToken();
+  downloadSession = session;
+  session.promise = runDownloadSession(session).finally(() => {
+    stopWatchdog(session);
+    if (downloadSession === session) downloadSession = null;
+    session.listeners.clear();
+  });
+  return session.promise;
 }
 
 /** 中止进行中的自动更新下载（updates:cancel-download 在 macOS 上的落点）。 */
 export async function cancelMacDownload() {
-  if (!downloadInFlight || !downloadCancellationToken) return { cancelled: false };
-  downloadCancellationToken.cancel();
+  const session = downloadSession;
+  if (!session) return { cancelled: false };
+  session.state.cancelRequested = true;
+  session.retryRequested = false;
+  emitCancelled(session);
+  session.token?.cancel();
   return { cancelled: true };
 }
 
@@ -147,6 +361,15 @@ export async function installMacUpdate() {
   const autoUpdater = await getUpdater();
   if (!autoUpdater || !downloadedVersion) throw new Error("更新尚未下载完成。");
   await autoUpdater.quitAndInstall();
+}
+
+/** 测试/退出清理：停止看门狗并中止在途下载。 */
+export function disposeMacUpdater() {
+  if (downloadSession) {
+    stopWatchdog(downloadSession);
+    downloadSession.token?.cancel();
+    downloadSession = null;
+  }
 }
 
 export const MAC_AUTO_UPDATE_FALLBACK = "__FALLBACK_MANUAL__";

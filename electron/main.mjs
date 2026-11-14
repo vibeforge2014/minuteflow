@@ -118,6 +118,7 @@ import {
   cancelMacDownload,
   downloadMacUpdate,
   installMacUpdate,
+  macDownloadSnapshot,
   macDownloadedUpdateVersion
 } from "./services/auto-update.mjs";
 import {
@@ -147,6 +148,7 @@ import {
   extractVoiceprintEmbedding,
   voiceprintModelKey
 } from "./services/diarization.mjs";
+import { labelLiveChunk, resetLiveSession } from "./services/live-diarization.mjs";
 import { groupTranscriptSegments, splitTimedTranscriptText } from "./services/transcript-grouping.mjs";
 
 // 当前文件所在目录：用于定位 preload.cjs 与打包后的前端产物。
@@ -729,11 +731,41 @@ function sendUpdateProgress(payload) {
 
 /** 已启动过后台静默下载的新版本号，避免每次检查都重复触发。 */
 let backgroundMacUpdateVersion = "";
+/** 已发过「更新已就绪」通知的版本，避免手动/后台路径重复提醒。 */
+let updateReadyNotifiedVersion = "";
+
+/**
+ * 自动更新下载就绪的统一出口：渲染层 toast（含「立即重启并更新」动作）
+ * + 窗口未聚焦时的系统通知（点击回到「设置 → 软件更新」）。
+ * 只提醒一次；下次检查发现同版本仍就绪时不再打扰。
+ */
+function notifyMacUpdateReady(version) {
+  if (!version || updateReadyNotifiedVersion === version) return;
+  updateReadyNotifiedVersion = version;
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send("updates:ready", { version });
+  }
+  if (!Notification.isSupported()) return;
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()) return;
+  const notification = new Notification({
+    title: "更新已就绪",
+    body: `新版本 ${version} 已下载，重启应用即可完成更新。`
+  });
+  notification.on("click", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send("updates:open-settings");
+  });
+  notification.show();
+}
 
 /**
  * macOS 自动更新：发现新版本后立即开始后台静默下载（不打扰使用）。
- * 下载完成后：退出应用时自动安装；设置页可显式「立即重启并更新」。
- * feed 不可用等失败保持静默——用户手动点「下载并安装」时会回退旧的手动 DMG 流程。
+ * 下载完成后：应用内 toast + （未聚焦时）系统通知；退出应用时自动安装；
+ * 设置页可显式「立即重启并更新」。feed 不可用等失败保持静默——用户手动点
+ * 「下载并安装」时会回退旧的手动 DMG 流程，设置页重开也能通过快照看到真实进度。
  */
 function startBackgroundMacUpdateDownload(update) {
   if (process.platform !== "darwin" || !update?.version) return;
@@ -741,8 +773,15 @@ function startBackgroundMacUpdateDownload(update) {
   backgroundMacUpdateVersion = update.version;
   downloadMacUpdate({
     version: update.version,
-    onProgress: (payload) => sendUpdateProgress({ ...payload, version: payload.version || update.version })
+    onProgress: (payload) => sendUpdateProgress({ ...payload, version: payload.version || update.version }),
+    onReady: (version) => notifyMacUpdateReady(version || update.version)
+  }).then((result) => {
+    // 用户取消后允许下次「检查更新」重新发起，而不是被启动守卫永久拦住。
+    if (result?.cancelled && backgroundMacUpdateVersion === update.version) {
+      backgroundMacUpdateVersion = "";
+    }
   }).catch((error) => {
+    if (backgroundMacUpdateVersion === update.version) backgroundMacUpdateVersion = "";
     if (error?.message !== MAC_AUTO_UPDATE_FALLBACK) {
       console.warn("[updates] 后台自动下载更新失败：", error?.message || error);
     }
@@ -878,9 +917,16 @@ function registerIpc() {
       if (!meeting?.transcript?.length) return;
       const profile = resolveProfile(listModelProfiles(), "diarization");
       if (!profile) return; // 未配置分离模型：保留按轨标签，不额外打扰。
+      // 转写引擎识别出语音的区间就是最可靠的 VAD：pyannote 在 WebRTC NS/AGC
+      // 处理过的直播麦克风音频上会漏检大部分语音（实测 452s 里只检出 24s），
+      // 碎片声纹不可靠、聚类塌缩成 1 人。窗口化路径以转写区间为准。
+      const transcriptSpans = meeting.transcript
+        .filter((segment) => segment?.endMs > segment?.startMs)
+        .map((segment) => ({ startMs: segment.startMs, endMs: segment.endMs }));
       const turns = await diarizeWithSherpa(profile, microphonePath, {
         expectedSpeakers: -1,
-        voiceprints: listVoiceprintSamples()
+        voiceprints: listVoiceprintSamples(),
+        transcriptSpans
       });
       if (new Set(turns.map((turn) => turn.speakerId)).size <= 1) return;
       // 分离可能跑几分钟。必须重新读取会议，用最新快照承载说话人标签，
@@ -935,6 +981,8 @@ function registerIpc() {
       });
     }
     saveMeeting({ ...meeting, status: "recording", updatedAt: new Date().toISOString() });
+    // 直播逐块说话人标注：新录音会话从零开始积累质心（继续录音即重建）。
+    resetLiveSession(meetingId);
     return { sessionId, startedAt: Date.now() };
   });
 
@@ -1064,6 +1112,8 @@ function registerIpc() {
       if (meeting.mode === "offline" && output.microphone) {
         void runPostRecordingDiarization(payload.meetingId, output.microphone);
       }
+      // 直播逐块标注的会话质心就此作废：录音后的全量窗口化分离才是最终口径。
+      resetLiveSession(payload.meetingId);
     }
     return output;
   });
@@ -1214,8 +1264,30 @@ function registerIpc() {
       : result.text.trim()
         ? [{ startMs: 0, endMs: chunkDurationMs, text: result.text, confidence: result.confidence }]
         : [];
-    const speakerId = payload.track === "microphone" ? "me" : "remote";
-    const speakerName = payload.track === "microphone" ? "我" : "远端发言人";
+    // 直播说话人标注：线下会议的麦克风轨上坐着房间里所有人，按轨标「我」
+    // 无法区分人声。用 STT 结果区间（已知语音位置）在主进程提声纹做会话内
+    // 在线聚类——簇 1 沿用「我」，后续块可能标「发言人 N」；任何失败都回退
+    // 按轨标签，绝不拖慢转写。线上会议保持按轨语义（麦克风=我 / 系统=远端）。
+    let speakerId = payload.track === "microphone" ? "me" : "remote";
+    let speakerName = payload.track === "microphone" ? "我" : "远端发言人";
+    if (sourceSegments.length && payload.track === "microphone" && normalizedWav && typeof payload.meetingId === "string" && payload.meetingId) {
+      try {
+        const diarizationProfile = resolveProfile(listModelProfiles(), "diarization");
+        const meetingForLabel = diarizationProfile ? loadMeeting(payload.meetingId) : null;
+        if (diarizationProfile?.options?.embeddingModelPath && meetingForLabel?.mode === "offline") {
+          const label = labelLiveChunk(payload.meetingId, prepared.audio, sourceSegments.map((segment) => ({
+            startMs: Math.max(0, Math.min(Math.max(0, chunkDurationMs - 1), Number(segment.startMs) || 0)),
+            endMs: Math.max(1, Math.min(chunkDurationMs, Number(segment.endMs) || chunkDurationMs))
+          })), { embeddingModelPath: diarizationProfile.options.embeddingModelPath });
+          if (label) {
+            speakerId = label.speakerId;
+            speakerName = label.speakerName;
+          }
+        }
+      } catch (error) {
+        console.warn("[live-diarization] 逐块标注跳过：", error instanceof Error ? error.message : error);
+      }
+    }
     let fragmentIndex = 0;
     return {
       segments: sourceSegments.flatMap((segment) => {
@@ -1645,7 +1717,12 @@ function registerIpc() {
   trustedHandle("updates:get-state", () => {
     const state = latestUpdateCheck ?? idleUpdateState();
     const readyVersion = process.platform === "darwin" ? macDownloadedUpdateVersion() : "";
-    return readyVersion ? { ...state, readyVersion } : state;
+    const downloading = process.platform === "darwin" ? macDownloadSnapshot() : null;
+    return {
+      ...state,
+      ...(readyVersion ? { readyVersion } : {}),
+      ...(downloading ? { downloading } : {})
+    };
   });
   // updates:check — 手动触发一次更新检查，设置页"检查更新"按钮调用。
   trustedHandle("updates:check", () => runUpdateCheck());
@@ -1670,10 +1747,13 @@ function registerIpc() {
     const update = state.update;
     if (process.platform === "darwin") {
       try {
-        await downloadMacUpdate({
+        const result = await downloadMacUpdate({
           version: update.version,
-          onProgress: (payload) => sendUpdateProgress({ ...payload, version: payload.version || update.version })
+          onProgress: (payload) => sendUpdateProgress({ ...payload, version: payload.version || update.version }),
+          onReady: (version) => notifyMacUpdateReady(version || update.version)
         });
+        // 用户取消：服务已推送 cancelled 状态，不再当错误上报。
+        if (result?.cancelled) return { cancelled: true, version: update.version };
         return { autoUpdate: true, version: update.version };
       } catch (error) {
         if (error?.message !== MAC_AUTO_UPDATE_FALLBACK) {

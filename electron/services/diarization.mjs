@@ -148,7 +148,8 @@ function runDiarizationWorker(request, { signal, onProgress } = {}) {
  * 子进程与临时 WAV）、进程外跑分离模型（CPU 密集但不再阻塞主进程）。
  * @param {object} profile diarization 模型档案（segmentation/embedding 模型路径等）
  * @param {object} options expectedSpeakers 已知人数（-1 自动聚类），threshold 聚类阈值，
- * voiceprints 本地声纹样本（兼容者自动命名），signal 取消信号
+ * voiceprints 本地声纹样本（兼容者自动命名），transcriptSpans 转写已知语音区间
+ * （直播录音：worker 改用窗口化声纹聚类），signal 取消信号
  * @returns {Promise<Array<{startMs, endMs, speakerId, speakerName?}>>} 说话人轮次列表
  */
 export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
@@ -171,6 +172,9 @@ export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
       numClusters: options.expectedSpeakers ?? -1,
       threshold: options.threshold ?? profile.options?.clusteringThreshold ?? 0.5
     },
+    // 直播录音传入转写区间：worker 改用「转写当 VAD」的窗口化路径
+    // （pyannote 在 WebRTC 处理过的远场音频上会漏检大部分语音，实测塌缩成 1 人）。
+    ...(options.transcriptSpans?.length ? { transcriptSpans: options.transcriptSpans } : {}),
     voiceprintSamples,
     voiceprintThreshold: profile.options?.voiceprintThreshold,
     voiceprintMargin: profile.options?.voiceprintMargin

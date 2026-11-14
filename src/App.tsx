@@ -156,6 +156,9 @@ export function App() {
     }
   }), [notify, openSettings]);
 
+  // 系统通知点击「更新已就绪」：直达软件更新页。
+  useEffect(() => api.updates.onOpenSettings(() => openSettings("updates")), [openSettings]);
+
   // 导入队列：先回填历史任务，再订阅主进程推送的任务更新；任务完成时提示一次并刷新会议列表。
   useEffect(() => {
     api.imports.list().then((jobs) => {
@@ -281,6 +284,25 @@ export function App() {
   const recordingElsewhere = Boolean(
     dockPhase && recorder.recordingMeetingId && recorder.recordingMeetingId !== meeting?.id
   );
+
+  // macOS 自动更新后台下载完成：全局 toast（这次修复前没有任何提示，用户毫不知情）。
+  // 无录音时给「立即重启并更新」直达动作；录音中改为「查看」——设置页的重启按钮
+  // 此时本就禁用并附「结束后可重启」说明，绝不打断录音。
+  useEffect(() => api.updates.onReady(({ version }) => {
+    if (recorder.phase !== "idle") {
+      notify(`新版本 ${version} 已下载，录音结束后可重启安装。`, {
+        label: "查看",
+        run: () => openSettings("updates")
+      });
+      return;
+    }
+    notify(`新版本 ${version} 已下载，重启即可更新。`, {
+      label: "立即重启并更新",
+      run: () => {
+        void api.updates.restartToUpdate().catch(() => openSettings("updates"));
+      }
+    });
+  }), [notify, openSettings, recorder.phase]);
   const workspaceStage = meeting
     ? meetingImportJob && selectedRecorderPhase === "idle"
       ? "review"

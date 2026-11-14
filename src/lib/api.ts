@@ -829,7 +829,9 @@ const browserApi: MeetingAPI = {
     },
     async cancelDownload() { return { cancelled: false }; },
     onDownloadProgress() { return () => {}; },
-    onAvailable() { return () => {}; }
+    onAvailable() { return () => {}; },
+    onReady() { return () => {}; },
+    onOpenSettings() { return () => {}; }
   },
   system: {
     // 浏览器端伪装权限已授予、无睡眠事件，保证 UI 流程可预览。

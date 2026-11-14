@@ -243,8 +243,12 @@ export class MeetingRecorder {
           audio: {
             // 线上会议开启回声消除，避免扬声器里的远端声音被麦克风重复录到。
             echoCancellation: this.meeting.mode === "online",
-            noiseSuppression: true,
-            autoGainControl: true,
+            // 线下会议关闭 WebRTC 降噪/自动增益：实测远场多人 + 背景媒体音频
+            // 会被降噪压制变形，pyannote 漏检大部分语音、声纹聚类塌缩成 1 人
+            // （转写引擎反而能识别）。与导入链路「Whisper 级前端不加滤镜」同口径；
+            // 线上模式保留全套处理（回声消除必须开）。
+            noiseSuppression: this.meeting.mode === "online",
+            autoGainControl: this.meeting.mode === "online",
             channelCount: 1
           }
         }, 30_000, "等待麦克风授权超时，请在系统设置中允许录音后重试。");
@@ -445,6 +449,8 @@ export class MeetingRecorder {
         startMs,
         endMs,
         track,
+        // 主进程在线下模式据此做逐块说话人标注（线上模式保持按轨标签）。
+        meetingId: this.meeting.id,
         glossary: this.glossary,
         previousText
       };
@@ -634,6 +640,7 @@ export class MeetingRecorder {
         startMs: entry.startMs,
         endMs: entry.endMs,
         track: entry.track,
+        meetingId: this.meeting.id,
         glossary: this.glossary,
         previousText: entry.previousText ?? ""
       });

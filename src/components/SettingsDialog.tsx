@@ -699,7 +699,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   }, [open, initialFocus]);
 
   // 进入「软件更新」页时读取主进程缓存的更新状态（启动时已静默检查过一次）。
-  // macOS 自动更新若已下载就绪（readyVersion），直接进入「待重启」状态。
+  // macOS 自动更新若已下载就绪（readyVersion），直接进入「待重启」状态；
+  // 若后台正在下载（downloading 快照），立即水合进度——重开设置不会误显示「下载并安装」。
   useEffect(() => {
     if (!open || tab !== "updates") return;
     api.updates.getState().then((state) => {
@@ -710,6 +711,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
           version: state.readyVersion,
           receivedBytes: 0, totalBytes: 0, fraction: 1
         });
+      } else if (state.downloading?.status === "downloading") {
+        setDownloadState(state.downloading);
       }
     }).catch((error) => {
       setUpdateState({
@@ -1204,7 +1207,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   /** 应用内下载更新：主进程负责下载、SHA-256 校验并打开安装程序。 */
   const downloadUpdate = async () => {
     setDownloadBusy(true);
-    setDownloadState({
+    // 后台下载可能已在途（加入既有会话）：保留真实进度，不回跳 0%。
+    setDownloadState((current) => current?.status === "downloading" ? current : {
       status: "downloading",
       version: updateState?.update?.version || "",
       receivedBytes: 0, totalBytes: 0, fraction: 0
@@ -1226,7 +1230,15 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   };
   const cancelUpdateDownload = async () => {
     try {
-      await api.updates.cancelDownload();
+      const result = await api.updates.cancelDownload();
+      // 主进程会立即推送 cancelled；这里同步兜底一次，保证按钮点下后界面立刻离开下载态。
+      if (result?.cancelled) {
+        setDownloadState((current) => current && {
+          ...current,
+          status: "cancelled",
+          message: "已取消下载。"
+        });
+      }
     } catch {
       // 取消失败不影响主进程的下载状态；错误会在下载通道里回到这里。
     }
@@ -1270,7 +1282,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const downloadLabel = !downloadState
     ? ""
     : downloadState.status === "downloading"
-      ? `正在后台下载更新 ${downloadPercent}%${downloadSize ? `（${downloadSize}）` : ""}`
+      ? `正在后台下载更新 ${downloadPercent}%${downloadSize ? `（${downloadSize}）` : ""}${downloadState.message ? ` · ${downloadState.message}` : ""}`
       : downloadState.status === "verifying"
         ? "正在校验更新…"
         : downloadState.status === "ready"

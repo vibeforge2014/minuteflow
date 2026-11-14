@@ -145,6 +145,18 @@ contextBridge.exposeInMainWorld("meetingAPI", {
       const listener = (_event, result) => callback(result);
       ipcRenderer.on("updates:available", listener);
       return () => ipcRenderer.removeListener("updates:available", listener);
+    },
+    // macOS 自动更新下载完成（已校验、等待重启安装）：全局 toast 与系统通知的渲染层入口。
+    onReady: (callback) => {
+      const listener = (_event, result) => callback(result);
+      ipcRenderer.on("updates:ready", listener);
+      return () => ipcRenderer.removeListener("updates:ready", listener);
+    },
+    // 系统通知点击：直达「设置 → 软件更新」。
+    onOpenSettings: (callback) => {
+      const listener = () => callback();
+      ipcRenderer.on("updates:open-settings", listener);
+      return () => ipcRenderer.removeListener("updates:open-settings", listener);
     }
   },
   system: {

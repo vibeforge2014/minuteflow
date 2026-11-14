@@ -1,9 +1,27 @@
 /**
  * 说话人分离的纯逻辑核心：聚类后处理合并、声纹比对、区间采样与嵌入编排。
  * 不依赖 Electron、数据库或原生 addon（sherpa 句柄由调用方传入），
- * 主进程（声纹登记）与 diarization-worker（utilityProcess 重推理）共用，
+ * 主进程（声纹登记/直播标注）与 diarization-worker（utilityProcess 重推理）共用，
  * 保证两条路径的合并与匹配行为完全一致。
  */
+import { parsePcmWav } from "./audio-quality.mjs";
+
+/**
+ * 把内存里的 16-bit PCM WAV 块解成 Float32 采样（直播逐块声纹用，
+ * 与 worker 的 readWave 同构）。非 PCM/损坏/多声道取首声道；失败返回 null，
+ * 调用方按「不敢判定」回退原标签。
+ */
+export function decodePcm16Wav(buffer) {
+  const wav = parsePcmWav(buffer);
+  if (!wav) return null;
+  const sampleCount = Math.floor(wav.length / 2);
+  if (!sampleCount) return null;
+  const samples = new Float32Array(sampleCount);
+  for (let index = 0; index < sampleCount; index += 1) {
+    samples[index] = buffer.readInt16LE(wav.start + index * 2) / 32768;
+  }
+  return { sampleRate: wav.sampleRate || 16000, samples };
+}
 
 // 官方 Node 示例使用 0.6；MinuteFlow 再增加“第一名与第二名的差距”约束，
 // 以牺牲少量召回换取更少的错误姓名。档案可在高级 options 中覆盖这两个值。
@@ -255,4 +273,126 @@ export function computeClusterCentroids(sherpaOnnx, embeddingModel, wave, turns)
     }
   }
   return centroids;
+}
+
+// —— 窗口化声纹聚类（直播逐块标注 + 录音后以转写区间为 VAD 的分离共用）——
+// 背景（真实直播麦克风实测，452s/996s 两场）：pyannote 在 WebRTC NS/AGC 处理过的
+// 远场多人音频上只检出 24–45s（转写引擎识别出 184s+），碎片 0.3–3s 的声纹不可靠，
+// 聚类必然塌缩成 1 人；改用「转写结果已知有语音的区间」代替检出后，
+// 同人窗口相似 0.85+、异人 ≤0.71，真实说话人可以分开。
+
+export const SPEECH_WINDOW_MS = 4_000;
+export const SPEECH_WINDOW_HOP_MS = 2_000;
+/** 单窗语音不足 2 秒时声纹不可靠（与声纹登记同口径）。 */
+export const SPEECH_WINDOW_MIN_MS = 2_000;
+/**
+ * 窗口级平均链接初筛阈值（其后还过 mergeDiarizationClusters 二段合并）。
+ * 真实两场直播录音校准：0.45–0.50 初筛后 merge 恰好得到真实的 2 位说话人；
+ * ≥0.55 初筛过碎（14 簇）会让 merge 把同一个人劈开。初筛宁粗勿碎。
+ */
+export const WINDOW_CLUSTER_THRESHOLD = 0.5;
+/**
+ * 直播逐块在线聚类的开新簇阈值（整块声纹比 4s 滑窗更稳，阈值取高一线：
+ * 宁可暂时并入「我」，也不要把同一个人反复劈成新发言人）。
+ */
+export const LIVE_CLUSTER_THRESHOLD = 0.72;
+
+/**
+ * 把转写区间切成滑窗（合并重叠、按时间排序）。
+ * 直播把 8 秒块的 STT 结果区间当 spans，录音后把整场 transcript 段落当 spans；
+ * 窗口短于 minWindowMs 的尾巴直接丢弃。
+ */
+export function buildSpeechWindows(spans, {
+  windowMs = SPEECH_WINDOW_MS,
+  hopMs = SPEECH_WINDOW_HOP_MS,
+  minWindowMs = SPEECH_WINDOW_MIN_MS
+} = {}) {
+  const windows = [];
+  const normalized = [...(spans ?? [])]
+    .map((span) => ({
+      startMs: Math.max(0, Math.floor(Number(span?.startMs) || 0)),
+      endMs: Math.max(0, Math.ceil(Number(span?.endMs) || 0))
+    }))
+    .filter((span) => span.endMs > span.startMs)
+    .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
+  const seen = new Set();
+  for (const span of normalized) {
+    for (let at = span.startMs; ; at += hopMs) {
+      const end = Math.min(span.endMs, at + windowMs);
+      if (end - at < minWindowMs) break;
+      const key = `${at}:${end}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        windows.push({ startMs: at, endMs: end });
+      }
+      if (end >= span.endMs) break;
+    }
+  }
+  return windows.sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
+}
+
+/**
+ * 平均链接层次聚类：每窗一个初始簇，反复合并簇间平均相似度最高且 ≥ threshold
+ * 的一对，直到没有合格对。返回与 embeddings 同序的簇下标数组（0..N-1）。
+ * 窗数 ≤ 几百（一场一小时的会议约千余窗以内），O(n²) 完全够用。
+ */
+export function assignWindowsToClusters(embeddings, { threshold = WINDOW_CLUSTER_THRESHOLD } = {}) {
+  const vectors = (embeddings ?? []).map((vector) => (vector?.length ? vector : null));
+  const groups = vectors.map((_, index) => (vectors[index] ? [index] : null));
+  for (;;) {
+    let best = null;
+    for (let left = 0; left < groups.length; left += 1) {
+      if (!groups[left]) continue;
+      for (let right = left + 1; right < groups.length; right += 1) {
+        if (!groups[right]) continue;
+        let total = 0;
+        let pairs = 0;
+        for (const i of groups[left]) {
+          for (const j of groups[right]) {
+            total += cosineSimilarity(vectors[i], vectors[j]);
+            pairs += 1;
+          }
+        }
+        const similarity = pairs ? total / pairs : -1;
+        if (similarity >= threshold && (!best || similarity > best.similarity)) {
+          best = { similarity, left, right };
+        }
+      }
+    }
+    if (!best) break;
+    groups[best.left].push(...groups[best.right]);
+    groups[best.right] = null;
+  }
+  // 簇编号按簇内最早窗口的时间顺序分配，保证同一输出里 speaker 序号稳定。
+  const ordered = groups
+    .filter(Boolean)
+    .map((members) => ({ first: Math.min(...members), members }))
+    .sort((left, right) => left.first - right.first);
+  const labels = new Array(vectors.length).fill(-1);
+  ordered.forEach((group, clusterIndex) => {
+    for (const member of group.members) labels[member] = clusterIndex;
+  });
+  return labels;
+}
+
+/**
+ * 窗口 + 簇标 → 分离轮次：时间上相邻且同簇的窗口合并成一个轮次，
+ * 结构与 pyannote 路径的 turns 完全一致（speaker-N），下游 applyDiarization
+ * 与声纹命名无需区分来源。
+ */
+export function windowsToTurns(windows, labels) {
+  const turns = [];
+  const pairs = (windows ?? [])
+    .map((window, index) => ({ window, label: labels?.[index] }))
+    .filter((item) => item.label >= 0 && item.window?.endMs > item.window?.startMs)
+    .sort((left, right) => left.window.startMs - right.window.startMs);
+  for (const { window, label } of pairs) {
+    const last = turns[turns.length - 1];
+    if (last && last.label === label && window.startMs <= last.endMs) {
+      last.endMs = Math.max(last.endMs, window.endMs);
+    } else {
+      turns.push({ label, startMs: window.startMs, endMs: window.endMs });
+    }
+  }
+  return turns.map(({ label, ...turn }) => ({ ...turn, speakerId: `speaker-${label + 1}` }));
 }
