@@ -21,6 +21,7 @@ import {
   Trash,
   Users,
   WarningCircle,
+  Waveform,
   X
 } from "@phosphor-icons/react";
 import type { ImportJob, Meeting, VoiceprintPerson } from "../types";
@@ -484,14 +485,36 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
     </div>
   );
 
+  const transcriptStatus = stage === "live"
+    ? { label: "实时接收", tone: "live" }
+    : importActive
+      ? { label: "后台处理中", tone: "active" }
+      : meeting.transcript.length
+        ? { label: "转写已完成", tone: "done" }
+        : { label: "等待内容", tone: "idle" };
+  const transcriptSubtitle = meeting.transcript.length
+    ? `${meeting.transcript.length} 段内容${speakers.length ? ` · ${speakers.length} 位发言人` : ""}`
+    : "语音与录音时间轴自动同步";
+
   return (
     <>
-      {stage === "live" ? (
-        <header className="live-transcript-header">
-          <h2 id="live-transcript-title">转写</h2>
-          {transcriptToolbar}
-        </header>
-      ) : transcriptToolbar}
+      <header className={`transcript-header ${stage === "live" ? "live-transcript-header transcript-header--live" : ""}`}>
+        <div className="transcript-header__identity">
+          <span className="transcript-header__symbol" aria-hidden="true">
+            <Waveform size={22} weight="duotone" />
+          </span>
+          <div className="transcript-header__copy">
+            <div className="transcript-header__title-row">
+              <h2 id={stage === "live" ? "live-transcript-title" : undefined}>{stage === "live" ? "实时转写" : "会议转写"}</h2>
+              <span className={`transcript-header__status is-${transcriptStatus.tone}`}>
+                <i aria-hidden="true" />{transcriptStatus.label}
+              </span>
+            </div>
+            <p>{transcriptSubtitle}</p>
+          </div>
+        </div>
+        {transcriptToolbar}
+      </header>
       {searchOpen && (
         <div className="transcript-search" id="transcript-search-bar" role="search">
           <MagnifyingGlass size={15} />
@@ -728,22 +751,30 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           const enteringIndex = enteringSequence.get(segment.id) ?? -1;
           const previous = visibleSegments[index - 1];
           const continuation = previous?.speakerId === segment.speakerId && segment.startMs - previous.endMs < 1500;
+          const segmentSpeakerColor = speakerColor(segment.speakerId);
           return (
             // is-playing：当前播放位置命中的段落整行高亮；data-segment-id 供回放跟随定位。
             <article
-              className={`transcript-item transcript-item--${segment.status} ${continuation ? "is-continuation" : ""} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${jumpHighlightId === segment.id ? "is-jump-highlight" : ""} ${searchFocusId === segment.id ? "is-search-hit" : ""} ${enteringIndex >= 0 ? "content-motion-enter" : ""}`}
+              className={`transcript-item transcript-item--${segment.status} transcript-item--speaker-${segmentSpeakerColor} ${continuation ? "is-continuation" : ""} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${jumpHighlightId === segment.id ? "is-jump-highlight" : ""} ${searchFocusId === segment.id ? "is-search-hit" : ""} ${enteringIndex >= 0 ? "content-motion-enter" : ""}`}
               data-segment-id={segment.id}
               key={segment.id}
               style={enteringIndex >= 0 ? { animationDelay: `${Math.min(enteringIndex, 2) * 40}ms` } : undefined}
             >
             <div className="transcript-item__meta">
-              <button className={`speaker-name speaker-name--${speakerColor(segment.speakerId)}`} onClick={() => openSpeakerEditor(segment.speakerId)}>
-                {segment.speakerName}
+              <button className={`speaker-name speaker-name--${segmentSpeakerColor}`} onClick={() => openSpeakerEditor(segment.speakerId)}>
+                <span className="transcript-speaker-avatar" aria-hidden="true">{segment.speakerName.trim().charAt(0) || "人"}</span>
+                <span>{segment.speakerName}</span>
                 {voiceprints.some((person) => person.name === segment.speakerName) && (
                   <FingerprintSimple size={11} weight="fill" aria-label="已保存在本地声纹簿" />
                 )}
               </button>
               <button className="transcript-time" aria-label={`定位到 ${formatTranscriptTime(segment.startMs)}`} onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
+              {playingSegment?.id === segment.id && (
+                <span className="transcript-playing" aria-label="正在播放当前段落">
+                  <span className="transcript-playing__bars" aria-hidden="true"><i /><i /><i /></span>
+                  正在播放
+                </span>
+              )}
               {isLowConfidence(segment.confidence) && (
                 <button
                   type="button"
@@ -825,10 +856,14 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
             </article>
           );
         }) : (
-          <div className="panel-empty">
-            <MagicWand size={24} weight="duotone" />
+          <div className="panel-empty transcript-empty">
+            <div className="transcript-empty__visual" aria-hidden="true">
+              <Waveform size={28} weight="duotone" />
+              <span className="transcript-empty__signal"><i /><i /><i /><i /></span>
+            </div>
             {meeting.transcript.length > 0 && (speakerFilter || normalizedQuery || onlyLowConfidence) ? (
               <>
+                <strong>没有匹配的内容</strong>
                 <p>没有符合当前查找或筛选条件的段落。</p>
                 <button
                   className="button button--secondary button--small"
@@ -837,6 +872,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
               </>
             ) : (
               <>
+                <strong>{stage === "live" || importActive ? "正在聆听，文字即将出现" : "这场会议还没有逐字稿"}</strong>
                 <p>{importJob
                   ? importTranscriptStatus(importJob)
                   : stage === "review"
@@ -937,7 +973,7 @@ function TranscriptOverview({ summary, busy, onRefresh }: {
   return (
     <section className={`transcript-overview ${summary.stale ? "is-stale" : ""}`} aria-label="纪要概览">
       <header>
-        <h2>纪要概览</h2>
+        <h2><MagicWand size={16} weight="duotone" aria-hidden="true" />纪要概览</h2>
         <div className="transcript-overview__actions">
           {onRefresh && <button className="icon-button" disabled={busy} title="更新纪要" aria-label="更新纪要概览" onClick={onRefresh}>
             <ArrowClockwise size={17} className={busy ? "spin" : ""} />
@@ -974,7 +1010,12 @@ function TranscriptOverview({ summary, busy, onRefresh }: {
 function ProvisionalBadge({ visible }: { visible: boolean }) {
   const { mounted, closing } = useExitPresence(visible, 140);
   if (!mounted) return null;
-  return <span className={`provisional content-status-enter${closing ? " is-closing" : ""}`}>临时转写中…</span>;
+  return (
+    <span className={`provisional content-status-enter${closing ? " is-closing" : ""}`}>
+      临时转写中
+      <span className="provisional__dots" aria-hidden="true"><i /><i /><i /></span>
+    </span>
+  );
 }
 
 /** 同一自然段续写时只让新增尾文出现；识别修正只给当前文字一次轻强调。 */
