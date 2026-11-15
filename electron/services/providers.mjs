@@ -224,7 +224,11 @@ async function requestAnthropic(profile, apiKey, prompt, maxTokens = 8_192, sign
     }),
     signal: requestSignal(signal, profile.options?.timeoutMs ?? (extraBody.stream ? 300_000 : 60_000))
   });
-  if (!response.ok) throw new Error(`${label}：${response.status} ${await response.text()}`);
+  if (!response.ok) throw new Error(`${label}：${friendlyHttpError(
+    response.status,
+    await response.text(),
+    response.headers?.get?.("x-request-id") ?? response.headers?.get?.("request-id")
+  )}`);
   return extraBody.stream ? response : response.json();
 }
 
@@ -251,7 +255,11 @@ async function requestGemini(profile, apiKey, prompt, maxTokens = 8_192, signal,
     }),
     signal: requestSignal(signal, profile.options?.timeoutMs ?? (extraBody.stream ? 300_000 : 60_000))
   });
-  if (!response.ok) throw new Error(`${label}：${response.status} ${await response.text()}`);
+  if (!response.ok) throw new Error(`${label}：${friendlyHttpError(
+    response.status,
+    await response.text(),
+    response.headers?.get?.("x-request-id") ?? response.headers?.get?.("request-id")
+  )}`);
   return extraBody.stream ? response : response.json();
 }
 
@@ -465,11 +473,62 @@ export function buildSummaryPrompt(input, final = false) {
   ].join("\n\n");
 }
 
+/** 网关抖动（上游 5xx、限流）值得再试一次；鉴权/参数错误不重试，避免把错误放大成等待。 */
+const TRANSIENT_SUMMARY_STATUSES = new Set([429, 500, 502, 503, 504]);
+
+/**
+ * 纪要请求超时（毫秒）。
+ * 历史档案与服务商预设普遍写 60_000，但真实会议的完整 JSON 输出常需 1–3 分钟；
+ * 终稿路径早就抬到 180 秒，滚动/「更新纪要」此前仍用 60 秒，导致同一模型在
+ * 会后手动更新时必然超时降级。两条路径统一 180 秒下限，显式配置更长的档案仍生效。
+ * 流式响应会持续吐 token，不会被代理按「空闲 60 秒」切断，因此这个上限是兜底。
+ */
+export function summaryRequestTimeoutMs(profile) {
+  const configured = Math.max(0, Number(profile?.options?.timeoutMs) || 0);
+  return Math.max(configured, 180_000);
+}
+
+/**
+ * 读取一次纪要响应：SSE 流拼接 choices[0].delta.content，网关忽略 stream 时
+ * 按整包 JSON 取 message.content。两种形态都交给同一套 JSON 校验。
+ */
+async function readSummaryContent(response, useStream) {
+  const contentType = response.headers?.get?.("content-type") ?? "";
+  if (!useStream || !contentType.includes("text/event-stream")) {
+    return extractMessageContent(await response.json());
+  }
+  let content = "";
+  for await (const data of sseDataLines(response)) {
+    if (!data || data === "[DONE]") continue;
+    let chunk;
+    try { chunk = JSON.parse(data); } catch { continue; }
+    const delta = chunk?.choices?.[0]?.delta?.content;
+    if (typeof delta === "string") content += delta;
+  }
+  return content;
+}
+
+/** 重试前的短等待；用户点「取消生成」时立即结束，不再多等一轮。 */
+async function pauseBeforeRetry(ms, signal) {
+  if (signal?.aborted) throw signal.reason ?? new DOMException("已取消", "AbortError");
+  const timer = AbortSignal.timeout(ms);
+  await new Promise((resolve) => {
+    const done = () => resolve();
+    timer.addEventListener("abort", done, { once: true });
+    signal?.addEventListener("abort", done, { once: true });
+  });
+  if (signal?.aborted) throw signal.reason ?? new DOMException("已取消", "AbortError");
+}
+
 /**
  * 调用在线模型生成会议纪要（summary:generate 与导入流水线调用）。副作用：网络请求。
- * apiFlavor 为 anthropic / gemini 时走原生协议，其余走 OpenAI 兼容 chat/completions；
- * OpenAI 路径最多尝试 2 次：第一次带 response_format=json_object，
- * 部分兼容网关不支持该字段，第二次去掉后重试（兼容性兜底）。
+ * apiFlavor 为 anthropic / gemini 时走原生协议，其余走 OpenAI 兼容 chat/completions。
+ *
+ * OpenAI 兼容路径默认用 SSE 流式：不少企业网关（本次实测的内网 aistore 即如此）
+ * 对「整包等响应」有 60 秒硬上限，长会议必然在 60 秒被切成 504；流式响应会持续
+ * 吐 token，连接不会被代理按空闲切断（同一提示词实测非流式 504、流式 200/91 秒）。
+ * 网关不支持 stream / response_format / max_tokens 时按报错信息逐个去掉并重试；
+ * 5xx/429/连接抖动原样重试一次；不认 SSE 但返回整包 JSON 的网关也能兜住。
  * @param {object} profile LLM 模型档案
  * @param {string} apiKey 经 secrets.mjs 解出的密钥
  * @param {object} input 会议上下文
@@ -486,28 +545,31 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
     return validateOnlineSummary(JSON.parse(extractJson(content)));
   }
   const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
-  // 终稿总结要等模型输出完整 JSON（非流式），长会议 60 秒不够：比照转录 330 秒
-  // 下限的做法，final 请求运行时抬升旧档案存的较短超时。
-  const timeoutMs = final
-    ? Math.max(profile.options?.timeoutMs ?? 0, 180_000)
-    : (profile.options?.timeoutMs ?? 60_000);
+  const timeoutMs = summaryRequestTimeoutMs(profile);
+  let useStream = true;
+  let useResponseFormat = true;
+  let transientRetries = 0;
   let lastError;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const body = {
         model: profile.model,
         temperature: 0.2,
+        // 不给输出设上限：推理型模型会把思维链一起计入 max_tokens，截断后
+        // 拿到的就是半截 JSON。流式本身已解决 60 秒网关上限，无需再限长。
+        ...(useStream ? { stream: true } : {}),
         messages: [
           { role: "system", content: "只输出可解析的 JSON。" },
           { role: "user", content: prompt }
         ]
       };
-      // 第一次请求带 response_format；若网关不认识该字段报错，下一轮去掉再试。
-      if (attempt === 0) body.response_format = { type: "json_object" };
+      if (useResponseFormat) body.response_format = { type: "json_object" };
       const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          // 部分网关依据 Accept 决定是否走 SSE。
+          ...(useStream ? { Accept: "text/event-stream" } : {}),
           ...authorizationHeaders(profile, apiKey),
           ...(profile.options?.headers ?? {})
         },
@@ -515,21 +577,57 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
       });
       if (!response.ok) {
-        const error = new Error(`总结模型请求失败：${response.status} ${await response.text()}`);
-        // 只有“可能是 response_format 不被网关支持”的错误（400/404/422 或报文点名该字段）
-        // 才值得去掉 response_format 重试；鉴权/限流等不可恢复错误直接抛出，不做无谓重试。
-        error.retriableWithoutResponseFormat = [400, 404, 422].includes(response.status)
-          || /response_format/i.test(error.message);
+        const bodyText = await response.text();
+        // 网关错误页常是整页 HTML（甚至内联 base64 图片），直接拼进错误会把几万字符
+        // 塞进 Toast。统一走 friendlyHttpError：只留状态码、中文归因与可读摘要。
+        const error = new Error(`总结模型请求失败：${friendlyHttpError(
+          response.status,
+          bodyText,
+          response.headers?.get?.("x-request-id") ?? response.headers?.get?.("request-id")
+        )}`);
+        const unsupported = [400, 404, 422].includes(response.status)
+          || /response_format|stream/i.test(bodyText);
+        if (unsupported && (useStream || useResponseFormat)) {
+          // 报错点名哪个参数就只去掉哪个；泛化的 400 一次退到最小请求体。
+          if (/response_format/i.test(bodyText)) useResponseFormat = false;
+          if (/stream/i.test(bodyText)) useStream = false;
+          if (!/response_format|stream/i.test(bodyText)) {
+            useStream = false;
+            useResponseFormat = false;
+          }
+          error.retry = "immediate";
+        } else if (TRANSIENT_SUMMARY_STATUSES.has(response.status) && transientRetries < 1) {
+          transientRetries += 1;
+          error.retry = "pause";
+        }
         throw error;
       }
-      const payload = await response.json();
-      const content = extractMessageContent(payload);
-      if (!content) throw new Error("总结模型没有返回内容。");
+      const content = await readSummaryContent(response, useStream);
+      if (!content) {
+        // 声称支持 SSE 却一个 token 都不给：退回最小请求体再试一次。
+        useStream = false;
+        useResponseFormat = false;
+        const empty = new Error("总结模型没有返回内容。");
+        empty.retry = "immediate";
+        throw empty;
+      }
       return validateOnlineSummary(JSON.parse(extractJson(content)));
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (!error.retriableWithoutResponseFormat) throw error;
+      // AbortSignal.timeout 抛的是 TimeoutError：已经等满上限，别再重试一次，
+      // 但要把英文 DOMException 换成用户能看懂、能操作的提示。
+      if (error?.name === "TimeoutError") {
+        throw new Error(`总结模型请求超时（${Math.round(timeoutMs / 1000)} 秒）：请稍后重试，或在「设置 → AI 总结」换用响应更快的模型。`);
+      }
+      if (!error.retry && error instanceof TypeError
+        && /fetch failed|network|ECONN|socket|timed out/i.test(String(error.message))
+        && transientRetries < 1) {
+        transientRetries += 1;
+        error.retry = "pause";
+      }
+      if (!error.retry || attempt === 2) throw error;
       lastError = error;
+      if (error.retry === "pause") await pauseBeforeRetry(900, signal);
     }
   }
   throw lastError;
@@ -574,8 +672,9 @@ export async function chatWithMeetingContext(profile, apiKey, { question, histor
     const next = accumulator.push(delta);
     if (next.content || next.reasoning) onDelta(next);
   };
-  // 流式问答给长思考模型更宽的窗口（默认 5 分钟），非流式路径维持 120 秒。
-  const streamTimeoutMs = profile.options?.timeoutMs ?? 300_000;
+  // 流式问答给长思考模型更宽的窗口（5 分钟下限）。旧档案普遍存 60_000，
+  // 那会把「思考 1 分钟以上」的模型整条流掐断；显式配置更长的档案仍生效。
+  const streamTimeoutMs = Math.max(Number(profile.options?.timeoutMs) || 0, 300_000);
   const finishOrThrow = () => {
     const result = accumulator.finish();
     if (!result.content) throw new Error("问答模型没有返回内容。");
@@ -650,7 +749,11 @@ export async function chatWithMeetingContext(profile, apiKey, { question, histor
     signal: requestSignal(signal, streamTimeoutMs)
   });
   if (!response.ok) {
-    throw new Error(`问答模型请求失败：${response.status} ${await response.text()}`);
+    throw new Error(`问答模型请求失败：${friendlyHttpError(
+      response.status,
+      await response.text(),
+      response.headers.get("x-request-id") ?? response.headers.get("request-id")
+    )}`);
   }
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
@@ -699,45 +802,69 @@ export async function generateVisualSummaryWithOpenAICompatible(profile, apiKey,
     content = extractMessageContent(payload);
   } else {
     const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
+    const timeoutMs = summaryRequestTimeoutMs(profile);
+    // 与普通纪要共用流式策略：企业网关对整包响应常有 60 秒硬上限，视觉纪要
+    // 也必须用 SSE 才能跑完。网关不支持 stream 时按报错回退到最小请求体。
+    let useStream = true;
+    let useResponseFormat = true;
+    let transientRetries = 0;
     let lastError;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const body = {
           model: profile.model,
           temperature: 0.15,
+          ...(useStream ? { stream: true } : {}),
           messages: [
             { role: "system", content: "只输出符合要求的视觉纪要 JSON。" },
             { role: "user", content: prompt }
           ]
         };
-        if (attempt === 0) body.response_format = { type: "json_object" };
+        if (useResponseFormat) body.response_format = { type: "json_object" };
         const response = await fetch(endpoint, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            ...(useStream ? { Accept: "text/event-stream" } : {}),
             ...authorizationHeaders(profile, apiKey),
             ...(profile.options?.headers ?? {})
           },
           body: JSON.stringify(body),
-          // 与终稿总结同节奏：等完整 JSON 输出，运行时抬升旧档案存的较短超时。
-          signal: requestSignal(signal, Math.max(profile.options?.timeoutMs ?? 0, 180_000))
+          signal: requestSignal(signal, timeoutMs)
         });
         if (!response.ok) {
           const bodyText = await response.text();
           const error = new Error(`视觉纪要模型请求失败：${friendlyHttpError(
             response.status,
             bodyText,
-            response.headers.get("x-request-id") ?? response.headers.get("request-id")
+            response.headers?.get?.("x-request-id") ?? response.headers?.get?.("request-id")
           )}`);
-          error.retriableWithoutResponseFormat = [400, 404, 422].includes(response.status)
-            || /response_format/i.test(bodyText);
+          const unsupported = [400, 404, 422].includes(response.status)
+            || /response_format|stream/i.test(bodyText);
+          if (unsupported && (useStream || useResponseFormat)) {
+            if (/response_format/i.test(bodyText)) useResponseFormat = false;
+            if (/stream/i.test(bodyText) || !/response_format|stream/i.test(bodyText)) {
+              useStream = false;
+              useResponseFormat = false;
+            }
+            error.retry = "immediate";
+          } else if (TRANSIENT_SUMMARY_STATUSES.has(response.status) && transientRetries < 1) {
+            transientRetries += 1;
+            error.retry = "pause";
+          }
           throw error;
         }
-        content = extractMessageContent(await response.json());
-        break;
+        content = await readSummaryContent(response, useStream);
+        if (content) break;
+        useStream = false;
+        useResponseFormat = false;
+        const empty = new Error("视觉纪要模型没有返回内容。");
+        empty.retry = "immediate";
+        throw empty;
       } catch (error) {
-        if (signal?.aborted || !error.retriableWithoutResponseFormat) throw error;
+        if (signal?.aborted || !error.retry || attempt === 2) throw error;
         lastError = error;
+        if (error.retry === "pause") await pauseBeforeRetry(900, signal);
       }
     }
     if (!content && lastError) throw lastError;
@@ -1371,6 +1498,27 @@ async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, lang
  * LLM 走一次最小请求确认连通，远程 stt 上传内置 WAV 确认真实转录端点。
  * @returns {Promise<{ok: true, message: string}>} 成功时带用户可读的提示
  */
+/**
+ * 网关 502/504 常返回整页 HTML（含内联 base64 图片、CSS、脚本），原样拼进错误消息会
+ * 让 Toast 变成几万字符的乱码。这里只保留 <title> 与去标签后的可见文字，并丢掉长
+ * base64 串；普通纯文本/JSON 响应走原路径。
+ */
+function readableErrorBody(bodyText) {
+  const raw = String(bodyText ?? "").trim();
+  if (!/^\s*(<!doctype|<html|<head|<body|<center|<h1)/i.test(raw)
+    && !/<\/(html|body|head|title)>/i.test(raw)) return raw;
+  const title = (raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "").trim();
+  let visible = raw
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&[a-z#0-9]+;/gi, " ")
+    .replace(/[A-Za-z0-9+/]{80,}={0,2}/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (title && visible.startsWith(title)) visible = visible.slice(title.length).trim();
+  return [title, visible].filter(Boolean).join(" · ").slice(0, 160);
+}
+
 /** 把 HTTP 错误响应翻译成可操作的中文提示：按状态码区分密钥/地址/限流/服务端四类常见原因，
  *  并尽量带上网关返回的 error.message 与 request id，方便用户拿着凭据去服务商侧排查。 */
 export function friendlyHttpError(status, bodyText, requestId) {
@@ -1394,7 +1542,7 @@ export function friendlyHttpError(status, bodyText, requestId) {
       const bodyRequestId = parsed?.request_id || errorBody?.request_id;
       if (bodyRequestId) extractedRequestId = String(bodyRequestId);
     } catch {
-      detail = bodyText.trim();
+      detail = readableErrorBody(bodyText);
     }
   }
   if (detail.length > 240) detail = `${detail.slice(0, 240)}…`;
