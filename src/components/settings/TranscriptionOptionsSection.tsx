@@ -14,20 +14,33 @@ export function TranscriptionOptionsSection({profile, disabled, onChange, onVali
   const caps = transcriptionParamCapabilities(profile.transport, profile.options);
   const [draft, setDraft] = useState(profile.options);
   const [error, setError] = useState('');
+  // 套用预设的即时反馈（本地已由「已生效」页级提示覆盖，这里补齐在线表单）。
+  const [applied, setApplied] = useState('');
   useEffect(() => { setDraft(profile.options); setError(''); onValidityChange(false); }, [profile.options, onValidityChange]);
-  const commit = (options: ModelProfile['options']) => { setError(''); setDraft(options); onChange(options); };
+  // note 只由预设下拉传入：其他字段编辑会清掉上一条预设反馈，避免陈旧。
+  const commit = (options: ModelProfile['options'], note = '') => { setError(''); setApplied(note); setDraft(options); onChange(options); };
   const preset = identifyTranscriptionPreset(draft, profile.transport);
+  const speedUnavailable = !caps.includes('beamSize');
+  const presetHint = preset === 'custom'
+    ? '当前为自定义参数；选择任一预设会覆盖手动调整。'
+    : `${transcriptionPresets.find(p => p.id === preset)?.description}${speedUnavailable ? '。当前引擎不开放束宽，速度优先不可用' : ''}`;
   if (profile.transport === 'parakeet-tdt') return <section className="transcription-options"><h3>转写预设</h3><p>识别语言由所选 Parakeet 模型固定。</p></section>;
   if (!caps.length) return null;
   const languages = profile.transport === 'sense-voice' ? ['auto','zh','en','ja','ko','yue'] : ['auto','zh','en'];
   const names: Record<string,string> = {auto:'自动识别',zh:'中文（简体）',en:'English',ja:'日本語',ko:'한국어',yue:'粤语'};
   return <section className="transcription-options" aria-label="转写预设">
     <h3>转写预设</h3>
-    <label className="transcription-option"><span>预设方案</span><select aria-label="转写预设方案" value={preset} disabled={disabled} onChange={e => commit(applyTranscriptionPreset(draft,e.target.value as TranscriptionPreset,profile.transport))}>
-      {transcriptionPresets.map(p => <option key={p.id} value={p.id} disabled={(p.id === 'speed' && !caps.includes('beamSize')) || (p.id === 'accuracy' && !caps.includes('temperature') && !caps.includes('beamSize'))}>{p.name}</option>)}
-      <option value="custom" disabled>自定义</option>
+    <label className="transcription-option"><span>预设方案</span><select aria-label="转写预设方案" value={preset} disabled={disabled} onChange={e => {
+      const id = e.target.value as TranscriptionPreset;
+      const next = applyTranscriptionPreset(draft, id, profile.transport);
+      const parts = [id !== 'default' && caps.includes('beamSize') && next.beamSize !== undefined ? `束宽 ${next.beamSize}` : '', id !== 'default' && caps.includes('temperature') && next.temperature !== undefined ? `温度 ${next.temperature}` : ''].filter(Boolean);
+      commit(next, `已套用「${transcriptionPresets.find(p => p.id === id)?.name}」${parts.length ? `（${parts.join('，')}）` : '，已清除手动解码参数'}`);
+    }}>
+      {transcriptionPresets.map(p => <option key={p.id} value={p.id} disabled={(p.id === 'speed' && speedUnavailable) || (p.id === 'accuracy' && !caps.includes('temperature') && !caps.includes('beamSize'))} title={p.id === 'speed' && speedUnavailable ? '当前引擎不开放束宽参数，速度优先仅限支持的本地引擎' : undefined}>{p.name}</option>)}
+      <option value="custom" disabled title="手动修改任意参数后自动进入自定义">自定义</option>
     </select></label>
-    <small>{transcriptionPresets.find(p => p.id === preset)?.description ?? '按当前模型能力调整。'}</small>
+    <small>{presetHint}</small>
+    {applied && <small role="status">{applied}</small>}
     <label className="transcription-option"><span>转写语言</span><select aria-label="模型转写语言" value={draft.transcriptionLanguage ?? ''} disabled={disabled} onChange={e => commit({...draft,transcriptionLanguage: (e.target.value || undefined) as ModelProfile['options']['transcriptionLanguage']})}>
       <option value="">跟随全局设置</option>{languages.map(language => <option key={language} value={language}>{names[language]}</option>)}
     </select></label>

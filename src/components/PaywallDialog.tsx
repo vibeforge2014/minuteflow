@@ -258,7 +258,7 @@ export function PaywallDialog({ open, reason, status, onStatusChange, onClose }:
           <span>{success === "activated" ? "已解锁，正在进入…" : "授权已恢复，正在进入…"}</span>
         </p>}
         {error && <p className="paywall-error" role="alert">{error}</p>}
-        {status && !status.verificationConfigured && !error && <p className="paywall-config-note">购买入口已就绪；激活验证服务正在接入，稍后重启应用即可使用。</p>}
+        {status && !status.verificationConfigured && !error && <p className="paywall-config-note">当前环境未配置激活验证服务，激活码激活暂不可用；购买入口仍可打开。</p>}
         {status?.insecureStorage && !error && <p className="paywall-config-note">当前为未签名版本，密钥将以未加密方式保存在本地，建议安装官方签名版本。</p>}
         <div className="paywall-actions">
           <button className="button button--primary paywall-buy" onClick={() => void checkout()} disabled={busy !== null || Boolean(success)}>
