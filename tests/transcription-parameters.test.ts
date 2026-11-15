@@ -23,7 +23,9 @@ describe('actual transcription parameter dispatch',()=>{
     await writeFile(path.join(dir,'whisper.py'),`import json\nclass Model:\n def transcribe(self,audio,**options): return {'text':json.dumps(options),'segments':[]}\ndef load_model(path): return Model()\n`);
     await writeFile(path.join(dir,'faster_whisper.py'),`import json\nfrom types import SimpleNamespace\nclass WhisperModel:\n def __init__(self,*args,**kwargs): pass\n def transcribe(self,audio,**options): return [SimpleNamespace(start=0,end=1,text=json.dumps(options))],SimpleNamespace(language='en')\n`);
     await writeFile(path.join(dir,'mlx_whisper.py'),`import json\ndef transcribe(audio,**options): return {'text':json.dumps(options),'segments':[]}\n`);
-    for(const [transport,run] of [['whisper-python',transcribeWithPythonWhisper],['faster-whisper',transcribeWithFasterWhisper],['mlx-whisper',transcribeWithMlxWhisper]] as const){
+    // MLX-Whisper 只在 Apple Silicon macOS 上可用（providers.mjs 平台守卫），其余平台跳过该分支。
+    const engines=[['whisper-python',transcribeWithPythonWhisper],['faster-whisper',transcribeWithFasterWhisper],...(process.platform==='darwin'?[['mlx-whisper',transcribeWithMlxWhisper]]:[])] as const;
+    for(const [transport,run] of engines){
       const result=await run({transport,options:{modelPath:'/test.pt',pythonExecutablePath:'python3',temperature:0,temperatureStep:.2,beamSize:5,noSpeechThreshold:.6,logprobThreshold:-1,initialPrompt:'项目会议'}},Buffer.alloc(20),'test.wav','en');
       const options=JSON.parse(result.text);expect(options.initial_prompt).toBe('项目会议');
       expect(options.temperature).toEqual(transport==='whisper-python'?[0,.2,.4,.6,.8,1]:0);
