@@ -1,8 +1,8 @@
-version: 0.1.45
+version: 0.1.46
 files:
-  - url: https://zensoft.top/minuteflow/dl/v0.1.45/MinuteFlow-0.1.45-macOS-arm64.zip
-    sha512: j3C/qDTYtmfsyEtGkjteT77cGX4PSMvTomOwowbPJ5Ma6wGxI8ynMW5hZNvEnRUPEhhFk8/Ma2YNu7ZELGMaAA==
-    size: 192447987
-path: https://zensoft.top/minuteflow/dl/v0.1.45/MinuteFlow-0.1.45-macOS-arm64.zip
-sha512: j3C/qDTYtmfsyEtGkjteT77cGX4PSMvTomOwowbPJ5Ma6wGxI8ynMW5hZNvEnRUPEhhFk8/Ma2YNu7ZELGMaAA==
-releaseDate: '2026-11-15T16:20:17.397Z'
+  - url: https://zensoft.top/minuteflow/dl/v0.1.46/MinuteFlow-0.1.46-macOS-arm64.zip
+    sha512: Z+/4nHXOS40RnYqg8yWEdd7w2owU/CrtFmZZJC1MUG7P8zjvsdv5PyiCxSilcUK4bGUwVjMlypxH5OVTmNA9tQ==
+    size: 184330210
+path: https://zensoft.top/minuteflow/dl/v0.1.46/MinuteFlow-0.1.46-macOS-arm64.zip
+sha512: Z+/4nHXOS40RnYqg8yWEdd7w2owU/CrtFmZZJC1MUG7P8zjvsdv5PyiCxSilcUK4bGUwVjMlypxH5OVTmNA9tQ==
+releaseDate: '2026-11-22T14:15:05.030Z'
