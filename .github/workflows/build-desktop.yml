@@ -57,7 +57,7 @@ jobs:
       # 正式发布（MINUTEFLOW_RELEASE_BUILD=1）时，把签名证书与公证密钥注入 runner；
       # 非发布构建跳过，绝不把 ad-hoc 构建误当成可分发产物。
       - name: Import Developer ID certificate
-        if: ${{ env.MINUTEFLOW_RELEASE_BUILD == '1' }}
+        if: ${{ env.MINUTEFLOW_RELEASE_BUILD == '1' && runner.os == 'macOS' }}
         env:
           CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
           CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
@@ -74,7 +74,7 @@ jobs:
           security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s -k "$CERT_PASSWORD" "$KEYCHAIN"
           echo "APPLE_IDENTITY=Developer ID Application: Zhen Qian (LPW4Z3BN69)" >> "$GITHUB_ENV"
       - name: Materialize App Store Connect API key
-        if: ${{ env.MINUTEFLOW_RELEASE_BUILD == '1' }}
+        if: ${{ env.MINUTEFLOW_RELEASE_BUILD == '1' && runner.os == 'macOS' }}
         env:
           API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
