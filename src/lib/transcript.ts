@@ -9,6 +9,19 @@ import { simplifyTranscriptSegment } from "./chinese";
 
 const normalizedText = (value: string) => value.toLocaleLowerCase().replace(/[\s，。！？、,.!?;；:：'"“”‘’]/g, "");
 
+/**
+ * 页面展示用的参与者名单：导入会议在说话人识别完成前只有「待识别」占位，
+ * 此时优先显示逐字稿里已经识别出的发言人；用户手写的真实名单始终优先。
+ */
+export function displayParticipants(participants: string[], transcript: TranscriptSegment[]) {
+  const manual = participants.filter(Boolean);
+  if (manual.length && !manual.every((name) => name === "待识别")) return manual;
+  const identified = [...new Set(transcript
+    .map((segment) => segment.speakerName)
+    .filter((name): name is string => Boolean(name?.trim())))];
+  return identified.length ? identified : manual;
+}
+
 const TERMINAL_PUNCTUATION = /[。！？!?…]/g;
 const HARD_TERMINAL = /[！？!?]\s*$/;
 const COMPLETE_SENTENCE = /[。！？!?…]\s*$/;

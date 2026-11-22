@@ -3,6 +3,7 @@ import type { Meeting, VisualSummary, VisualSummarySection } from "../types";
 
 interface VisualSummaryViewProps {
   meeting: Meeting;
+  participants?: string[];
   visual?: VisualSummary;
   capable: boolean;
   busy: boolean;
@@ -10,7 +11,9 @@ interface VisualSummaryViewProps {
 }
 
 /** 受限 schema 的原生视觉纪要渲染器；不使用 dangerouslySetInnerHTML。 */
-export function VisualSummaryView({ meeting, visual, capable, busy, onRetry }: VisualSummaryViewProps) {
+export function VisualSummaryView({ meeting, participants, visual, capable, busy, onRetry }: VisualSummaryViewProps) {
+  const visibleParticipants = participants ?? meeting.participants;
+
   if (!visual) {
     return (
       <section className="visual-summary-empty">
@@ -45,7 +48,7 @@ export function VisualSummaryView({ meeting, visual, capable, busy, onRetry }: V
           <p>{visual.subtitle}</p>
           <div>
             <span>{new Date(meeting.scheduledAt).toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" })}</span>
-            <span>{meeting.participants.length ? meeting.participants.join("、") : "参与者待补充"}</span>
+            <span>{visibleParticipants.length ? visibleParticipants.join("、") : "参与者待补充"}</span>
             <span><CheckCircle size={14} weight="fill" />基于已确认纪要</span>
           </div>
         </header>

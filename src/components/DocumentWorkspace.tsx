@@ -37,6 +37,7 @@ import TurndownService from "turndown";
 import type { ImportJob, Meeting, ModelProfile, SummaryTemplateId } from "../types";
 import { api } from "../lib/api";
 import { lockSummaryField, removeSummaryListItem, toggleSummaryLock } from "../lib/summary";
+import { displayParticipants } from "../lib/transcript";
 import { formatDuration, formatInterval } from "../lib/format";
 import { markdownToHtml } from "../lib/markdown";
 import { useMeetingStore } from "../store/meetingStore";
@@ -45,7 +46,7 @@ import { VisualSummaryView } from "./VisualSummaryView";
 import { TranscriptView, type TranscriptJump } from "./TranscriptPanel";
 import { MinutesOverview, MinutesSections, MinutesSource, type MinutesSourceJump } from "./MinutesSections";
 import { ImportProcessingMeta } from "./ImportProcessingMeta";
-import { canRetryTranscriptionGaps, isActiveImportJob, isRetryableImportJob } from "../lib/import-status";
+import { canRetryTranscriptionGaps, describeReviewProcessing, isActiveImportJob, isRetryableImportJob } from "../lib/import-status";
 import type { ContentChangeKind } from "../lib/content-motion";
 import type { LiveTranscriptionFailure } from "../services/recording";
 import { useEnteringItemIds, useSummaryContentMotion } from "../hooks/useContentMotion";
@@ -202,6 +203,11 @@ export function DocumentWorkspace({
   }, [meeting.id, stage]);
   const showViewSwitch = stage === "review" && !splitWorkspace;
   const showTranscript = splitWorkspace || (showViewSwitch && workspaceView === "transcript");
+  const reviewProcessing = describeReviewProcessing({
+    meetingEnded: meeting.status === "complete",
+    job: importJob
+  });
+  const visibleParticipants = displayParticipants(meeting.participants, meeting.transcript);
   /** 标签页遵循桌面键盘惯例：左右方向键切换，Home/End 到首尾。 */
   const handleWorkspaceTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
@@ -402,7 +408,7 @@ export function DocumentWorkspace({
           <input
             className="participants-editor"
             aria-label="参与者"
-            value={meeting.participants.join("、")}
+            value={visibleParticipants.join("、")}
             onChange={(event) => onChange({
               ...meeting,
               participants: event.target.value.split(/[、,，]/).map((item) => item.trim()).filter(Boolean)
@@ -453,14 +459,8 @@ export function DocumentWorkspace({
           <section className={`review-hero ${recentlyFinalized || processingStatus ? "is-fresh" : ""} ${hasOrdinarySummary && !processingStatus && !summaryBusy ? "review-hero--compact" : ""}`}>
             <div className="review-hero__main">
               <div className="review-hero__head">
-                {processingStatus && (
-                  <span className="eyebrow">{importJob?.status === "cancelled"
-                    ? "处理已暂停"
-                    : importJob?.status === "failed"
-                      ? "处理失败"
-                      : importJob?.status === "diarizing"
-                        ? "识别发言人"
-                        : "录音处理中"}</span>
+                {reviewProcessing && (
+                  <span className="eyebrow">{reviewProcessing.eyebrow}</span>
                 )}
                 {!processingStatus && (
                   // 安静的文本切换，不再放第二个分段控件在工作区标签旁边。
@@ -478,12 +478,8 @@ export function DocumentWorkspace({
                 )}
               </div>
               {importJob && processingStatus && <ImportProcessingMeta job={importJob} />}
-              {(!hasOrdinarySummary || processingStatus || summaryBusy) && <p>{processingStatus
-                ? importJob?.status === "failed" || importJob?.status === "cancelled"
-                  ? "已保存完成的内容；重试会从当前阶段继续。"
-                  : importJob?.status === "diarizing"
-                    ? "转写已就绪，正在本机识别发言人。"
-                    : "处理在后台继续，可随时暂停。"
+              {(!hasOrdinarySummary || processingStatus || summaryBusy) && <p>{reviewProcessing
+                ? reviewProcessing.detail
                 : summaryBusy ? (
                     // 停止录音后滚动纪要可能仍在请求中：这一行是生成期的唯一状态指示。
                     <span className="review-hero__generating">
@@ -578,6 +574,7 @@ export function DocumentWorkspace({
           <div className="content-view-enter">
             <VisualSummaryView
               meeting={meeting}
+              participants={visibleParticipants}
               visual={meeting.summary.visualSummary}
               capable={Boolean(visualCapable)}
               busy={summaryBusy}

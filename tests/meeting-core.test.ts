@@ -62,7 +62,7 @@ import {
   updateManifestUrls,
   validateUpdateManifest
 } from "../electron/services/updates.mjs";
-import { groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments, splitTimedTranscriptText } from "../src/lib/transcript";
+import { displayParticipants, groupTranscriptSegments, mergeSpeakerLabels, mergeTranscriptSegments, splitTimedTranscriptText } from "../src/lib/transcript";
 import { groupLibraryMeetings, splitHighlight } from "../src/lib/library";
 import { simplifyChinese, simplifySummary } from "../src/lib/chinese";
 import {
@@ -77,11 +77,12 @@ import {
 import { derivePermissionSetupPhase, finishPermissionSetup, isMicrophonePermissionError, isScreenPermissionError, shouldOpenPermissionSetup, shouldRequestMicrophone } from "../src/lib/permissions";
 import { lockSummaryField, mergeSummaryRevision, removeSummaryListItem, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { buildBasicKeyPoints, KEY_POINT_MAX_CHARS } from "../electron/services/chinese.mjs";
-import { cancelImport, enqueueRetranscription, normalizeImportChunkSegments, removeImportJob, retryImport, wakeImportQueue } from "../electron/services/import-queue.mjs";
+import { cancelImport, enqueueRetranscription, normalizeImportChunkSegments, removeImportJob, resolveImportedParticipants, retryImport, wakeImportQueue } from "../electron/services/import-queue.mjs";
 import {
   describeDiarizationPhase,
   describeImportProcessing,
   describeImportProgressDetail,
+  describeReviewProcessing,
   isActiveImportJob,
   isRetryableImportJob,
   mergeImportJob,
@@ -105,7 +106,7 @@ import {
   needsRemoteTranscriptionNormalization,
   normalizeRemoteTranscriptionAudio
 } from "../electron/services/transcription-audio.mjs";
-import { buildRecordingReadiness, deriveWorkspaceStage, findPlayingSegment, isImportedMeeting, shouldAutoOpenRightPanel } from "../src/lib/workspace";
+import { buildRecordingReadiness, deriveWorkspaceStage, findPlayingSegment, isImportedMeeting, shouldAutoOpenRightPanel, shouldUseTranscriptionWorkspace } from "../src/lib/workspace";
 import { isOnboardingSummaryReady, isOnboardingTranscriptionReady } from "../src/lib/onboarding";
 import {
   buildSummaryContentMotion,
@@ -283,11 +284,35 @@ describe("content change motion classification", () => {
 });
 
 describe("phase-aware desktop workspace", () => {
-  it("keeps imported meetings in the split workspace when their queue entry is removed or replaced", () => {
+  it("recognizes imported meetings independently of the active queue entry", () => {
     expect(isImportedMeeting({ tags: [] }, { retranscribe: false })).toBe(true);
     expect(isImportedMeeting({ tags: ["导入"] })).toBe(true);
     expect(isImportedMeeting({ tags: ["导入"] }, { retranscribe: true })).toBe(true);
     expect(isImportedMeeting({ tags: [] }, { retranscribe: true })).toBe(false);
+  });
+
+  it("returns imported meetings to the post-meeting workspace once transcription is complete", () => {
+    const base = { stage: "review" as const, imported: true, jobsLoaded: true };
+    expect(shouldUseTranscriptionWorkspace({ ...base, job: { status: "transcribing" } })).toBe(true);
+    // 转写完但后台还在识别发言人/生成纪要：已经属于会后整理，不再停留转写工作台。
+    expect(shouldUseTranscriptionWorkspace({ ...base, job: { status: "diarizing", transcriptionComplete: true } })).toBe(false);
+    expect(shouldUseTranscriptionWorkspace({ ...base, job: { status: "complete" } })).toBe(false);
+    expect(shouldUseTranscriptionWorkspace({ ...base, job: undefined })).toBe(false);
+    // 队列尚未回填时沿用旧布局，避免首帧闪动。
+    expect(shouldUseTranscriptionWorkspace({ ...base, jobsLoaded: false, job: { status: "complete" } })).toBe(true);
+    expect(shouldUseTranscriptionWorkspace({ stage: "live", imported: false, job: undefined, jobsLoaded: true })).toBe(true);
+    expect(shouldUseTranscriptionWorkspace({ stage: null, imported: true, job: undefined, jobsLoaded: true })).toBe(false);
+  });
+
+  it("fills imported participants from identified speaker labels without overwriting manual names", () => {
+    const transcript = [
+      { speakerName: "发言人1" },
+      { speakerName: "发言人2" },
+      { speakerName: "发言人1" }
+    ];
+    expect(resolveImportedParticipants({ participants: ["待识别"], transcript })).toEqual(["发言人1", "发言人2"]);
+    expect(resolveImportedParticipants({ participants: [], transcript })).toEqual(["发言人1", "发言人2"]);
+    expect(resolveImportedParticipants({ participants: ["老王", "小陈"], transcript })).toEqual(["老王", "小陈"]);
   });
 
   it("derives prepare, live, and review without adding persisted UI state", () => {
@@ -799,6 +824,17 @@ describe("transcript window merge", () => {
     const other = { ...segment("s2", 5_000, 7_000, "好的"), speakerId: "speaker-2", speakerName: "周哲" };
     const merged = mergeSpeakerLabels(meeting.transcript.concat(other), "speaker-2", "speaker-1", "刘婷");
     expect(merged[1]).toMatchObject({ speakerId: "speaker-1", speakerName: "刘婷" });
+  });
+
+  it("shows identified speakers while participants are still a placeholder", () => {
+    const transcript = [
+      { ...segment("p1", 0, 1_000, "你好"), speakerName: "发言人1" },
+      { ...segment("p2", 1_000, 2_000, "在"), speakerName: "发言人2" },
+      { ...segment("p3", 2_000, 3_000, "开始吧"), speakerName: "发言人1" }
+    ];
+    expect(displayParticipants(["待识别"], transcript)).toEqual(["发言人1", "发言人2"]);
+    expect(displayParticipants([], transcript)).toEqual(["发言人1", "发言人2"]);
+    expect(displayParticipants(["老王", "小陈"], transcript)).toEqual(["老王", "小陈"]);
   });
 
   it("applies stable diarization turns by transcript midpoint", () => {
@@ -2723,6 +2759,22 @@ describe("导入任务的进度与可操作性文案", () => {
     expect(detail).toContain("已用 01:05");
     expect(detail).toContain("不上传音频");
     expect(describeDiarizationPhase("naming")).toBe("匹配声纹");
+  });
+
+  it("会议已结束后文案不再说录音处理中", () => {
+    const diarizing = base();
+    expect(describeReviewProcessing({ meetingEnded: false, job: diarizing })).toEqual({
+      eyebrow: "识别发言人",
+      detail: "转写已就绪，正在本机识别发言人。"
+    });
+    expect(describeReviewProcessing({ meetingEnded: true, job: diarizing })).toEqual({
+      eyebrow: "会议已结束 · 识别发言人",
+      detail: "转写已完成，正在本机识别发言人；可以先看转写。"
+    });
+    const summarizing = base({ status: "summarizing", stage: "summarizing" });
+    expect(describeReviewProcessing({ meetingEnded: true, job: summarizing })?.eyebrow)
+      .toBe("会议已结束 · 整理纪要");
+    expect(describeReviewProcessing({ meetingEnded: true, job: base({ status: "complete" }) })).toBeUndefined();
   });
 
   it("处理中的任务可停止，失败/取消/网络等待可重试", () => {

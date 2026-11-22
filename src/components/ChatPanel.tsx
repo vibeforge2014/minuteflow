@@ -248,7 +248,8 @@ export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings,
   const send = async (question: string) => {
     const trimmed = question.trim();
     if (!trimmed || busy) return;
-    if (liveSummary) setLiveChatOpen(true);
+    // live 态纪要为主视图：发问后不强制展开问答区，避免与纪要两套 header 同时堆叠。
+    // 有新回答时用底部「查看 N 条问答」入口提示，用户想看再展开。
     setDraft("");
     setBusy(true);
     lastFailedPrompt.current = trimmed;
@@ -467,12 +468,14 @@ export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings,
         {profiles.length === 0 && onOpenSettings && (
           <button className="text-button chat-composer__setup" onClick={onOpenSettings}>配置问答模型</button>
         )}
+        {liveSummary && messages.length > 0 && !conversationVisible && (
+          <button className="chat-history-entry" onClick={() => setLiveChatOpen(true)} aria-label={`展开问答记录，共 ${messages.length} 条`}>
+            <ChatTeardropText size={15} />
+            <span>查看 {messages.length} 条问答</span>
+            {messages.at(-1)?.pending && <span className="chat-history-entry__dot" aria-label="回答生成中" />}
+          </button>
+        )}
         <div className="chat-composer__input-row">
-          {liveSummary && messages.length > 0 && !conversationVisible && (
-            <button className="icon-button chat-model-switch__trigger" aria-label="展开问答记录" title="展开问答记录" onClick={() => setLiveChatOpen(true)}>
-              <ChatTeardropText size={17} />
-            </button>
-          )}
           {profiles.length > 0 && (
             <ChatModelSwitch
               profiles={profiles}

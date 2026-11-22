@@ -58,6 +58,27 @@ export function shouldAutoOpenRightPanel(input: {
 }
 
 /**
+ * 导入会议是否仍停留在转写工作台三列布局。
+ *
+ * 转写一完成就回到会后整理布局：会议状态已经结束，说话人识别与纪要生成只是
+ * 后台加工，不应继续把用户留在「实时转写」形态里。
+ */
+export function shouldUseTranscriptionWorkspace(input: {
+  stage: WorkspaceStage | null;
+  imported: boolean;
+  job?: Pick<ImportJob, "status" | "transcriptionComplete">;
+  jobsLoaded: boolean;
+}) {
+  if (!input.stage) return false;
+  if (input.stage === "live") return true;
+  if (!input.imported) return false;
+  // 队列尚未回填时保持旧布局，避免首帧在两版布局之间闪动。
+  if (!input.jobsLoaded) return true;
+  if (!input.job) return false;
+  return input.job.transcriptionComplete !== true && input.job.status !== "complete";
+}
+
+/**
  * 回放位置 → 正在播放的转写段落（歌词式同步的定位核心）。
  *
  * 二分找最后一个 startMs ≤ 播放位置的段落；段落区间内的间隙（沉默）

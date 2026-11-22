@@ -182,6 +182,19 @@ const PARAGRAPHING_VERSION = 2;
 
 const summaryListKeys = ["keyPoints", "decisions", "openQuestions", "risks", "nextSteps"];
 
+/**
+ * 导入会议识别完发言人后，把逐字稿里的说话人标签回填到参与者字段。
+ * 只在参与者仍是占位值时回填，避免覆盖用户在会议头里手写的真实名单。
+ */
+export function resolveImportedParticipants(meeting, transcript = meeting?.transcript ?? []) {
+  const current = Array.isArray(meeting?.participants) ? meeting.participants : [];
+  const placeholderOnly = current.length === 0 || current.every((name) => name === "待识别");
+  if (!placeholderOnly) return current;
+  return [...new Set(transcript
+    .map((segment) => segment?.speakerName)
+    .filter((name) => typeof name === "string" && name.trim()))];
+}
+
 /** 主进程后台合并纪要时保留用户锁定的条目与行动项。 */
 function mergeSummaryPreservingLocks(current = {}, incoming = {}) {
   const locks = new Set(current.manualLocks ?? []);
@@ -960,6 +973,9 @@ async function processJob(initial) {
         });
         return;
       }
+      // 转写成稿即会议结束：后续说话人识别与纪要生成属于会后加工，会议状态
+      // 不该等到整条任务跑完才从 draft 变成 complete。
+      meeting = publishMeeting(saveMeeting({ ...meeting, status: "complete" }));
       job = patchJob(job.id, {
         transcriptionComplete: true, transcriptionNoSpeech: false, retryingTranscriptionGaps: false, stage: "diarizing", progress: 0.68,
         completedChunks: totalChunks, currentChunkStartMs: undefined, currentChunkEndMs: undefined
@@ -988,6 +1004,10 @@ async function processJob(initial) {
       if (!turns?.length && speakerAnalysis) {
         meeting = loadMeeting(job.meetingId) || meeting;
         meeting = publishMeeting(saveMeeting({ ...meeting, transcript: groupTranscriptSegments(meeting.transcript) }));
+      }
+      const participants = resolveImportedParticipants(meeting);
+      if (participants.length) {
+        meeting = publishMeeting(saveMeeting({ ...meeting, participants }));
       }
       job = patchJob(job.id, {
         diarizationComplete: true, diarizationOutcome,

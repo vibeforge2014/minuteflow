@@ -48,7 +48,7 @@ import { useExitPresence } from "./hooks/useExitPresence";
 import { api } from "./lib/api";
 import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Meeting } from "./types";
 import { BrandMark } from "./components/BrandMark";
-import { buildRecordingReadiness, deriveWorkspaceStage, isImportedMeeting, isLocalTranscriptionTransport, shouldAutoOpenRightPanel, type WorkspaceStage } from "./lib/workspace";
+import { buildRecordingReadiness, deriveWorkspaceStage, isImportedMeeting, isLocalTranscriptionTransport, shouldAutoOpenRightPanel, shouldUseTranscriptionWorkspace, type WorkspaceStage } from "./lib/workspace";
 import { describeImportProcessing, isActiveImportJob, mergeImportJob, mergeImportJobs, selectMeetingImportJob } from "./lib/import-status";
 import type { SystemPermissionStatus } from "./types";
 import { finishPermissionSetup, shouldOpenPermissionSetup } from "./lib/permissions";
@@ -347,7 +347,12 @@ export function App() {
       ? "review"
       : deriveWorkspaceStage(meeting.status, selectedRecorderPhase)
     : null;
-  const splitWorkspace = workspaceStage === "live" || importedMeeting;
+  const splitWorkspace = shouldUseTranscriptionWorkspace({
+    stage: workspaceStage,
+    imported: importedMeeting,
+    job: meetingImportJob,
+    jobsLoaded: importJobsLoaded
+  });
   const panelPresence = useExitPresence(Boolean(rightPanelOpen && meeting && !splitWorkspace), 240);
   const closeLibrary = useCallback(() => {
     setLibraryOpen(false);

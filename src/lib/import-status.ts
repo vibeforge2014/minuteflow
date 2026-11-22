@@ -122,6 +122,42 @@ export function describeImportProcessing(job: ImportJob | undefined) {
 }
 
 /**
+ * 会后整理页顶部的状态文案。
+ *
+ * 转写完成后会议已经是结束态，后续的说话人识别/纪要生成只是后台加工；
+ * 这里不能继续写「录音处理中」，否则和数据状态、页面徽标互相矛盾。
+ */
+export function describeReviewProcessing(input: {
+  meetingEnded: boolean;
+  job: ImportJob | undefined;
+}): { eyebrow: string; detail: string } | undefined {
+  const { job, meetingEnded } = input;
+  if (!job || job.status === "complete") return undefined;
+  if (job.status === "cancelled") {
+    return { eyebrow: "处理已暂停", detail: "已保存完成的内容；重试会从当前阶段继续。" };
+  }
+  if (job.status === "failed") {
+    return { eyebrow: "处理失败", detail: "已保存完成的内容；重试会从当前阶段继续。" };
+  }
+  if (meetingEnded) {
+    if (job.status === "diarizing") {
+      return { eyebrow: "会议已结束 · 识别发言人", detail: "转写已完成，正在本机识别发言人；可以先看转写。" };
+    }
+    if (job.status === "summarizing" || job.status === "waiting_for_summary_model") {
+      return { eyebrow: "会议已结束 · 整理纪要", detail: "转写已完成，正在后台整理纪要；可以先编辑笔记或查看转写。" };
+    }
+    return {
+      eyebrow: "会议已结束 · 后台处理",
+      detail: describeImportProcessing(job) ?? "转写已完成，剩余步骤会在后台继续。"
+    };
+  }
+  if (job.status === "diarizing") {
+    return { eyebrow: "识别发言人", detail: "转写已就绪，正在本机识别发言人。" };
+  }
+  return { eyebrow: "录音处理中", detail: "处理在后台继续，可随时暂停。" };
+}
+
+/**
  * 任务副标题：说话人分离显示阶段、音频规模与真实已用时间；
  * 转写显示分块进度；失败/等待态显示具体原因。
  */
