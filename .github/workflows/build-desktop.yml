@@ -77,10 +77,12 @@ jobs:
         if: ${{ env.MINUTEFLOW_RELEASE_BUILD == '1' }}
         env:
           API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
         run: |
           set -euo pipefail
-          echo "$API_KEY_P8" > "$RUNNER_TEMP/AuthKey_496SRK4K68.p8"
-          echo "APPLE_NOTARY_KEY_PATH=$RUNNER_TEMP/AuthKey_496SRK4K68.p8" >> "$GITHUB_ENV"
+          # notarytool 按文件名里的 Key ID 识别密钥，文件名必须与 APPLE_API_KEY_ID 一致。
+          echo "$API_KEY_P8" > "$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
+          echo "APPLE_NOTARY_KEY_PATH=$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8" >> "$GITHUB_ENV"
       - run: npm run make
       - uses: actions/upload-artifact@v4
         with:
