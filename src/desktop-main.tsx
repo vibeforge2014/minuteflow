@@ -14,7 +14,6 @@ import { api } from "./lib/api";
 import { App } from "./App";
 import { PermissionDragHelper } from "./components/PermissionDragHelper";
 import "./styles.css";
-import "./styles-professional.css";
 
 document.documentElement.dataset.platform = api.system.platform;
 const requestedSurface = new URLSearchParams(window.location.search).get("surface");

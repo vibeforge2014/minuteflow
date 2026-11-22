@@ -52,6 +52,9 @@ import { buildRecordingReadiness, deriveWorkspaceStage, isImportedMeeting, isLoc
 import { describeImportProcessing, isActiveImportJob, mergeImportJob, mergeImportJobs, selectMeetingImportJob } from "./lib/import-status";
 import type { SystemPermissionStatus } from "./types";
 import { finishPermissionSetup, shouldOpenPermissionSetup } from "./lib/permissions";
+// 工作台主题覆盖层放在 App 内：开发态 Electron 走 main.tsx + lazy App、生产态走
+// desktop-main.tsx，两者都会加载它；官网只渲染 MarketingSite、不加载 App，因此零影响。
+import "./styles-professional.css";
 
 export function App() {
   const forceMacPermissionPreview = import.meta.env.DEV
