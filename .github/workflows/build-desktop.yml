@@ -32,7 +32,9 @@ jobs:
     needs: verify
     strategy:
       matrix:
-        os: [macos-14, windows-2022]
+        # GitHub 于 2026-11-02 退役 macos-14（arm64）镜像，旧 label 会直接被拒。
+        # macos-15 是同为 Apple Silicon 的官方替代品，保证 DMG 仍是 arm64。
+        os: [macos-15, windows-2022]
     runs-on: ${{ matrix.os }}
     # 默认仍产出 ad-hoc 本地构建。把仓库变量 MINUTEFLOW_RELEASE_BUILD 设为 1
     # 即启用严格模式：macOS 缺少签名身份或公证凭据时打包直接失败，避免把
