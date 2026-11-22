@@ -1,0 +1,12 @@
+import fs from 'node:fs';
+const list = await (await fetch('http://127.0.0.1:9333/json/list')).json();
+const page = list.find(p => p.type === 'page' && p.url.includes('5173')) || list[0];
+const ws = new WebSocket(page.webSocketDebuggerUrl);
+let id = 0; const pending = new Map();
+ws.addEventListener('message', (e) => { const m = JSON.parse(e.data); if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); } });
+await new Promise(r => ws.addEventListener('open', r, { once: true }));
+const send = (method, params = {}) => new Promise(r => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
+await send('Page.enable'); await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 2, mobile: false });
+await new Promise(r => setTimeout(r, 1200));
+const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+fs.writeFileSync(process.argv[2], Buffer.from(shot.result.data, 'base64')); console.log('saved', process.argv[2]); ws.close();

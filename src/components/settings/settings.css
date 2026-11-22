@@ -274,3 +274,56 @@
 .local-model-config small, .transcription-options small, .transcription-options p { display: block; color: var(--settings-muted); font-size: 12px; line-height: 1.6; }
 .transcription-option input, .transcription-option select, .transcription-option textarea { box-sizing: border-box; width: 100%; font: inherit; padding: 8px 10px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
 .transcription-option textarea { resize: vertical; }
+
+/* ==========================================================================
+   克制专业主题（冷色）覆盖
+   本文件由 SettingsDialog 组件内 import，加载顺序晚于全局 styles-professional.css，
+   因此这里的私有 token 与硬编码暖色必须在文件末尾就地覆盖，才能与主界面一致。
+   ========================================================================== */
+.settings-dialog {
+  --settings-ink: #1f2430;
+  --settings-muted: #6b7280;
+  --settings-line: #e5e7ec;
+  --settings-soft: #f4f6fb;
+  --settings-accent: #4954a8;
+  --settings-accent-soft: #eef0fb;
+}
+.settings-dialog .settings-nav { background: #f7f8fb; }
+.settings-dialog .settings-nav button { color: #4b5260; }
+.settings-dialog .settings-nav button.is-active {
+  background: var(--settings-accent-soft);
+  color: var(--settings-accent);
+}
+.settings-dialog .settings-header__actions > .icon-button { color: #6b7280; }
+.settings-dialog .settings-add-service {
+  border-color: #c3c9e2;
+  color: var(--settings-accent);
+  background: #fff;
+}
+.settings-dialog .settings-add-service:hover { background: var(--settings-accent-soft); border-color: var(--settings-accent); }
+.settings-dialog .settings-service-list { border-color: var(--settings-line); }
+.settings-dialog .settings-service-row:hover,
+.settings-dialog .settings-service-row:focus-within { background: var(--settings-soft); }
+.settings-dialog .settings-service-row__main { color: #2f3540; }
+.settings-dialog .settings-service-row small.is-issue { color: var(--red); }
+.settings-dialog .settings-service-row__icon { color: #6b7280; }
+.settings-dialog .settings-default { color: #4954a8; background: #eef0fb; }
+.settings-dialog .settings-remove-action:hover { color: var(--red); background: #fbeef0; }
+.settings-dialog .settings-choice { color: #2f3540; }
+.settings-dialog .settings-choice:hover { background: var(--settings-soft); }
+.settings-dialog .settings-choice > svg { color: #6b7280; }
+.settings-dialog .settings-service-group--enhancement > h3 { color: #232936; }
+.settings-dialog .profile-editor .field,
+.settings-dialog .profile-editor .field > span,
+.settings-dialog .profile-editor .field > label { color: #5b6270; }
+.settings-dialog .visual-capability-setting { border-color: var(--settings-line); background: var(--settings-soft); }
+.settings-dialog .settings-info-note { background: var(--settings-soft); color: #5b6270; }
+.settings-dialog .update-card__icon { background: var(--settings-accent-soft); color: var(--settings-accent); }
+.settings-dialog .update-security-note svg { color: #6b7280; }
+.settings-dialog .download-model-card { border-color: var(--settings-line); }
+.settings-dialog .download-model-card--recommended { background: var(--settings-accent-soft); border-color: #c3c9e2; }
+.settings-dialog .settings-card { border-color: var(--settings-line); }
+.settings-dialog .settings-card select { border-color: var(--settings-line); color: #4b5260; }
+.settings-dialog .settings-card--stacked textarea { color: #2f3540; }
+.settings-dialog .settings-card--stacked:focus-within { border-color: #c3c9e2; box-shadow: 0 0 0 3px rgba(91, 103, 199, .12); }
+.settings-dialog .license-card__key { color: #6b7280; }
