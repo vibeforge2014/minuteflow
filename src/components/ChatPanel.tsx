@@ -394,7 +394,7 @@ export function ChatPanel({ meeting, profiles, closing, onClose, onOpenSettings,
   };
 
   return (
-    <aside className={`transcript-panel chat-panel ${liveSummary ? "chat-panel--live" : ""} ${closing ? "is-closing" : ""}`} aria-label={liveSummary ? "实时总结与 AI 问答" : "AI 问答"}>
+    <aside className={`transcript-panel chat-panel ${liveSummary ? "chat-panel--live" : ""} ${closing ? "is-closing" : ""}`} aria-label={liveSummary ? "纪要与 AI 问答" : "AI 问答"}>
       {liveSummary}
       {conversationVisible && (
         <section className="chat-conversation" aria-label="AI 问答">

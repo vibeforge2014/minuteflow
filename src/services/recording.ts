@@ -11,10 +11,11 @@ import { shouldShowTranscriptionPlaceholder } from "./audio-activity";
 import { resolveTranscriptionLanguage } from "../lib/transcription-presets";
 import { api } from "../lib/api";
 import { isMicrophonePermissionError, MICROPHONE_PERMISSION_REQUIRED, shouldRequestMicrophone } from "../lib/permissions";
-import type { AudioTrackKind, Meeting, ModelProfile, TranscriptSegment, TranscriptionChunkResult } from "../types";
+import type { AudioTrackKind, Meeting, ModelProfile, TranscriptSegment, TranscriptionChunkResult, TranscriptionTimeRange } from "../types";
 
 /** 可直接采集的轨道类型（"mixed" 仅用于已落盘的合成产物，不能采集）。 */
 type CaptureTrack = Exclude<AudioTrackKind, "mixed">;
+type LiveGap = TranscriptionTimeRange & { track: CaptureTrack; offsetMs: number };
 
 /**
  * 停止录音时等待在途转写的宽限期。远程转录客户端超时是 330 秒，不能让它
@@ -58,6 +59,8 @@ interface RecorderBinding {
   track: CaptureTrack;
   stream: MediaStream;
   archive: MediaRecorder;
+  offsetMs: number;
+  coveredThroughMs: number;
   /** 归档块序号：主进程按 (track, sequence) 排序拼接，乱序会破坏音频。 */
   sequence: number;
   /** 在途的 recordings.append 任务集合；stop() 必须等它们全部落盘后才能收尾。 */
@@ -156,18 +159,20 @@ function createAudioRecorder(stream: MediaStream, audioBitsPerSecond: number) {
  */
 export class MeetingRecorder {
   private meeting: Meeting;
-  /** 已启用的 stt 模型档案；未配置时只归档不转写。 */
+  /** 当前转写档案；未配置时暂存待识别的块。 */
   private sttProfile: ModelProfile | undefined;
   private glossary: string[];
   private callbacks: RecordingCallbacks;
   /** 用户配置的转写语言（zh / en / auto），来自全局偏好。 */
   private configuredLanguage: string;
-  /** auto 模式下首块识别锁定的语种；后续块固定沿用，避免逐块重新猜语言。 */
-  private detectedLanguage = "";
   /** 主进程录音会话 id，append/stop 都要带上。 */
   private sessionId = "";
-  /** 会话开始时间戳（主进程返回），用于把块时间换算为相对会议的 startMs/endMs。 */
-  private startedAt = 0;
+  private startedAt: number | undefined;
+  private pausedAt: number | undefined;
+  private pausedMs = 0;
+  private resumeListeners = new Set<() => void>();
+  private uncoveredChunks = new Map<string, LiveGap>();
+  private captureGaps: LiveGap[] = [];
   private bindings: RecorderBinding[] = [];
   /** 每条轨道的转写循环 Promise；stop 时等待它们退出。 */
   private transcriptionLoops: Array<Promise<void>> = [];
@@ -182,7 +187,7 @@ export class MeetingRecorder {
   /** 停止时仍有转写请求未返回：随后到达的结果直接丢弃，避免写入已收尾的会议。 */
   private discardLateTranscriptions = false;
   /** 正在采集的 8 秒独立转写块；停止时立即停掉，不必等满 8 秒。 */
-  private standaloneRecorders = new Set<MediaRecorder>();
+  private standaloneRecorders = new Set<() => void>();
   private transcriptionStates = new Map<CaptureTrack, TrackTranscriptionState>();
   /**
    * 每条轨道最近已定稿的文本尾部。Whisper 系引擎的 initial_prompt 带上前文后，
@@ -213,11 +218,20 @@ export class MeetingRecorder {
     this.configuredLanguage = options.transcriptionLanguage || "zh";
   }
 
-  /** 本次请求要下发的语言：显式配置优先；auto 在首块锁定后改用已判定语种。 */
   private effectiveLanguage() {
-    const configured = resolveTranscriptionLanguage(undefined, this.sttProfile?.options, this.configuredLanguage);
-    if (configured !== "auto") return configured;
-    return this.detectedLanguage || "auto";
+    return resolveTranscriptionLanguage(undefined, this.sttProfile?.options, this.configuredLanguage);
+  }
+
+  private positionMs() {
+    const now = this.pausedAt ?? performance.now();
+    return Math.max(0, Math.round(now - (this.startedAt ?? now) - this.pausedMs));
+  }
+
+  private noteCaptureGap(binding: RecorderBinding, throughMs: number) {
+    const startMs = binding.coveredThroughMs;
+    if (throughMs - startMs >= 150) {
+      this.captureGaps.push({ track: binding.track, offsetMs: binding.offsetMs, startMs, endMs: throughMs });
+    }
   }
 
   /**
@@ -238,7 +252,6 @@ export class MeetingRecorder {
     }
     const session = await api.recordings.start(this.meeting.id);
     this.sessionId = session.sessionId;
-    this.startedAt = session.startedAt;
     try {
       let microphone: MediaStream;
       try {
@@ -367,10 +380,14 @@ export class MeetingRecorder {
    */
   private async bindStream(track: CaptureTrack, stream: MediaStream) {
     const archive = createAudioRecorder(stream, 96_000);
+    this.startedAt ??= performance.now();
+    const offsetMs = this.positionMs();
     const binding: RecorderBinding = {
       track,
       stream,
       archive,
+      offsetMs,
+      coveredThroughMs: offsetMs,
       sequence: 0,
       pendingWrites: new Set()
     };
@@ -403,10 +420,8 @@ export class MeetingRecorder {
     archive.start(15_000);
     this.bindings.push(binding);
 
-    if (this.sttProfile) {
-      this.transcriptionStates.set(track, { issued: 0, nextCommit: 0, completed: new Map(), backlog: [] });
-      this.transcriptionLoops.push(this.runTranscriptionLoop(track, stream));
-    }
+    this.transcriptionStates.set(track, { issued: 0, nextCommit: 0, completed: new Map(), backlog: [] });
+    this.transcriptionLoops.push(this.runTranscriptionLoop(binding));
   }
 
   /**
@@ -415,19 +430,21 @@ export class MeetingRecorder {
    * 瞬时失败按 1.5s/5s/15s 退避多轮重试，仍失败才告警并留空该块（按序提交不受影响）。
    * 暂停期间只休眠不采集；块时间戳换算为相对会议起点，供转写段落排序与播放器同步。
    */
-  private async runTranscriptionLoop(track: CaptureTrack, stream: MediaStream) {
-    const state = this.transcriptionStates.get(track);
-    if (!state) return;
+  private async runTranscriptionLoop(binding: RecorderBinding) {
+    const { track, stream, offsetMs } = binding;
+    const state = this.transcriptionStates.get(track)!;
     while (!this.stopTranscription && stream.active) {
       if (this.paused) {
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise<void>((resolve) => this.resumeListeners.add(resolve));
         continue;
       }
-      const chunkStarted = Date.now();
-      const blob = await this.captureStandaloneChunk(stream, 8_000);
-      if (!blob?.size || this.stopTranscription || !this.sttProfile?.id) continue;
-      const startMs = Math.max(0, chunkStarted - this.startedAt);
-      const endMs = Math.max(startMs, Date.now() - this.startedAt);
+      const startMs = this.positionMs();
+      const chunk = await this.captureStandaloneChunk(stream, 8_000);
+      if (this.discardLateTranscriptions) break;
+      if (!chunk.blob?.size || chunk.endMs <= startMs) continue;
+      this.noteCaptureGap(binding, startMs);
+      const { blob, endMs } = chunk;
+      binding.coveredThroughMs = endMs;
       const sequence = state.issued++;
       // 占位临时段：与最终段落共享时间区间与轨道，mergeTranscriptSegments 会用定稿结果替换它。
       const provisional: TranscriptSegment = {
@@ -440,33 +457,39 @@ export class MeetingRecorder {
         status: "provisional",
         track
       };
-      const data = await blob.arrayBuffer();
-      const showPlaceholder = await shouldShowTranscriptionPlaceholder(data, (copy) => {
-        if (!this.audioContext || this.audioContext.state === "closed") this.audioContext = new AudioContext();
-        return this.audioContext.decodeAudioData(copy);
-      });
-      if (this.stopTranscription) break;
-      if (showPlaceholder) this.callbacks.onProvisional(provisional);
+      this.uncoveredChunks.set(provisional.id, { track, offsetMs, startMs, endMs });
+      const profileId = this.sttProfile?.id;
+      const language = this.effectiveLanguage();
       const fileName = `${track}-${startMs}.${blob.type.includes("mp4") ? "m4a" : "webm"}`;
       const previousText = this.transcriptTails.get(track) ?? "";
-      const payload = {
-        profileId: this.sttProfile.id,
-        data,
-        fileName,
-        language: this.effectiveLanguage(),
-        startMs,
-        endMs,
-        track,
-        // 主进程在线下模式据此做逐块说话人标注（线上模式保持按轨标签）。
-        meetingId: this.meeting.id,
-        glossary: this.glossary,
-        previousText
-      };
-      // 入队在途计数 +1，UI 可显示「转写中 N」。
       this.transcriptionQueue += 1;
       this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
-      const request = () => api.transcription.processChunk(payload);
       const transcription = (async () => {
+        const data = await blob.arrayBuffer();
+        if (this.discardLateTranscriptions) return;
+        if (!profileId) {
+          this.parkChunkForBacklog(state, {
+            sequence, provisionalId: provisional.id, data, fileName, startMs, endMs, track, attempts: 0, previousText
+          });
+          this.ensureBacklogDrain();
+          return;
+        }
+
+        // Decode in parallel with the next capture. During stop the tail goes
+        // straight to recognition, since there is no need to animate a placeholder.
+        if (!this.stopTranscription && !this.paused) {
+          void shouldShowTranscriptionPlaceholder(data, (copy) =>
+            this.audioContext?.decodeAudioData(copy) ?? Promise.reject(new Error("音频解码未就绪"))
+          ).then((visible) => {
+            if (visible && !this.stopTranscription && !this.paused
+              && this.uncoveredChunks.has(provisional.id) && sequence >= state.nextCommit
+              && !state.completed.has(sequence)) this.callbacks.onProvisional(provisional);
+          });
+        }
+        const request = () => api.transcription.processChunk({
+          profileId, data, fileName, language, startMs, endMs, track,
+          meetingId: this.meeting.id, glossary: this.glossary, previousText
+        });
         // 网关/本地运行时偶发失败：按 1.5s/5s/15s 退避多轮重试（每次请求内部还会再重试
         // 瞬时 5xx/网络抖动），仍失败才告警并以空结果提交——该块留空，已归档音频可在
         // 会后通过导入流程补转录；按序提交机制保证后续块不会被卡住。
@@ -476,9 +499,9 @@ export class MeetingRecorder {
         for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
           if (attempt > 0) {
             // 停止录音/切换档案时不再等待退避，避免拖慢收尾；本次失败按告警处理。
-            if (this.stopTranscription || !this.sttProfile) break;
+            if (this.stopTranscription || this.sttProfile?.id !== profileId) break;
             await new Promise((resolve) => setTimeout(resolve, retryDelaysMs[attempt - 1]));
-            if (this.stopTranscription || !this.sttProfile) break;
+            if (this.stopTranscription || this.sttProfile?.id !== profileId) break;
           }
           try {
             result = await request();
@@ -523,12 +546,9 @@ export class MeetingRecorder {
             atMs: startMs
           });
         } else {
-          // auto 模式首块带回引擎判定的语种后即锁定，后续块不再逐块重新检测。
-          if (resolveTranscriptionLanguage(undefined, this.sttProfile?.options, this.configuredLanguage) === "auto" && !this.detectedLanguage && result.language) {
-            this.detectedLanguage = result.language;
-          }
-          // 服务恢复：仅在同一条录音内从失败转成功时通知一次，UI 收起提示。
-          if (this.transcriptionFailureStreak > 0) {
+          const recognized = result.segments.some((segment) => segment.text.trim());
+          if (recognized || result.outcome === "silent") this.uncoveredChunks.delete(provisional.id);
+          if (recognized && this.transcriptionFailureStreak > 0) {
             this.transcriptionFailureStreak = 0;
             this.callbacks.onTranscriptionRecovered?.();
           }
@@ -540,31 +560,24 @@ export class MeetingRecorder {
         this.commitCompletedTranscriptions(track);
       })();
       this.pendingTranscriptions.add(transcription);
-      void transcription.finally(() => {
+      void transcription.catch(() => {
+        if (this.discardLateTranscriptions) return;
+        state.completed.set(sequence, { provisionalId: provisional.id, segments: [] });
+        this.commitCompletedTranscriptions(track);
+      }).finally(() => {
         this.pendingTranscriptions.delete(transcription);
         this.transcriptionQueue = Math.max(0, this.transcriptionQueue - 1);
-        this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
+        if (!this.discardLateTranscriptions) this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
       });
     }
   }
 
   /**
    * 录音进行中切换转写档案：下一个 8 秒块即用新档案，无需中断录音。
-   * 录音开始时未配置档案、中途才配置好的场景也会在这里补启各轨道的转写循环；
    * 已有补转积压时立即唤醒排空循环（profileId 在发送时重新解析，新档案即刻生效）。
    */
   updateSttProfile(profile: ModelProfile | undefined) {
-    if (this.sttProfile?.id !== profile?.id || this.sttProfile?.options?.transcriptionLanguage !== profile?.options?.transcriptionLanguage) this.detectedLanguage = "";
     this.sttProfile = profile;
-    if (profile && this.transcriptionStates.size === 0) {
-      for (const binding of this.bindings) {
-        this.transcriptionStates.set(
-          binding.track,
-          { issued: 0, nextCommit: 0, completed: new Map(), backlog: [] }
-        );
-        this.transcriptionLoops.push(this.runTranscriptionLoop(binding.track, binding.stream));
-      }
-    }
     if (this.hasBacklogChunks()) this.ensureBacklogDrain();
   }
 
@@ -593,10 +606,11 @@ export class MeetingRecorder {
   /** 块入队；超限时放弃最旧的块（音频已归档，可会后补转），保持内存有界。 */
   private parkChunkForBacklog(state: TrackTranscriptionState, entry: PendingBacklogChunk) {
     if (state.backlog.length >= MAX_BACKLOG_CHUNKS) {
-      const dropped = state.backlog.shift();
+      const dropped = state.backlog[0];
       if (dropped) this.settleBacklogChunk(dropped, { provisionalId: dropped.provisionalId, segments: [] });
     }
     state.backlog.push(entry);
+    state.backlog.sort((left, right) => left.sequence - right.sequence);
     this.transcriptionQueue += 1;
     this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
   }
@@ -605,10 +619,10 @@ export class MeetingRecorder {
   private settleBacklogChunk(entry: PendingBacklogChunk, result: CompletedTranscription) {
     const state = this.transcriptionStates.get(entry.track);
     const index = state?.backlog.indexOf(entry) ?? -1;
-    if (state && index >= 0) state.backlog.splice(index, 1);
+    if (!state || index < 0) return;
+    state.backlog.splice(index, 1);
     this.transcriptionQueue = Math.max(0, this.transcriptionQueue - 1);
     this.callbacks.onTranscriptionQueue(this.transcriptionQueue);
-    if (!state) return;
     state.completed.set(entry.sequence, result);
     this.commitCompletedTranscriptions(entry.track);
   }
@@ -621,7 +635,9 @@ export class MeetingRecorder {
     const delay = BACKLOG_RETRY_DELAYS_MS[oldest.attempts % BACKLOG_RETRY_DELAYS_MS.length];
     this.backlogTimer = window.setTimeout(() => {
       this.backlogTimer = null;
-      void this.drainBacklogOnce();
+      const pending = this.drainBacklogOnce();
+      this.pendingTranscriptions.add(pending);
+      void pending.finally(() => this.pendingTranscriptions.delete(pending));
     }, delay);
   }
 
@@ -653,10 +669,10 @@ export class MeetingRecorder {
         glossary: this.glossary,
         previousText: entry.previousText ?? ""
       });
-      if (resolveTranscriptionLanguage(undefined, this.sttProfile?.options, this.configuredLanguage) === "auto" && !this.detectedLanguage && result.language) {
-        this.detectedLanguage = result.language;
-      }
-      if (this.transcriptionFailureStreak > 0) {
+      if (this.discardLateTranscriptions || !this.transcriptionStates.get(entry.track)?.backlog.includes(entry)) return;
+      const recognized = result.segments.some((segment) => segment.text.trim());
+      if (recognized || result.outcome === "silent") this.uncoveredChunks.delete(entry.provisionalId);
+      if (recognized && this.transcriptionFailureStreak > 0) {
         this.transcriptionFailureStreak = 0;
         this.callbacks.onTranscriptionRecovered?.();
       }
@@ -665,6 +681,7 @@ export class MeetingRecorder {
         segments: result.segments.filter((segment) => segment.text.trim())
       });
     } catch (error) {
+      if (this.discardLateTranscriptions) return;
       if (isTranscriptionNotReadyFailure(error)) {
         this.transcriptionFailureStreak += 1;
         this.callbacks.onTranscriptionFailure?.({
@@ -710,24 +727,28 @@ export class MeetingRecorder {
 
   /** 单独录一个固定时长的自包含块（起止各产生一次事件），避免切割长录制流导致的时间戳错位。 */
   private captureStandaloneChunk(stream: MediaStream, duration: number) {
-    return new Promise<Blob | null>((resolve) => {
-      if (this.stopTranscription || !stream.active) return resolve(null);
+    return new Promise<{ blob: Blob | null; endMs: number }>((resolve) => {
+      let endMs: number | undefined;
+      if (this.stopTranscription || !stream.active) return resolve({ blob: null, endMs: this.positionMs() });
       const chunks: BlobPart[] = [];
       const recorder = createAudioRecorder(stream, 64_000);
-      let timeout = 0;
-      this.standaloneRecorders.add(recorder);
+      const finish = () => {
+        if (recorder.state === "inactive") return;
+        endMs = this.positionMs();
+        recorder.stop();
+      };
+      this.standaloneRecorders.add(finish);
       recorder.addEventListener("dataavailable", (event) => {
         if (event.data.size) chunks.push(event.data);
       });
       recorder.addEventListener("stop", () => {
         window.clearTimeout(timeout);
-        this.standaloneRecorders.delete(recorder);
-        resolve(chunks.length ? new Blob(chunks, { type: recorder.mimeType }) : null);
+        this.standaloneRecorders.delete(finish);
+        const blob = chunks.length ? new Blob(chunks, { type: recorder.mimeType }) : null;
+        resolve({ blob, endMs: endMs ?? this.positionMs() });
       }, { once: true });
       recorder.start();
-      timeout = window.setTimeout(() => {
-        if (recorder.state !== "inactive") recorder.stop();
-      }, duration);
+      const timeout = window.setTimeout(finish, duration);
     });
   }
 
@@ -760,7 +781,10 @@ export class MeetingRecorder {
 
   /** 暂停：归档录制器 pause，转写循环进入休眠（轨道保持打开，快速恢复不断流）。 */
   pause() {
+    if (this.paused || this.stopTranscription) return;
+    this.pausedAt = performance.now();
     this.paused = true;
+    this.stopStandaloneRecorders();
     for (const binding of this.bindings) {
       if (binding.archive.state === "recording") binding.archive.pause();
     }
@@ -768,10 +792,14 @@ export class MeetingRecorder {
 
   /** 恢复：归档录制器 resume，转写循环恢复采集；有补转积压时一并唤醒排空。 */
   resume() {
+    if (!this.paused || this.stopTranscription) return;
+    this.pausedMs += performance.now() - (this.pausedAt ?? performance.now());
+    this.pausedAt = undefined;
     this.paused = false;
     for (const binding of this.bindings) {
       if (binding.archive.state === "paused") binding.archive.resume();
     }
+    this.wakeCaptureLoops();
     if (this.hasBacklogChunks()) this.ensureBacklogDrain();
   }
 
@@ -784,6 +812,7 @@ export class MeetingRecorder {
     this.stopTranscription = true;
     this.discardLateTranscriptions = true;
     this.stopStandaloneRecorders();
+    this.wakeCaptureLoops();
     cancelAnimationFrame(this.analyserFrame);
     const stops = this.bindings.map((binding) => new Promise<void>((resolve) => {
       if (binding.archive.state === "inactive") return resolve();
@@ -807,8 +836,11 @@ export class MeetingRecorder {
    * → 等转写循环退出 → 最后 recordings.stop 让主进程合并/重命名产物文件。
    * 任何提前返回都可能丢最后一块音频或留下未完成的录音。
    */
-  async stop(durationSeconds: number) {
+  async stop(durationSeconds: number, flushTranscript?: () => Promise<void>) {
+    this.pausedAt ??= performance.now();
+    const endMs = this.positionMs();
     this.stopTranscription = true;
+    this.wakeCaptureLoops();
     // 立即停掉正在采集的 8 秒转写块：否则收尾还要白等它自然结束。
     this.stopStandaloneRecorders();
     cancelAnimationFrame(this.analyserFrame);
@@ -827,24 +859,43 @@ export class MeetingRecorder {
     await Promise.allSettled(this.transcriptionLoops);
     // 转写请求不参与“录音是否保存成功”的判定：远程网关最长可挂 330 秒，
     // 停止操作只等一个短宽限期，过期就先收尾并丢弃迟到结果。
-    const transcriptionsSettled = await this.settlePendingTranscriptions(STOP_TRANSCRIPTION_GRACE_MS);
-    if (!transcriptionsSettled) {
-      this.discardLateTranscriptions = true;
-      this.callbacks.onWarning("录音已保存；仍有转写请求未及时返回，本次收尾已跳过等待。需要时可在会后从录音重新转写。");
+    await this.settlePendingTranscriptions(STOP_TRANSCRIPTION_GRACE_MS);
+    // Release any recognized chunks held behind an unresolved sequence. Only
+    // the unresolved intervals are handed off for archive recovery.
+    for (const [track, state] of this.transcriptionStates) {
+      for (let sequence = state.nextCommit; sequence < state.issued; sequence += 1) {
+        if (!state.completed.has(sequence)) {
+          state.completed.set(sequence, { provisionalId: "", segments: [] });
+        }
+      }
+      this.commitCompletedTranscriptions(track);
     }
+    this.discardLateTranscriptions = true;
+    this.callbacks.onTranscriptionQueue(0);
+    if (this.backlogTimer !== null) window.clearTimeout(this.backlogTimer);
+    for (const binding of this.bindings) this.noteCaptureGap(binding, endMs);
+    const ranges = [...this.captureGaps, ...this.uncoveredChunks.values()]
+      .sort((left, right) => left.startMs - right.startMs);
+    await flushTranscript?.().catch((error: unknown) => {
+      this.callbacks.onWarning(error instanceof Error ? error.message : "实时转写保存失败。");
+    });
     return api.recordings.stop({
       meetingId: this.meeting.id,
       sessionId: this.sessionId,
-      durationSeconds
+      durationSeconds,
+      ...(ranges.length ? {
+        transcriptionBackfill: { sttProfileId: this.sttProfile?.id, language: this.effectiveLanguage(), ranges }
+      } : {})
     });
   }
 
-  /** 停止仍在采集的独立转写块（停止事件会立刻生成一个不完整块，随后被丢弃）。 */
   private stopStandaloneRecorders() {
-    for (const recorder of this.standaloneRecorders) {
-      if (recorder.state === "inactive") continue;
-      try { recorder.stop(); } catch { /* 已停止或已释放 */ }
-    }
+    for (const finish of this.standaloneRecorders) finish();
+  }
+
+  private wakeCaptureLoops() {
+    for (const wake of this.resumeListeners) wake();
+    this.resumeListeners.clear();
   }
 
   /** 等待在途转写收尾，但最多等 timeoutMs；返回是否全部结束。 */

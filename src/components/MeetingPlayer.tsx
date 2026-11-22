@@ -71,7 +71,9 @@ export function MeetingPlayer({ meetingId, durationSeconds, seekToMs, open, onCl
   useEffect(() => {
     if (seekToMs === null || !audioRef.current) return;
     audioRef.current.currentTime = seekToMs / 1000;
-    void audioRef.current.play().catch(() => onError("无法播放这段录音，请确认音频文件仍然可用。"));
+    void audioRef.current.play().catch((error) => {
+      if (error?.name !== "AbortError") onError("无法播放这段录音，请确认音频文件仍然可用。");
+    });
   }, [seekToMs, onError]);
 
   /** 前进/后退指定秒数，并夹在有效时长范围内。 */
@@ -90,7 +92,8 @@ export function MeetingPlayer({ meetingId, durationSeconds, seekToMs, open, onCl
     setMediaError(null);
     try {
       await audio.play();
-    } catch {
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
       const message = "录音加载失败，请检查文件是否完整或重新导入。";
       setMediaError(message);
       onError(message);

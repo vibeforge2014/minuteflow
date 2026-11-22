@@ -105,7 +105,7 @@ import {
   needsRemoteTranscriptionNormalization,
   normalizeRemoteTranscriptionAudio
 } from "../electron/services/transcription-audio.mjs";
-import { buildRecordingReadiness, deriveWorkspaceStage, findPlayingSegment, shouldAutoOpenRightPanel } from "../src/lib/workspace";
+import { buildRecordingReadiness, deriveWorkspaceStage, findPlayingSegment, isImportedMeeting, shouldAutoOpenRightPanel } from "../src/lib/workspace";
 import { isOnboardingSummaryReady, isOnboardingTranscriptionReady } from "../src/lib/onboarding";
 import {
   buildSummaryContentMotion,
@@ -283,6 +283,13 @@ describe("content change motion classification", () => {
 });
 
 describe("phase-aware desktop workspace", () => {
+  it("keeps imported meetings in the split workspace when their queue entry is removed or replaced", () => {
+    expect(isImportedMeeting({ tags: [] }, { retranscribe: false })).toBe(true);
+    expect(isImportedMeeting({ tags: ["导入"] })).toBe(true);
+    expect(isImportedMeeting({ tags: ["导入"] }, { retranscribe: true })).toBe(true);
+    expect(isImportedMeeting({ tags: [] }, { retranscribe: true })).toBe(false);
+  });
+
   it("derives prepare, live, and review without adding persisted UI state", () => {
     const statuses: MeetingStatus[] = ["draft", "recording", "paused", "complete", "interrupted"];
     const phases: RecorderPhase[] = ["idle", "starting", "recording", "paused", "stopping"];
@@ -532,6 +539,13 @@ describe("progressive import transcript", () => {
     }, 59_000, 60_000, 120_000, "job:chunk:1:", [segment("old", 59_000, 60_200, "已经出现")]);
     expect(result.map((item) => item.text)).toEqual(["继续讨论"]);
     expect(result[0].startMs).toBe(61_100);
+  });
+
+  it("keeps real repetitions after the boundary", () => {
+    const result = normalizeImportChunkSegments({
+      segments: [{ startMs: 1_400, endMs: 2_200, text: "已经出现。" }]
+    }, 59_000, 60_000, 70_000, "job:chunk:1:", [segment("old", 59_000, 60_200, "已经出现。")]);
+    expect(result.map((item) => item.text)).toEqual(["已经出现。"]);
   });
 });
 
@@ -898,6 +912,25 @@ describe("diarization cluster merging", () => {
 });
 
 describe("structured meeting summary", () => {
+  it("rebuilds local sections from meeting text instead of carrying an earlier draft forward", () => {
+    const summary = summarizeLocally({
+      title: "评审",
+      goals: [],
+      notes: [],
+      previousSummary: {
+        risks: ["录音转录内容简短且语义不完整，难以形成可靠会议结论。"],
+        nextSteps: ["补充或重听录音，确认签约事项。"]
+      },
+      transcript: [
+        segment("q", 0, 1_000, "你确认过这个日期了吗？"),
+        segment("r", 1_000, 3_000, "接口尚未就绪，周五上线有延期风险。")
+      ]
+    });
+    expect(summary.nextSteps).toEqual([]);
+    expect(summary.decisions).toEqual([]);
+    expect(summary.risks).toEqual(["接口尚未就绪，周五上线有延期风险。"]);
+  });
+
   it("extracts decisions, actions, and questions with valid defaults", () => {
     const summary = summarizeLocally({
       title: "评审",
@@ -921,7 +954,7 @@ describe("structured meeting summary", () => {
     // 不再携带「会议决定/讨论重点」这类会在卡片里反复出现的前缀小标题。
     expect(summary.keyPoints.length).toBeGreaterThan(0);
     expect(summary.keyPoints.every((item) => /^(会议决定|后续安排|风险提示|讨论重点)：/.test(item) === false)).toBe(true);
-    // 行长纪律：一条结论一行、单分句，绝不「；」拼接，截断后不超过上限加省略号。
+    // 保留同一事项必要的上下文，各事项单独成条。
     expect(summary.keyPoints.every((item) => !item.includes("；"))).toBe(true);
     expect(summary.keyPoints.every((item) => item.replace(/…$/, "").length <= KEY_POINT_MAX_CHARS)).toBe(true);
     // 证据时间与文本逐位对齐，可回链到转写原文。
@@ -962,16 +995,16 @@ describe("structured meeting summary", () => {
     expect(healed.keyPointTimes).toBeUndefined();
   });
 
-  it("emits one clause per key point with its source time", () => {
+  it("keeps the subject with the metric and drops context-dependent fragments", () => {
     const drafts = buildBasicKeyPoints([
       segment("s1", 0, 6_000, "我们先对齐整体节奏，本季度完成核心功能交付并且启动灰度验证。"),
-      segment("s2", 8_000, 14_000, "确认预算维持不变。")
+      segment("s2", 8_000, 14_000, "能力复用得分为78.7，比上次增加4.2分。"),
+      segment("s3", 14_000, 16_000, "目前是60.8。")
     ]);
-    expect(drafts.length).toBeGreaterThan(0);
+    expect(drafts).toContainEqual({ text: "能力复用得分为78.7，比上次增加4.2分", timeMs: 8_000 });
     for (const draft of drafts) {
       expect(draft.text.includes("；")).toBe(false);
-      expect(draft.text.includes("，")).toBe(false);
-      expect(draft.text.replace(/…$/, "").length).toBeLessThanOrEqual(KEY_POINT_MAX_CHARS);
+      expect(draft.text.length).toBeLessThanOrEqual(KEY_POINT_MAX_CHARS);
     }
     // 证据时间指向来源段落的开始时刻。
     expect(drafts.every((draft) => draft.timeMs === 0 || draft.timeMs === 8_000)).toBe(true);
@@ -1222,14 +1255,22 @@ describe("model response parsing", () => {
   it("bounds the transcript portion of summary prompts for long meetings", () => {
     const longSegments = Array.from({ length: 2_000 }, (_value, index) =>
       segment(`s${index}`, index * 1_000, index * 1_000 + 999, "这是一段比较长的转录内容，用来撑爆提示词窗口。"));
+    longSegments[0].text = "前段事项：确认项目范围";
+    longSegments[1_000].text = "中段事项：付款接口仍缺白名单";
+    longSegments.at(-1)!.text = "尾段事项：确定验收日期";
     const prompt = buildSummaryPrompt({
       title: "超长会议",
       goals: [],
       notes: [],
       transcript: longSegments,
-      previousSummary: { topics: [], keyPoints: [], decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: [] }
-    });
-    expect(prompt).toContain("已省略更早的部分");
+      previousSummary: { keyPoints: ["旧版泛化措辞", "人工核对的事项"], manualLocks: ["keyPoints:1"] }
+    }, true);
+    expect(prompt).toContain("会议前、中、后各阶段摘录");
+    expect(prompt).toContain("前段事项：确认项目范围");
+    expect(prompt).toContain("中段事项：付款接口仍缺白名单");
+    expect(prompt).toContain("尾段事项：确定验收日期");
+    expect(prompt).toContain("人工核对的事项");
+    expect(prompt).not.toContain("旧版泛化措辞");
     expect(prompt.length).toBeLessThan(45_000);
   });
 
@@ -1256,6 +1297,47 @@ describe("model provider compatibility", () => {
   const validSummaryPayload = JSON.stringify({
     topics: [], keyPoints: ["最小可用的关键结论"], decisions: [], actionItems: [],
     openQuestions: [], risks: [], nextSteps: []
+  });
+
+  it("links evidence to real transcript segments and ignores invented references", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        overview: "接口聯調已完成，後續提交驗收清單。",
+        discussionSections: [{
+          title: "交付驗收",
+          table: { columns: ["項目", "狀態"], rows: [["聯調", "已完成"], ["清單", "待提交"], ["欄數不符"]] },
+          points: [
+            { heading: "聯調", text: "接口已完成聯調。", evidenceSegmentId: "S1" },
+            { heading: "排期", text: "驗收排期仍待確認。", evidenceSegmentId: "S999" }
+          ]
+        }],
+        keyPoints: [
+          { text: "接口进展｜已经完成联调", evidenceTime: "1:01:32" },
+          { text: "待验收｜验收排期需要确认", evidenceTime: "1:02:44" }
+        ],
+        actionItems: [{ title: "提交验收清单", owner: "待确认", evidenceSegmentIds: ["S1", "S999", "meeting-line"] }]
+      }) } }]
+    }), { headers: { "Content-Type": "application/json" } }));
+    try {
+      const summary = await summarizeWithOpenAICompatible({ baseUrl: "https://example.test", model: "test", options: {} }, "key", {
+        ...summaryInput,
+        transcript: [segment("meeting-line", 3_692_700, 3_697_000, "接口已经联调完成，需要提交清单。")]
+      }, true);
+      expect(summary.keyPointTimes).toEqual([3_692_700, null]);
+      expect(summary.actionItems[0].evidenceSegmentIds).toEqual(["meeting-line"]);
+      expect(summary.overview).toBe("接口联调已完成，后续提交验收清单。");
+      expect(summary.discussionSections?.[0]).toEqual({
+        title: "交付验收",
+        table: { columns: ["项目", "状态"], rows: [["联调", "已完成"], ["清单", "待提交"]] },
+        points: [
+          { heading: "联调", text: "接口已完成联调。", evidenceSegmentId: "meeting-line" },
+          { heading: "排期", text: "验收排期仍待确认。" }
+        ]
+      });
+      expect(fetchMock.mock.calls[0][1]?.body).toContain("[S1 1:01:32]");
+    } finally {
+      fetchMock.mockRestore();
+    }
   });
 
   it("normalizes New API base URLs with or without /v1", () => {
@@ -1664,6 +1746,18 @@ describe("model provider compatibility", () => {
     await expect(readFile(path.join(directory, "my-whisper.bin"))).resolves.toEqual(Buffer.from(bytes));
     expect(events.some((event) => event.status === "ready")).toBe(true);
     expect(events.every((event) => event.modelId === "custom:my-whisper.bin")).toBe(true);
+  });
+
+  it("preserves the installed model when downloading a custom link with the same filename", { timeout: 30_000 }, async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(bytes));
+    const directory = await mkdtemp(path.join(tmpdir(), "minuteflow-model-url-collision-"));
+    const installed = path.join(directory, "ggml-base.bin");
+    await writeFile(installed, "installed model");
+    const model = await downloadFromUrl("https://example.com/models/ggml-base.bin", directory);
+    expect(model.path).not.toBe(installed);
+    await expect(readFile(installed, "utf8")).resolves.toBe("installed model");
+    await expect(readFile(model.path)).resolves.toEqual(Buffer.from(bytes));
   });
 
   it("rejects custom links that do not point at a model file", async () => {

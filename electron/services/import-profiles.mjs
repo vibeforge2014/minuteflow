@@ -66,7 +66,7 @@ export function isLocalModelGatedRoute(transport) {
  * Apple Speech 必须用更长的上下文窗口：实测连续中文会议音频用 10 秒句中截断时，
  * 本机识别器约六成块报「No speech detected」、成功块产出也骤减（336 秒连续语音
  * 只出 176 字）；30 秒块 + 20–40 秒上下限仍远在 helper 单次识别超时之内。
- * 远程/本地 Whisper 维持 10 秒网格（进度反馈密度优先）。
+ * 本地 Whisper 用长窗保留句子上下文，减少整场解码次数；在线模型维持短请求。
  */
 export function chunkPlanDefaults(transport) {
   if (transport === "apple-speech") {
@@ -74,6 +74,13 @@ export function chunkPlanDefaults(transport) {
       chunkMs: 30_000,
       overlapMs: 3_000,
       planning: { targetMs: 30_000, windowMs: 4_000, minMs: 20_000, maxMs: 40_000 }
+    };
+  }
+  if (WHISPER_RUNTIMES.includes(transport)) {
+    return {
+      chunkMs: 24_000,
+      overlapMs: 2_000,
+      planning: { targetMs: 24_000, windowMs: 2_500, minMs: 19_000, maxMs: 28_000 }
     };
   }
   return {

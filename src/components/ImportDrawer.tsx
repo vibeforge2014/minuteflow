@@ -10,6 +10,7 @@ import type { ImportCandidate, ImportJob, ModelProfile } from "../types";
 import { useEnteringItemIds } from "../hooks/useContentMotion";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { formatDuration } from "../lib/format";
+import { canRetryTranscriptionGaps, isRetryableImportJob } from "../lib/import-status";
 
 import { ImportProcessingMeta } from "./ImportProcessingMeta";
 
@@ -25,7 +26,7 @@ interface Props {
   onClose(): void;
   onPick(): void;
   onChange(items: ImportCandidate[]): void;
-  onEnqueue(items: ImportCandidate[], options: { language: string; sttProfileId?: string; llmProfileId?: string; diarizationEnabled: boolean; autoSummarize: boolean }): Promise<void>;
+  onEnqueue(items: ImportCandidate[], options: { language: string; sttProfileId?: string; llmProfileId?: string; transcriptionTerms?: string[]; diarizationEnabled: boolean; autoSummarize: boolean }): Promise<void>;
   onRetry(id: string): void;
   onCancel(id: string): void;
   /** 说话人识别耗时过长时跳过，先用现有转录继续生成纪要。 */
@@ -80,6 +81,8 @@ export function ImportDrawer(props: Props) {
   const defaultSttId = () => sttProfiles.find((profile) => profile.isDefault)?.id || sttProfiles[0]?.id || "";
   const defaultLlmId = () => llmProfiles.find((profile) => profile.isDefault)?.id || llmProfiles[0]?.id || "";
   const [language, setLanguage] = useState("");
+  const [transcriptionTerms, setTranscriptionTerms] = useState("");
+  useEffect(() => { if (!props.open) setTranscriptionTerms(""); }, [props.open]);
   useEffect(() => { if (props.open) setLanguage(""); }, [props.open]);
   const [sttProfileId, setSttProfileId] = useState(defaultSttId);
   const [llmProfileId, setLlmProfileId] = useState(defaultLlmId);
@@ -151,6 +154,7 @@ export function ImportDrawer(props: Props) {
             <label>总结模型<select value={llmProfileId} onChange={(event) => setLlmProfileId(event.target.value)}><option value="">稍后配置</option>{llmProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
             <label className="import-check"><input type="checkbox" checked={diarizationEnabled} onChange={(event) => setDiarizationEnabled(event.target.checked)} />识别不同发言人</label>
             <label className="import-check"><input type="checkbox" checked={autoSummarize} onChange={(event) => setAutoSummarize(event.target.checked)} />转录后自动生成纪要</label>
+            <label>本次术语<input value={transcriptionTerms} maxLength={180} onChange={(event) => setTranscriptionTerms(event.target.value)} placeholder="例如 合同、项目名、人名" /></label>
           </div>
           {/* 任务级配置摘要：让用户在执行前就看清「用哪个档案、什么语言、什么参数」，
               同时说明这里的改动只作用于本次导入，不会回写档案默认值。 */}
@@ -170,7 +174,14 @@ export function ImportDrawer(props: Props) {
           {/* 空标题不需要拦住提交：主进程会用文件名兜底命名（import-queue.mjs），
               不让「忘了改标题」挡住一键导入。 */}
           <button className="button button--primary import-submit" disabled={busy} onClick={async () => {
-            setBusy(true); try { await props.onEnqueue(props.candidates, { language, sttProfileId: sttProfileId || undefined, llmProfileId: llmProfileId || undefined, diarizationEnabled, autoSummarize }); } finally { setBusy(false); }
+            setBusy(true);
+            try {
+              await props.onEnqueue(props.candidates, {
+                language, sttProfileId: sttProfileId || undefined, llmProfileId: llmProfileId || undefined,
+                transcriptionTerms: transcriptionTerms.split(/[、，,；;\n]+/).map((word) => word.trim()).filter(Boolean),
+                diarizationEnabled, autoSummarize
+              });
+            } finally { setBusy(false); }
           }}>{busy ? "正在加入…" : `导入并后台处理 ${props.candidates.length} 个文件`}</button>
           <p className="import-duplicate-note">重复文件也会创建新的会议副本，原文件不会被移动或修改。</p>
         </section>
@@ -181,13 +192,13 @@ export function ImportDrawer(props: Props) {
         {!props.jobs.length && <div className="import-empty"><FileAudio size={24} /><p>尚无导入任务</p><button onClick={props.onPick}>选择录音</button></div>}
         {props.jobs.map((job) => (
           <article className={`import-job import-job--${job.status} ${enteringJobs.has(job.id) ? "content-motion-enter" : ""}`} key={job.id} onClick={() => job.meetingId && props.onOpenMeeting(job.meetingId)}>
-            <div className="import-job__top"><span className="import-job__state content-status-enter" key={job.status}>{job.status === "complete" ? <Check size={14} weight="bold" /> : job.status === "cancelled" ? <Pause size={14} /> : <FileAudio size={14} />}{statusText[job.status]}</span><time>{new Date(job.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time></div>
+            <div className="import-job__top"><span className="import-job__state content-status-enter" key={job.status}>{job.status === "complete" && !job.transcriptionGaps?.length ? <Check size={14} weight="bold" /> : job.status === "cancelled" ? <Pause size={14} /> : <FileAudio size={14} />}{job.status === "complete" && job.transcriptionGaps?.length ? `${job.transcriptionGaps.length} 段待补转` : job.transcriptionNoSpeech ? "未检测到语音" : statusText[job.status]}</span><time>{new Date(job.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time></div>
             <h3>{job.title}</h3><p>{job.sourceName}</p>
             <ImportProcessingMeta job={job} compact showDetail={!job.error} queuePosition={queuedOrder.get(job.id)} />
             {job.error && <p className="import-job__error content-motion-enter">{job.error}</p>}
             <div className="import-job__actions" onClick={(event) => event.stopPropagation()}>
               {/* 行内操作按钮阻止冒泡，避免触发整行「打开会议」。 */}
-              {["failed", "cancelled", "waiting_for_network"].includes(job.status) && <button onClick={() => props.onRetry(job.id)}><ArrowClockwise size={14} />{job.status === "waiting_for_network" ? "立即重试" : "重试当前阶段"}</button>}
+              {isRetryableImportJob(job) && <button onClick={() => props.onRetry(job.id)}><ArrowClockwise size={14} />{canRetryTranscriptionGaps(job) ? "补转漏段" : job.status === "waiting_for_network" ? "立即重试" : "重试当前阶段"}</button>}
               {["waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(job.status) && <button onClick={props.onConfigure}><GearSix size={14} />配置</button>}
               {job.status === "diarizing" && <button onClick={() => props.onSkipDiarization(job.id)}>跳过识别</button>}
               {!['complete', 'cancelled', 'failed'].includes(job.status) && <button onClick={() => props.onCancel(job.id)}>暂停</button>}

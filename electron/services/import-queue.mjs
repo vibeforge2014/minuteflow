@@ -1,4 +1,3 @@
-import { resolveTranscriptionLanguage } from "../../shared/transcription-options.mjs";
 /**
  * 音频导入的持久化后台队列（Electron 主进程 / 服务层）。
  * 单 worker 串行处理导入任务：复制归档 →（部分格式）生成播放副本 → 转录 →
@@ -23,6 +22,7 @@ import {
   listMeetingAudioAssets,
   listModelProfiles,
   listVoiceprintSamples,
+  loadAudioAsset,
   loadJob,
   loadMeeting,
   saveAudioAsset,
@@ -51,10 +51,11 @@ import { managedFfmpegPath, resolveLocalModelProfile } from "./local-models.mjs"
 import { simplifyTranscriptResult } from "./chinese.mjs";
 import { groupTranscriptSegments, splitTimedTranscriptText } from "./transcript-grouping.mjs";
 import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "./chunk-planning.mjs";
-import { normalizeGlossary, resolveChunkLanguage, transcriptionLanguageForEngine } from "./transcription-prompt.mjs";
+import { normalizeGlossary, transcriptionLanguageForEngine } from "./transcription-prompt.mjs";
 import { enhanceTranscriptionAudio } from "./transcription-audio.mjs";
 import { isSilenceSkipEnabled, isSilentPcmWav } from "./audio-quality.mjs";
 import { withSegmentConfidence } from "./transcript-confidence.mjs";
+import { resolveTranscriptionLanguage } from "../../shared/transcription-options.mjs";
 
 /** 与 main.mjs 的 transcribeLocally 同构：按 transport 分派本地 Whisper 转录。
  *  术语表与前文和实时录音链路一致地注入 initial_prompt；此前导入链路传空数组，
@@ -134,6 +135,29 @@ async function transcribeImportChunk(route, profile, audio, chunkIndex, language
   throw lastError;
 }
 
+async function prepareArchivedChunk({ route, bundledFfmpeg, chunkPath, controller, leadingMs = 0 }) {
+  const original = await readFile(chunkPath);
+  const silent = isSilentPcmWav(original, { leadingMs });
+  if (silent && isSilenceSkipEnabled()) return { silent, audio: null };
+  const audio = await enhanceTranscriptionAudio(original, bundledFfmpeg, controller.signal);
+  if (route === "sherpa" && !audio.equals(original)) await writeFile(chunkPath, audio);
+  return { silent, audio };
+}
+
+async function recognizeArchivedChunk(options, prepared) {
+  const { profile, route, chunkPath, chunkIndex, language, controller, glossary, previousText } = options;
+  const { silent, audio } = prepared ?? await prepareArchivedChunk(options);
+  if (!audio) return { silent, result: { text: "", segments: [] } };
+  let raw;
+  try {
+    raw = await transcribeImportChunk(route, profile, audio, chunkIndex, language, controller.signal, chunkPath, glossary, previousText);
+  } catch (error) {
+    if (error?.appleSpeechCode !== "no_speech") throw error;
+    raw = { text: "", segments: [] };
+  }
+  return { silent, result: withSegmentConfidence(simplifyTranscriptResult(raw)) };
+}
+
 // 运行中的任务取消器与子进程句柄：cancelImport 借此中止在途转录/转码。
 const activeControllers = new Map();
 // jobId → Set<ChildProcess>：一个任务可能同时/先后拉起多个 FFmpeg，取消时要全部终止。
@@ -153,7 +177,7 @@ const LEGACY_TRANSCRIPTION_CHUNK_MS = 60_000;
 const LEGACY_TRANSCRIPTION_OVERLAP_MS = 1_000;
 // v3：切块边界吸附最近静音中点（引擎相关的目标网格见 import-profiles.mjs 的
 // chunkPlanDefaults），避免把词切成两半；计划持久化后重启不漂移。
-const TRANSCRIPTION_PLAN_VERSION = 3;
+const TRANSCRIPTION_PLAN_VERSION = 4;
 const PARAGRAPHING_VERSION = 2;
 
 const summaryListKeys = ["keyPoints", "decisions", "openQuestions", "risks", "nextSteps"];
@@ -199,12 +223,9 @@ function mergeSummaryPreservingLocks(current = {}, incoming = {}) {
   return merged;
 }
 
-/**
- * 转录过程中按有效内容和墙钟时间节流滚动纪要。首版累计 30 秒即可出现，后续至少新增
- * 45 秒音频且距上次请求 45 秒，避免长文件快速处理时产生密集在线调用。
- */
-async function maybeUpdateRollingSummary(job, meeting, profiles, signal) {
-  const sourceThroughMs = meeting.transcript.reduce((maximum, segment) => Math.max(maximum, segment.endMs || 0), 0);
+/** 导入中的纪要是本地预览，最终在线请求在转写和说话人分离完成后执行。 */
+function maybeUpdateRollingSummary(job, meeting) {
+  const sourceThroughMs = meeting.transcript.at(-1)?.endMs ?? 0;
   const previousThroughMs = job.lastSummaryThroughMs || 0;
   const lastSummaryAt = job.lastSummaryAt ? Date.parse(job.lastSummaryAt) : 0;
   const firstReady = previousThroughMs === 0 && sourceThroughMs >= 30_000;
@@ -213,54 +234,20 @@ async function maybeUpdateRollingSummary(job, meeting, profiles, signal) {
     && Date.now() - lastSummaryAt >= 45_000;
   if (!firstReady && !nextReady) return { job, meeting };
 
-  const input = {
-    title: meeting.title,
-    goals: meeting.goals,
-    notes: meeting.notes,
-    transcript: meeting.transcript,
-    previousSummary: meeting.summary
-  };
-  const llmProfile = job.autoSummarize
-    ? resolveJobProfile(profiles, "llm", job.llmProfileId)
-    : undefined;
-  let summary;
-  let generationMode = "local";
-  if (llmProfile && llmProfile.transport !== "local-summary") {
-    try {
-      summary = await summarizeWithOpenAICompatible(
-        llmProfile,
-        llmProfile.transport === "ollama" ? "" : readSecret(llmProfile.secretId),
-        input,
-        false,
-        signal
-      );
-      generationMode = "online";
-    } catch (error) {
-      if (signal.aborted) throw error;
-      // 滚动纪要失败静默降级为本机基础版是设计内的，但必须留下失败原因供诊断。
-      console.error(`[import] 会议 ${job.meetingId} 在线滚动纪要失败，改用本机基础纪要：${error instanceof Error ? error.message : error}`);
-      summary = summarizeLocally(input);
-    }
-  } else {
-    summary = summarizeLocally(input);
-  }
-  const latest = loadMeeting(job.meetingId) || meeting;
-  const latestThroughMs = latest.transcript.reduce((maximum, segment) => Math.max(maximum, segment.endMs || 0), 0);
+  const summary = summarizeLocally({
+    title: meeting.title, goals: meeting.goals, notes: meeting.notes, transcript: meeting.transcript
+  });
   meeting = publishMeeting(saveMeeting({
-    ...latest,
+    ...meeting,
     summary: {
-      ...mergeSummaryPreservingLocks(latest.summary, summary),
-      updatedAt: new Date().toISOString(),
-      generationMode,
-      sourceThroughMs,
-      stale: latestThroughMs > sourceThroughMs
+      ...mergeSummaryPreservingLocks(meeting.summary, summary),
+      updatedAt: new Date().toISOString(), generationMode: "local", sourceThroughMs, stale: false
     }
   }));
   job = patchJob(job.id, {
     lastSummaryThroughMs: sourceThroughMs,
     lastSummaryCompletedChunks: job.completedChunks || 0,
-    lastSummaryAt: new Date().toISOString(),
-    llmProfileId: llmProfile?.id ?? job.llmProfileId
+    lastSummaryAt: new Date().toISOString()
   });
   return { job, meeting };
 }
@@ -378,6 +365,9 @@ export async function enqueueImports(items, options = {}) {
       title: meeting.title,
       mimeType: item.mimeType,
       sizeBytes: item.sizeBytes,
+      explicitLanguage: options.language || undefined,
+      defaultLanguage: options.defaultLanguage,
+      transcriptionTerms: normalizeGlossary(options.transcriptionTerms).slice(0, 12),
       language: resolveTranscriptionLanguage(options.language, resolveJobProfile(listModelProfiles(), "stt", options.sttProfileId)?.options, options.defaultLanguage),
       sttProfileId: options.sttProfileId,
       llmProfileId: options.llmProfileId,
@@ -415,6 +405,7 @@ export async function enqueueRetranscription(meetingId, options = {}) {
   }
   const busy = listImportJobs().find((job) => job.meetingId === meetingId && ACTIVE_JOB_STATUSES.includes(job.status));
   if (busy) throw new Error("这场会议已有处理中的任务，请等它完成或先暂停。");
+  const previousImport = listImportJobs().find((job) => job.meetingId === meetingId && !job.recordingBackfill);
   // live 录音按轨归档为 microphone/system，导入产物才是 mixed——优先 mixed，
   // 否则按 轨优先级 回退（与人声纹提取、回放选择同一口径），并确认文件仍可读——
   // 超过保留期被清理的录音会走到明确的「无法重新转录」提示，而不是排进队列后失败。
@@ -452,6 +443,9 @@ export async function enqueueRetranscription(meetingId, options = {}) {
     durationMs: asset.durationMs,
     title: meeting.title,
     language: resolveTranscriptionLanguage(options.language, resolveJobProfile(listModelProfiles(), "stt", options.sttProfileId)?.options, options.defaultLanguage),
+    explicitLanguage: options.language || undefined,
+    defaultLanguage: options.defaultLanguage,
+    transcriptionTerms: previousImport?.transcriptionTerms,
     sttProfileId: options.sttProfileId,
     llmProfileId: options.llmProfileId,
     diarizationEnabled: options.diarizationEnabled !== false,
@@ -473,8 +467,29 @@ export async function enqueueRetranscription(meetingId, options = {}) {
   return job;
 }
 
+/** 录音落盘后，复用持久化队列补转未提交的音频区间。 */
+export function enqueueRecordingBackfill(meetingId, sessionId, { ranges, sttProfileId, language }, archivedTracks) {
+  const now = new Date().toISOString();
+  const recordingRanges = ranges.flatMap((range) => {
+    const { track, startMs, endMs, offsetMs } = range ?? {};
+    if (!["microphone", "system"].includes(track) || !archivedTracks[track]
+      || ![startMs, endMs, offsetMs].every(Number.isSafeInteger)
+      || offsetMs < 0 || startMs < offsetMs || endMs <= startMs) return [];
+    return [{ track, startMs, endMs, offsetMs, audioAssetId: `${sessionId}:${track}` }];
+  });
+  if (!recordingRanges.length) return;
+  publish(saveJob({
+    id: randomUUID(), meetingId, type: "import", title: loadMeeting(meetingId).title,
+    sourceName: "现场录音", status: "queued", stage: "transcribing", progress: 0,
+    language, sttProfileId, recordingBackfill: true, recordingRanges,
+    transcriptionGaps: recordingRanges.map(({ startMs, endMs }) => ({ startMs, endMs })),
+    createdAt: now, updatedAt: now
+  }));
+  void runQueue();
+}
+
 /** 重试失败任务：状态复位为 queued 并重新驱动队列（imports:retry 通道调用）。 */
-export function retryImport(id) {
+export function retryImport(id, sttProfileId, preferences = {}) {
   const job = loadJob(id);
   if (!job) throw new Error("导入任务不存在。");
   // 同一会议只允许一条任务在跑：重试历史任务前先确认没有另一条（例如重新转录）已在进行，
@@ -485,9 +500,25 @@ export function retryImport(id) {
       && ACTIVE_JOB_STATUSES.includes(candidate.status))
     : undefined;
   if (busy) throw new Error("这场会议已有处理中的任务，请等它完成或先暂停。");
+  const hasGaps = Boolean(job.transcriptionGaps?.length);
+  if (job.status === "complete" && !hasGaps) return job;
+  const profile = sttProfileId && listModelProfiles().find((item) => item.id === sttProfileId && item.kind === "stt");
+  if (sttProfileId && !profile) throw new Error("所选转录模型已删除，请重新选择。");
+  const retryingTranscriptionGaps = !job.recordingBackfill
+    && hasGaps && (job.retryingTranscriptionGaps || job.completedChunks >= job.totalChunks);
   // 重试是干净的一轮：清掉上一轮的网络退避计数与说话人分离进度，
   // 避免 UI 继续显示旧的“已用时间/阶段”。
   const next = patchJob(id, {
+    ...(retryingTranscriptionGaps ? {
+      retryingTranscriptionGaps: true,
+      retryingCompletedTranscription: job.retryingCompletedTranscription || job.status === "complete",
+      transcriptionComplete: false,
+      stage: "transcribing"
+    } : {}),
+    ...(profile ? {
+      sttProfileId: profile.id,
+      language: resolveTranscriptionLanguage(job.explicitLanguage, profile.options, preferences.transcriptionLanguage)
+    } : {}),
     status: "queued",
     // 复位进度：否则排队期间仍显示上一轮失败时的 73%/88%，看起来像卡住。
     progress: 0,
@@ -520,11 +551,10 @@ export function skipImportDiarization(id) {
   const job = loadJob(id);
   if (!job) throw new Error("导入任务不存在。");
   if (job.diarizationComplete || job.diarizationSkipped) return job;
-  if (job.status !== "diarizing") {
-    // 尚未进入该阶段（排队/转录中）：记下意图，流水线走到这里时直接跳过。
-    return patchJob(id, { diarizationSkipped: true });
-  }
-  const next = patchJob(id, { diarizationSkipped: true, diarizationPhase: "skipping" });
+  const next = patchJob(id, {
+    diarizationSkipped: true, diarizationOutcome: "skipped",
+    ...(job.status === "diarizing" ? { diarizationPhase: "skipping" } : {})
+  });
   activeDiarizationSkips.get(id)?.abort();
   return next;
 }
@@ -593,6 +623,49 @@ export async function runQueue() {
   }
 }
 
+/** 在转写同时分析发言人。最终阶段复用分析结果，取消或暂停任务会终止 worker。 */
+function startImportDiarization(job, profiles, controller) {
+  if (!job.diarizationEnabled || job.diarizationSkipped || job.diarizationComplete || job.retryingCompletedTranscription) return;
+  const profile = resolveJobProfile(profiles, "diarization");
+  if (!profile?.options?.segmentationModelPath || !profile?.options?.embeddingModelPath) {
+    patchJob(job.id, { diarizationOutcome: "unavailable" });
+    return;
+  }
+  const skipController = new AbortController();
+  activeDiarizationSkips.set(job.id, skipController);
+  const signal = combineAbortSignals(controller.signal, skipController.signal);
+  patchJob(job.id, {
+    diarizationStartedAt: new Date().toISOString(), diarizationPhase: "preparing", diarizationOutcome: "pending"
+  });
+  const analysis = { turns: undefined };
+  analysis.done = diarizeWithSherpa(profile, job.archivedPath, {
+    voiceprints: listVoiceprintSamples(),
+    diarizationCheckpoint: job.diarizationCheckpoint?.profileId === profile.id ? job.diarizationCheckpoint : undefined,
+    signal,
+    onProgress: ({ phase, audioDurationMs, window }) => {
+      if (!phase || signal.aborted || isJobCancelled(job.id, controller)) return;
+      const current = loadJob(job.id);
+      if (!current) return;
+      const checkpoint = current.diarizationCheckpoint?.profileId === profile.id ? current.diarizationCheckpoint : undefined;
+      const patch = {};
+      if (phase !== current.diarizationPhase) patch.diarizationPhase = phase;
+      if (audioDurationMs && audioDurationMs !== current.diarizationAudioDurationMs) patch.diarizationAudioDurationMs = audioDurationMs;
+      if (window && window.throughSample > (checkpoint?.throughSample ?? 0)) {
+        patch.diarizationProcessedMs = window.processedMs;
+        patch.diarizationCheckpoint = {
+          profileId: profile.id, throughSample: window.throughSample, turns: [...(checkpoint?.turns ?? []), ...window.turns]
+        };
+      }
+      if (Object.keys(patch).length) patchJob(job.id, patch);
+    }
+  }).then((turns) => {
+    if (!signal.aborted) analysis.turns = turns;
+  }).catch((error) => {
+    if (!signal.aborted) analysis.error = error;
+  });
+  return analysis;
+}
+
 /**
  * 执行单个导入任务的完整流水线（副作用：复制文件、转码、转录子进程/网络、写库）。
  * 各阶段用任务字段（archivedPath / playbackReady / transcriptionComplete /
@@ -606,11 +679,12 @@ async function processJob(initial) {
   // 提升到函数作用域，finally 才能在取消/失败/等待网络等所有提前 return 的路径
   // 上清理切块目录（此前只有转录全部成功才删，异常任务会留下成百上千个 WAV）。
   let chunkDirectory;
+  let nextPreparedChunk;
   try {
     let job = loadJob(initial.id);
     if (!job || job.status === "cancelled") return;
 
-    if (!job.archivedPath) {
+    if (!job.recordingBackfill && !job.archivedPath) {
       // 第一步：立即把源文件复制归档进应用数据目录并登记资产，
       // 之后即使源文件被移动/删除，任务仍可继续处理。
       job = patchJob(job.id, { status: "copying", stage: "copying", progress: 0.08 });
@@ -642,7 +716,7 @@ async function processJob(initial) {
     }
     if (controller.signal.aborted || job.status === "cancelled") return;
 
-    if (!job.playbackReady && [".flac", ".mov"].includes(path.extname(job.archivedPath).toLowerCase())) {
+    if (!job.recordingBackfill && !job.playbackReady && [".flac", ".mov"].includes(path.extname(job.archivedPath).toLowerCase())) {
       // FLAC/MOV 浏览器无法直接播放：先用 FFmpeg 生成 m4a 播放副本；
       // 统一使用随应用打包的 FFmpeg；组件缺失时保留已归档原文件并提示重装。
       job = patchJob(job.id, { status: "preparing", stage: "preparing", progress: 0.24 });
@@ -681,12 +755,22 @@ async function processJob(initial) {
         return;
       }
     }
+    if (job.sttProfileId !== sttProfile.id) {
+      job = patchJob(job.id, {
+        sttProfileId: sttProfile.id,
+        language: resolveTranscriptionLanguage(job.explicitLanguage, sttProfile.options, job.defaultLanguage ?? job.language)
+      });
+    }
 
-    // 静音/无语音块统计（跨转录阶段保留到任务完成）：全部为空 → 可行动失败提示；
-    // 部分为空 → 任务照常完成但注明转写不完整，绝不静默吞掉缺口。
-    let silentChunks = 0;
-    let speechChunks = 0;
+    if (job.recordingBackfill) {
+      chunkDirectory = path.join(app.getPath("temp"), `minuteflow-backfill-${job.id}`);
+      await processRecordingBackfill(job, sttProfile, controller, chunkDirectory);
+      return;
+    }
+
     let meeting = loadMeeting(job.meetingId);
+    const speakerAnalysis = startImportDiarization(job, profiles, controller);
+    let subtitleLabelsApplied = false;
     if (!job.transcriptionComplete) {
       // 渐进式转录：新任务用应用内 FFmpeg 生成约 10 秒 WAV 块并带短重叠；
       // 每块完成后立刻换算全局时间戳、落库并广播，右侧转录栏可持续追加内容。
@@ -711,7 +795,7 @@ async function processJob(initial) {
       const chunkOverlapMs = planBound && job.chunkOverlapMs
         ? job.chunkOverlapMs
         : (legacyInProgress ? LEGACY_TRANSCRIPTION_OVERLAP_MS : enginePlan.overlapMs);
-      const chunkingVersion = job.chunkingVersion || (legacyInProgress ? 1 : TRANSCRIPTION_PLAN_VERSION);
+      let chunkingVersion = job.chunkingVersion || (legacyInProgress ? 1 : TRANSCRIPTION_PLAN_VERSION);
       // v3 起，先对整段录音做一次静音扫描，把切块边界吸附到目标网格附近的自然停顿。
       // 边界计划随任务落库：崩溃重启后沿用同一份切点，已完成块的 id 与时间轴保持稳定。
       // 已开工却没有边界计划的任务（理论不可达）、扫描失败或没有可用静音时回落固定网格。
@@ -722,6 +806,15 @@ async function processJob(initial) {
         const silenceMidpoints = await detectSilenceMidpoints(job.id, bundledFfmpeg, job.archivedPath, controller.signal, durationMs);
         if (isJobCancelled(job.id, controller)) return;
         chunkBoundaries = planTranscriptionChunkBoundaries(durationMs, silenceMidpoints, enginePlan.planning);
+      }
+      if (chunkBoundaries && chunkingVersion === 3 && importTranscriptionRoute(sttProfile.transport) === "whisper") {
+        const completed = job.completedChunks || 0;
+        const remainingFrom = chunkBoundaries[completed];
+        if (remainingFrom !== undefined && !job.retryingTranscriptionGaps && durationMs > remainingFrom) {
+          const suffix = planTranscriptionChunkBoundaries(durationMs - remainingFrom, [], enginePlan.planning);
+          chunkBoundaries = [...chunkBoundaries.slice(0, completed), ...suffix.map((time) => time + remainingFrom)];
+        }
+        chunkingVersion = TRANSCRIPTION_PLAN_VERSION;
       }
       if (isJobCancelled(job.id, controller)) return;
       const useAdaptiveBoundaries = Boolean(chunkBoundaries);
@@ -740,85 +833,59 @@ async function processJob(initial) {
       });
       // 术语表在任务开始时读一次：用户在转录途中编辑术语不会让同一份逐字稿前后
       // 用词不一致。每块把最近定稿段落作为前文送进 prompt，保持专名与断句风格连续。
-      const glossary = normalizeGlossary(await getGlossary().catch(() => []));
+      const glossary = normalizeGlossary([...(job.transcriptionTerms ?? []), ...await getGlossary().catch(() => [])]);
       const configuredLanguage = transcriptionLanguageForEngine(job.language);
-      // auto 模式原先让每个 10 秒块各自重新判语种，中英混说或只有语气词的块极易
-      // 误判。首块采信引擎结果并落库，后续块固定沿用已锁定语言。
-      let detectedLanguage = String(job.detectedLanguage || "");
-      for (let chunkIndex = completedChunks; chunkIndex < totalChunks; chunkIndex += 1) {
-        if (controller.signal.aborted || loadJob(job.id)?.status === "cancelled") return;
-        const chunkLanguage = resolveChunkLanguage({ configured: configuredLanguage, detected: detectedLanguage });
-        const previousText = (meeting?.transcript ?? [])
-          .slice(-3)
-          .map((segment) => String(segment.text ?? ""))
-          .join("");
+      const retryingGaps = job.retryingTranscriptionGaps === true;
+      let gaps = job.transcriptionGaps ?? [];
+      const targets = retryingGaps
+        ? gaps.map((gap) => gap.chunkIndex)
+        : Array.from({ length: totalChunks - completedChunks }, (_, index) => completedChunks + index);
+      const transcriptionRoute = importTranscriptionRoute(sttProfile.transport);
+      const boundsFor = (chunkIndex) => {
         const nominalStartMs = useAdaptiveBoundaries ? chunkBoundaries[chunkIndex] : chunkIndex * chunkDurationMs;
         const extractionStartMs = Math.max(0, nominalStartMs - (chunkIndex ? chunkOverlapMs : 0));
         const chunkEndMs = useAdaptiveBoundaries
-          ? (chunkIndex + 1 < chunkBoundaries.length ? chunkBoundaries[chunkIndex + 1] : durationMs)
+          ? (chunkBoundaries[chunkIndex + 1] ?? durationMs)
           : Math.min(durationMs, nominalStartMs + chunkDurationMs);
         const chunkPath = path.join(chunkDirectory, `chunk-${String(chunkIndex).padStart(5, "0")}.wav`);
-        const transcriptionRoute = importTranscriptionRoute(sttProfile.transport);
+        return { nominalStartMs, extractionStartMs, chunkEndMs, chunkPath };
+      };
+      const prepareChunk = async ({ extractionStartMs, nominalStartMs, chunkEndMs, chunkPath }) => {
+        // 静音检测使用原始音量；FFmpeg 增强后的 PCM 可以直接交给本地 Whisper。
+        await extractTranscriptionChunk(job.id, bundledFfmpeg, job.archivedPath, chunkPath,
+          extractionStartMs, chunkEndMs - extractionStartMs, controller.signal);
+        return prepareArchivedChunk({
+          route: transcriptionRoute, bundledFfmpeg, chunkPath, controller,
+          leadingMs: nominalStartMs - extractionStartMs
+        });
+      };
+      for (const [targetIndex, chunkIndex] of targets.entries()) {
+        if (isJobCancelled(job.id, controller)) return;
+        const bounds = boundsFor(chunkIndex);
+        const { nominalStartMs, extractionStartMs, chunkEndMs, chunkPath } = bounds;
+        const previousText = (meeting?.transcript ?? [])
+          .filter((segment) => segment.endMs <= nominalStartMs)
+          .slice(-3).map((segment) => segment.text).join("");
         job = patchJob(job.id, {
           status: "transcribing",
           currentChunkStartMs: nominalStartMs,
           currentChunkEndMs: chunkEndMs,
-          progress: 0.35 + (0.33 * chunkIndex / totalChunks)
+          progress: 0.35 + 0.33 * targetIndex / Math.max(1, targets.length)
         });
-        // 切块只做格式转换，绝不带 loudnorm：静音门限必须在原始 PCM 上算，
-        // 否则被抬升的底噪会让纯静音块看起来「有人说话」。增强作为独立后处理，
-        // 这样所有引擎（不只 Apple Speech）都能吃到同一份处理过的音频。
-        await extractTranscriptionChunk(
-          job.id, bundledFfmpeg, job.archivedPath, chunkPath,
-          extractionStartMs, chunkEndMs - extractionStartMs, controller.signal
-        );
-        let audio = await readFile(chunkPath);
-        const silentChunk = isSilenceSkipEnabled() && isSilentPcmWav(audio);
-        if (!silentChunk) {
-          const original = audio;
-          audio = await enhanceTranscriptionAudio(audio, bundledFfmpeg, controller.signal);
-          // sherpa 运行时直接读切块文件而非内存 buffer，增强后回写保持一致。
-          if (transcriptionRoute === "sherpa" && !audio.equals(original)) {
-            await writeFile(chunkPath, audio);
-          }
+        const prepared = await (nextPreparedChunk ?? prepareChunk(bounds));
+        nextPreparedChunk = undefined;
+        if (isJobCancelled(job.id, controller)) return;
+        const nextChunkIndex = targets[targetIndex + 1];
+        if (transcriptionRoute === "whisper" && nextChunkIndex !== undefined) {
+          // 一次只预取一块，取音与增强用 CPU，与当前 GPU 推理重叠。逐块按序落盘。
+          nextPreparedChunk = prepareChunk(boundsFor(nextChunkIndex));
+          void nextPreparedChunk.catch(() => {});
         }
-        let rawResult;
-        try {
-          rawResult = silentChunk
-            ? { text: "", segments: [] }
-            : await transcribeImportChunk(transcriptionRoute, sttProfile, audio, chunkIndex, chunkLanguage, controller.signal, chunkPath, glossary, previousText);
-        } catch (error) {
-          // 静音块识别不到语音是正常输入，不是失败：按空结果继续，任务不中断。
-          if (error?.appleSpeechCode === "no_speech") {
-            rawResult = { text: "", segments: [] };
-            silentChunks += 1;
-          } else {
-            if (controller.signal.aborted || !error?.retryable) throw error;
-            // 网关/网络持续波动（请求级重试已耗尽）：进入可恢复等待态，按退避自动从
-            // 当前块续跑。断点 = 已完成块数 + 持久化切块计划，崩溃/重启也不会重切重算。
-            const attempt = (job.transcriptionRetryAttempts || 0) + 1;
-            const delayMs = nextTranscriptionResumeDelayMs(attempt);
-            patchJob(job.id, {
-              status: "waiting_for_network",
-              stage: "transcribing",
-              transcriptionRetryAttempts: attempt,
-              error: `${error instanceof Error ? error.message : "转录模型请求失败"}（第 ${attempt} 次等待，${Math.round(delayMs / 1000)} 秒后自动从断点继续）`
-            });
-            scheduleQueueAutoResume(delayMs);
-            return;
-          }
-        }
-        if (silentChunk) silentChunks += 1;
-        const result = withSegmentConfidence(simplifyTranscriptResult(rawResult));
-        if (result.text.trim() || result.segments?.length) speechChunks += 1;
-        if (!configuredLanguage && !detectedLanguage) {
-          const transcriptText = result.text || (result.segments ?? []).map((segment) => segment.text).join("");
-          const locked = resolveChunkLanguage({ resultLanguage: result.language, text: transcriptText });
-          if (locked) {
-            detectedLanguage = locked;
-            job = patchJob(job.id, { detectedLanguage }) || job;
-          }
-        }
+        const { result, silent } = await recognizeArchivedChunk({
+          profile: sttProfile, route: transcriptionRoute, bundledFfmpeg, chunkPath,
+          chunkIndex, language: configuredLanguage, controller, glossary, previousText
+        }, prepared);
+        if (isJobCancelled(job.id, controller)) return;
         // 用户可能在转录期间编辑标题/笔记/已出现的文本；每块落盘前重读最新会议，
         // 只把本块结果合进去，避免后台快照覆盖前台编辑。
         meeting = loadMeeting(job.meetingId) || meeting;
@@ -833,35 +900,42 @@ async function processJob(initial) {
           const existing = previousChunkSegments.get(segment.id);
           return existing ? { ...segment, text: existing.text } : segment;
         });
-        meeting = publishMeeting(saveMeeting({
-          ...meeting,
-          durationSeconds: Math.max(0, Math.round(durationMs / 1000)),
-          // 重新转录的会议已是会后状态：保持 complete，不要把它打回草稿。
-          ...(job.retranscribe ? {} : { status: "draft" }),
-          transcript: groupTranscriptSegments([...retained, ...chunkSegments]),
-          summary: { ...meeting.summary, stale: retained.length + chunkSegments.length > 0 }
-        }));
-        completedChunks = chunkIndex + 1;
+        if (chunkSegments.length || !retryingGaps) {
+          const turns = speakerAnalysis?.turns;
+          const labeledChunks = turns?.length ? applyDiarization(chunkSegments, turns) : chunkSegments;
+          const labeledExisting = turns?.length && !subtitleLabelsApplied && !retryingGaps
+            ? applyDiarization(retained, turns)
+            : retained;
+          if (turns?.length && !retryingGaps && !subtitleLabelsApplied) {
+            subtitleLabelsApplied = true;
+            job = patchJob(job.id, { diarizationOutcome: "identified" });
+          }
+          const combined = [...labeledExisting, ...labeledChunks].sort((left, right) => left.startMs - right.startMs);
+          // Keep atomic recognition timestamps until the separate model knows who spoke.
+          const transcript = retryingGaps || (speakerAnalysis && !turns?.length)
+            ? combined
+            : groupTranscriptSegments(combined);
+          meeting = publishMeeting(saveMeeting({
+            ...meeting,
+            durationSeconds: Math.max(0, Math.round(durationMs / 1000)),
+            ...(job.retranscribe || retryingGaps ? {} : { status: "draft" }),
+            transcript,
+            summary: { ...meeting.summary, stale: chunkSegments.length > 0 || meeting.summary.stale }
+          }));
+        }
+        gaps = gaps.filter((gap) => gap.chunkIndex !== chunkIndex);
+        if (!silent && !chunkSegments.length) gaps.push({ chunkIndex, startMs: nominalStartMs, endMs: chunkEndMs });
+        completedChunks = Math.max(completedChunks, chunkIndex + 1);
         job = patchJob(job.id, {
           completedChunks,
-          progress: 0.35 + (0.33 * completedChunks / totalChunks),
-          // 服务恢复后清零等待计数，下次波动重新从最短退避起步。
+          transcriptionGaps: gaps.sort((left, right) => left.startMs - right.startMs),
+          progress: 0.35 + 0.33 * (targetIndex + 1) / Math.max(1, targets.length),
           ...(job.transcriptionRetryAttempts ? { transcriptionRetryAttempts: 0 } : {})
         });
-        ({ job, meeting } = await maybeUpdateRollingSummary(job, meeting, profiles, controller.signal));
+        if (!retryingGaps) ({ job, meeting } = maybeUpdateRollingSummary(job, meeting));
         await rm(chunkPath, { force: true }).catch(() => {});
       }
       if (isJobCancelled(job.id, controller)) return;
-      // 全程没有识别到任何语音（典型：录音语言与所选模型不匹配，或纯音乐/环境音）：
-      // 停在可重试的失败态并给出可行动指引，不静默产出一份空转写。任务钉住的模型
-      // 不会随重试变化，所以指引重新导入改选模型；原文件已安全归档。
-      if (speechChunks === 0 && silentChunks > 0 && silentChunks >= totalChunks) {
-        patchJob(job.id, {
-          status: "failed", stage: "transcribing",
-          error: "所选转录模型没有在这份录音中识别到语音（可能语言不匹配，或录音中无人说话）。请重新导入并选择其他转录模型；原文件已安全归档。"
-        });
-        return;
-      }
       saveAudioAsset({
         id: job.audioAssetId, meetingId: job.meetingId, path: job.archivedPath,
         playbackPath: job.playbackPath, track: "mixed",
@@ -871,83 +945,58 @@ async function processJob(initial) {
         byteLength: job.sizeBytes, durationMs
       });
       await rm(chunkDirectory, { recursive: true, force: true }).catch(() => {});
+      if (!meeting.transcript.length || job.retryingCompletedTranscription) {
+        meeting = loadMeeting(job.meetingId) || meeting;
+        const noSpeech = !meeting.transcript.length && !gaps.length;
+        const noResult = !meeting.transcript.length && gaps.length > 0;
+        publishMeeting(saveMeeting({ ...meeting, status: "complete" }));
+        patchJob(job.id, {
+          status: noResult ? "failed" : "complete",
+          stage: "complete", progress: 1, transcriptionComplete: !noResult,
+          transcriptionNoSpeech: noSpeech, retryingTranscriptionGaps: false,
+          retryingCompletedTranscription: undefined,
+          currentChunkStartMs: undefined, currentChunkEndMs: undefined,
+          error: noResult ? "模型未返回转写。可更换模型，仅重试待补转时段。" : undefined
+        });
+        return;
+      }
       job = patchJob(job.id, {
-        transcriptionComplete: true, stage: "diarizing", progress: 0.68,
+        transcriptionComplete: true, transcriptionNoSpeech: false, retryingTranscriptionGaps: false, stage: "diarizing", progress: 0.68,
         completedChunks: totalChunks, currentChunkStartMs: undefined, currentChunkEndMs: undefined
       });
     }
     if (isJobCancelled(job.id, controller)) return;
 
-    if (job.diarizationEnabled && !job.diarizationComplete && !job.diarizationSkipped && meeting.transcript.length) {
-      meeting = loadMeeting(job.meetingId) || meeting;
-      // 说话人分离（可选）：配置了 diarization 档案才执行，按时间中点把轮次套到转录段上。
-      const profile = profiles.find((candidate) => candidate.kind === "diarization" && candidate.enabled);
-      let skipped = false;
-      if (profile) {
-        job = patchJob(job.id, {
-          status: "diarizing",
-          stage: "diarizing",
-          progress: 0.73,
-          // 长推理没有细粒度百分比；记录开始时间与阶段，界面显示真实已用时间。
-          diarizationStartedAt: new Date().toISOString(),
-          diarizationPhase: "preparing",
-          diarizationAudioDurationMs: job.durationMs,
-          error: undefined
-        });
-        // 跳过识别有独立信号：只终止分离 worker，转录断点与任务本身继续。
-        const skipController = new AbortController();
-        activeDiarizationSkips.set(job.id, skipController);
-        try {
-          const turns = await diarizeWithSherpa(profile, job.archivedPath, {
-            expectedSpeakers: -1,
-            voiceprints: listVoiceprintSamples(),
-            // 取消必须能终止 worker：否则 34 分钟音频的分离会继续跑几分钟。
-            signal: combineAbortSignals(controller.signal, skipController.signal),
-            onProgress: (progress) => {
-              if (!progress?.phase || isJobCancelled(job.id, controller)) return;
-              const current = loadJob(job.id);
-              if (!current || current.status !== "diarizing" || current.diarizationSkipped) return;
-              const patch = {};
-              if (current.diarizationPhase !== progress.phase) patch.diarizationPhase = progress.phase;
-              if (progress.audioDurationMs && current.diarizationAudioDurationMs !== progress.audioDurationMs) {
-                patch.diarizationAudioDurationMs = progress.audioDurationMs;
-              }
-              if (Object.keys(patch).length) patchJob(job.id, patch);
-            }
-          });
-          if (isJobCancelled(job.id, controller)) return;
-          meeting = publishMeeting(saveMeeting({
-            ...meeting,
-            transcript: groupTranscriptSegments(applyDiarization(meeting.transcript, turns))
-          }));
-        } catch (error) {
-          // 只有“空闲跳过”信号被触发时才降级为跳过；任务级取消仍按取消处理。
-          if (!skipController.signal.aborted || controller.signal.aborted) throw error;
-          skipped = true;
-        } finally {
-          activeDiarizationSkips.delete(job.id);
-        }
+    if (job.diarizationEnabled && !job.diarizationComplete) {
+      if (speakerAnalysis) {
+        job = patchJob(job.id, { status: "diarizing", stage: "diarizing", progress: 0.73 });
+        await speakerAnalysis.done;
+        if (isJobCancelled(job.id, controller)) return;
       }
-      if (isJobCancelled(job.id, controller)) return;
+      job = loadJob(job.id);
+      if (!job) return;
+      if (speakerAnalysis?.error && !job.diarizationSkipped) throw speakerAnalysis.error;
+      const turns = speakerAnalysis?.turns;
+      if (turns?.length && !subtitleLabelsApplied && !job.diarizationSkipped) {
+        meeting = loadMeeting(job.meetingId) || meeting;
+        meeting = publishMeeting(saveMeeting({
+          ...meeting, transcript: groupTranscriptSegments(applyDiarization(meeting.transcript, turns))
+        }));
+      }
+      const diarizationOutcome = job.diarizationSkipped ? "skipped"
+        : turns?.length ? "identified" : speakerAnalysis ? "unresolved" : "unavailable";
+      if (!turns?.length && speakerAnalysis) {
+        meeting = loadMeeting(job.meetingId) || meeting;
+        meeting = publishMeeting(saveMeeting({ ...meeting, transcript: groupTranscriptSegments(meeting.transcript) }));
+      }
       job = patchJob(job.id, {
-        diarizationComplete: true,
-        // 用户主动跳过时打标，避免界面把“未识别”误读为识别失败。
-        ...(skipped || job.diarizationSkipped ? { diarizationSkipped: true } : {}),
-        diarizationPhase: undefined,
-        diarizationStartedAt: undefined,
-        diarizationAudioDurationMs: undefined,
-        stage: "summarizing",
-        progress: 0.8
-      });
-    } else if (job.diarizationSkipped && !job.diarizationComplete) {
-      // 跳过发生在排队/转录阶段：流水线走到这里时直接结项，不再进入分离。
-      job = patchJob(job.id, {
-        diarizationComplete: true,
-        diarizationPhase: undefined,
-        diarizationStartedAt: undefined,
-        diarizationAudioDurationMs: undefined
+        diarizationComplete: true, diarizationOutcome,
+        diarizationPhase: undefined, diarizationStartedAt: undefined, diarizationAudioDurationMs: undefined,
+        diarizationCheckpoint: undefined, diarizationProcessedMs: undefined,
+        stage: "summarizing", progress: 0.8
       });
     }
+    if (isJobCancelled(job.id, controller)) return;
 
     if (job.autoSummarize && !job.summaryComplete) {
       if (isJobCancelled(job.id, controller)) return;
@@ -1012,13 +1061,18 @@ async function processJob(initial) {
         }
       }
       if (isJobCancelled(job.id, controller)) return;
+      meeting = loadMeeting(job.meetingId) || meeting;
       meeting = publishMeeting(saveMeeting({
         ...meeting,
-        summary: ordinarySummary
+        summary: {
+          ...mergeSummaryPreservingLocks(meeting.summary, ordinarySummary),
+          stale: meeting.title !== input.title
+        }
       }));
       job = patchJob(job.id, { summaryComplete: true, progress: 0.98 });
     } else if (!job.autoSummarize) {
       if (isJobCancelled(job.id, controller)) return;
+      meeting = loadMeeting(job.meetingId) || meeting;
       const summary = summarizeLocally({
         title: meeting.title, goals: meeting.goals, notes: meeting.notes,
         transcript: meeting.transcript, previousSummary: meeting.summary
@@ -1039,30 +1093,110 @@ async function processJob(initial) {
     publishMeeting(saveMeeting({ ...meeting, status: "complete" }));
     patchJob(job.id, {
       status: "complete", stage: "complete", progress: 1,
-      // 部分片段没识别出内容：任务完成但明确告知转写不完整（静默缺块会让人误以为
-      // 录音没人说话）。全部片段都为空的情况已在转录阶段走可重试失败提示。
-      error: silentChunks > 0 && speechChunks > 0
-        ? `${silentChunks} 个片段未能识别出内容，已跳过；转写可能不完整，可更换转录模型后重试。`
-        : undefined
+      error: undefined
     });
   } catch (error) {
     const current = loadJob(initial.id);
     // AbortController 已取消时，即使状态刚被重试改回 queued，也不能把旧一轮的
     // 取消异常写成 failed。
     if (!controller.signal.aborted && current?.status !== "cancelled") {
-      patchJob(initial.id, {
-        status: "failed",
-        error: error instanceof Error ? error.message : "导入处理失败。"
-      });
+      if (error?.retryable && current?.stage === "transcribing") {
+        const attempt = (current.transcriptionRetryAttempts || 0) + 1;
+        const delayMs = nextTranscriptionResumeDelayMs(attempt);
+        patchJob(initial.id, {
+          status: "waiting_for_network",
+          transcriptionRetryAttempts: attempt,
+          error: `${error.message}（${Math.round(delayMs / 1000)} 秒后自动从断点继续）`
+        });
+        scheduleQueueAutoResume(delayMs);
+      } else {
+        patchJob(initial.id, {
+          status: "failed",
+          error: error instanceof Error ? error.message : "导入处理失败。"
+        });
+      }
     }
   } finally {
+    if (nextPreparedChunk) {
+      controller.abort();
+      await nextPreparedChunk.catch(() => {});
+    }
     activeControllers.delete(initial.id);
     activeProcesses.delete(initial.id);
+    activeDiarizationSkips.get(initial.id)?.abort();
     activeDiarizationSkips.delete(initial.id);
     if (chunkDirectory) {
       await rm(chunkDirectory, { recursive: true, force: true }).catch(() => {});
     }
   }
+}
+
+async function processRecordingBackfill(job, profile, controller, directory) {
+  const bundledFfmpeg = await managedFfmpegPath();
+  if (isJobCancelled(job.id, controller)) return;
+  if (!bundledFfmpeg) {
+    patchJob(job.id, { status: "waiting_for_audio_tool", error: "内置音频组件无法加载，请重新安装 MinuteFlow。" });
+    return;
+  }
+  await mkdir(directory, { recursive: true });
+  const glossary = normalizeGlossary(await getGlossary().catch(() => []));
+  const language = transcriptionLanguageForEngine(job.language);
+  const route = importTranscriptionRoute(profile.transport);
+  const ranges = job.recordingRanges;
+  let remaining = [...ranges];
+  let completedChunks = 0;
+  for (const [index, range] of ranges.entries()) {
+    if (isJobCancelled(job.id, controller)) return;
+    const asset = loadAudioAsset(range.audioAssetId);
+    if (!asset || asset.meetingId !== job.meetingId) throw new Error("未找到归档录音，无法补转。");
+    patchJob(job.id, {
+      status: "transcribing", totalChunks: ranges.length, completedChunks,
+      currentChunkStartMs: range.startMs, currentChunkEndMs: range.endMs
+    });
+    const chunkPath = path.join(directory, "chunk.wav");
+    await extractTranscriptionChunk(job.id, bundledFfmpeg, asset.path, chunkPath,
+      range.startMs - range.offsetMs, range.endMs - range.startMs, controller.signal);
+    const previousText = (loadMeeting(job.meetingId)?.transcript ?? [])
+      .filter((segment) => segment.track === range.track && segment.endMs <= range.startMs)
+      .slice(-3).map((segment) => segment.text).join("");
+    const { result, silent } = await recognizeArchivedChunk({
+      profile, route, bundledFfmpeg, chunkPath, chunkIndex: index, language, controller, glossary, previousText
+    });
+    if (isJobCancelled(job.id, controller)) return;
+    const meeting = loadMeeting(job.meetingId);
+    if (!meeting) return;
+    const prefix = `${job.id}:live:${range.track}:${range.startMs}:`;
+    const alreadySaved = meeting.transcript.some((segment) => segment.id.startsWith(prefix));
+    const sameTrack = meeting.transcript.filter((segment) => segment.track === range.track);
+    const overlapping = sameTrack.filter((segment) => segment.startMs < range.endMs && segment.endMs > range.startMs);
+    const source = alreadySaved ? [] : normalizeImportChunkSegments(result, range.startMs, range.startMs, range.endMs, prefix, overlapping);
+    if (source.length) {
+      const systemTrack = range.track === "system";
+      const segments = groupTranscriptSegments(source.map((segment) => ({
+        ...segment, track: range.track,
+        speakerId: systemTrack ? "remote" : "me",
+        speakerName: systemTrack ? "远端发言人" : "我"
+      })));
+      publishMeeting(saveMeeting({
+        ...meeting,
+        transcript: [...meeting.transcript, ...segments].sort((left, right) => left.startMs - right.startMs),
+        summary: { ...meeting.summary, stale: true }
+      }));
+    }
+    if (alreadySaved || silent || source.length) {
+      remaining = remaining.filter((entry) => entry !== range);
+    }
+    completedChunks += 1;
+    patchJob(job.id, {
+      recordingRanges: remaining,
+      transcriptionGaps: remaining.map(({ startMs, endMs }) => ({ startMs, endMs })),
+      completedChunks, progress: completedChunks / ranges.length, transcriptionRetryAttempts: 0
+    });
+  }
+  patchJob(job.id, {
+    status: "complete", stage: "complete", progress: 1,
+    currentChunkStartMs: undefined, currentChunkEndMs: undefined
+  });
 }
 
 /**
@@ -1083,17 +1217,21 @@ export function normalizeImportChunkSegments(result, extractionStartMs, nominalS
       ...fragment
     }));
   });
-  const recentTexts = existing.slice(-4).map((segment) => normalizeTranscriptText(segment.text));
+  const overlappingSegments = existing.filter((segment) => segment.endMs > extractionStartMs && segment.startMs < chunkEndMs);
   return source.flatMap((segment, index) => {
     const text = String(segment.text || "").trim();
     if (!text) return [];
     const rawStartMs = extractionStartMs + Math.max(0, Number(segment.startMs) || 0);
     const rawEndMs = extractionStartMs + Math.max(Number(segment.endMs) || 0, Number(segment.startMs) || 0);
-    if (nominalStartMs > 0 && rawEndMs <= nominalStartMs) return [];
+    if (rawEndMs <= nominalStartMs || rawStartMs >= chunkEndMs) return [];
     const normalized = normalizeTranscriptText(text);
-    // 重叠预滚的重复靠文本匹配去除；但极短文本（「对」「好的」）天然容易是上一段
-    // 长句的子串，只有足够长的文本才参与子串级去重，精确匹配始终去重。
-    if (recentTexts.some((value) => value === normalized || (normalized.length >= 6 && value.includes(normalized)))) return [];
+    // 同一句可能在录音里反复说。只在时间确实相交时匹配预滚重复。
+    if (overlappingSegments.some((prior) => {
+      const overlap = Math.min(rawEndMs, prior.endMs) - Math.max(rawStartMs, prior.startMs);
+      if (overlap <= 0) return false;
+      const priorText = normalizeTranscriptText(prior.text);
+      return normalized === priorText || (normalized.length >= 6 && overlap >= (rawEndMs - rawStartMs) * 0.8 && priorText.includes(normalized));
+    })) return [];
     const startMs = Math.max(nominalStartMs, rawStartMs);
     const endMs = Math.max(startMs + 1, Math.min(chunkEndMs, rawEndMs || chunkEndMs));
     return [{

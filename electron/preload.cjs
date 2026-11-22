@@ -81,6 +81,8 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     scanDiarization: () => invoke("models:scan-diarization"),
     chooseLocal: (kind) => invoke("models:choose-local", kind),
     catalog: () => invoke("models:catalog"),
+    downloaded: () => invoke("models:downloaded"),
+    trashDownloaded: (file) => invoke("models:trash-downloaded", file),
     download: (modelId) => invoke("models:download", modelId),
     downloadFromUrl: (url) => invoke("models:download-url", url),
     onDownloadProgress: (callback) => {
@@ -97,7 +99,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     fromDropped: (files) => invoke("imports:describe-dropped", Array.from(files, (file) => webUtils.getPathForFile(file))),
     enqueue: (items, options) => invoke("imports:enqueue", items, options),
     list: () => invoke("imports:list"),
-    retry: (id) => invoke("imports:retry", id),
+    retry: (id, sttProfileId) => invoke("imports:retry", id, sttProfileId),
     cancel: (id) => invoke("imports:cancel", id),
     skipDiarization: (id) => invoke("imports:skip-diarization", id),
     retranscribe: (meetingId) => invoke("imports:retranscribe", meetingId),

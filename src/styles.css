@@ -496,6 +496,7 @@ button {
 .import-settings { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .import-settings label { display: grid; gap: 5px; color: var(--ink-soft); font-size: var(--text-data); }
 .import-settings select { width: 100%; min-width: 0; height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink-soft); background: var(--surface); }
+.import-settings input:not([type="checkbox"]) { width: 100%; min-width: 0; height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink-soft); background: var(--surface); }
 .import-settings .import-check { display: flex; align-items: center; gap: 8px; min-height: 34px; color: var(--ink-soft); }
 .import-model-hint { width: 100%; margin-top: 12px; padding: 10px 12px; display: flex; gap: 9px; align-items: center; text-align: left; border: 1px solid var(--line); border-radius: 11px; background: var(--accent-soft); color: var(--red); }
 .import-model-hint span { display: grid; gap: 2px; font-size: var(--text-data); }.import-model-hint strong { font-size: 12px; }
@@ -587,6 +588,14 @@ button {
   flex-direction: column;
   gap: 2px;
 }
+
+.document-header__topic {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.document-header__topic .icon-button { flex-shrink: 0; }
 
 .document-header__title input {
   min-width: 150px;
@@ -1134,6 +1143,7 @@ button {
 /* 结论是纪要文档的重心：字号比正文大一档并加粗，与普通列表文字拉开层级。 */
 .summary-point textarea {
   width: 100%;
+  field-sizing: content;
   min-height: 22px;
   margin: 0;
   padding: 0;
@@ -4300,6 +4310,12 @@ html[data-surface="permission-helper"] #root {
   background: var(--surface-raised);
 }
 
+.local-model-list--actions > button {
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+}
+
+.local-model-list--actions strong { overflow-wrap: anywhere; }
+
 .local-model-list span,
 .download-model-card > div {
   min-width: 0;
@@ -4832,13 +4848,13 @@ html[data-surface="permission-helper"] #root {
   z-index: 200;
   left: 50%;
   top: 18px;
-  min-width: 280px;
-  max-width: 520px;
+  min-width: min(280px, calc(100vw - 32px));
+  max-width: min(520px, calc(100vw - 32px));
   min-height: 43px;
   opacity: 1;
   transform: translate(var(--toast-x), 0);
   display: grid;
-  grid-template-columns: 20px 1fr 24px;
+  grid-template-columns: 20px minmax(0, 1fr) 24px;
   align-items: center;
   gap: 8px;
   padding: 8px 10px 8px 13px;
@@ -4869,6 +4885,11 @@ html[data-surface="permission-helper"] #root {
   color: var(--green);
 }
 
+.toast > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .toast--warning > svg {
   color: var(--red);
 }
@@ -4884,6 +4905,8 @@ html[data-surface="permission-helper"] #root {
   flex-direction: column;
   align-items: center;
   gap: 8px;
+  width: max-content;
+  max-width: calc(100vw - 32px);
 }
 
 .toast-stack .toast {
@@ -4910,7 +4933,7 @@ html[data-surface="permission-helper"] #root {
   font-size: var(--text-data);
 }
 
-.toast button {
+.toast > button:not(.toast__action) {
   width: 24px;
   height: 24px;
   display: grid;
@@ -4922,7 +4945,7 @@ html[data-surface="permission-helper"] #root {
 
 /* 带 action 的 Toast：图标 / 文案 / 按钮 / 关闭 四列排布。 */
 .toast:has(.toast__action) {
-  grid-template-columns: 20px 1fr auto 24px;
+  grid-template-columns: 20px minmax(0, 1fr) auto 24px;
 }
 
 .toast__action {
@@ -4965,11 +4988,13 @@ html[data-surface="permission-helper"] #root {
 .meeting-document--live .document-section--goals,
 .meeting-document--live .document-section--details { display: none; }
 
+.meeting-document--review .minutes-overview,
 .meeting-document--review .document-section--summary { order: 1; }
-.meeting-document--review .document-section--actions { order: 2; }
-.meeting-document--review .document-section--details { order: 3; }
-.meeting-document--review .document-section--notes { order: 4; }
-.meeting-document--review .document-section--goals { order: 5; }
+.meeting-document--review .minutes-discussion { order: 2; }
+.meeting-document--review .document-section--actions { order: 3; }
+.meeting-document--review .document-section--details { order: 4; }
+.meeting-document--review .document-section--notes { order: 5; }
+.meeting-document--review .document-section--goals { order: 6; }
 
 /* 视觉纪要只替换「关键结论」这一节：我的记录、行动项、决策等可编辑内容必须留在场，
    否则切一次视图就像把用户写的东西整块删掉。 */
@@ -5889,6 +5914,10 @@ html[data-surface="permission-helper"] #root {
 .transcript-import-status__actions { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
 .transcript-import-status__actions .text-button { display: inline-flex; align-items: center; gap: 3px; margin: 0; padding: 0; font-size: var(--text-data); }
 .transcript-import-status .import-processing-meta { margin-top: 8px; }
+.transcript-gap-retry { margin-top: 8px; color: var(--ink-soft); font-size: var(--text-data); }
+.transcript-gap-retry summary { width: fit-content; cursor: pointer; }
+.transcript-gap-retry ul { max-height: 104px; overflow: auto; padding-inline-start: 20px; }
+.transcript-gap-retry select { max-width: 65%; }
 
 .workspace-transcript .transcript-list {
   flex: 1;
@@ -6376,7 +6405,7 @@ html[data-surface="permission-helper"] #root {
 
 .chat-bubble.is-stopped { border-color: color-mix(in srgb, var(--line) 85%, transparent); }
 
-/* Recording is a focused split workspace. Each column scrolls independently. */
+/* Recording and audio imports use the same split workspace. Each column scrolls independently. */
 .app-shell--live {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   background: var(--surface-raised);
@@ -6404,6 +6433,7 @@ html[data-surface="permission-helper"] #root {
 
 .document-header--live {
   flex-basis: 56px;
+  gap: 8px;
   padding: 6px clamp(16px, 2.7vw, 38px);
   border-bottom: 0;
 }
@@ -6411,9 +6441,16 @@ html[data-surface="permission-helper"] #root {
 .document-header--live .document-header__title { gap: 7px; }
 .document-header--live .document-header__title input { min-width: 0; max-width: min(100%, 28vw, 360px); }
 .document-header--live .document-header__actions { gap: 5px; }
+.document-header--live .document-header__actions .import-notes-trigger { display: inline-flex; }
+.document-header--live .save-state { padding-inline: 4px; }
 .live-library-trigger { flex-shrink: 0; }
 
 [data-platform="darwin"] .document-header--live { padding-left: 86px; }
+
+@media (max-width: 1280px) {
+  .document-header--live .icon-button--labeled { padding-inline: 6px; }
+  .document-header--live .icon-button--labeled > span { display: none; }
+}
 
 .main-pane--live .document-scroll { overflow: hidden; }
 
@@ -6531,6 +6568,56 @@ html[data-surface="permission-helper"] #root {
 
 .live-summary__points p { margin: 0; }
 .live-summary__points strong { display: block; }
+
+.minutes-overview {
+  margin: 0 0 14px;
+  padding: 8px 0 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+}
+.minutes-overview h3,
+.minutes-chapter h3,
+.live-summary__conclusions h3 { margin: 0 0 6px; font-size: 14px; font-weight: 680; }
+.minutes-overview h3 { color: var(--accent-text); }
+.minutes-overview p,
+.minutes-chapter p { margin: 0; font-size: 14px; line-height: 1.68; overflow-wrap: anywhere; }
+.minutes-overview p { font-size: 16px; }
+
+.minutes-discussion { margin-block: 10px 18px; }
+.minutes-chapter {
+  display: grid;
+  grid-template-columns: minmax(100px, 22%) minmax(0, 1fr);
+  gap: 12px;
+  padding: 13px 0;
+  border-top: 1px solid var(--line);
+}
+.minutes-chapter ul { list-style: none; margin: 0; padding: 0; }
+.minutes-chapter li + li { margin-top: 9px; }
+.minutes-chapter li strong { display: block; margin-bottom: 2px; }
+.minutes-chapter__table { overflow-x: auto; margin-bottom: 10px; }
+.minutes-chapter table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: start; }
+.minutes-chapter :is(th, td) {
+  padding: 6px 10px 6px 0;
+  text-align: start;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line-soft);
+  overflow-wrap: anywhere;
+}
+.minutes-chapter thead th { color: var(--ink-muted); }
+.live-summary .minutes-chapter { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.minutes-add { order: 4; margin-block: 8px 16px; color: var(--ink-muted); font-size: 13px; }
+.minutes-add summary { width: fit-content; cursor: pointer; }
+.minutes-add > div { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+@media (max-width: 720px) {
+  .minutes-chapter { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+}
+.minutes-source { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.minutes-source:active { background: var(--accent-soft); }
+.live-summary__points .minutes-source,
+.minutes-discussion .minutes-source { margin-top: 4px; }
+.action-row__task { min-width: 0; }
+.action-row__task .minutes-source { margin: 0 0 4px 20px; }
+.live-summary__action-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .live-summary__detail { padding-top: 16px; font-size: 13px; }
 .live-summary__detail h3 { margin: 0 0 6px; font-size: 14px; }
@@ -7941,4 +8028,19 @@ html[data-surface="permission-helper"] #root {
   .workspace-transcript .follow-control { transition: none; }
   .workspace-transcript .transcript-item:hover .transcript-bubble,
   .workspace-transcript .follow-control:hover { transform: none; }
+}
+
+
+.review-hero.review-hero--compact {
+  padding: 6px 0 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.meeting-document--review .summary-points {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
 }

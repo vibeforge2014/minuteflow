@@ -1,4 +1,5 @@
 import { TranscriptionOptionsSection } from "./settings/TranscriptionOptionsSection";
+import { transcriptionComputeMode, transcriptionGpuBackend, type TranscriptionComputeMode } from "../../shared/transcription-options.mjs";
 /**
  * 设置：统一的分类导航与单列内容，服务管理按列表 → 添加 / 编辑分步呈现。
  * 五个标签页：AI 总结（llm）、转录设置（stt）、通用设置、存储与隐私、软件更新（macOS / Windows）。
@@ -21,20 +22,25 @@ import {
   EyeSlash,
   Cloud,
   FolderOpen,
+  HardDrive,
   Info,
   Key,
   MagnifyingGlass,
   Plus,
   ShieldCheck,
+  Trash,
   X
 } from "@phosphor-icons/react";
 import { DiarizationSetup } from "./settings/DiarizationSetup";
+import { DownloadedModels } from "./settings/DownloadedModels";
 import { SettingsNavigation, SETTINGS_PAGES } from "./settings/SettingsNavigation";
 import { SettingsServiceList, SettingsServiceChooser, SettingsEnhancementEntry, SettingsDraftList, type SettingsServiceChoice, type SettingsServiceItem } from "./settings/SettingsServices";
 import "./settings/settings.css";
 import { api, isElectronRuntime } from "../lib/api";
+import { LOCAL_ASR_SETUP_MODELS } from "../lib/local-asr-setup";
 import { hasSettingsDraftChanges, settingsDraftKey, type SettingsDraftSession, type SettingsProfileDraft } from "../lib/settings-drafts";
 import { profileConfigurationKey, validateProfileConfiguration, type ProfileField } from "../lib/profile-configuration";
+import { switchTranscriptionModel } from "../lib/transcription-presets";
 import { useMeetingStore } from "../store/meetingStore";
 import { ConfirmDialog, useConfirmDialog } from "./ConfirmDialog";
 import { useDialogFocus } from "../hooks/useDialogFocus";
@@ -471,6 +477,7 @@ export type SettingsTab = "llm" | "transcription" | "general" | "storage" | "upd
 export type SettingsFocus = "local-whisper" | "online-transcription" | "apple-speech";
 
 type StatusTone = "info" | "success" | "error";
+type ModelSettingsView = "overview" | "add" | "edit" | "downloads";
 
 /** 反馈归属：字段一改或切页，旧结果自动失效，不会停在已改过的配置旁边。 */
 const profileStatusKey = (tab: SettingsTab, profile: ModelProfile | null) =>
@@ -492,7 +499,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const beginDraftSession = (profile: ModelProfile, preserveId = false) => {
     draftSession.current = { id: preserveId && draftSession.current.id ? draftSession.current.id : crypto.randomUUID(), baseline: profile };
   };
-  const [modelView, setModelView] = useState<"overview" | "add" | "edit">("overview");
+  const [modelView, setModelView] = useState<ModelSettingsView>("overview");
   const [glossaryDraft, setGlossaryDraft] = useState(preferences.glossary.join("\n"));
   const glossaryDraftRef = useRef(glossaryDraft);
   glossaryDraftRef.current = glossaryDraft;
@@ -511,17 +518,23 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const [modelQuery, setModelQuery] = useState<string | null>(null);
   const modelRequest = useRef(0);
   // Keep unfinished task forms in memory while navigating; credentials never cross task pages.
-  const taskDrafts = useRef(new Map<SettingsTab, { profile: ModelProfile | null; apiKey: string; presetKey: string | null; view: "overview" | "add" | "edit"; session: SettingsDraftSession }>());
+  const taskDrafts = useRef(new Map<SettingsTab, { profile: ModelProfile | null; apiKey: string; presetKey: string | null; view: ModelSettingsView; session: SettingsDraftSession }>());
   /** 测试/保存的结果反馈：带 tone 与归属键，错误不再显示成成功色。 */
   const [status, setStatus] = useState<{ text: string; tone: StatusTone; key: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  /** 标题区「⋯」菜单（删除档案 / 删除密钥）。 */
+  /** 标题区密钥菜单。 */
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const profileConfirm = useConfirmDialog();
   /** 配置面板“世代”：目录里切换选中服务（预设/已保存/自定义）时 +1，
    *  驱动编辑器面板重放进场过渡；字段编辑不递增，打字不会打断输入。 */
   const [editorGeneration, setEditorGeneration] = useState(0);
+  const [libraryGeneration, setLibraryGeneration] = useState<number | null>(null);
+  const localModelEditor = tab === "transcription" && modelView === "edit" && editing
+    && (isLocalWhisperTransport(editing.transport) || isLocalAsrTransport(editing.transport)) ? editing : null;
+  const showLocalLibrary = Boolean(localModelEditor
+    && (!localModelEditor.options.modelPath || libraryGeneration === editorGeneration));
+  const backToModelConfig = showLocalLibrary && Boolean(localModelEditor?.options.modelPath);
   /** 模型下拉：远端列表（随服务地址/协议变化失效）、拉取状态与菜单开合。 */
   const [modelList, setModelList] = useState<string[] | null>(null);
   /** Ollama 模型名 → 磁盘体积（随 modelList 一起失效），按设备内存标注适配建议。 */
@@ -567,8 +580,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
       setLicenseError(caught instanceof Error ? caught.message : "无法打开购买页，请稍后再试。");
     }
   };
-  const escapeContext = useRef({ busy, modelMenuOpen, profileMenuOpen, confirmOpen: profileConfirm.open, onClose });
-  escapeContext.current = { busy, modelMenuOpen, profileMenuOpen, confirmOpen: profileConfirm.open, onClose };
+  const escapeContext = useRef({ busy, modelMenuOpen, profileMenuOpen, confirmOpen: profileConfirm.open, backToModelConfig, modelView, onClose });
+  escapeContext.current = { busy, modelMenuOpen, profileMenuOpen, confirmOpen: profileConfirm.open, backToModelConfig, modelView, onClose };
   const handleEscape = useCallback(() => {
     const context = escapeContext.current;
     if (context.busy || context.confirmOpen) return;
@@ -576,6 +589,14 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     if (context.profileMenuOpen) {
       setProfileMenuOpen(false);
       profileMenuRef.current?.querySelector<HTMLButtonElement>("button[aria-label='更多操作']")?.focus();
+      return;
+    }
+    if (context.backToModelConfig) {
+      setLibraryGeneration(null);
+      return;
+    }
+    if (context.modelView === "downloads") {
+      setModelView("overview");
       return;
     }
     context.onClose();
@@ -592,6 +613,12 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   latestEditorScope.current = editorScope;
   const updateLocalEditor = (profile: ModelProfile) => {
     if (latestEditorScope.current === editorScope) setEditing(profile);
+  };
+  const finishModelSelection = (profile: ModelProfile, notice?: string) => {
+    if (latestEditorScope.current !== editorScope) return;
+    setEditing(profile);
+    setLibraryGeneration(null);
+    setStatus(notice ? { text: notice, tone: "info", key: profileStatusKey(tab, profile) } : null);
   };
   const visibleStatus = status && status.key === statusKey ? status : null;
   const pushStatus = (text: string, tone: StatusTone, key = statusKey) => setStatus({ text, tone, key });
@@ -638,11 +665,27 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     previousStep.current = { open, tab, modelView };
     if (!open || !previous.open || previous.tab !== tab || previous.modelView === modelView) return;
     const frame = requestAnimationFrame(() => {
-      const selector = modelView === "add" ? ".settings-choice" : modelView === "overview" ? ".settings-add-service" : ".profile-editor select, .profile-editor input, .profile-editor button";
+      const selector = modelView === "add" ? ".settings-choice" : modelView === "overview"
+        ? previous.modelView === "downloads" ? ".settings-downloaded-models" : ".settings-add-service"
+        : ".profile-editor select, .profile-editor input, .profile-editor button";
       (dialogRef.current?.querySelector<HTMLElement>(selector) ?? dialogRef.current?.querySelector<HTMLElement>(".settings-back"))?.focus();
     });
     return () => cancelAnimationFrame(frame);
   }, [open, tab, modelView]);
+
+  // 深入目录时从页面顶部开始，返回时把键盘焦点交还给「管理模型」。
+  const previousLibrary = useRef(showLocalLibrary);
+  useEffect(() => {
+    const changed = previousLibrary.current !== showLocalLibrary;
+    previousLibrary.current = showLocalLibrary;
+    if (!open || !changed) return;
+    const frame = requestAnimationFrame(() => {
+      dialogRef.current?.querySelector<HTMLElement>(".profile-editor-wrap")?.scrollTo({ top: 0 });
+      const selector = showLocalLibrary ? ".settings-back" : ".local-model-config__manage";
+      dialogRef.current?.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [open, showLocalLibrary, dialogRef]);
 
   // 指定初始页时（如更新提示 Toast 直达「软件更新」），打开瞬间切到该页。
   useEffect(() => {
@@ -833,6 +876,9 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
 
   const selectSettingsTab = (next: SettingsTab) => {
     if (next === tab || busy) return;
+    // 转写参数校验属该表单局部状态：离开转写页时必须复位，否则非法值
+    // 会让后续「AI 总结」页的保存按钮一直禁用且没有任何解释。
+    setTranscriptionInvalid(false);
     checkpointDraft();
     taskDrafts.current.set(tab, { profile: editing, apiKey, presetKey: draftPresetKey, view: modelView, session: draftSession.current });
     const draft = taskDrafts.current.get(next);
@@ -929,6 +975,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const makeDefaultProfile = async (profile: ModelProfile) => {
     if (!profile.id || switchBusy) return;
     setSwitchBusy(profile.id);
+    setStatus(null);
     try {
       await api.models.setDefault(profile.kind, profile.id!);
       await loadProfiles();
@@ -1027,7 +1074,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     setBusyAction("test");
     // 立即给出"已在测试"的反馈：远程接口的测试可能要数秒到 20 秒，
     // 只禁用按钮没有任何文字变化，用户会以为点击没生效。
-    pushStatus("正在测试连接…", "info", keyAtStart);
+    pushStatus(localModelEditor ? "正在检查模型…" : "正在测试连接…", "info", keyAtStart);
     try {
       const result = await api.models.test(editing, apiKey.trim() || undefined);
       // 测试只更新草稿；只有保存动作才能持久化配置与密钥。
@@ -1068,6 +1115,14 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     } finally { setBusy(false); }
   };
 
+  const changeModelName = (model: string) => {
+    setEditing((current) => {
+      if (!current || current.model === model) return current;
+      if (current.kind === "stt") return switchTranscriptionModel(current, { transport: current.transport, model });
+      return { ...current, model, options: invalidateVisualVerification(current.options) };
+    });
+  };
+
   /** 本机服务（Apple 在线识别）改动即写入：保存失败回滚开关并用红字说明。 */
   const updateAppleServerMode = async (allowServer: boolean) => {
     if (!editing) return;
@@ -1106,24 +1161,40 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
     }
   };
 
-  /** 标题区「⋯」：删除档案（默认档由主进程按名称序补位）。 */
-  const deleteProfile = async () => {
-    if (!editing?.id) return;
+  const deleteProfile = async (target: ModelProfile) => {
+    const id = target.id;
+    if (!id || busy || switchBusy) return;
     setProfileMenuOpen(false);
-    const target = editing;
+    const consequences = ["历史会议和已生成的内容会保留。"];
+    if (target.options.modelPath || target.kind === "diarization") consequences.push("本地模型文件会保留。");
+    if (target.isDefault) {
+      consequences.push(profiles.some((profile) => profile.id !== id && profile.kind === target.kind)
+        ? "同类服务会自动选出新的默认配置。"
+        : "使用此类服务的新任务需要重新配置模型。");
+    }
     if (!(await profileConfirm.confirm({
       title: `删除「${target.name}」？`,
-      body: "只会移除这份配置，历史会议、转写与纪要都不受影响。",
-      confirmLabel: "删除配置"
+      body: consequences.join(""),
+      confirmLabel: "删除配置",
+      destructive: true
     }))) return;
     setBusy(true);
     try {
-      await api.models.delete(target.id!);
+      const { nextDefaultId } = await api.models.delete(id);
+      const remaining = useMeetingStore.getState().profiles.filter((profile) => profile.id !== id);
+      const nextDefault = remaining.find((profile) => profile.id === nextDefaultId);
+      setProfiles(nextDefaultId ? remaining.map((profile) => profile.kind === target.kind
+        ? { ...profile, isDefault: profile.id === nextDefaultId } : profile) : remaining);
       forgetDraft(settingsDraftKey(target, draftSession.current.id));
+      draftSession.current = { id: "", baseline: null };
       setEditing(null);
+      setApiKey("");
       setModelView("overview");
-      setStatus(null);
-      await loadProfiles();
+      pushStatus(nextDefault ? `已删除配置，默认服务已改为「${nextDefault.name}」。` : "已删除配置。", "success", profileStatusKey(tab, null));
+      if (modelView === "overview") requestAnimationFrame(() => {
+        (dialogRef.current?.querySelector<HTMLElement>(".settings-service-group:not(.settings-draft-group) .settings-service-row__main")
+          ?? dialogRef.current?.querySelector<HTMLElement>(".settings-add-service"))?.focus();
+      });
     } catch (error) {
       pushStatus(error instanceof Error ? error.message : "删除失败", "error");
     } finally {
@@ -1415,15 +1486,20 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
   const profileDirty = hasSettingsDraftChanges(editing, draftSession.current.baseline, apiKey);
   const returnToServices = () => {
     if (busy) return;
+    setTranscriptionInvalid(false);
     checkpointDraft();
     setModelView("overview");
     setModelMenuOpen(false);
     setProfileMenuOpen(false);
     setStatus(null);
   };
-  const title = modelTab && modelView === "add" ? `添加${tab === "llm" ? "总结" : "转录"}服务`
+  const title = modelView === "downloads" && modelTab ? "已下载模型"
+    : showLocalLibrary ? (backToModelConfig ? "管理模型" : "选择本地模型")
+    : modelTab && modelView === "add" ? `添加${tab === "llm" ? "总结" : "转录"}服务`
     : modelTab && modelView === "edit" && editing ? editing.name : page.title;
-  const description = modelTab && modelView === "edit" && editing
+  const description = modelView === "downloads" && modelTab ? undefined
+    : showLocalLibrary ? localModelEditor?.name
+    : modelTab && modelView === "edit" && editing
     ? `${transportInfo?.text ?? ""}${isLocalServiceProfile(editing) ? " · 更改后自动保存" : ""}`
     : modelTab && modelView === "add" ? "选择服务的运行方式。" : page.description;
 
@@ -1435,15 +1511,17 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
           <main className="settings-main">
             <header className="settings-header">
               <div className="settings-header__title">
-                {modelTab && modelView !== "overview" && <button className="settings-back" disabled={busy} onClick={returnToServices}><CaretLeft size={14} />{page.title}</button>}
-                <h1>{title}</h1><p>{description}</p>
+                {modelTab && modelView !== "overview" && <button className="settings-back" disabled={busy} onClick={backToModelConfig ? () => setLibraryGeneration(null) : returnToServices}><CaretLeft size={14} />{backToModelConfig ? "模型配置" : page.title}</button>}
+                <h1 id="settings-dialog-title">{title}</h1>{description && <p>{description}</p>}
               </div>
               <div className="settings-header__actions">
-                {modelTab && modelView === "edit" && editing?.id && <div className="profile-menu" ref={profileMenuRef}>
+                {modelTab && modelView === "edit" && editing?.id && !backToModelConfig && (
+                  <button type="button" className="button button--small settings-remove-action settings-delete-profile" disabled={busy || !!switchBusy} onClick={() => void deleteProfile(editing)}><Trash size={15} />删除配置</button>
+                )}
+                {modelTab && modelView === "edit" && editing?.id && editing.secretId && !backToModelConfig && <div className="profile-menu" ref={profileMenuRef}>
                   <button type="button" className="icon-button" aria-label="更多操作" aria-expanded={profileMenuOpen} disabled={busy} onClick={() => setProfileMenuOpen((value) => !value)}><DotsThree size={20} /></button>
                   {profileMenuOpen && <div className="profile-menu__panel" role="menu">
-                    {editing.secretId && <button type="button" role="menuitem" onClick={() => void deleteProfileSecret()}>删除密钥</button>}
-                    <button type="button" role="menuitem" className="is-danger" onClick={() => void deleteProfile()}>删除配置</button>
+                    <button type="button" role="menuitem" className="is-danger" onClick={() => void deleteProfileSecret()}>删除密钥</button>
                   </div>}
                 </div>}
                 <button className="icon-button" onClick={onClose} aria-label="关闭设置" disabled={busy}><X size={19} /></button>
@@ -1454,17 +1532,25 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
               <fieldset className="model-settings" disabled={busy}>
                 {modelView === "overview" ? (
                   <div className="settings-services-page">
-                    <div className="settings-section-heading"><h2>{tab === "llm" ? "总结服务" : "转录服务"}</h2><button type="button" className="button button--small settings-add-service" onClick={() => setModelView("add")}><Plus size={15} />添加服务</button></div>
+                    <div className="settings-section-heading">
+                      <h2>{tab === "llm" ? "总结服务" : "转录服务"}</h2>
+                      <div className="settings-section-heading__actions">
+                        {tab === "transcription" && <button type="button" className="button button--small settings-downloaded-models" onClick={() => { setStatus(null); setModelView("downloads"); }}><HardDrive size={15} />已下载模型</button>}
+                        <button type="button" className="button button--small settings-add-service" onClick={() => setModelView("add")}><Plus size={15} />添加服务</button>
+                      </div>
+                    </div>
+                    {visibleStatus && <div className={statusClass(visibleStatus.tone)} role={visibleStatus.tone === "error" ? "alert" : "status"}>{visibleStatus.text}</div>}
                     {!!newDrafts.length && <SettingsDraftList drafts={newDrafts} onResume={resumeDraft} onDiscard={discardDraft} />}
-                    <SettingsServiceList groups={serviceGroups} onEdit={editService} onDefault={(profile) => void makeDefaultProfile(profile)} switchingId={switchBusy} disabled={busy} />
+                    <SettingsServiceList groups={serviceGroups} onEdit={editService} onDefault={(profile) => void makeDefaultProfile(profile)} onDelete={(profile) => void deleteProfile(profile)} switchingId={switchBusy} disabled={busy} />
                     {!newDrafts.length && !serviceGroups.some((group) => group.items.length) && <p className="settings-empty">尚未添加{tab === "llm" ? "总结" : "转录"}服务</p>}
                     {tab === "transcription" && !savedDiarizationProfiles.length && <SettingsEnhancementEntry disabled={busy} onClick={() => void addService("sherpa")} />}
-                    {visibleStatus?.tone === "error" && <div className={statusClass("error")} role="alert">{visibleStatus.text}</div>}
                   </div>
+                ) : modelView === "downloads" ? (
+                  <DownloadedModels confirm={profileConfirm.confirm} />
                 ) : modelView === "add" ? (
                   <div className="settings-services-page"><SettingsServiceChooser choices={serviceChoices} disabled={busy} onChoose={(key) => void addService(key as Parameters<typeof addService>[0])} /></div>
                 ) : editing ? (
-                  <div key={editorGeneration} className={`profile-editor-wrap${isLocalServiceProfile(editing) ? "" : " profile-editor-wrap--remote"}`}>
+                  <div key={`${editorGeneration}:${showLocalLibrary ? "library" : "editor"}`} className={`profile-editor-wrap${isLocalServiceProfile(editing) ? "" : " profile-editor-wrap--remote"}`}>
                   <div className="profile-editor">
 
                     {!isLocalServiceProfile(editing) && (
@@ -1511,7 +1597,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                                 <input
                                   id="profile-model" role="combobox" aria-expanded={modelMenuOpen} aria-controls="profile-model-options" aria-autocomplete="list" autoComplete="off" spellCheck={false} aria-invalid={Boolean(fieldErrors.model)} aria-describedby={fieldErrors.model ? "profile-model-error" : undefined}
                                   value={editing.model}
-                                  onChange={(event) => { setModelQuery(event.target.value); setModelMenuOpen(true); setEditing({ ...editing, model: event.target.value, options: invalidateVisualVerification(editing.options) }); }}
+                                  onChange={(event) => { setModelQuery(event.target.value); setModelMenuOpen(true); changeModelName(event.target.value); }}
                                   onFocus={() => { setModelQuery(null); setModelMenuOpen(true); }}
                                   onKeyDown={(event) => {
                                     if (event.key === "Escape" && modelMenuOpen) { event.preventDefault(); event.stopPropagation(); setModelMenuOpen(false); }
@@ -1533,7 +1619,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                                     if (event.key === "Escape") { event.stopPropagation(); event.preventDefault(); document.getElementById("profile-model")?.focus(); setModelMenuOpen(false); }
                                   }}>
                                     {modelSuggestions.recommended.map((item) => (
-                                      <button key={`rec-${item.id}`} type="button" role="option" aria-selected={item.id === editing.model} className={`model-picker__option is-recommended ${item.id === editing.model ? "is-current" : ""}`} onClick={() => { setEditing({ ...editing, model: item.id, options: invalidateVisualVerification(editing.options) }); setModelMenuOpen(false); }}>
+                                      <button key={`rec-${item.id}`} type="button" role="option" aria-selected={item.id === editing.model} className={`model-picker__option is-recommended ${item.id === editing.model ? "is-current" : ""}`} onClick={() => { changeModelName(item.id); setModelMenuOpen(false); }}>
                                         <span>{item.id}</span><small>推荐</small>
                                       </button>
                                     ))}
@@ -1542,7 +1628,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                                       const size = editing.transport === "ollama" ? modelSizes?.[item.id] : undefined;
                                       const fit = size ? ollamaModelFit(size, hardware?.memoryBytes ?? 0) : "unknown";
                                       return (
-                                        <button key={item.id} type="button" role="option" aria-selected={item.id === editing.model} className={`model-picker__option ${item.id === editing.model ? "is-current" : ""}`} onClick={() => { setEditing({ ...editing, model: item.id, options: invalidateVisualVerification(editing.options) }); setModelMenuOpen(false); }}>
+                                        <button key={item.id} type="button" role="option" aria-selected={item.id === editing.model} className={`model-picker__option ${item.id === editing.model ? "is-current" : ""}`} onClick={() => { changeModelName(item.id); setModelMenuOpen(false); }}>
                                           <span>{item.id}</span>
                                           {size ? (
                                             <small className={fit === "heavy" ? "is-heavy" : fit === "best" ? "is-fit" : undefined}>
@@ -1571,10 +1657,20 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                       <>
                         <div className="settings-info-note"><Info size={18} /><p>从逐字稿中提取要点、决策与行动项。无需模型、密钥或网络连接。</p></div>
                       </>
-                    ) : isLocalAsrTransport(editing.transport) ? (
-                      <LocalAsrModelManager key={editorGeneration} profile={editing} onChange={updateLocalEditor} />
-                    ) : isLocalWhisperTransport(editing.transport) ? (
-                      <LocalModelManager key={editorGeneration} profile={editing} onChange={updateLocalEditor} />
+                    ) : localModelEditor ? (
+                      showLocalLibrary
+                        ? isLocalAsrTransport(editing.transport)
+                          ? <LocalAsrModelManager profile={editing} onChange={finishModelSelection} />
+                          : <LocalModelManager profile={editing} onChange={finishModelSelection} />
+                        : <LocalModelConfiguration
+                            profile={editing}
+                            hardware={hardware}
+                            disabled={busy}
+                            testing={busyAction === "test"}
+                            onTest={() => void testProfile()}
+                            onManage={() => { setProfileMenuOpen(false); setLibraryGeneration(editorGeneration); }}
+                            onComputeModeChange={(computeMode) => void updateTranscriptionOptions({ ...editing.options, computeMode })}
+                          />
                     ) : editing.transport === "apple-speech" ? (
                       <>
                         <details className="advanced-provider-options">
@@ -1655,7 +1751,8 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                         </details>
                       </>
                     )}
-                    {editing.kind === "stt" && <TranscriptionOptionsSection key={`transcription-options:${editorGeneration}`} profile={editing} disabled={busy} onValidityChange={setTranscriptionInvalid} onChange={options => void updateTranscriptionOptions(options)} />}
+                    {localModelEditor && !showLocalLibrary && visibleStatus && <div className={statusClass(visibleStatus.tone)} role={visibleStatus.tone === "error" ? "alert" : "status"}>{visibleStatus.text}</div>}
+                    {editing.kind === "stt" && !showLocalLibrary && <TranscriptionOptionsSection key={`transcription-options:${editorGeneration}`} profile={editing} disabled={busy} onValidityChange={setTranscriptionInvalid} onChange={options => void updateTranscriptionOptions(options)} />}
                     {tab === "llm" && editing.transport !== "local-summary" && (
                       <section className="visual-capability-setting">
                         <label>
@@ -1682,7 +1779,7 @@ export function SettingsDialog({ open, initialTab, initialFocus, onClose, licens
                       </section>
                     )}
                     {isLocalServiceProfile(editing) ? (
-                      visibleStatus && <div className={statusClass(visibleStatus.tone)} role="status" aria-live="polite">{visibleStatus.text}</div>
+                      !localModelEditor && visibleStatus && <div className={statusClass(visibleStatus.tone)} role="status" aria-live="polite">{visibleStatus.text}</div>
                     ) : (
                       <div className="profile-actions">
                         {visibleStatus && <div className={statusClass(visibleStatus.tone)} role="status" aria-live="polite">{visibleStatus.text}</div>}
@@ -1944,13 +2041,76 @@ function VoiceprintBookCard() {
   );
 }
 
-/**
- * 本地 Whisper 模型管理器（零路径配置）：搜索本机 / 选择文件 / 应用内下载三条路径。
- * 全程不暴露可执行文件、模型或 FFmpeg 路径——运行时组件由主进程托管解析；
- * 下载走「校验过的目录 + SHA 摘要」，就绪后自动写入档案并启用。
- * 下载源（官方 / 镜像 / 自定义）存全局偏好，换源不影响摘要校验；
- * 目录之外还支持粘贴直链下载（无官方摘要，明确提示不校验）。
- */
+function LocalModelConfiguration({
+  profile,
+  hardware,
+  disabled,
+  testing,
+  onTest,
+  onManage,
+  onComputeModeChange
+}: {
+  profile: ModelProfile;
+  hardware: HardwareInfo | null;
+  disabled: boolean;
+  testing: boolean;
+  onTest(): void;
+  onManage(): void;
+  onComputeModeChange(mode: TranscriptionComputeMode): void;
+}) {
+  const whisper = isLocalWhisperTransport(profile.transport);
+  const modelName = whisper
+    ? whisperModelLabel(profile.model)
+    : LOCAL_ASR_SETUP_MODELS.find((model) => model.id === profile.model)?.name ?? profile.model;
+  const gpuBackend = transcriptionGpuBackend(profile, hardware?.platform ?? api.system.platform, hardware?.arch);
+  const gpuLabels = {
+    metal: "GPU（Metal）",
+    vulkan: "GPU（Vulkan）",
+    cuda: "GPU（NVIDIA CUDA）",
+    external: "GPU（外部 Whisper）"
+  };
+  const gpuHints = {
+    vulkan: "需要支持 Vulkan 的显卡驱动。自动模式使用 CPU。",
+    cuda: "需要 NVIDIA 显卡和支持 CUDA 的 Python 环境。",
+    external: "需要支持 GPU 的 whisper.cpp 构建。"
+  };
+  return (
+    <section className="local-model-config" aria-label="模型配置">
+      <div className="local-model-config__current">
+        <div>
+          <span>当前模型</span>
+          <strong>{modelName || profile.name}</strong>
+        </div>
+        <div className="local-model-config__actions">
+          <button type="button" className="button button--small" disabled={disabled} onClick={onTest}>{testing ? "正在检查…" : "检查模型"}</button>
+          <button type="button" className="button button--small local-model-config__manage" disabled={disabled} onClick={onManage}>管理模型</button>
+        </div>
+      </div>
+      {whisper ? (
+        <label className="transcription-option">
+          <span>推理设备{gpuBackend && gpuBackend !== "metal" && <small>{gpuHints[gpuBackend]}</small>}</span>
+          <select
+            aria-label="推理设备"
+            value={transcriptionComputeMode(profile.options.computeMode)}
+            disabled={disabled}
+            onChange={(event) => onComputeModeChange(transcriptionComputeMode(event.target.value))}
+          >
+            <option value="auto">自动（引擎默认）</option>
+            <option value="cpu">CPU</option>
+            <option value="gpu" disabled={!gpuBackend}>{gpuBackend ? gpuLabels[gpuBackend] : "GPU（当前引擎或设备不支持）"}</option>
+          </select>
+        </label>
+      ) : (
+        <div className="transcription-option local-model-config__device">
+          <span>推理设备</span>
+          <span>{profile.transport === "qwen3-asr" ? "GPU（CUDA / Apple Silicon MPS）" : "CPU"}</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Whisper 模型目录。浏览和下载不切换已经配置的模型。 */
 function LocalModelManager({
   profile,
   onChange
@@ -1966,6 +2126,7 @@ function LocalModelManager({
   const [progress, setProgress] = useState<ModelDownloadProgress | null>(null);
   /** 自定义直链输入框内容。 */
   const [customUrl, setCustomUrl] = useState("");
+  const [downloadedFromLink, setDownloadedFromLink] = useState<LocalModelFile | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -1974,6 +2135,8 @@ function LocalModelManager({
   const updatePreferences = useMeetingStore((state) => state.updatePreferences);
   /** 本机芯片/内存：目录里的推荐徽标与「内存不足」提示都按它计算。 */
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
+  const discoveredWhisper = scan?.models.filter((model) => isLocalWhisperTransport(model.engine)) ?? [];
+  const whisperCatalog = catalog.filter((model) => isLocalWhisperTransport(model.engine));
 
   // 挂载时拉取目录并订阅主进程的下载进度推送。
   useEffect(() => {
@@ -1988,36 +2151,25 @@ function LocalModelManager({
   }, []);
 
   /** 把一个本地模型文件启用为 stt 档案：按文件类型自动切换 transport（whisper-cpp/python 等）。 */
-  const applyModel = async (model: LocalModelFile, runtimes = scan?.runtimes) => {
+  const applyModel = async (model: LocalModelFile) => {
     setBusy(true);
     setError(null);
     setSuccess(null);
     try {
       const selectedModelName = model.name.replace(/\.(?:pt|bin|gguf)$/i, "");
+      const selected = switchTranscriptionModel(profile, { transport: model.engine, model: selectedModelName }, model.path);
       const nextProfile: ModelProfile = {
-      ...profile,
-      kind: "stt",
-      transport: model.engine,
-      name: localProfileName({ ...profile, transport: model.engine, model: selectedModelName } as ModelProfile),
-      model: selectedModelName,
-      enabled: true,
-      options: {
-        ...profile.options,
-        modelPath: model.path,
-        // Runtime locations are resolved in the Electron main process. Keep
-        // legacy values intact for upgraded profiles, but never create new
-        // user-managed path settings from the renderer.
-      }
+        ...selected,
+        name: localProfileName(selected),
+        enabled: true
       };
+      if (profile.options.computeMode === "gpu" && hardware
+        && !transcriptionGpuBackend(nextProfile, hardware.platform, hardware.arch)) {
+        nextProfile.options.computeMode = "auto";
+      }
       const saved = await api.models.save(nextProfile);
       onChange(saved);
       await loadProfiles();
-      const runtimeReady = model.engine === "whisper-cpp"
-        ? Boolean(runtimes?.managedWhisper || runtimes?.whisperCpp)
-        : Boolean(runtimes?.python);
-      setSuccess(runtimeReady
-        ? `已启用 ${model.name}，后续会议将使用此模型转写。`
-        : `已启用 ${model.name}；应用会在转写前自动检查所需组件。`);
     } catch (applyError) {
       setError(applyError instanceof Error ? applyError.message : "无法启用本地模型");
     } finally {
@@ -2025,14 +2177,13 @@ function LocalModelManager({
     }
   };
 
-  /** 搜索本机常见目录；恰好只发现一个模型时直接启用，省去一次点击。 */
+  /** 搜索只列结果；选中某个文件后才替换当前模型。 */
   const scanModels = async () => {
     setBusy(true);
     setError(null);
+    setSuccess(null);
     try {
-      const result = await api.models.scanLocal();
-      setScan(result);
-      if (result.models.length === 1) await applyModel(result.models[0], result.runtimes);
+      setScan(await api.models.scanLocal());
     } catch (scanError) {
       setError(scanError instanceof Error ? scanError.message : "本地模型搜索失败");
     } finally {
@@ -2042,30 +2193,32 @@ function LocalModelManager({
 
   /** 手动选择模型文件（高级兜底，仍是文件选择器而非手填路径）。 */
   const chooseModel = async () => {
+    setBusy(true);
     setError(null);
     try {
       const model = await api.models.chooseLocal();
-      if (model) {
-        const discovery = scan ?? await api.models.scanLocal();
-        setScan(discovery);
-        await applyModel(model, discovery.runtimes);
-      }
+      if (model) await applyModel(model);
     } catch (chooseError) {
       setError(chooseError instanceof Error ? chooseError.message : "无法打开模型文件");
+    } finally {
+      setBusy(false);
     }
   };
 
-  /** 应用内下载模型：完成后重新扫描并自动启用。 */
+  /** 首次下载后直接完成配置；已有模型时，安装与切换是两个操作。 */
   const downloadModel = async (modelId: string) => {
     setBusy(true);
     setError(null);
+    setSuccess(null);
     setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "preparing", message: "正在准备转写组件…" });
     try {
       const model = await api.models.download(modelId);
-      const discovery = await api.models.scanLocal();
-      setScan(discovery);
-      await applyModel(model, discovery.runtimes);
+      if (!profile.options.modelPath) {
+        await applyModel(model);
+        return;
+      }
       setCatalog(await api.models.catalog());
+      setSuccess("下载完成。");
     } catch (downloadError) {
       const message = downloadError instanceof Error ? downloadError.message : "模型下载失败";
       setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "error", message: "准备失败，可重试。" });
@@ -2077,19 +2230,22 @@ function LocalModelManager({
 
   /**
    * 从自定义直链下载模型（目录之外的兜底入口）：主进程校验扩展名后下载，
-   * 无官方摘要故不做完整性校验；完成后与目录下载一致扫描并自动启用。
+   * 无官方摘要故不做完整性校验；已有模型时提供单独的启用动作。
    */
   const downloadFromLink = async () => {
     const url = customUrl.trim();
     if (!url) return;
     setBusy(true);
     setError(null);
+    setSuccess(null);
     setProgress(null);
     try {
       const model = await api.models.downloadFromUrl(url);
-      const discovery = await api.models.scanLocal();
-      setScan(discovery);
-      await applyModel(model, discovery.runtimes);
+      if (!profile.options.modelPath) {
+        await applyModel(model);
+        return;
+      }
+      setDownloadedFromLink(model);
       setCustomUrl("");
     } catch (downloadError) {
       setError(downloadError instanceof Error ? downloadError.message : "模型下载失败");
@@ -2133,11 +2289,10 @@ function LocalModelManager({
           <span>{model.format} · {formatBytes(model.sizeBytes)} · {model.license}{describeRuntimeMemory(model.sizeBytes) && ` · ${describeRuntimeMemory(model.sizeBytes)}`}{tooHeavy && minRamGB ? ` · 建议 ${minRamGB}GB 内存以上` : ""}</span>
         </div>
         {model.installed && model.localPath ? (
-          <button className="button button--small" disabled={busy} onClick={async () => {
-            const discovery = scan ?? await api.models.scanLocal();
-            setScan(discovery);
-            await applyModel({ path: model.localPath!, name: model.fileName ?? model.id, format: model.format, engine: model.engine as LocalModelFile["engine"], sizeBytes: model.sizeBytes }, discovery.runtimes);
-          }}>{profile.options.modelPath === model.localPath ? "使用中" : "已下载 · 使用"}</button>
+          <button className="button button--small" disabled={busy || profile.options.modelPath === model.localPath} onClick={() => void applyModel({
+            path: model.localPath!, name: model.fileName ?? model.id, format: model.format,
+            engine: model.engine as LocalModelFile["engine"], sizeBytes: model.sizeBytes
+          })}>{profile.options.modelPath === model.localPath ? "使用中" : "使用此模型"}</button>
         ) : (
           <button className="button button--small" disabled={busy} onClick={() => downloadModel(model.id)}><CloudArrowDown size={15} />{currentProgress ? (currentProgress.status === "downloading" ? `${percent}%` : currentProgress.status === "verifying" ? "校验中" : currentProgress.status === "ready" ? "已就绪" : currentProgress.status === "error" ? "重试" : "准备中") : "下载"}</button>
         )}
@@ -2152,12 +2307,14 @@ function LocalModelManager({
   return (
     <section className="local-model-manager">
       <div className="local-model-manager__heading">
-        <div><strong>本地模型</strong></div>
+        <div><strong>本机模型</strong></div>
         <div className="local-model-actions">
           <button className="button button--small" disabled={busy} onClick={scanModels}><MagnifyingGlass size={15} />搜索本机</button>
           <button className="button button--small" disabled={busy} onClick={chooseModel}><FolderOpen size={15} />选择文件</button>
         </div>
       </div>
+      {error && <div className="connection-status is-error" role="alert">{error}</div>}
+      {success && <div className="connection-status is-success" role="status">{success}</div>}
       {hardware && (
         <div className="device-info-line" role="note">
           <Cpu size={14} weight="duotone" />
@@ -2166,12 +2323,12 @@ function LocalModelManager({
       )}
       {runtimeLabels.length > 0 && <div className="runtime-chips">{runtimeLabels.map((label) => <span key={label}>{label}</span>)}</div>}
       {scan && (
-        <div className="local-model-list">
-          {scan.models.length ? scan.models.map((model) => (
-            <button key={model.path} disabled={busy} className={profile.options.modelPath === model.path ? "is-selected" : ""} onClick={() => void applyModel(model, scan.runtimes)}>
+        <div className="local-model-list local-model-list--actions">
+          {discoveredWhisper.length ? discoveredWhisper.map((model) => (
+            <button key={model.path} disabled={busy || profile.options.modelPath === model.path} className={profile.options.modelPath === model.path ? "is-selected" : ""} onClick={() => void applyModel(model)}>
               <Cpu size={18} weight="duotone" />
               <span><strong>{model.name}</strong><small>{model.format} · {formatBytes(model.sizeBytes)}</small></span>
-              {profile.options.modelPath === model.path && <CheckCircle size={17} weight="fill" />}
+              <small>{profile.options.modelPath === model.path ? "使用中" : "使用此模型"}</small>
             </button>
           )) : <p className="local-model-empty">本机暂未找到模型。</p>}
         </div>
@@ -2193,7 +2350,7 @@ function LocalModelManager({
                 { id: deviceBestId, badge: "按你的设备推荐" }
               ];
           return featured.map((recommendation) => {
-            const model = catalog.find((item) => item.id === recommendation.id);
+            const model = whisperCatalog.find((item) => item.id === recommendation.id);
             return model ? renderDownloadModelCard(model, recommendation) : null;
           });
         })()}
@@ -2229,18 +2386,27 @@ function LocalModelManager({
             )}
           </div>
           <div className="download-model-list">
-            {(Object.keys(MODEL_GROUP_LABELS) as Array<DownloadableModel["group"]>).map((group) => (
-              <div className="download-model-group" key={group}>
+            {(Object.keys(MODEL_GROUP_LABELS) as Array<DownloadableModel["group"]>).map((group) => {
+              const models = whisperCatalog.filter((model) => model.group === group);
+              return models.length > 0 && <div className="download-model-group" key={group}>
                 <small className="download-model-group__label">{MODEL_GROUP_LABELS[group]}</small>
-                {catalog.filter((model) => model.group === group).map((model) => renderDownloadModelCard(model))}
-              </div>
-            ))}
+                {models.map((model) => renderDownloadModelCard(model))}
+              </div>;
+            })}
           </div>
           <div className="download-url-row">
             <div className="download-url-row__heading">
               <strong>从链接下载</strong>
               <small>支持 .bin / .gguf / .pt；直链不校验完整性，请只用信任来源。</small>
             </div>
+            {downloadedFromLink && (
+              <div className="download-url-row__controls">
+                <strong>{downloadedFromLink.name}</strong>
+                <button type="button" className="button button--small" disabled={busy || profile.options.modelPath === downloadedFromLink.path} onClick={() => void applyModel(downloadedFromLink)}>
+                  {profile.options.modelPath === downloadedFromLink.path ? "使用中" : "使用此模型"}
+                </button>
+              </div>
+            )}
             <div className="download-url-row__controls">
               <input
                 value={customUrl}
@@ -2266,8 +2432,6 @@ function LocalModelManager({
           </div>
         </div>
       </details>
-      {error && <div className="connection-status is-error">{error}</div>}
-      {success && <div className="connection-status is-success">{success}</div>}
     </section>
   );
 }
@@ -2319,7 +2483,7 @@ function LocalAsrModelManager({
   onChange
 }: {
   profile: ModelProfile;
-  onChange(profile: ModelProfile): void;
+  onChange(profile: ModelProfile, notice?: string): void;
 }) {
   const family = LOCAL_ASR_FAMILY_CONFIG[profile.transport] ?? null;
   const [catalog, setCatalog] = useState<DownloadableModel[]>([]);
@@ -2349,24 +2513,21 @@ function LocalAsrModelManager({
     setError(null);
     setSuccess(null);
     try {
+      const selected = switchTranscriptionModel(profile, { transport: bundle.engine, model: bundle.name }, bundle.path);
       const nextProfile: ModelProfile = {
-        ...profile,
-        kind: "stt",
-        transport: bundle.engine,
-        name: localProfileName({ ...profile, transport: bundle.engine, model: bundle.name } as ModelProfile),
-        model: bundle.name,
-        enabled: true,
-        options: { ...profile.options, modelPath: bundle.path }
+        ...selected,
+        name: localProfileName(selected),
+        enabled: true
       };
       const saved = await api.models.save(nextProfile);
-      onChange(saved);
+      const missingRuntime = runtimes && (bundle.engine === "qwen3-asr"
+        ? runtimes.pythonTorchDevice !== "cuda" && runtimes.pythonTorchDevice !== "mps"
+        : runtimes.onnxAsr === false);
+      const notice = missingRuntime ? bundle.engine === "qwen3-asr"
+        ? "运行此模型需要支持 CUDA 或 MPS 的 Python 环境。"
+        : "内置识别引擎未就绪，请重新安装应用。" : undefined;
+      onChange(saved, notice);
       await loadProfiles();
-      const ready = profile.transport === "qwen3-asr"
-        ? runtimes?.pythonTorchDevice === "cuda" || runtimes?.pythonTorchDevice === "mps"
-        : runtimes?.onnxAsr !== false;
-      setSuccess(ready
-        ? `已启用 ${family?.heading ?? bundle.name}，后续会议将使用此模型转写。`
-        : `已启用 ${family?.heading ?? bundle.name}；运行条件尚未满足，启用前请先按下方提示准备环境。`);
     } catch (applyError) {
       setError(applyError instanceof Error ? applyError.message : "无法启用本地模型");
     } finally {
@@ -2374,17 +2535,12 @@ function LocalAsrModelManager({
     }
   };
 
-  /** 搜索本机 bundle（含已下载目录与用户手动解压的目录）；恰好一个时直接启用。 */
   const scanBundles = async () => {
     setBusy(true);
     setError(null);
+    setSuccess(null);
     try {
-      const result = await api.models.scanLocal();
-      setScan(result);
-      const matches = result.models.filter((model) => model.engine === profile.transport);
-      if (matches.length === 1 && profile.options.modelPath !== matches[0].path) {
-        await applyBundle(matches[0], result.runtimes);
-      }
+      setScan(await api.models.scanLocal());
     } catch (scanError) {
       setError(scanError instanceof Error ? scanError.message : "本地模型搜索失败");
     } finally {
@@ -2392,17 +2548,18 @@ function LocalAsrModelManager({
     }
   };
 
-  /** 应用内下载：完成后重新扫描并自动启用（与 Whisper 目录行为一致）。 */
   const downloadModel = async (modelId: string) => {
     setBusy(true);
     setError(null);
+    setSuccess(null);
     setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "preparing", message: "正在准备下载…" });
     try {
       const model = await api.models.download(modelId);
-      const discovery = await api.models.scanLocal();
+      const [discovery, updatedCatalog] = await Promise.all([api.models.scanLocal(), api.models.catalog()]);
       setScan(discovery);
-      setCatalog(await api.models.catalog());
-      await applyBundle(model, discovery.runtimes);
+      setCatalog(updatedCatalog);
+      if (profile.options.modelPath) setSuccess("下载完成。");
+      else await applyBundle(model, discovery.runtimes);
     } catch (downloadError) {
       const message = downloadError instanceof Error ? downloadError.message : "模型下载失败";
       setProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "error", message: "准备失败，可重试。" });
@@ -2446,8 +2603,8 @@ function LocalAsrModelManager({
           <span>{model.format} · {formatBytes(model.sizeBytes)} · {model.license}{model.files ? ` · ${model.files.length} 个文件` : ""}{describeRuntimeMemory(model.sizeBytes) && ` · ${describeRuntimeMemory(model.sizeBytes)}`}{tooHeavy && minRamGB ? ` · 建议 ${minRamGB}GB 内存以上` : ""}</span>
         </div>
         {model.installed && model.localPath ? (
-          <button className="button button--small" disabled={busy} onClick={() => void applyBundle({ path: model.localPath!, name: model.id, format: model.format, engine: model.engine as LocalModelFile["engine"], sizeBytes: model.sizeBytes })}>
-            {profile.options.modelPath === model.localPath ? "使用中" : "已下载 · 使用"}
+          <button className="button button--small" disabled={busy || profile.options.modelPath === model.localPath} onClick={() => void applyBundle({ path: model.localPath!, name: model.id, format: model.format, engine: model.engine as LocalModelFile["engine"], sizeBytes: model.sizeBytes })}>
+            {profile.options.modelPath === model.localPath ? "使用中" : "使用此模型"}
           </button>
         ) : (
           <button className="button button--small" disabled={busy} onClick={() => void downloadModel(model.id)}><CloudArrowDown size={15} />{currentProgress ? (currentProgress.status === "downloading" ? `${percent}%` : currentProgress.status === "verifying" ? "校验中" : currentProgress.status === "ready" ? "已就绪" : currentProgress.status === "error" ? "重试" : "准备中") : "下载"}</button>
@@ -2468,6 +2625,8 @@ function LocalAsrModelManager({
           <button className="button button--small" disabled={busy} onClick={scanBundles}><MagnifyingGlass size={15} />搜索本机</button>
         </div>
       </div>
+      {error && <div className="connection-status is-error" role="alert">{error}</div>}
+      {success && <div className="connection-status is-success" role="status">{success}</div>}
       <div className="settings-info-note"><Info size={18} /><p>{family.blurb}</p></div>
       {hardware && (
         <div className="device-info-line" role="note">
@@ -2477,12 +2636,12 @@ function LocalAsrModelManager({
       )}
       {runtimeLabels.length > 0 && <div className="runtime-chips">{runtimeLabels.map((label) => <span key={label}>{label}</span>)}</div>}
       {scan && (
-        <div className="local-model-list">
+        <div className="local-model-list local-model-list--actions">
           {engineBundles.length ? engineBundles.map((bundle) => (
-            <button key={bundle.path} disabled={busy} className={profile.options.modelPath === bundle.path ? "is-selected" : ""} onClick={() => void applyBundle(bundle, scan.runtimes)}>
+            <button key={bundle.path} disabled={busy || profile.options.modelPath === bundle.path} className={profile.options.modelPath === bundle.path ? "is-selected" : ""} onClick={() => void applyBundle(bundle, scan.runtimes)}>
               <Cpu size={18} weight="duotone" />
               <span><strong>{bundle.name}</strong><small>{bundle.format} · {formatBytes(bundle.sizeBytes)}</small></span>
-              {profile.options.modelPath === bundle.path && <CheckCircle size={17} weight="fill" />}
+              <small>{profile.options.modelPath === bundle.path ? "使用中" : "使用此模型"}</small>
             </button>
           )) : <p className="local-model-empty">本机暂未找到 {family.heading} 模型；可从下方目录下载。</p>}
         </div>
@@ -2504,8 +2663,6 @@ function LocalAsrModelManager({
           </div>
         </details>
       )}
-      {error && <div className="connection-status is-error">{error}</div>}
-      {success && <div className="connection-status is-success">{success}</div>}
     </section>
   );
 }

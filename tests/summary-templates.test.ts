@@ -40,4 +40,10 @@ describe("meeting summary templates", () => {
     expect(prompt).toContain("本次纪要模板：通用会议");
     expect(prompt).toContain("请只根据新增内容更新滚动纪要");
   });
+
+  it.each([false, true])("uses the edited meeting topic as context (final: %s)", (final) => {
+    const prompt = buildSummaryPrompt({ ...baseInput, title: "登录改版与灰度发布评审" }, final);
+    expect(prompt).toContain("当前会议主题：登录改版与灰度发布评审");
+    expect(prompt).toContain("结论、决策和行动项须有会议内容支撑");
+  });
 });

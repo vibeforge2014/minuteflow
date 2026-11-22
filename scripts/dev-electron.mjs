@@ -24,9 +24,11 @@ const watchedExtensions = new Set([".js", ".cjs", ".mjs", ".json"]);
 
 let viteProcess;
 let electronProcess;
+let checkProcess;
 let fileWatcher;
 let restartTimer;
 let restartQueue = Promise.resolve();
+let sourceRevision = 0;
 let shuttingDown = false;
 let restartingElectron = false;
 
@@ -54,6 +56,23 @@ function waitForExit(child, timeoutMs = 3_000) {
       resolve();
     });
     child.kill("SIGTERM");
+  });
+}
+
+function checkElectronSources() {
+  return new Promise((resolve, reject) => {
+    const check = run(process.execPath, [path.join(projectDirectory, "scripts", "static-check.mjs")]);
+    checkProcess = check;
+    // 静态检查内部会跑 tsc：给它一个有界超时，卡住时也要能退出，
+    // 否则 Ctrl+C 退出时会留下孤儿进程。
+    const timeout = setTimeout(() => check.kill("SIGKILL"), 30_000);
+    const settle = (value, error) => {
+      clearTimeout(timeout);
+      if (checkProcess === check) checkProcess = undefined;
+      if (error) reject(error); else resolve(value);
+    };
+    check.once("error", (error) => settle(undefined, error));
+    check.once("exit", (code) => settle(code === 0));
   });
 }
 
@@ -94,17 +113,26 @@ function startElectron() {
 
 function requestElectronRestart(fileName) {
   if (shuttingDown || !fileName || !watchedExtensions.has(path.extname(fileName))) return;
+  const revision = ++sourceRevision;
   clearTimeout(restartTimer);
   restartTimer = setTimeout(() => {
     restartQueue = restartQueue.then(async () => {
-      if (shuttingDown) return;
+      if (shuttingDown || revision !== sourceRevision) return;
+      const valid = await checkElectronSources();
+      if (shuttingDown || revision !== sourceRevision) return;
+      if (!valid) {
+        // 监听范围只有 electron/；若错误来自 scripts/ 或配置，需说明如何重试，
+        // 不能承诺「自动重新检查」却永远不触发。
+        log("主进程检查未通过，保留当前窗口。修复后保存任一 electron/ 文件即可重试；若问题在 scripts/ 或配置，请重启开发服务。");
+        return;
+      }
       restartingElectron = true;
       log(`${fileName} 已变更，正在重启 Electron…`);
       const previousProcess = electronProcess;
       electronProcess = undefined;
       await waitForExit(previousProcess);
       restartingElectron = false;
-      startElectron();
+      if (revision === sourceRevision) startElectron();
     }).catch((error) => {
       restartingElectron = false;
       console.error("[MinuteFlow dev] Electron 热重启失败：", error);
@@ -119,12 +147,15 @@ async function shutdown(exitCode = 0) {
   clearTimeout(restartTimer);
   fileWatcher?.close();
   const currentElectron = electronProcess;
+  const currentCheck = checkProcess;
   electronProcess = undefined;
-  await Promise.all([waitForExit(currentElectron), waitForExit(viteProcess)]);
+  checkProcess = undefined;
+  await Promise.all([waitForExit(currentElectron), waitForExit(currentCheck), waitForExit(viteProcess)]);
   process.exit(exitCode);
 }
 
 async function main() {
+  if (!(await checkElectronSources())) throw new Error("请先修复主进程检查中的问题。");
   log(`启动 Vite：${developmentServerUrl}`);
   const serverUrl = new URL(developmentServerUrl);
   viteProcess = run(process.execPath, [viteCli, "--host", serverUrl.hostname, "--port", serverUrl.port || "5173", "--strictPort"]);

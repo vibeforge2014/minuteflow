@@ -120,6 +120,7 @@ describe("shouldSeedAppleSpeechProfile（出厂默认）", () => {
   it("仅 macOS 且无任何 stt 档案时预启用", () => {
     expect(shouldSeedAppleSpeechProfile("darwin", 0)).toBe(true);
     expect(shouldSeedAppleSpeechProfile("darwin", 1)).toBe(false);
+    expect(shouldSeedAppleSpeechProfile("darwin", 0, true)).toBe(false);
     expect(shouldSeedAppleSpeechProfile("win32", 0)).toBe(false);
     expect(shouldSeedAppleSpeechProfile("linux", 0)).toBe(false);
   });

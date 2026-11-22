@@ -37,6 +37,48 @@ describe("export deliverables", () => {
     expect(text).not.toContain("## 完整转录");
   });
 
+  it("keeps the overview and discussion sections in the minutes export", () => {
+    const detailedMeeting = {
+      ...meeting,
+      summary: {
+        ...meeting.summary,
+        overview: "发布前须补齐风控白名单。",
+        discussionSections: [{
+          title: "发布准备",
+          points: [{ heading: "风控白名单", text: "还差一人签字。" }],
+          table: { columns: ["事项", "状态"], rows: [["签字", "待确认"], ["联调", "已完成"]] }
+        }]
+      }
+    };
+    const text = markdown(detailedMeeting, { scope: "summary" });
+    expect(text).toContain("## 会议概览\n\n发布前须补齐风控白名单。");
+    expect(text).toContain("### 发布准备");
+    expect(text).toContain("| 签字 | 待确认 |");
+    expect(text).toContain("- 风控白名单：还差一人签字。");
+    expect(markdown(detailedMeeting, { scope: "transcript" })).not.toContain("分议题纪要");
+  });
+
+  it("escapes pipes and newlines in table cells and tolerates a table without points", () => {
+    const detailedMeeting = {
+      ...meeting,
+      summary: {
+        ...meeting.summary,
+        discussionSections: [{
+          title: "风险盘点",
+          // 只有表格、没有 points；单元格含管道符、换行、数字和 null。
+          table: { columns: ["事项", "状态"], rows: [["A|B", "待\n确认"], [42, null]] }
+        }]
+      }
+    };
+    const text = markdown(detailedMeeting, { scope: "summary" });
+    expect(text).toContain("### 风险盘点");
+    expect(text).toContain("| A\\|B | 待 确认 |");
+    expect(text).toContain("| 42 |  |");
+    // 没有 points 时不输出列表也不抛错。
+    expect(text).not.toContain("- undefined");
+    expect(text).toContain("## 已确认决策");
+  });
+
   it("exports a transcript-only document with optional timestamps and speakers", () => {
     const plain = markdown(meeting, { scope: "transcript", includeTimestamps: false, includeSpeakers: false });
     expect(plain).not.toContain("## 关键要点");

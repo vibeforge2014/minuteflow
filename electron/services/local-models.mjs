@@ -16,7 +16,7 @@
  */
 import diarizationModels from "../../shared/diarization-models.json" with { type: "json" };
 import localAsrModels from "../../shared/local-asr-models.json" with { type: "json" };
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdir, open, readFile, readdir, rename, rm, stat, unlink } from "node:fs/promises";
@@ -640,11 +640,11 @@ async function findExecutable(names) {
   return undefined;
 }
 
-/** 扫描全部根目录（去重）收集模型，按中文名排序并按路径去重。ASR bundle 目录始终参与扫描。 */
+/** 优先扫描应用托管目录，避免搜索外部目录耗尽扫描额度。结果按路径去重并按名称排序。 */
 async function scanLocalModels({ roots, modelDirectory }) {
   const models = [];
   const state = { visited: 0 };
-  for (const root of Array.from(new Set([...roots, modelDirectory, localAsrModelDirectory(modelDirectory)]))) {
+  for (const root of new Set([modelDirectory, localAsrModelDirectory(modelDirectory), ...roots])) {
     await scanDirectory(root, models, state);
   }
   return Array.from(new Map(models.map((item) => [item.path, item])).values())
@@ -786,6 +786,34 @@ export async function listDownloadableModels(modelDirectory) {
       localPath: fileStat?.size ? localPath : undefined
     };
   }));
+}
+
+/** 管理应用下载的转录文件，范围独立于本机搜索结果及用户选取的外部路径。 */
+export async function listDownloadedTranscriptionModels(modelDirectory) {
+  const asrDirectory = localAsrModelDirectory(modelDirectory);
+  const [entries, bundles] = await Promise.all([modelDirectory, asrDirectory].map((directory) => readdir(directory, { withFileTypes: true }).catch((error) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  })));
+  const whisper = await Promise.all(entries.filter((entry) => entry.isFile() && supportedExtensions.has(path.extname(entry.name).toLowerCase())).map(async (entry) => {
+    const file = path.join(modelDirectory, entry.name);
+    const fileStat = await stat(file).catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!fileStat?.size) return null;
+    const preset = catalog.find((item) => item.fileName === entry.name);
+    return { ...describeModel(file, fileStat.size), name: preset?.name ?? entry.name };
+  }));
+  const asr = await Promise.all(localAsrModels.filter((model) => bundles.some((entry) => entry.isDirectory() && entry.name === model.id)).map(async (model) => {
+    const descriptor = await buildAsrBundleDescriptor(path.join(asrDirectory, model.id), model.engine, model.format);
+    return descriptor ? { ...descriptor, name: model.name } : null;
+  }));
+  return [...whisper, ...asr].filter(Boolean).sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+}
+
+export function hasActiveModelDownloads() {
+  return activeDownloads.size > 0;
 }
 
 /**
@@ -1019,7 +1047,11 @@ async function doDownloadFromUrl(url, fileName, modelId, modelDirectory, onProgr
   onProgress({ modelId, downloadedBytes: 0, totalBytes: 0, status: "preparing", message: "正在准备本地转写组件…" });
   await ensureManagedLocalRuntime();
   await mkdir(modelDirectory, { recursive: true });
-  const target = path.join(modelDirectory, fileName);
+  let target = path.join(modelDirectory, fileName);
+  if (await exists(target)) {
+    const { name, ext } = path.parse(fileName);
+    target = path.join(modelDirectory, `${name}-${randomUUID().slice(0, 8)}${ext}`);
+  }
   const sizeBytes = await downloadToFile(url, target, {
     modelId,
     totalBytes: 0,

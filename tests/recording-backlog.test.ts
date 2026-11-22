@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { processChunk } = vi.hoisted(() => ({ processChunk: vi.fn() }));
+const { processChunk, stopRecording } = vi.hoisted(() => ({ processChunk: vi.fn(), stopRecording: vi.fn(async (_payload: unknown) => ({})) }));
 
 vi.mock("../src/lib/api", () => ({
   api: {
@@ -15,7 +15,7 @@ vi.mock("../src/lib/api", () => ({
     recordings: {
       start: async () => ({ sessionId: "session-1", startedAt: Date.now() }),
       append: async () => ({ ok: true }),
-      stop: async () => ({}),
+      stop: stopRecording,
       abort: async () => ({ ok: true }),
       open: async () => ({}),
       assets: async () => []
@@ -35,6 +35,7 @@ class FakeMediaRecorder {
   state = "inactive";
   mimeType = "audio/webm;codecs=opus";
   private listeners = new Map<string, Array<(event: unknown) => void>>();
+  private captureTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     public stream: { active: boolean },
@@ -50,22 +51,20 @@ class FakeMediaRecorder {
   start() {
     this.state = "recording";
     if (this.options?.audioBitsPerSecond !== 64_000) return;
-    setTimeout(() => {
-      const blob = new Blob([new ArrayBuffer(256)], { type: "audio/webm;codecs=opus" });
-      this.emit("dataavailable", { data: blob });
-      this.state = "inactive";
-      this.emit("stop", {});
-    }, 7_500);
+    this.captureTimer = setTimeout(() => this.stop(), 7_500);
   }
 
   stop() {
     if (this.state === "inactive") return;
+    clearTimeout(this.captureTimer);
+    const blob = new Blob([new ArrayBuffer(256)], { type: this.mimeType });
+    this.emit("dataavailable", { data: blob });
     this.state = "inactive";
     this.emit("stop", {});
   }
 
-  pause() {}
-  resume() {}
+  pause() { this.state = "paused"; }
+  resume() { this.state = "recording"; }
 
   private emit(type: string, event: unknown) {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
@@ -134,7 +133,7 @@ const NOT_READY = new Error("[STT_NOT_READY] 本地模型尚未就绪。请在�
 
 describe("实时转写补转队列", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
     stubBrowserApis();
   });
 
@@ -142,11 +141,13 @@ describe("实时转写补转队列", () => {
     vi.unstubAllGlobals();
     vi.useRealTimers();
     processChunk.mockReset();
+    stopRecording.mockClear();
   });
 
   it("模型未就绪时块挂起排队，就绪后按序补转且不提前放行后续块", async () => {
     let ready = false;
     processChunk.mockImplementation(async (payload: { startMs: number }) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
       if (!ready) throw NOT_READY;
       return {
         segments: [{
@@ -184,11 +185,13 @@ describe("实时转写补转队列", () => {
 
     // 继续推进：积压清空、后续块按 startMs 升序完整落进正文。
     await vi.advanceTimersByTimeAsync(20_000);
-    await recorder.stop(50);
+    const stopping = recorder.stop(50);
+    await vi.advanceTimersByTimeAsync(10);
+    await stopping;
     expect(events.failures.length).toBe(3);
     expect(events.recovered).toBe(1);
     expect(events.queue.at(-1)).toBe(0);
-    expect(events.transcript.length).toBe(events.provisional.length);
+    expect(events.transcript.length).toBe(events.provisional.length + 1);
     const startTimes = events.transcript.map((segment) => segment.startMs);
     expect([...startTimes].sort((a, b) => a - b)).toEqual(startTimes);
     for (const segment of events.transcript) {
@@ -196,7 +199,7 @@ describe("实时转写补转队列", () => {
     }
   });
 
-  it("录音开始时未配置档案：中途补配档案会补启转写循环", async () => {
+  it("录音开始时未配置档案：中途补配档案会补转开场录音", async () => {
     processChunk.mockImplementation(async (payload: { startMs: number }) => ({
       segments: [{
         id: `seg-${payload.startMs}`,
@@ -222,6 +225,7 @@ describe("实时转写补转队列", () => {
       (payload as { profileId: string }).profileId === "stt-late"
     )).toBe(true);
     expect(events.transcript.length).toBeGreaterThanOrEqual(1);
+    expect(events.transcript[0].startMs).toBe(0);
     await recorder.stop(20);
   });
   it("30 秒静音不挂占位，后续人声恢复占位与正文，模型语言覆盖全局", async () => {
@@ -229,7 +233,11 @@ describe("实时转写补转队列", () => {
     (AudioContext.prototype as unknown as {decodeAudioData: (buffer: ArrayBuffer) => Promise<unknown>}).decodeAudioData = async () => ({
       numberOfChannels: 1, getChannelData: () => new Float32Array(1600).fill(speech ? .1 : 0)
     });
-    processChunk.mockImplementation(async (payload: {startMs:number}) => ({segments: speech ? [{id:`voice-${payload.startMs}`,startMs:payload.startMs,endMs:payload.startMs+3000,text:'开始讨论',speakerId:'me',speakerName:'我',status:'final',track:'microphone'}] : []}));
+    processChunk.mockImplementation(async (payload: {startMs:number}) => {
+      const result = {outcome: speech ? "recognized" : "silent", segments: speech ? [{id:`voice-${payload.startMs}`,startMs:payload.startMs,endMs:payload.startMs+3000,text:'开始讨论',speakerId:'me',speakerName:'我',status:'final',track:'microphone'}] : []};
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return result;
+    });
     const {recorder,events} = makeRecorder({id:'quiet-stt'});
     recorder.updateSttProfile({id:'quiet-stt',kind:'stt',options:{transcriptionLanguage:'en'}} as never);
     await recorder.start();
@@ -242,7 +250,44 @@ describe("实时转写补转队列", () => {
     await vi.advanceTimersByTimeAsync(8_000);
     expect(events.provisional.length).toBeGreaterThan(0);
     expect(events.transcript.length).toBeGreaterThan(0);
-    await recorder.stop(38);
+    const stopping = recorder.stop(38);
+    await vi.advanceTimersByTimeAsync(10);
+    await stopping;
   });
 
+  it("暂停截断当前块，恢复时沿用录音时间轴，停录时提交最后一段", async () => {
+    processChunk.mockResolvedValue({ segments: [], outcome: "silent", language: "zh" });
+    const { recorder } = makeRecorder({ id: "stt-auto" });
+    recorder.updateSttProfile({ id: "stt-auto", options: { transcriptionLanguage: "auto" } } as never);
+    await recorder.start();
+    await vi.advanceTimersByTimeAsync(3_000);
+    recorder.pause();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(processChunk).toHaveBeenCalledTimes(1);
+    recorder.resume();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await recorder.stop(5);
+    expect(processChunk.mock.calls.map(([input]) => [input.startMs, input.endMs, input.language])).toEqual([
+      [0, 3_000, "auto"], [3_000, 5_000, "auto"]
+    ]);
+    expect(stopRecording.mock.calls[0][0]).not.toHaveProperty("transcriptionBackfill");
+  });
+
+  it("停录等待超过八秒时，只登记未完成的时段用于会后补转", async () => {
+    processChunk.mockResolvedValueOnce({ segments: [], outcome: "silent" })
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const { recorder } = makeRecorder({ id: "stt-slow" });
+    await recorder.start();
+    await vi.advanceTimersByTimeAsync(9_000);
+    const stopping = recorder.stop(9);
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(stopRecording).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await stopping;
+    expect(stopRecording).toHaveBeenCalledWith(expect.objectContaining({
+      transcriptionBackfill: expect.objectContaining({
+        ranges: [{ track: "microphone", offsetMs: 0, startMs: 7_500, endMs: 9_000 }]
+      })
+    }));
+  });
 });

@@ -73,6 +73,16 @@ describe("静音块跳过", () => {
     expect(isSilentPcmWav(makeWav(sine(16_000, 0.001)))).toBe(true);
   });
 
+  it("在绝对门限以下保留安静的人声起伏", () => {
+    const samples = sine(16_000, 0.0001);
+    const syllable = sine(2_400, 0.004);
+    samples.splice(5_000, syllable.length, ...syllable);
+    const wave = makeWav(samples);
+    expect(measurePcmWav(wave)?.rms).toBeLessThan(0.004);
+    expect(isSilentPcmWav(wave)).toBe(false);
+    expect(isSilentPcmWav(wave, { leadingMs: 500 })).toBe(true);
+  });
+
   it("极短的清晰爆破音即使整体 RMS 很低也不能跳过", () => {
     const samples = new Array(16_000).fill(0);
     for (let index = 8_000; index < 8_100; index += 1) samples[index] = 0.3;

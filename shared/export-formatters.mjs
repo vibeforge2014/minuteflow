@@ -49,6 +49,10 @@ export function markdown(meeting, options = {}) {
   const includeSpeakers = options.includeSpeakers !== false;
   const summary = meeting.summary ?? {};
   const list = (items) => (items?.length ? items.map((item) => `- ${item}`).join("\n") : "- 暂无");
+  // 表格单元格可能来自模型输出，不保证都是字符串：数字/null 直接 replaceAll
+  // 会抛 TypeError，整份纪要导出因此崩掉。统一转字符串后再转义管道符与换行，
+  // 否则单元格里的 | 会把列数撑乱、换行会把表格截断。
+  const tableRow = (cells) => `| ${(cells ?? []).map((cell) => String(cell ?? "").replaceAll("|", "\\|").replace(/\r?\n/g, " ")).join(" | ")} |`;
   const actions = summary.actionItems?.length
     ? summary.actionItems.map((item) => `- [${item.done ? "x" : " "}] ${item.title}｜负责人：${item.owner || "待确认"}｜截止：${item.dueDate || "待确认"}`).join("\n")
     : "- 暂无";
@@ -63,15 +67,24 @@ export function markdown(meeting, options = {}) {
   ];
 
   if (scope !== "transcript") {
+    if (summary.overview) blocks.push(`## 会议概览\n\n${summary.overview}`);
+    if (summary.keyPoints?.length) blocks.push(["## 关键要点", list(summary.keyPoints)].join("\n"));
+    if (summary.discussionSections?.length) {
+      blocks.push("## 分议题纪要", ...summary.discussionSections.map(({ title, points, table }) => {
+        const chapter = [`### ${title}`];
+        if (table) chapter.push([tableRow(table.columns), tableRow(table.columns.map(() => "---")), ...(table.rows ?? []).map(tableRow)].join("\n"));
+        // 模型可能只给表格不给文字要点：缺省 points 时跳过这一段而不是抛错。
+        if (points?.length) chapter.push(list(points.map(({ heading, text }) => heading ? `${heading}：${text}` : text)));
+        return chapter.join(table ? "\n\n" : "\n");
+      }));
+    }
     blocks.push(
-      ["## 会议目标", list(meeting.goals)].join("\n"),
-      ["## 我的记录", list(meeting.notes)].join("\n"),
-      ["## 关键要点", list(summary.keyPoints)].join("\n"),
-      ["## 已确认决策", list(summary.decisions)].join("\n"),
-      ["## 行动项", actions].join("\n"),
-      ["## 未决问题", list(summary.openQuestions)].join("\n"),
-      ["## 风险", list(summary.risks)].join("\n"),
-      ["## 下一步", list(summary.nextSteps)].join("\n")
+      ...(summary.actionItems?.length ? [`## 行动项\n${actions}`] : []),
+      ...[
+        ["已确认决策", summary.decisions], ["未决问题", summary.openQuestions],
+        ["风险", summary.risks], ["下一步", summary.nextSteps],
+        ["会议目标", meeting.goals], ["我的记录", meeting.notes]
+      ].flatMap(([title, items]) => items?.length ? [`## ${title}\n${list(items)}`] : [])
     );
   }
 

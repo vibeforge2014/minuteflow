@@ -78,12 +78,13 @@ describe("chunkPlanDefaults（按引擎切块策略）", () => {
     expect(plan.planning.maxMs).toBeLessThan(55_000);
   });
 
-  it("Whisper 与在线服务维持 10 秒网格", () => {
-    for (const transport of ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper", "openai"]) {
+  it("本地 Whisper 使用 24 秒长窗，在线服务维持短请求", () => {
+    for (const transport of ["whisper-cpp", "whisper-python", "faster-whisper", "mlx-whisper"]) {
       const plan = chunkPlanDefaults(transport);
-      expect(plan.chunkMs).toBe(10_000);
+      expect(plan.chunkMs).toBe(24_000);
       expect(plan.overlapMs).toBe(2_000);
-      expect(plan.planning.targetMs).toBe(10_000);
+      expect(plan.planning.targetMs).toBe(24_000);
     }
+    expect(chunkPlanDefaults("openai-audio").chunkMs).toBe(10_000);
   });
 });

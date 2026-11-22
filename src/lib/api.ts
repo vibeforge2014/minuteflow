@@ -12,6 +12,7 @@ import { LOCAL_ASR_SETUP_MODELS } from "./local-asr-setup";
 import { demoMeetings } from "../data/demo";
 import type { CreateMeetingInput, DownloadableModel, ImportCandidate, ImportJob, Meeting, MeetingAPI, MeetingPreferences, MeetingSummary, ModelProfile, VisualSummary } from "../types";
 import { simplifyChinese, simplifySummary } from "./chinese";
+import { markdown } from "../../shared/export-formatters.mjs";
 
 // —— 浏览器兜底实现的 localStorage 键位与内存事件总线 ——
 const storageKey = "meeting-assistant-demo-state-v5";
@@ -142,26 +143,37 @@ function localSummary(input: {
   previousSummary: MeetingSummary;
 }): MeetingSummary {
   const candidates = input.transcript
-    .flatMap((segment) => segment.text.split(/(?<=[。！？!?])\s*/))
-    .map((text) => simplifyChinese(text).replace(/^(嗯+|啊+|呃+|然后|就是|那个)[，,。.!！\s]*/, "").trim())
-    .filter((text) => text.length >= 8 && !/[？?]$/.test(text))
-    .map((text) => ({
+    .filter((segment) => segment.status === "final")
+    .flatMap((segment) => segment.text.split(/(?<=[。！？!?])\s*/).map((text) => ({ text, startMs: segment.startMs })))
+    .map(({ text, startMs }) => ({
+      text: simplifyChinese(text).replace(/^(嗯+|啊+|呃+|然后|就是|那个)[，,。.!！\s]*/, "").trim(),
+      startMs
+    }))
+    .filter(({ text }) => text.length >= 8 && !/[？?]$/.test(text))
+    .map(({ text, startMs }) => ({
       text,
+      startMs,
       score: (text.match(/(确认|决定|结论|完成|进展|方案|问题|结果|计划|建议|需要|风险|负责)/g)?.length ?? 0) * 3 + text.length / 30
     }))
     .sort((left, right) => right.score - left.score);
   const keyPoints: string[] = [];
+  const keyPointTimes: number[] = [];
   for (const candidate of candidates) {
     const normalized = candidate.text.replace(/[\s，。！？、,.!?]/g, "");
     if (keyPoints.some((item) => item.replace(/[\s，。！？、,.!?]/g, "").includes(normalized))) continue;
-    keyPoints.push(/^(已|将|需|本次|当前|会议)/.test(candidate.text) ? candidate.text : `会议明确：${candidate.text}`);
+    keyPoints.push(candidate.text);
+    keyPointTimes.push(candidate.startMs);
     if (keyPoints.length >= 6) break;
   }
   const sourceThroughMs = input.transcript.reduce((maximum, segment) => Math.max(maximum, segment.endMs), 0);
   return simplifySummary({
     ...input.previousSummary,
     topics: input.previousSummary.topics.length ? input.previousSummary.topics : input.goals.slice(0, 3),
-    keyPoints: Array.from(new Set(keyPoints)).slice(-8),
+    keyPoints,
+    keyPointTimes,
+    keyPointHeadlines: undefined,
+    overview: undefined,
+    discussionSections: undefined,
     updatedAt: new Date().toISOString(),
     generationMode: "local",
     sourceThroughMs,
@@ -503,6 +515,10 @@ const browserApi: MeetingAPI = {
     async catalog() {
       return browserModelCatalog;
     },
+    async downloaded() { return []; },
+    async trashDownloaded() {
+      throw new Error("请在 MinuteFlow 桌面版中管理本地模型文件。");
+    },
     async download() {
       throw new Error("浏览器预览无法安装本地模型，请在 MinuteFlow 桌面版中下载并配置。");
     },
@@ -569,12 +585,13 @@ const browserApi: MeetingAPI = {
       return jobs;
     },
     async list() { return loadBrowserImportJobs(); },
-    async retry(id) {
+    async retry(id, sttProfileId) {
       const current = loadBrowserImportJobs().find((job) => job.id === id);
       if (!current) throw new Error("导入任务不存在。");
       const job = {
         ...current,
         status: "queued" as const,
+        sttProfileId: sttProfileId ?? current.sttProfileId,
         progress: 0,
         error: undefined,
         transcriptionRetryAttempts: 0,
@@ -680,24 +697,9 @@ const browserApi: MeetingAPI = {
     // 无系统保存框，用 Blob + <a download> 触发浏览器下载。
     // 浏览器预览只支持文本类导出：范围/时间戳/发言人按桌面端同一套语义裁剪。
     async save(meeting, format, options) {
-      const scope = options?.scope ?? "all";
-      const includeTimestamps = options?.includeTimestamps !== false;
-      const includeSpeakers = options?.includeSpeakers !== false;
-      const lines = [`# ${meeting.title}`, ""];
-      if (scope !== "transcript") {
-        lines.push(...meeting.summary.keyPoints.map((item) => `- ${item}`));
-      }
-      if (scope !== "summary") {
-        lines.push("", "## 完整转录");
-        lines.push(...meeting.transcript.map((segment) => {
-          const time = includeTimestamps ? `[${segment.startMs}] ` : "";
-          const speaker = includeSpeakers ? `${segment.speakerName}：` : "";
-          return `- ${time}${speaker}${segment.text}`;
-        }));
-      }
       const content = format === "json"
         ? JSON.stringify(meeting, null, 2)
-        : lines.join("\n");
+        : markdown(meeting, options);
       const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");

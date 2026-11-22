@@ -1,4 +1,4 @@
-import { CaretRight, Cloud, Cpu, FingerprintSimple, Plus, Waveform, X, PencilSimple } from "@phosphor-icons/react";
+import { CaretRight, Cloud, Cpu, FingerprintSimple, Plus, Trash, Waveform, X, PencilSimple } from "@phosphor-icons/react";
 import type { SettingsProfileDraft } from "../../lib/settings-drafts";
 import type { ModelProfile } from "../../types";
 
@@ -6,8 +6,8 @@ export type SettingsServiceItem = { profile: ModelProfile; subtitle: string; iss
 export type SettingsServiceGroup = { title: string; items: SettingsServiceItem[] };
 export type SettingsServiceChoice = { key: string; name: string; description: string; local: boolean; enhancement?: boolean };
 
-export function SettingsServiceList({ groups, onEdit, onDefault, switchingId, disabled }: {
-  groups: SettingsServiceGroup[]; onEdit(profile: ModelProfile): void; onDefault(profile: ModelProfile): void; switchingId: string | null; disabled: boolean;
+export function SettingsServiceList({ groups, onEdit, onDefault, onDelete, switchingId, disabled }: {
+  groups: SettingsServiceGroup[]; onEdit(profile: ModelProfile): void; onDefault(profile: ModelProfile): void; onDelete(profile: ModelProfile): void; switchingId: string | null; disabled: boolean;
 }) {
   return <>{groups.filter((group) => group.items.length).map((group) => <section className="settings-service-group" key={group.title}>
     <h3>{group.title}</h3>
@@ -18,7 +18,7 @@ export function SettingsServiceList({ groups, onEdit, onDefault, switchingId, di
           <span><strong>{profile.name}</strong>{draft ? <small className="settings-unsaved">未保存更改</small> : subtitle && <small className={issue ? "is-issue" : undefined}>{subtitle}</small>}</span>
         </button>
         {profile.isDefault ? <span className="settings-default">默认</span> : <button type="button" className="settings-default-action" disabled={disabled || Boolean(switchingId)} aria-label={`将 ${profile.name} 设为默认`} onClick={() => onDefault(profile)}>{switchingId === profile.id ? "设置中…" : "设为默认"}</button>}
-        <span className="settings-service-row__open" aria-hidden="true"><CaretRight size={17} /></span>
+        <button type="button" className="icon-button settings-service-row__delete" disabled={disabled || Boolean(switchingId)} aria-label={`删除 ${profile.name} 的配置`} title="删除配置" onClick={() => onDelete(profile)}><Trash size={17} /></button>
       </div>)}
     </div>
   </section>)}</>;

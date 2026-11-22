@@ -1,4 +1,4 @@
-import { transcriptionDecodingOptions, whisperCliDecodingArgs, pythonDecodingOptions } from "../../shared/transcription-options.mjs";
+import { transcriptionComputeMode, transcriptionDecodingOptions, transcriptionGpuBackend, whisperCliDecodingArgs, whisperCpuThreads, pythonDecodingOptions } from "../../shared/transcription-options.mjs";
 import { summaryTemplateById } from "../../shared/summary-templates.mjs";
 /**
  * 转录与纪要的模型调用层（Electron 主进程 / 服务层）。
@@ -22,16 +22,36 @@ import { randomUUID } from "node:crypto";
 import { writeFile, unlink } from "node:fs/promises";
 import { z } from "zod";
 import { initWhisper, loadWhisperModule } from "@fugood/whisper.node";
-import { buildBasicKeyPoints, simplifySummary } from "./chinese.mjs";
+import { buildBasicKeyPoints, isStandaloneSummaryText, simplifySummary } from "./chinese.mjs";
 import { testAppleSpeech, appleSpeechFixturePath } from "./apple-speech.mjs";
 import { decodeWithSherpaAsr } from "./asr-runtime.mjs";
 import { buildTranscriptionPrompt } from "./transcription-prompt.mjs";
+import { parsePcmWav } from "./audio-quality.mjs";
+
+function modelTranscriptionPrompt(profile, language, glossary, previousText) {
+  return buildTranscriptionPrompt({
+    language,
+    glossary,
+    previousText: profile.options?.usePreviousText === false ? undefined : previousText,
+    initialPrompt: profile.options?.initialPrompt
+  });
+}
 
 // ESM 下按需加载 CJS 原生模块（sherpa-onnx-node）。
 const require = createRequire(import.meta.url);
 
 /** 会议纪要 JSON 的 zod 校验 schema：模型输出先经它归一化（缺省字段补默认值）再进库。 */
 const summarySchema = z.object({
+  overview: z.string().optional(),
+  discussionSections: z.array(z.object({
+    title: z.string(),
+    table: z.unknown().optional(),
+    points: z.array(z.object({
+      heading: z.string().optional(),
+      text: z.string(),
+      evidenceSegmentId: z.string().optional()
+    }))
+  })).optional(),
   topics: z.array(z.string()).default([]),
   // 关键结论兼容三种形态：纯字符串 / {text} / {text, headline?, evidenceTime|timeMs}；
   // validateSummary 里统一归一为字符串数组 + 平行的 keyPointTimes / keyPointHeadlines。
@@ -368,6 +388,8 @@ function coerceActionItems(value) {
 export function validateSummary(value) {
   const result = summarySchema.safeParse({
     ...value,
+    overview: typeof value?.overview === "string" ? value.overview : undefined,
+    discussionSections: summarySchema.shape.discussionSections.safeParse(value?.discussionSections).data,
     topics: coerceStringList(value?.topics),
     decisions: coerceStringList(value?.decisions),
     openQuestions: coerceStringList(value?.openQuestions),
@@ -407,10 +429,34 @@ export function validateSummary(value) {
  * 在线纪要的最小内容下限：结构合法但所有条目为空视为模型没有完成任务，
  * 抛错走本机兜底，绝不用空结果清掉已有纪要。
  */
-function validateOnlineSummary(value) {
+function validateOnlineSummary(value, sources) {
   const summary = validateSummary(value);
-  const hasContent = ["keyPoints", "decisions", "actionItems", "openQuestions", "nextSteps", "risks"]
-    .some((key) => (summary[key] ?? []).length > 0);
+  const ids = new Map(sources.filter((source) => source.id).flatMap(({ id, label }) => [[label, id], [id, id]]));
+  summary.discussionSections = summary.discussionSections?.map((section) => ({
+    ...section,
+    points: section.points.map((point) => ({
+      ...point,
+      evidenceSegmentId: ids.get(point.evidenceSegmentId ?? "")
+    }))
+  }));
+  summary.actionItems = summary.actionItems.map((item) => ({
+    ...item,
+    evidenceSegmentIds: [...new Set(item.evidenceSegmentIds.map((reference) => ids.get(reference.trim())).filter(Boolean))]
+  }));
+  const times = new Map();
+  for (const { time, timeMs } of sources) {
+    const second = parseEvidenceTimeMs(time);
+    if (second !== null && timeMs !== null && !times.has(second)) times.set(second, timeMs);
+  }
+  summary.keyPointTimes = summary.keyPointTimes?.map((time) =>
+    typeof time === "number" ? times.get(Math.floor(time / 1000) * 1000) ?? null : null
+  );
+  for (const field of ["risks", "nextSteps"]) {
+    summary[field] = summary[field].filter((item) => !isTranscriptReviewBoilerplate(item));
+  }
+  const hasContent = Boolean(summary.overview || summary.discussionSections?.length)
+    || ["keyPoints", "decisions", "actionItems", "openQuestions", "nextSteps", "risks"]
+      .some((key) => (summary[key] ?? []).length > 0);
   if (!hasContent) {
     const snippet = String(JSON.stringify(value)).slice(0, 100);
     console.error(`[summary] 模型返回了全空纪要，原始片段：${String(JSON.stringify(value)).slice(0, 300)}`);
@@ -419,58 +465,114 @@ function validateOnlineSummary(value) {
   return summary;
 }
 
-/** 提示词中转录部分的最大字符量：更早的内容已并入上一版纪要，超长时只保留最近窗口。 */
-const MAX_TRANSCRIPT_PROMPT_CHARS = 30_000;
-
-/**
- * 转录行窗口化：拼接后超长时从尾部往前保留最近的内容（滚动纪要场景下，
- * 早期内容已体现在上一版纪要里），避免长会议把模型上下文和费用撑爆。
- */
-function windowTranscriptLines(lines) {
-  if (!lines.length) return "";
-  let total = 0;
-  for (const line of lines) total += line.length + 1;
-  if (total <= MAX_TRANSCRIPT_PROMPT_CHARS) return lines.join("\n");
-  const kept = [];
-  let used = 0;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const cost = lines[index].length + 1;
-    if (used + cost > MAX_TRANSCRIPT_PROMPT_CHARS && kept.length) break;
-    kept.unshift(lines[index]);
-    used += cost;
-  }
-  return `（转录过长，已省略更早的部分，其内容包含在上一版纪要中）\n${kept.join("\n")}`;
+function isTranscriptReviewBoilerplate(item) {
+  return /^(?:录音(?:转录|转写)?|转录|转写)(?:内容|文本)?(?:过于|较为)?(?:简短|不完整|不清晰|信息不足)|^关键主体、事项和依据未明确|^(?:补充或重听|重新听取|补齐)(?:会议)?录音|^在关键信息明确前.{0,16}(?:正式决策|正式依据)/.test(item.trim());
 }
 
-/**
- * 构造中文会议纪要提示词：拼接转录（带时间戳与说话人）、目标、人工笔记与上一版纪要。
- * final=true 要求生成最终纪要；否则只根据新增内容滚动更新且不删除已确认的人工内容。
- * input.template 选择归纳视角（通用/周会/访谈/复盘），只影响提示词里的关注点，
- * 不改变要求模型输出的 JSON 结构。
- * @param {object} input 会议上下文（title/goals/notes/transcript/previousSummary/template）
- * @returns {string} 提示词文本
- */
-export function buildSummaryPrompt(input, final = false) {
-  const transcript = windowTranscriptLines(input.transcript
-    .map((segment) => `[${formatTime(segment.startMs)}] ${segment.speakerName}: ${segment.text}`));
+const MAX_TRANSCRIPT_PROMPT_CHARS = 30_000;
+const SUMMARY_CONTEXT_FIELDS = ["topics", "keyPoints", "decisions", "actionItems", "openQuestions", "risks", "nextSteps"];
+
+function selectSummaryTranscript(lines, keepTimeline) {
+  if (lines.reduce((length, line) => length + line.text.length + 1, 0) <= MAX_TRANSCRIPT_PROMPT_CHARS) {
+    return { lines, notice: "" };
+  }
+
+  // 长会分布取样留出更多中段入口，避免逐组汇报只剩少数时段的开头。
+  const windowCount = keepTimeline ? Math.min(18, lines.length) : 1;
+  const budget = Math.floor((MAX_TRANSCRIPT_PROMPT_CHARS - 100) / windowCount);
+  const selected = [];
+  for (let window = 0; window < windowCount; window += 1) {
+    const group = lines.slice(Math.floor(lines.length * window / windowCount), Math.floor(lines.length * (window + 1) / windowCount));
+    const fromEnd = window === windowCount - 1;
+    if (fromEnd) group.reverse();
+    let remaining = budget;
+    const excerpt = [];
+    for (const line of group) {
+      if (remaining <= 1) break;
+      if (line.text.length + 1 > remaining && excerpt.length) break;
+      // 窗口首行超预算时会被截断：必须按「实际压入的长度」扣减预算，
+      // 用原始长度会把 remaining 扣成负数，导致这一窗口后续证据行全被丢掉。
+      const clipped = line.text.slice(0, remaining - 1);
+      excerpt.push({ ...line, text: clipped });
+      remaining -= clipped.length + 1;
+    }
+    if (fromEnd) excerpt.reverse();
+    selected.push(...excerpt);
+  }
+  const notice = keepTimeline
+    ? "（转录过长，以下为会议前、中、后各阶段摘录。只归纳可见证据。）"
+    : "（转录过长，以下为最近一段转录。较早的进展可参考上一版纪要。）";
+  return { lines: selected, notice };
+}
+
+/** 只传有助于本次归纳的普通纪要条目，避免视觉纪要与旧的草稿措辞污染终稿。 */
+function summaryDraftContext(previous = {}, onlyLocked = false) {
+  const locks = new Set(Array.isArray(previous.manualLocks) ? previous.manualLocks : []);
+  return Object.fromEntries(SUMMARY_CONTEXT_FIELDS.flatMap((field) => {
+    const values = Array.isArray(previous[field]) ? previous[field] : [];
+    const kept = values.filter((value, index) => {
+      if (!onlyLocked) return typeof value !== "string" || !isTranscriptReviewBoilerplate(value);
+      if (field === "topics") return locks.has("topics");
+      if (field === "actionItems") return locks.has(`action:${value?.id}`);
+      return locks.has(`${field}:${index}`);
+    });
+    return kept.length ? [[field, kept.slice(0, 12)]] : [];
+  }));
+}
+
+function buildSummaryRequest(input, final) {
+  const source = input.transcript.flatMap((segment, index) => {
+    if (!segment.text.trim() || segment.status === "provisional") return [];
+    const label = `S${index + 1}`;
+    const time = formatTime(segment.startMs);
+    return [{
+      id: segment.id,
+      label,
+      time,
+      timeMs: Number.isFinite(segment.startMs) ? segment.startMs : null,
+      text: `[${label} ${time}] ${segment.speakerName || "发言人"}: ${segment.text}`
+    }];
+  });
+  const previous = summaryDraftContext(input.previousSummary);
+  const hasDraft = Object.keys(previous).length > 0;
+  const transcript = selectSummaryTranscript(source, final || !hasDraft);
+  const locked = summaryDraftContext(input.previousSummary, true);
   const template = summaryTemplateById(input.template);
-  return [
-    "你是一名严谨的中文会议纪要助手。",
-    "所有内容必须使用简体中文。请归纳和压缩信息，合并重复观点，不要逐句复述转录。",
+  const prompt = [
+    "你在为没有参加会议的同事写简体中文纪要。读完应能直接回答：哪个事项到了什么状态，定下了什么，还卡在哪里，接下来谁做什么。",
     final
-      ? "请基于完整会议内容生成最终纪要。"
-      : "请只根据新增内容更新滚动纪要，不要删除已经确认的人工内容。",
+      ? "生成会后纪要。按事项合并各时段的讨论，将最重要的结果、变化和阻塞排在前面。"
+      : "请只根据新增内容更新滚动纪要。合并对同一事项的重复汇报，已明确的新状态替换旧状态，仍有效的结论继续保留。",
     `本次纪要模板：${template.label}。${template.guidance}`,
-    "必须返回 JSON，不要使用 Markdown 代码块。",
-    "结构：topics, keyPoints, decisions, actionItems, openQuestions, risks, nextSteps。",
-    "keyPoints 每项是 {\"text\": \"要点标题｜一句完整结论\", \"evidenceTime\": \"mm:ss\"}：text 内用全角竖线「｜」分隔，竖线前是 6–14 字的要点标题（这条结论的核心，读者扫标题即可抓住重点，不要写成「讨论重点」这类类别名），竖线后是提炼后的完整结论（约 15–45 字，不要照抄原话），一行只表达一条结论，不要类别标签开头，不要 Markdown 符号；evidenceTime 引用转录行开头的时间戳，仅当结论对应某个明确时刻时提供。",
-    "actionItems 每项包含 title, owner, dueDate, status, done, evidenceSegmentIds。",
-    `会议标题：${input.title}`,
+    "每条写成可独立读懂的句子。写出项目、指标或交付物的名称，用具体动作和结果代替「这个、这块、相关工作、持续推进」。保留能说明变化的基线、现值、数量、单位、口径和日期。只有上下文能明确指代时才补出名称。听不清的专名、数字或单位不得猜测；不确定且重要的事实放入未决问题。",
+    "只输出一个 JSON 对象。结构：topics, keyPoints, decisions, actionItems, openQuestions, risks, nextSteps。这七个字段是数组，有依据才填写，避免同一句在各节重复。",
+    "可增加 overview 字符串：一到两句交代会议范围、整体结果和最重要的限制，省略寒暄、过程性套话与纯议程复述。",
+    ...(final ? [
+      '会后另输出 discussionSections 数组，格式为 [{"title":"议题","points":[{"heading":"对象或小结","text":"可独立读懂的事实和背景","evidenceSegmentId":"S12"}]}]。章节按讨论主题组织，短会内容稀少可省略。多单位逐一汇报时，请在同一章节中为每个有实质内容的单位单列小结，不能把不同单位的完成值、预计值或缺口合并。复用同一单位小结保留关键指标、口径、卡点与时间；多个独立事项可以拆开。证据编号只从下方转录行复制，没有证据时省略该字段。',
+      "按实际讨论命名章节与小结。访谈优先呈现观察、困难和待验证问题；项目会议区分已完成、预计、目标与缺口；涉及规范时保留适用条件和例外。区分已确认事实、建议与未决判断。只有不同对象确实可以按同一组字段并列比较时，才在对应章节添加可选 table 对象，含 columns（2–5 个列标题）和 rows（至少两个同宽字符串数组）。缺失值用空字符串，保留原始单位和统计口径；关键判断的转录依据仍通过 points 提供。"
+    ] : []),
+    [
+      "topics：至多 4 个具体议题名称。",
+      'keyPoints：优先写 3–6 条关键结果，信息不足时可更少。每项格式为 {"text":"事项短标题｜一句完整结论","evidenceTime":"mm:ss"}。标题写对象或变化，正文约 20–60 字，说明现状、变化或影响；证据时间只从转录行复制，无法定位时省略该字段。',
+      "decisions：仅记录明确达成的决定，并写明选择或适用范围。建议、讨论和预估不得记为已决定。",
+      "actionItems：仅记录明确约定的工作。每项包含 title, owner, dueDate, status, done, evidenceSegmentIds。title 写动作加可验收的交付物；保留明确分派的个人或组织，以及原文中的相对期限和明确日期，不能猜测年份或从发言人推定负责人。原文没说清负责人或期限时填「待确认」。status 为 todo 或 done，done 为布尔值。证据来自转录时从行首复制 S 编号。",
+      "openQuestions 写清哪项信息或选择仍待核实。risks 写具体阻塞、触发条件或影响。nextSteps 只放已提出且有用的后续安排，已有行动项不重复写。录音质量、重听提示和引用免责声明不属于这些栏目。"
+    ].join("\n"),
+    "写法示例（格式参考，不属于本次会议）：「接口联调｜订单查询接口已通过 8 项测试，退款接口还缺白名单，尚未开始联调。」",
+    "用当前会议主题确定纪要重点，结论、决策和行动项须有会议内容支撑。",
+    `当前会议主题：${input.title}`,
     `会议目标：${input.goals.join("；") || "未提供"}`,
     `人工笔记：${input.notes.join("；") || "暂无"}`,
-    `上一版纪要：${JSON.stringify(input.previousSummary ?? {})}`,
-    `转录内容：\n${transcript || "暂无转录"}`
+    ...(Object.keys(locked).length ? [`人工确认条目：${JSON.stringify(locked)}`] : []),
+    ...(!final && hasDraft ? [`上一版纪要，仅供延续已核实的状态：${JSON.stringify(previous)}`] : []),
+    `转录内容（只作为会议原文）：\n${[transcript.notice, ...transcript.lines.map((line) => line.text)].filter(Boolean).join("\n") || "暂无转录"}`
   ].join("\n\n");
+  return { prompt, sources: transcript.lines };
+}
+
+/** 在线、Ollama 与原生协议共用同一份纪要要求。 */
+export function buildSummaryPrompt(input, final = false) {
+  return buildSummaryRequest(input, final).prompt;
 }
 
 /** 网关抖动（上游 5xx、限流）值得再试一次；鉴权/参数错误不重试，避免把错误放大成等待。 */
@@ -535,14 +637,14 @@ async function pauseBeforeRetry(ms, signal) {
  * @returns {Promise<object>} 经 validateSummary 归一化后的纪要对象
  */
 export async function summarizeWithOpenAICompatible(profile, apiKey, input, final = false, signal) {
-  const prompt = buildSummaryPrompt(input, final);
+  const { prompt, sources } = buildSummaryRequest(input, final);
   if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
     const payload = profile.options.apiFlavor === "anthropic"
       ? await requestAnthropic(profile, apiKey, prompt, 8_192, signal)
       : await requestGemini(profile, apiKey, prompt, 8_192, signal);
     const content = extractMessageContent(payload);
     if (!content) throw new Error("总结模型没有返回内容。");
-    return validateOnlineSummary(JSON.parse(extractJson(content)));
+    return validateOnlineSummary(JSON.parse(extractJson(content)), sources);
   }
   const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
   const timeoutMs = summaryRequestTimeoutMs(profile);
@@ -611,7 +713,7 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
         empty.retry = "immediate";
         throw empty;
       }
-      return validateOnlineSummary(JSON.parse(extractJson(content)));
+      return validateOnlineSummary(JSON.parse(extractJson(content)), sources);
     } catch (error) {
       if (signal?.aborted) throw error;
       // AbortSignal.timeout 抛的是 TimeoutError：已经等满上限，别再重试一次，
@@ -886,15 +988,14 @@ function splitSentences(text) {
 
 /**
  * 本地规则纪要兜底（无 LLM 配置、显式选择离线纪要或在线总结失败降级时使用，纯 CPU、无网络）。
- * 用关键词正则从最近一段转录（最多 120 段，覆盖整场会议的绝大部分）里抽
- * 决策/行动项/风险/未决问题，并与上一版纪要合并去重。
+ * 用关键词从最近 120 段转录里提取决策、行动、风险与未决问题。
  * @param {object} input 会议上下文
  * @returns {object} 经 validateSummary 归一化后的纪要对象
  */
 export function summarizeLocally(input) {
   const recent = input.transcript.filter((segment) => segment.status === "final").slice(-120);
-  const decisionPattern = /(决定|決定|确认|確認|同意|采用|採用|确定|確定|结论|結論)/;
-  const actionPattern = /(需要|负责|負責|完成|跟进|跟進|输出|輸出|整理|评估|評估|邀请|邀請)/;
+  const decisionPattern = /(?:^|[，,：:\s])(?:决定|決定|确认采用|同意|一致同意|确定采用|結論是|结论是)/;
+  const actionPattern = /负责|負責|(?:将|要|需要|请|待|尽快|之前|以前)(?:.{0,16})(?:完成|跟进|跟進|提交|输出|輸出|整理|评估|評估|邀请|邀請)/;
   const questionPattern = /[？?]$/;
   const riskPattern = /(风险|風險|延期|阻塞|合规|合規|隐患|隱患|来不及|來不及)/;
 
@@ -902,7 +1003,7 @@ export function summarizeLocally(input) {
   // so a single long segment containing several points yields individual
   // decisions, actions, and questions instead of one undifferentiated block.
   const sentences = recent.flatMap((segment) =>
-    splitSentences(segment.text).map((sentence) => ({
+    splitSentences(segment.text).filter(isStandaloneSummaryText).map((sentence) => ({
       text: sentence,
       speakerName: segment.speakerName,
       segmentId: segment.id
@@ -918,18 +1019,17 @@ export function summarizeLocally(input) {
     keyPoints: keyDrafts.map((draft) => draft.text).slice(-8),
     keyPointTimes: keyDrafts.map((draft) => draft.timeMs ?? null).slice(-8),
     decisions: Array.from(new Set([
-      ...(input.previousSummary?.decisions ?? []),
-      ...sentences.filter((unit) => decisionPattern.test(unit.text)).map((unit) => unit.text)
+      ...sentences.filter((unit) => !questionPattern.test(unit.text) && decisionPattern.test(unit.text)).map((unit) => unit.text)
     ])).slice(-5),
     actionItems: Array.from(new Map([
-      ...(input.previousSummary?.actionItems ?? []),
       ...sentences
-        .filter((unit) => actionPattern.test(unit.text))
+        .filter((unit) => !questionPattern.test(unit.text) && actionPattern.test(unit.text))
         .slice(-3)
         .map((unit) => ({
           id: randomUUID(),
           title: unit.text,
-          owner: unit.speakerName,
+          owner: unit.speakerName && (unit.text.startsWith(`${unit.speakerName}负责`)
+            || unit.text.startsWith("我负责") && !/^发言人/.test(unit.speakerName)) ? unit.speakerName : "待确认",
           dueDate: "待确认",
           status: "todo",
           done: false,
@@ -937,14 +1037,12 @@ export function summarizeLocally(input) {
         }))
     ].map((item) => [item.title, item])).values()).slice(-8),
     openQuestions: Array.from(new Set([
-      ...(input.previousSummary?.openQuestions ?? []),
       ...sentences.filter((unit) => questionPattern.test(unit.text)).map((unit) => unit.text)
     ])).slice(-5),
     risks: Array.from(new Set([
-      ...(input.previousSummary?.risks ?? []),
-      ...sentences.filter((unit) => riskPattern.test(unit.text)).map((unit) => unit.text)
+      ...sentences.filter((unit) => riskPattern.test(unit.text) && !isTranscriptReviewBoilerplate(unit.text)).map((unit) => unit.text)
     ])).slice(-5),
-    nextSteps: input.previousSummary?.nextSteps ?? []
+    nextSteps: []
   });
 }
 
@@ -958,9 +1056,11 @@ export function summarizeLocally(input) {
 const FASTER_WHISPER_SCRIPT = [
   "import json, sys",
   "from faster_whisper import WhisperModel",
-  "model = WhisperModel(sys.argv[1], device='auto', compute_type='auto')",
+  "device = {'cpu': 'cpu', 'gpu': 'cuda'}.get(sys.argv[6], 'auto')",
+  "model = WhisperModel(sys.argv[1], device=device, compute_type='auto')",
   "options = json.loads(sys.argv[5])",
-  "segments, info = model.transcribe(sys.argv[2], language=sys.argv[3] or None, initial_prompt=sys.argv[4] or None, vad_filter=True, **options)",
+  "options.setdefault('vad_filter', True)",
+  "segments, info = model.transcribe(sys.argv[2], language=sys.argv[3] or None, initial_prompt=sys.argv[4] or None, **options)",
   "materialized = [{'start': float(s.start), 'end': float(s.end), 'text': (s.text or '').strip(), 'avg_logprob': getattr(s, 'avg_logprob', None), 'no_speech_prob': getattr(s, 'no_speech_prob', None), 'compression_ratio': getattr(s, 'compression_ratio', None)} for s in segments]",
   "print(json.dumps({'text': ' '.join(s['text'] for s in materialized), 'language': getattr(info, 'language', None), 'segments': materialized}, ensure_ascii=False))"
 ].join("\n");
@@ -969,6 +1069,9 @@ const FASTER_WHISPER_SCRIPT = [
 const MLX_WHISPER_SCRIPT = [
   "import json, sys",
   "import mlx_whisper",
+  "if sys.argv[6] != 'auto':",
+  "    import mlx.core as mx",
+  "    mx.set_default_device(mx.gpu if sys.argv[6] == 'gpu' else mx.cpu)",
   "options = json.loads(sys.argv[5])",
   "result = mlx_whisper.transcribe(sys.argv[2], path_or_hf_repo=sys.argv[1], language=sys.argv[3] or None, initial_prompt=sys.argv[4] or None, **options)",
   "segments = [{'start': float(s.get('start', 0)), 'end': float(s.get('end', 0)), 'text': (s.get('text') or '').strip(), 'avg_logprob': s.get('avg_logprob'), 'no_speech_prob': s.get('no_speech_prob'), 'compression_ratio': s.get('compression_ratio')} for s in result.get('segments', [])]",
@@ -978,20 +1081,22 @@ const MLX_WHISPER_SCRIPT = [
 /**
  * Qwen3-ASR（实验性）的 Python 内置脚本：qwen-asr 包（transformers 后端），
  * 输出格式与 faster-whisper 兼容（segments 留空，按整块出文）。模型路径是应用内
- * 下载的 bundle 目录；torch 设备由包自动选择（CUDA / MPS），CPU 已被就绪检查挡下。
+ * 下载的 bundle 目录；显式绑定到当前 Python 环境可用的 CUDA / MPS。
  */
 const QWEN3_ASR_SCRIPT = [
-  "import json, sys",
+  "import json, sys, torch",
   "from qwen_asr import Qwen3ASRModel",
   "lang_map = {'zh': 'Chinese', 'en': 'English', 'yue': 'Cantonese', 'ja': 'Japanese', 'ko': 'Korean'}",
   "raw_language = (sys.argv[3] or '').strip()",
   "language = lang_map.get(raw_language, raw_language) or None",
-  "model = Qwen3ASRModel.from_pretrained(sys.argv[1], dtype='auto', device_map='auto')",
+  "device = 'cuda:0' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else None",
+  "if device is None: raise RuntimeError('Qwen3-ASR 需要 NVIDIA CUDA 或 Apple Silicon MPS。')",
+  "model = Qwen3ASRModel.from_pretrained(sys.argv[1], dtype='auto', device_map=device)",
   "result = model.transcribe(audio=sys.argv[2], language=language)",
   "if isinstance(result, str):",
   "    text = result",
   "elif isinstance(result, (list, tuple)):",
-  "    text = ' '.join([((item.get('text') if isinstance(item, dict) else str(item)) or '') for item in result])",
+  "    text = ' '.join((item.get('text') if isinstance(item, dict) else getattr(item, 'text', item if isinstance(item, str) else '')) or '' for item in result)",
   "else:",
   "    text = getattr(result, 'text', None) or (result.get('text') if isinstance(result, dict) else '') or str(result)",
   "print(json.dumps({'text': (text or '').strip(), 'language': raw_language or None, 'segments': []}, ensure_ascii=False))"
@@ -1010,7 +1115,7 @@ async function transcribeWithPythonPackage(profile, audioBuffer, fileName, langu
     || profile.options?.executablePath
     || (process.platform === "win32" ? "python" : "python3");
   if (!modelPath) throw new Error("请先选择本地模型目录或填写 Hugging Face 仓库 ID。");
-  const prompt = buildTranscriptionPrompt({ language, glossary, previousText, initialPrompt: profile.options?.initialPrompt });
+  const prompt = modelTranscriptionPrompt(profile, language, glossary, previousText);
   const inputPath = path.join(tmpdir(), `${randomUUID()}-${fileName}`);
   let wavePath = inputPath;
   await writeFile(inputPath, audioBuffer);
@@ -1021,7 +1126,10 @@ async function transcribeWithPythonPackage(profile, audioBuffer, fileName, langu
     await runProcess(profile.options.ffmpegPath, ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavePath], { signal });
   }
   try {
-    const { stdout } = await runProcess(pythonPath, ["-c", script, modelPath, wavePath, language ?? "", prompt, JSON.stringify(pythonDecodingOptions(profile))], { env: environment, signal });
+    const { stdout } = await runProcess(pythonPath, [
+      "-c", script, modelPath, wavePath, language ?? "", prompt,
+      JSON.stringify(pythonDecodingOptions(profile)), transcriptionComputeMode(profile.options?.computeMode)
+    ], { env: environment, signal });
     const payload = JSON.parse(stdout.trim().split("\n").pop());
     const segments = (payload.segments ?? [])
       .map((segment) => ({
@@ -1048,12 +1156,13 @@ async function transcribeWithPythonPackage(profile, audioBuffer, fileName, langu
 
 /** faster-whisper（CTranslate2）转录入口，委托 transcribeWithPythonPackage 执行。 */
 export async function transcribeWithFasterWhisper(profile, audioBuffer, fileName, language = "zh", glossary = [], signal, previousText = "") {
+  assertTranscriptionGpuSupported(profile);
   return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, FASTER_WHISPER_SCRIPT, previousText);
 }
 
 /** mlx-whisper 转录入口：仅 Apple Silicon macOS 可用，其余平台直接报错。 */
 export async function transcribeWithMlxWhisper(profile, audioBuffer, fileName, language = "zh", glossary = [], signal, previousText = "") {
-  if (process.platform !== "darwin") throw new Error("MLX-Whisper 仅在 Apple Silicon macOS 上可用。");
+  if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("MLX-Whisper 仅在 Apple Silicon macOS 上可用。");
   return transcribeWithPythonPackage(profile, audioBuffer, fileName, language, glossary, signal, MLX_WHISPER_SCRIPT, previousText);
 }
 
@@ -1140,7 +1249,7 @@ export async function transcribeRemote(
   })[extension] || "application/octet-stream";
   // 简体引导语 + 前文 + 术语表统一构造；此前远程链路只传术语表，中文用词的
   // 简繁与专名写法和本地引擎不一致。
-  const prompt = buildTranscriptionPrompt({ language, glossary, previousText, initialPrompt: profile.options?.initialPrompt });
+  const prompt = modelTranscriptionPrompt(profile, language, glossary, previousText);
   const retryBackoffMs = [2_000, 8_000];
   let lastFailure;
   for (let attempt = 0; ; attempt += 1) {
@@ -1237,6 +1346,13 @@ function runProcess(command, args, options = {}) {
   });
 }
 
+function assertTranscriptionGpuSupported(profile) {
+  if (transcriptionComputeMode(profile.options?.computeMode) === "gpu"
+    && !transcriptionGpuBackend(profile, process.platform, process.arch)) {
+    throw new Error("当前引擎在此设备上不支持 GPU 模式。请在转录设置中切换到自动或 CPU。");
+  }
+}
+
 /**
  * OpenAI Whisper 官方 Python 包的转录入口（.pt 检查点）。副作用：临时文件 + Python 子进程。
  * 强校验模型必须是 .pt 文件，与 whisper.cpp 的 GGML/GGUF 区分开；
@@ -1251,6 +1367,7 @@ export async function transcribeWithPythonWhisper(
   signal,
   previousText = ""
 ) {
+  assertTranscriptionGpuSupported(profile);
   const modelPath = profile.options?.modelPath;
   const pythonPath = profile.options?.pythonExecutablePath
     || profile.options?.executablePath
@@ -1263,7 +1380,12 @@ export async function transcribeWithPythonWhisper(
   await writeFile(inputPath, audioBuffer);
   const script = [
     "import json, sys, whisper",
-    "model = whisper.load_model(sys.argv[1])",
+    "mode = sys.argv[6]",
+    "device = {'cpu': 'cpu', 'gpu': 'cuda'}.get(mode)",
+    "if mode == 'gpu':",
+    "    import torch",
+    "    if not torch.cuda.is_available(): raise RuntimeError('GPU 模式需要支持 CUDA 的 PyTorch 和 NVIDIA 显卡驱动。')",
+    "model = whisper.load_model(sys.argv[1], device=device) if device else whisper.load_model(sys.argv[1])",
     "options = {'verbose': False, 'fp16': False}",
     "if sys.argv[3]: options['language'] = sys.argv[3]",
     "if sys.argv[4]: options['initial_prompt'] = sys.argv[4]",
@@ -1282,8 +1404,9 @@ export async function transcribeWithPythonWhisper(
       modelPath,
       inputPath,
       language,
-      buildTranscriptionPrompt({ language, glossary, previousText, initialPrompt: profile.options?.initialPrompt }),
-      JSON.stringify(pythonDecodingOptions(profile))
+      modelTranscriptionPrompt(profile, language, glossary, previousText),
+      JSON.stringify(pythonDecodingOptions(profile)),
+      transcriptionComputeMode(profile.options?.computeMode)
     ], { env: environment, signal });
     const result = JSON.parse(stdout.trim().split("\n").at(-1));
     const segments = (result.segments ?? []).map((segment) => ({
@@ -1355,8 +1478,9 @@ export async function transcribeWithWhisperCpp(
     // Whisper defaults to Traditional Chinese for Mandarin even with -l zh.
     // 简体引导语、前文上下文与术语表由统一模块按 token 预算组装，避免各引擎
     // 拼接顺序不一致，也避免长术语表把 prompt 撑爆后被 tokenizer 截断。
-    const prompt = buildTranscriptionPrompt({ language, glossary, previousText, initialPrompt: profile.options?.initialPrompt });
+    const prompt = modelTranscriptionPrompt(profile, language, glossary, previousText);
     if (prompt) args.push("--prompt", prompt);
+    if (transcriptionComputeMode(profile.options?.computeMode) === "cpu") args.push("--no-gpu");
     args.push(...whisperCliDecodingArgs(profile));
     await runProcess(whisperPath, args, { signal });
     const result = JSON.parse(await readFile(`${outputBase}.json`, "utf8"));
@@ -1380,7 +1504,7 @@ export async function transcribeWithWhisperCpp(
 }
 
 /**
- * whisper.node 上下文按模型路径常驻。此前每个 8/10 秒转录块都 initWhisper +
+ * whisper.node 上下文按模型路径和设备常驻。此前每个 8/10 秒转录块都 initWhisper +
  * release，长会议会把几百 MB~数 GB 权重反复从磁盘载入上千次，补转队列永远追不上。
  * 同一上下文一次只能跑一个转录，用 promise 队列串行；空闲 5 分钟自动释放，
  * 避免模型常驻吃满内存。
@@ -1388,29 +1512,56 @@ export async function transcribeWithWhisperCpp(
 const WHISPER_IDLE_RELEASE_MS = 5 * 60 * 1000;
 const whisperContexts = new Map();
 
-function releaseWhisperContext(modelPath, entry) {
-  if (whisperContexts.get(modelPath) !== entry) return;
-  whisperContexts.delete(modelPath);
-  const context = entry.context;
-  entry.context = null;
-  void Promise.resolve(context?.release?.()).catch(() => {});
+function releaseWhisperContext(key, entry) {
+  if (whisperContexts.get(key) !== entry || entry.pending || !entry.context) return;
+  // 释放必须排进该 key 的任务队列，并等原生 release() 真正完成后才把 entry
+  // 从表里移除：空闲计时触发与新任务进入之间有一个窗口，若先 delete 再异步
+  // release，新任务会查不到 entry 而在旧 context 尚未释放时又 init 一份，
+  // 同一模型的权重双份常驻，显存紧张时会 OOM。
+  // 新任务若在释放期间进来，会排在释放之后执行并复用同一个 entry。
+  const release = entry.queue.then(async () => {
+    if (whisperContexts.get(key) !== entry || !entry.context) return;
+    const context = entry.context;
+    entry.context = null;
+    await Promise.resolve(context?.release?.()).catch(() => {});
+    // 只有原生释放彻底结束、期间无人复用，才允许删除表项。
+    if (whisperContexts.get(key) === entry && !entry.context && !entry.pending) {
+      whisperContexts.delete(key);
+    }
+  });
+  entry.queue = release.then(() => {}, () => {});
 }
 
-async function withWhisperContext(modelPath, task) {
-  let entry = whisperContexts.get(modelPath);
+function loadVulkanWhisper() {
+  // whisper.node's public loader caches the first native variant process-wide.
+  // Load Vulkan separately so switching from the default CPU library works without restarting.
+  try {
+    return require(`@fugood/node-whisper-win32-${process.arch}-vulkan`);
+  } catch {
+    throw new Error("无法加载 Whisper Vulkan。请检查显卡驱动，或在转录设置中切换到自动或 CPU。");
+  }
+}
+
+async function withWhisperContext(profile, task) {
+  const modelPath = profile.options.modelPath;
+  const mode = transcriptionComputeMode(profile.options.computeMode);
+  const backend = transcriptionGpuBackend(profile, process.platform, process.arch);
+  const useGpu = mode === "gpu" || (mode === "auto" && backend === "metal");
+  const useVulkan = useGpu && backend === "vulkan";
+  const key = JSON.stringify([modelPath, useVulkan ? "vulkan" : useGpu ? "metal" : "cpu"]);
+  let entry = whisperContexts.get(key);
   if (!entry) {
-    entry = { context: null, queue: Promise.resolve(), lastUsedAt: 0, idleTimer: null };
-    whisperContexts.set(modelPath, entry);
+    entry = { context: null, queue: Promise.resolve(), pending: 0, idleTimer: null };
+    whisperContexts.set(key, entry);
   }
   if (entry.idleTimer) { clearTimeout(entry.idleTimer); entry.idleTimer = null; }
+  entry.pending++;
   const run = entry.queue.then(async () => {
     if (!entry.context) {
-      entry.context = await initWhisper({
-        filePath: modelPath,
-        // GPU 加速只在 macOS 启用（Windows 上该后端不稳定），FlashAttention 两平台均可。
-        useGpu: process.platform === "darwin",
-        useFlashAttn: true
-      });
+      const options = { filePath: modelPath, useGpu, useFlashAttn: true };
+      entry.context = useVulkan
+        ? new (loadVulkanWhisper().WhisperContext)(options)
+        : await initWhisper(options);
     }
     return task(entry.context);
   });
@@ -1418,15 +1569,11 @@ async function withWhisperContext(modelPath, task) {
   try {
     return await run;
   } finally {
-    entry.lastUsedAt = Date.now();
-    if (entry.idleTimer) clearTimeout(entry.idleTimer);
-    entry.idleTimer = setTimeout(() => {
-      entry.idleTimer = null;
-      if (Date.now() - entry.lastUsedAt >= WHISPER_IDLE_RELEASE_MS - 1000) {
-        releaseWhisperContext(modelPath, entry);
-      }
-    }, WHISPER_IDLE_RELEASE_MS);
-    entry.idleTimer.unref?.();
+    entry.pending--;
+    if (!entry.pending) {
+      entry.idleTimer = setTimeout(() => releaseWhisperContext(key, entry), WHISPER_IDLE_RELEASE_MS);
+      entry.idleTimer.unref?.();
+    }
   }
 }
 
@@ -1436,6 +1583,7 @@ async function withWhisperContext(modelPath, task) {
  * 支持取消：AbortSignal 触发时停止推理并抛"任务已取消"。
  */
 async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, language, glossary, signal, previousText = "") {
+  assertTranscriptionGpuSupported(profile);
   const modelPath = profile.options?.modelPath;
   const ffmpegPath = profile.options?.ffmpegPath;
   if (!modelPath) throw new Error("本地模型尚未就绪，请在转录设置中下载一个模型。");
@@ -1443,26 +1591,38 @@ async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, lang
 
   const inputPath = path.join(tmpdir(), `${randomUUID()}-${fileName}`);
   const wavePath = `${inputPath}.wav`;
-  await writeFile(inputPath, audioBuffer);
+  const wave = parsePcmWav(audioBuffer);
+  const pcm = wave?.sampleRate === 16_000 && wave.channels === 1
+    ? audioBuffer.buffer.slice(audioBuffer.byteOffset + wave.start, audioBuffer.byteOffset + wave.start + wave.length - wave.length % 2)
+    : undefined;
   let abort;
   try {
-    if (ffmpegPath) {
-      await runProcess(ffmpegPath, ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavePath], { signal });
-    } else if (path.extname(fileName).toLowerCase() === ".wav") {
-      await writeFile(wavePath, await readFile(inputPath));
-    } else {
-      throw new Error("音频处理组件尚未就绪，请重试或重新安装应用。");
+    if (!pcm) {
+      if (ffmpegPath) {
+        await writeFile(inputPath, audioBuffer);
+        await runProcess(ffmpegPath, ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavePath], { signal });
+      } else if (path.extname(fileName).toLowerCase() === ".wav") {
+        await writeFile(wavePath, audioBuffer);
+      } else {
+        throw new Error("音频处理组件尚未就绪，请重试或重新安装应用。");
+      }
     }
 
-    const prompt = buildTranscriptionPrompt({ language, glossary, previousText, initialPrompt: profile.options?.initialPrompt });
-    const result = await withWhisperContext(modelPath, async (context) => {
-      const job = context.transcribeFile(wavePath, {
-        language: language || undefined,
+    const prompt = modelTranscriptionPrompt(profile, language, glossary, previousText);
+    const decoding = transcriptionDecodingOptions(profile);
+    const result = await withWhisperContext(profile, async (context) => {
+      if (signal?.aborted) throw new Error("任务已取消。");
+      const options = {
+        // The native binding defaults to English when this option is omitted.
+        language: language || "auto",
         prompt: prompt || undefined,
         // 未设置的参数沿用托管运行时默认值。原生绑定固定贪心策略，不暴露无效束宽。
-        temperature: transcriptionDecodingOptions(profile).temperature,
-        temperatureInc: transcriptionDecodingOptions(profile).temperatureStep
-      });
+        temperature: decoding.temperature,
+        temperatureInc: decoding.temperatureStep,
+        bestOf: decoding.bestOf,
+        maxThreads: whisperCpuThreads(profile)
+      };
+      const job = pcm ? context.transcribeData(pcm, options) : context.transcribeFile(wavePath, options);
       abort = () => { void job.stop(); };
       signal?.addEventListener("abort", abort, { once: true });
       try {
@@ -1475,9 +1635,9 @@ async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, lang
       }
     });
     const segments = (result.segments ?? []).map((segment) => ({
-      // whisper.cpp timestamps are expressed in 10 ms units.
-      startMs: Math.round(Number(segment.t0 ?? 0) * 10),
-      endMs: Math.round(Number(segment.t1 ?? segment.t0 ?? 0) * 10),
+      // whisper.node already converts whisper.cpp's 10 ms units to milliseconds.
+      startMs: Math.round(Number(segment.t0 ?? 0)),
+      endMs: Math.round(Number(segment.t1 ?? segment.t0 ?? 0)),
       text: String(segment.text ?? "").trim()
     })).filter((segment) => segment.text);
     return {
@@ -1488,7 +1648,7 @@ async function transcribeWithManagedWhisper(profile, audioBuffer, fileName, lang
     };
   } finally {
     if (abort) signal?.removeEventListener("abort", abort);
-    await Promise.allSettled([unlink(inputPath), unlink(wavePath)]);
+    if (!pcm) await Promise.allSettled([unlink(inputPath), unlink(wavePath)]);
   }
 }
 
@@ -2105,6 +2265,9 @@ export function extractJson(content) {
 
 /** 毫秒数格式化为 mm:ss（纪要提示词中的时间戳用）；非法/缺失时间戳按 00:00 处理。 */
 function formatTime(ms) {
-  const total = Math.floor((Number.isFinite(ms) ? Number(ms) : 0) / 1000);
-  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+  const total = Math.max(0, Math.floor((Number.isFinite(ms) ? Number(ms) : 0) / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = String(Math.floor(total / 60) % 60).padStart(2, "0");
+  const seconds = String(total % 60).padStart(2, "0");
+  return hours ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`;
 }

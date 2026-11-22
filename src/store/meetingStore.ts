@@ -130,6 +130,8 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     silenceSkip: true,
     retentionDays: null,
     onboardingCompleted: false,
+    // 与主进程 defaultPreferences / 持久化闩锁保持同一字段集。
+    appleSpeechBootstrapCompleted: false,
     systemPermissionsCompleted: false,
     permissionsVersion: 0,
     permissionSetupResume: false,
@@ -211,7 +213,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
         status: incoming.status,
         summary: {
           ...mergeSummaryRevision(current.summary, incoming.summary),
-          stale: incoming.summary.stale
+          stale: incoming.summary.stale || (current.title !== incoming.title && Boolean(incoming.summary.updatedAt))
         },
         participants: incoming.participants,
         updatedAt: incoming.updatedAt

@@ -15,6 +15,8 @@ import {
   FileArrowUp,
   GearSix,
   LockKey,
+  NotePencil,
+  PencilSimple,
   PlayCircle,
   FolderOpen,
   SidebarSimple,
@@ -46,7 +48,7 @@ import { useExitPresence } from "./hooks/useExitPresence";
 import { api } from "./lib/api";
 import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Meeting } from "./types";
 import { BrandMark } from "./components/BrandMark";
-import { buildRecordingReadiness, deriveWorkspaceStage, isLocalTranscriptionTransport, shouldAutoOpenRightPanel, type WorkspaceStage } from "./lib/workspace";
+import { buildRecordingReadiness, deriveWorkspaceStage, isImportedMeeting, isLocalTranscriptionTransport, shouldAutoOpenRightPanel, type WorkspaceStage } from "./lib/workspace";
 import { describeImportProcessing, isActiveImportJob, mergeImportJob, mergeImportJobs, selectMeetingImportJob } from "./lib/import-status";
 import type { SystemPermissionStatus } from "./types";
 import { finishPermissionSetup, shouldOpenPermissionSetup } from "./lib/permissions";
@@ -76,6 +78,7 @@ export function App() {
   } = useMeetingStore.getState();
   // —— 本地 UI 状态：各类弹层开关、导入队列、播放进度等，不进入 Zustand 全局 store ——
   const [newMeetingOpen, setNewMeetingOpen] = useState(false);
+  const meetingTitleRef = useRef<HTMLInputElement>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 打开设置时的初始页（如更新提示直达「软件更新」）；undefined 表示沿用上次页。 */
   const [settingsTab, setSettingsTab] = useState<SettingsTab>();
@@ -110,6 +113,7 @@ export function App() {
   const [playbackMs, setPlaybackMs] = useState(0);
   const [playbackPlaying, setPlaybackPlaying] = useState(false);
   const [seekToMs, setSeekToMs] = useState<number | null>(null);
+  const [minutesJump, setMinutesJump] = useState<{ meetingId: string; ms: number; segmentId?: string; nonce: number } | null>(null);
   const [playerAvailable, setPlayerAvailable] = useState(false);
   const [playerOpen, setPlayerOpen] = useState(false);
   const [permissionStatus, setPermissionStatus] = useState<SystemPermissionStatus | null>(null);
@@ -142,6 +146,11 @@ export function App() {
     setSeekToMs(null);
     requestAnimationFrame(() => setSeekToMs(ms));
   }, [notify, playerAvailable]);
+
+  const jumpToMinutesSource = (meetingId: string, ms: number, segmentId?: string) => {
+    setMinutesJump((previous) => ({ meetingId, ms, segmentId, nonce: (previous?.nonce ?? 0) + 1 }));
+    if (playerAvailable) seekTo(ms);
+  };
 
   /** 打开设置，可选直达某个标签页与具体配置表单。 */
   const openSettings = useCallback((tab?: SettingsTab, focus?: SettingsFocus) => {
@@ -184,12 +193,17 @@ export function App() {
     }).catch(() => {}).finally(() => setImportJobsLoaded(true));
     return api.imports.onJobUpdated((job) => {
       setImportJobs((current) => mergeImportJob(current, job));
+      // 任务离开 complete（重试补转/重新排队）后复位完成提醒，与 failed 的
+      // 「离开即复位」对称，否则重试完成的会议不会再弹「已就绪」。
+      if (job.status !== "complete") completedImports.current.delete(job.id);
       if (job.status === "complete" && !completedImports.current.has(job.id)) {
         completedImports.current.add(job.id);
-        notify(`「${job.title}」的转录与纪要已就绪。`, {
-          label: "打开会议",
-          run: () => openImportedMeeting(job.meetingId)
-        });
+        if (useMeetingStore.getState().selectedId !== job.meetingId) {
+          notify(`「${job.title}」${job.autoSummarize === false ? "的转写已就绪。" : "的转写与纪要已就绪。"}`, {
+            label: "打开会议",
+            run: () => openImportedMeeting(job.meetingId)
+          });
+        }
         void refreshMeetings();
       }
       if (job.status === "failed") {
@@ -304,8 +318,13 @@ export function App() {
   // macOS 自动更新后台下载完成：全局 toast（这次修复前没有任何提示，用户毫不知情）。
   // 无录音时给「立即重启并更新」直达动作；录音中改为「查看」——设置页的重启按钮
   // 此时本就禁用并附「结束后可重启」说明，绝不打断录音。
+  // 订阅只建立一次：录音态与导入队列用 ref 读最新值。importJobs 每完成一个
+  // 分段都会换新数组引用，若放进依赖会导致反复退订/重订，甚至漏掉窗口内的就绪事件。
+  const updateReadyStateRef = useRef({ phase: recorder.phase, jobs: importJobs });
+  updateReadyStateRef.current = { phase: recorder.phase, jobs: importJobs };
   useEffect(() => api.updates.onReady(({ version }) => {
-    if (recorder.phase !== "idle" || importJobs.some(isActiveImportJob)) {
+    const { phase, jobs } = updateReadyStateRef.current;
+    if (phase !== "idle" || jobs.some(isActiveImportJob)) {
       notify(`新版本 ${version} 已下载，当前任务结束后可重启安装。`, {
         label: "查看",
         run: () => openSettings("updates")
@@ -318,22 +337,23 @@ export function App() {
         void api.updates.restartToUpdate().catch(() => openSettings("updates"));
       }
     });
-  }), [notify, openSettings, recorder.phase, importJobs]);
+  }), [notify, openSettings]);
+  const importedMeeting = Boolean(meeting && isImportedMeeting(meeting, meetingImportJob));
   const workspaceStage = meeting
-    ? meetingImportJob && selectedRecorderPhase === "idle"
+    ? (meetingImportJob || importedMeeting) && selectedRecorderPhase === "idle"
       ? "review"
       : deriveWorkspaceStage(meeting.status, selectedRecorderPhase)
     : null;
-  const liveWorkspace = workspaceStage === "live";
-  const panelPresence = useExitPresence(Boolean(rightPanelOpen && meeting && !liveWorkspace), 240);
+  const splitWorkspace = workspaceStage === "live" || importedMeeting;
+  const panelPresence = useExitPresence(Boolean(rightPanelOpen && meeting && !splitWorkspace), 240);
   const closeLibrary = useCallback(() => {
     setLibraryOpen(false);
     libraryButtonRef.current?.focus();
   }, []);
 
   useEffect(() => {
-    if (liveWorkspace && libraryOpen) document.getElementById("meeting-search")?.focus();
-  }, [liveWorkspace, libraryOpen]);
+    if (splitWorkspace && libraryOpen) document.getElementById("meeting-search")?.focus();
+  }, [splitWorkspace, libraryOpen]);
   const importProcessingStatus = useMemo(
     () => describeImportProcessing(meetingImportJob),
     [meetingImportJob]
@@ -479,7 +499,7 @@ export function App() {
   const dismissToast = useCallback(() => setToast(null), []);
 
   const generateMeetingSummary = () => {
-    const generate = () => void recorder.generateSummary(liveWorkspace ? false : undefined);
+    const generate = () => void recorder.generateSummary(workspaceStage === "live" ? false : undefined);
     if (requirePremium("生成 AI 会议纪要", generate)) generate();
   };
 
@@ -518,7 +538,7 @@ export function App() {
   openNewMeetingRef.current = () => setNewMeetingOpen(true);
   const focusSearchRef = useRef(() => {});
   focusSearchRef.current = () => {
-    if (liveWorkspace && !libraryOpen) setLibraryOpen(true);
+    if (splitWorkspace && !libraryOpen) setLibraryOpen(true);
     else document.getElementById("meeting-search")?.focus();
   };
 
@@ -558,12 +578,12 @@ export function App() {
         if (moreOpen) { setMoreOpen(false); return; }
         if (exportOpen) { setExportOpen(false); return; }
         if (importOpen) { setImportOpen(false); return; }
-        if (liveWorkspace && libraryOpen) closeLibrary();
+        if (splitWorkspace && libraryOpen) closeLibrary();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [closeLibrary, exportOpen, importOpen, libraryOpen, liveWorkspace, moreOpen, overlayActive]);
+  }, [closeLibrary, exportOpen, importOpen, libraryOpen, splitWorkspace, moreOpen, overlayActive]);
 
   // 导入入口（文件选择器 / 拖拽）：先过付费墙，再把候选文件交给右侧确认抽屉，确认后才入队归档。
   // 把“过墙”与“真正选文件”拆开，激活成功后可以从选文件这一步继续，而不是再弹一次付费墙。
@@ -651,10 +671,10 @@ export function App() {
    * 重试导入任务：失败、取消或等待网络时从持久化断点续跑。
    * 主进程会推送任务更新；这里同时乐观合并返回值，浏览器预览也能立即看到状态。
    */
-  const retryImportJob = useCallback(async (id: string) => {
+  const retryImportJob = useCallback(async (id: string, sttProfileId?: string) => {
     try {
-      const job = await api.imports.retry(id);
-      if (job) setImportJobs((current) => [job, ...current.filter((item) => item.id !== id)]);
+      const job = await api.imports.retry(id, sttProfileId);
+      if (job) setImportJobs((current) => mergeImportJobs(current, [job]));
     } catch (error) {
       notify(error instanceof Error ? error.message : "重试导入任务失败，请稍后再试。");
     }
@@ -746,29 +766,29 @@ export function App() {
   // 会让空状态引导在视觉上偏离居中。
   return (
       <div
-        className={`app-shell ${meeting ? "app-shell--document" : ""} ${liveWorkspace ? "app-shell--live" : rightPanelOpen && meeting ? "app-shell--right-open" : ""} ${liveWorkspace && libraryOpen ? "app-shell--library-open" : ""}`}
+        className={`app-shell ${meeting ? "app-shell--document" : ""} ${splitWorkspace ? "app-shell--live" : rightPanelOpen && meeting ? "app-shell--right-open" : ""} ${splitWorkspace && libraryOpen ? "app-shell--library-open" : ""}`}
       // 根节点接管投放（侧栏也可导入），同时阻止浏览器把文件当导航打开。
       onDragOver={(event) => event.preventDefault()}
       onDrop={handleDrop}
     >
-      {liveWorkspace && libraryOpen && <div className="live-library-scrim" aria-hidden="true" onClick={closeLibrary} />}
+      {splitWorkspace && libraryOpen && <div className="live-library-scrim" aria-hidden="true" onClick={closeLibrary} />}
       <Sidebar
         meetings={meetings}
         selectedId={selectedId}
-        onSelect={(id) => { if (liveWorkspace) closeLibrary(); selectMeeting(id); }}
+        onSelect={(id) => { if (splitWorkspace) closeLibrary(); selectMeeting(id); }}
         onQuickStart={handleQuickStart}
-        onNew={() => { if (liveWorkspace) closeLibrary(); setNewMeetingOpen(true); }}
-        onImport={() => { if (liveWorkspace) closeLibrary(); void handleImport(); }}
+        onNew={() => { if (splitWorkspace) closeLibrary(); setNewMeetingOpen(true); }}
+        onImport={() => { if (splitWorkspace) closeLibrary(); void handleImport(); }}
         importCount={importJobs.filter((job) => !["complete", "cancelled", "failed"].includes(job.status)).length}
         importIssueCount={importJobs.filter((job) => job.status === "failed").length}
         onToggleFavorite={handleToggleFavorite}
         onDeleteMeeting={handleDeleteMeeting}
-        onTrash={() => { if (liveWorkspace) closeLibrary(); setTrashOpen(true); }}
-        onSettings={() => { if (liveWorkspace) closeLibrary(); openSettings(); }}
+        onTrash={() => { if (splitWorkspace) closeLibrary(); setTrashOpen(true); }}
+        onSettings={() => { if (splitWorkspace) closeLibrary(); openSettings(); }}
       />
 
       <main
-        className={`main-pane ${workspaceStage ? `main-pane--${workspaceStage}` : ""}`}
+        className={`main-pane ${splitWorkspace ? "main-pane--live" : workspaceStage ? `main-pane--${workspaceStage}` : ""}`}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -784,20 +804,51 @@ export function App() {
         )}
         {meeting ? (
           <>
-            <header className={`document-header document-header--${workspaceStage}`}>
+            <header className={`document-header document-header--${splitWorkspace ? "live" : workspaceStage}`}>
               <div className="document-header__title">
-                {liveWorkspace && (
+                {splitWorkspace && (
                   <button ref={libraryButtonRef} className="icon-button live-library-trigger" aria-label="会议库" aria-expanded={libraryOpen} aria-controls="meeting-library" title="会议库" onClick={() => libraryOpen ? closeLibrary() : setLibraryOpen(true)}>
                     <SidebarSimple size={19} />
                   </button>
                 )}
                 <div className="document-header__heading">
-                  <input
-                    aria-label="会议标题"
-                    value={meeting.title}
-                    onChange={(event) => handleMeetingChange({ ...meeting, title: event.target.value })}
-                  />
-                  {workspaceStage !== "live" && (
+                  <div className="document-header__topic">
+                    <input
+                      key={meeting.id}
+                      ref={meetingTitleRef}
+                      aria-label="会议主题"
+                      placeholder="输入会议主题"
+                      title={meeting.title}
+                      value={meeting.title}
+                      onChange={(event) => {
+                        const title = event.target.value;
+                        void updateMeeting(meeting.id, (current) => ({
+                          ...current,
+                          title,
+                          summary: current.summary.updatedAt
+                            ? { ...current.summary, stale: true }
+                            : current.summary
+                        }));
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && !event.nativeEvent.isComposing) event.currentTarget.blur();
+                      }}
+                    />
+                    {splitWorkspace && (
+                      <button
+                        className="icon-button"
+                        aria-label="修改会议主题"
+                        title="修改会议主题，用于生成纪要"
+                        onClick={() => {
+                          meetingTitleRef.current?.focus();
+                          meetingTitleRef.current?.select();
+                        }}
+                      >
+                        <PencilSimple size={15} />
+                      </button>
+                    )}
+                  </div>
+                  {!splitWorkspace && (
                     <span className={`workspace-stage workspace-stage--${workspaceStage}`}>
                       {workspaceStage === "prepare" ? "会前准备" : "会后整理"}
                     </span>
@@ -814,10 +865,10 @@ export function App() {
                 </button>
               </div>
               <div className="document-header__actions">
-                <span className="save-state" title={workspaceStage === "live" ? (saving ? "正在保存" : "已保存到本机") : undefined}>
+                <span className="save-state" title={splitWorkspace ? (saving ? "正在保存" : "已保存到本机") : undefined}>
                   <span className="save-state__content content-status-enter" key={saving ? "saving" : "saved"}>
                     {saving ? <ArrowClockwise size={16} className="spin" /> : <CloudCheck size={17} />}
-                    <span className={workspaceStage === "live" ? "sr-only" : undefined}>{saving ? "正在保存" : "已保存到本机"}</span>
+                    <span className={splitWorkspace ? "sr-only" : undefined}>{saving ? "正在保存" : "已保存到本机"}</span>
                   </span>
                 </span>
                 {playerAvailable && (
@@ -830,9 +881,14 @@ export function App() {
                     <PlayCircle size={16} weight={playerOpen ? "fill" : "regular"} />回放
                   </button>
                 )}
+                {importedMeeting && workspaceStage !== "live" && (
+                  <button className="icon-button import-notes-trigger" aria-label="打开笔记" title="打开笔记" onClick={() => setLiveDocument("notes")}>
+                    <NotePencil size={18} />
+                  </button>
+                )}
                 <div className="export-wrap">
                   {/* 打开导出对话框本身免费：具体格式在对话框里逐项过授权守卫。 */}
-                  <button className={`button button--small ${workspaceStage === "live" ? "button--secondary" : "button--primary"}`} aria-expanded={exportOpen} aria-haspopup="dialog" onClick={openExportMenu}>
+                  <button className={`button button--small ${splitWorkspace ? "button--secondary" : "button--primary"}`} aria-expanded={exportOpen} aria-haspopup="dialog" onClick={openExportMenu}>
                     <Export size={16} /> 导出
                   </button>
                 </div>
@@ -869,7 +925,7 @@ export function App() {
                         <Star size={16} weight={meeting.favorite ? "fill" : "regular"} />
                         {meeting.favorite ? "取消收藏" : "添加到收藏"}
                       </button>
-                      {workspaceStage === "review" && (
+                      {workspaceStage === "review" && !importProcessingStatus && (
                         <button role="menuitem" onClick={() => {
                           setMoreOpen(false);
                           continueRecording();
@@ -877,7 +933,15 @@ export function App() {
                           <PlayCircle size={16} />继续录音
                         </button>
                       )}
-                        <button role="menuitem" className="is-danger" onClick={() => {
+                      {importedMeeting && workspaceStage === "review" && importJobsLoaded && playerAvailable && !importProcessingStatus && (
+                        <button role="menuitem" onClick={() => {
+                          setMoreOpen(false);
+                          void handleRetranscribe();
+                        }}>
+                          <ArrowClockwise size={16} />重新转录
+                        </button>
+                      )}
+                      <button role="menuitem" className="is-danger" onClick={() => {
                           setMoreOpen(false);
                           void handleDeleteMeeting(meeting.id);
                         }}>
@@ -886,7 +950,7 @@ export function App() {
                     </div>
                   )}
                 </div>
-                {!liveWorkspace && <button
+                {!splitWorkspace && <button
                   className={`icon-button ${rightPanelOpen ? "is-active" : ""}`}
                   aria-label={rightPanelOpen ? "关闭 AI 问答侧栏" : "打开 AI 问答侧栏"}
                   aria-pressed={rightPanelOpen}
@@ -918,18 +982,22 @@ export function App() {
             <DocumentWorkspace
               meeting={meeting}
               stage={workspaceStage!}
+              splitWorkspace={splitWorkspace}
               readiness={recordingReadiness!}
               elapsed={recorder.elapsed}
               recentlyFinalized={recentlyFinalizedId === meeting.id}
               processingStatus={importProcessingStatus}
               importJob={meetingImportJob}
-              onRetryImport={(id) => void retryImportJob(id)}
+              sttProfiles={sttProfiles}
+              onRetryImport={(id, sttProfileId) => void retryImportJob(id, sttProfileId)}
               onCancelImport={(id) => void cancelImportJob(id)}
               onSkipDiarization={(id) => void skipImportDiarizationJob(id)}
               onRetranscribe={importJobsLoaded ? () => void handleRetranscribe() : undefined}
               playbackMs={playbackMs}
               playbackPlaying={playbackPlaying}
               onSeek={seekTo}
+              minutesJump={minutesJump?.meetingId === meeting.id ? minutesJump : null}
+              onJumpToMinutesSource={(ms, segmentId) => jumpToMinutesSource(meeting.id, ms, segmentId)}
               emptyActionLabel={workspaceStage === "review" ? "继续录音" : undefined}
               onEmptyAction={workspaceStage === "review" ? continueRecording : undefined}
               onChange={handleMeetingChange}
@@ -941,7 +1009,7 @@ export function App() {
                 if (!requirePremium("录音、实时转写与自动纪要", () => void recorder.start())) return;
                 await recorder.start();
               }}
-              onConfigureTranscription={() => openSettings("transcription")}
+              onConfigureTranscription={() => openSettings(meetingImportJob?.status === "waiting_for_summary_model" ? "llm" : "transcription")}
               transcriptionFailure={selectedIsRecording ? recorder.transcriptionFailure : null}
               transcriptionIsLocal={transcriptionIsLocal}
               onUseLocalWhisper={() => openSettings("transcription", "local-whisper")}
@@ -1036,21 +1104,24 @@ export function App() {
         />
       )}
 
-      {meeting && (liveWorkspace || panelPresence.mounted) && (
+      {meeting && (splitWorkspace || panelPresence.mounted) && (
         <ChatPanel
           meeting={meeting}
           profiles={chatProfiles}
-          closing={!liveWorkspace && panelPresence.closing}
+          closing={!splitWorkspace && panelPresence.closing}
           onClose={() => setRightPanelOpen(false)}
           onOpenSettings={() => openSettings("llm")}
           onSeek={seekTo}
-          liveSummary={liveWorkspace ? (
+          liveSummary={splitWorkspace ? (
             <LiveSummary
               meeting={meeting}
+              importJob={workspaceStage === "live" ? undefined : meetingImportJob}
+              recording={workspaceStage === "live"}
               busy={recorder.summaryBusy}
               onRefresh={generateMeetingSummary}
               onCancel={() => void recorder.cancelSummary()}
               onEdit={() => setLiveDocument("summary")}
+              onJumpToSource={(ms, segmentId) => jumpToMinutesSource(meeting.id, ms, segmentId)}
             />
           ) : undefined}
         />
@@ -1133,14 +1204,16 @@ export function App() {
         onPick={handleImport}
         onChange={setImportCandidates}
         onEnqueue={async (items, options) => {
-          const jobs = await api.imports.enqueue(items, options);
-          setImportJobs((current) => [...jobs, ...current.filter((item) => !jobs.some((job) => job.id === item.id))]);
-          setImportCandidates([]);
-          await refreshMeetings();
-          if (jobs[0]?.meetingId) selectMeeting(jobs[0].meetingId);
-          setImportOpen(false);
-          // 转写进度现在在中央列「转写」视图：选中会议后按 live 阶段默认展示，无需再动右栏。
-          notify(`${jobs.length} 个录音已归档并加入后台队列。`);
+          try {
+            const jobs = await api.imports.enqueue(items, options);
+            setImportJobs((current) => mergeImportJobs(current, jobs));
+            setImportCandidates([]);
+            await refreshMeetings();
+            if (jobs[0]?.meetingId) selectMeeting(jobs[0].meetingId);
+            setImportOpen(false);
+          } catch (error) {
+            notify(error instanceof Error ? error.message : "无法导入录音，请重试。");
+          }
         }}
         onRetry={(id) => void retryImportJob(id)}
         onCancel={(id) => void cancelImportJob(id)}

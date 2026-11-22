@@ -26,7 +26,20 @@ export function isActiveImportJob(job?: ImportJob) {
 }
 
 export function isRetryableImportJob(job?: ImportJob) {
-  return Boolean(job && RETRYABLE_IMPORT_STATUSES.includes(job.status));
+  return Boolean(job && (RETRYABLE_IMPORT_STATUSES.includes(job.status)
+    || job.status === "complete" && job.transcriptionGaps?.length));
+}
+
+export function canRetryTranscriptionGaps(job: ImportJob) {
+  return Boolean(job.transcriptionGaps?.length && (job.recordingBackfill || job.retryingTranscriptionGaps
+    || job.totalChunks && (job.completedChunks ?? 0) >= job.totalChunks));
+}
+
+export function hasUnassignedImportSpeakers(job?: ImportJob) {
+  if (!job || job.recordingBackfill) return false;
+  return job.diarizationOutcome
+    ? job.diarizationOutcome !== "identified"
+    : !job.diarizationComplete || Boolean(job.diarizationSkipped);
 }
 
 function jobTimestamp(job: ImportJob) {
@@ -89,12 +102,13 @@ export function importElapsedSeconds(startedAt: string | undefined, now = Date.n
 export function describeImportProcessing(job: ImportJob | undefined) {
   if (!job || job.status === "complete") return undefined;
   if (job.status === "cancelled") return "处理已暂停，可继续未完成的阶段";
-  if (job.status === "failed") return "录音处理已暂停，可直接重试";
+  if (job.status === "failed") return canRetryTranscriptionGaps(job) ? "有声片段待补转" : "录音处理已暂停，可直接重试";
   if (job.status === "waiting_for_model") return "录音已归档，等待配置转写模型";
   if (job.status === "waiting_for_summary_model") return "录音已归档，等待配置总结模型";
   if (job.status === "waiting_for_audio_tool") return "录音已归档，等待音频组件恢复";
   if (job.status === "waiting_for_network") return "转写服务暂时不可达，等待网络恢复";
   if (job.status === "transcribing" || job.stage === "transcribing") {
+    if (job.recordingBackfill || job.retryingTranscriptionGaps) return "正在补转漏段";
     return job.totalChunks
       ? `正在转写第 ${Math.min((job.completedChunks || 0) + 1, job.totalChunks)}/${job.totalChunks} 段`
       : "正在生成第一段转写";
@@ -117,28 +131,31 @@ export function describeImportProgressDetail(job: ImportJob | undefined, now = D
     const elapsed = importElapsedSeconds(job.diarizationStartedAt, now);
     const parts = [describeDiarizationPhase(job.diarizationPhase)];
     if (job.diarizationAudioDurationMs) {
-      parts.push(`音频 ${formatDuration(job.diarizationAudioDurationMs / 1000)}`);
+      const duration = formatDuration(job.diarizationAudioDurationMs / 1000);
+      parts.push(job.diarizationProcessedMs
+        ? `已分析 ${formatDuration(job.diarizationProcessedMs / 1000)} / ${duration}`
+        : `音频 ${duration}`);
     }
     if (elapsed !== undefined) parts.push(`已用 ${formatDuration(elapsed)}`);
     parts.push("本地处理，不上传音频");
     return parts.join(" · ");
   }
-  if (job.status === "transcribing" || job.stage === "transcribing") {
-    if (!job.totalChunks) return "音频会按自然停顿切段，首段文本很快出现";
-    return `已完成 ${Math.min(job.completedChunks || 0, job.totalChunks)}/${job.totalChunks} 段`;
-  }
-  if (job.status === "summarizing") return undefined;
-  if (job.status === "cancelled") {
-    return job.transcriptionComplete
-      ? "转写已完成；重试会从说话人识别或纪要阶段继续"
-      : "已完成的转写与录音都会保留，重试会从断点继续";
-  }
-  if (job.status === "failed") return job.error || "处理中断，可从已完成的阶段继续";
   if (job.status === "waiting_for_network") return job.error || "网络恢复后会自动从断点继续";
   if (job.status === "waiting_for_model" || job.status === "waiting_for_summary_model") {
     return job.error || "配置好模型后会自动继续，已归档音频不会丢失";
   }
   if (job.status === "waiting_for_audio_tool") return job.error || "恢复应用内置音频组件后继续";
+  if (job.status === "failed") return job.error || "处理中断，可从已完成的阶段继续";
+  if (job.status === "cancelled") {
+    return job.transcriptionComplete && !canRetryTranscriptionGaps(job)
+      ? "转写已完成；重试会从说话人识别或纪要阶段继续"
+      : "已完成的转写与录音都会保留，重试会从断点继续";
+  }
+  if (job.status === "transcribing" || job.stage === "transcribing") {
+    if (job.retryingTranscriptionGaps) return `${job.transcriptionGaps?.length ?? 0} 段待补转`;
+    if (!job.totalChunks) return "音频会按自然停顿切段，首段文本很快出现";
+    return `已完成 ${Math.min(job.completedChunks || 0, job.totalChunks)}/${job.totalChunks} 段`;
+  }
   return undefined;
 }
 

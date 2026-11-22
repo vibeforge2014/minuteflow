@@ -1,9 +1,14 @@
-export type TranscriptionParameter = 'transcriptionLanguage' | 'initialPrompt' | 'temperature' | 'temperatureStep' | 'beamSize' | 'noSpeechThreshold' | 'logprobThreshold' | 'entropyThreshold';
-export const decodingKeys: TranscriptionParameter[];
+export type TranscriptionNumericParameter = 'temperature' | 'temperatureStep' | 'beamSize' | 'bestOf' | 'noSpeechThreshold' | 'logprobThreshold' | 'entropyThreshold' | 'compressionRatioThreshold' | 'cpuThreads';
+export type TranscriptionParameter = TranscriptionNumericParameter | 'transcriptionLanguage' | 'initialPrompt' | 'usePreviousText' | 'vadFilter';
+export const decodingKeys: TranscriptionNumericParameter[];
 export const transcriptionKeys: TranscriptionParameter[];
-export const parameterRanges: Record<string, [number, number, number]>;
+export const parameterRanges: Record<TranscriptionNumericParameter, [number, number, number]>;
 export function transcriptionParamCapabilities(transport: string, options?: {executablePath?: string}): TranscriptionParameter[];
 export function resolveTranscriptionLanguage(explicit?: string, options?: {transcriptionLanguage?: string}, globalLanguage?: string): string;
 export function transcriptionDecodingOptions(profile: {transport: string; options?: object}): Record<string, number>;
 export function whisperCliDecodingArgs(profile: {transport: string; options?: object}): string[];
-export function pythonDecodingOptions(profile: {transport: string; options?: object}): Record<string, number | number[]>;
+export function whisperCpuThreads(profile: {transport: string; options?: object}): number | undefined;
+export function pythonDecodingOptions(profile: {transport: string; options?: object}): Record<string, number | number[] | boolean>;
+export type TranscriptionComputeMode = "auto" | "cpu" | "gpu";
+export function transcriptionComputeMode(value: unknown): TranscriptionComputeMode;
+export function transcriptionGpuBackend(profile: { transport: string; options?: { executablePath?: string } }, platform: string, arch?: string): "metal" | "vulkan" | "cuda" | "external" | undefined;

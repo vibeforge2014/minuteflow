@@ -165,15 +165,16 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   /**
    * 生成 AI 纪要。final 省略时自动推导：会议不在录音/暂停中即为“会后终稿”，
    * 手动按钮因此能在录音结束后产出终稿总结（终稿路径不再不可达）。
-   * 乐观并发保护：请求前记下会议的 updatedAt（baseVersion），返回后若已变化，
-   * 只把纪要标记为 stale 而不覆盖文档，避免用旧转写冲掉用户刚写入的内容。
+   * 请求返回后合入最新会议，主题、笔记或转写在生成期间变化时将纪要标记为 stale。
    * 主进程降级（未配置 LLM 或在线失败回退本地引擎）时返回 degraded 标记，
    * 这里合入结果的同时用 warning 告知用户，不再静默。
    */
   const generateSummary = useCallback(async (final?: boolean, automatic = false) => {
     // 定时滚动纪要属于录音会话：即使界面已切到别的会议，也只总结正在录的那场；
     // 手动点击则总结用户当前正在看的会议。
-    const current = (automatic ? resolveRecordingMeeting() : undefined) ?? meetingRef.current;
+    const selected = meetingRef.current;
+    const current = automatic ? resolveRecordingMeeting()
+      : useMeetingStore.getState().meetings.find((item) => item.id === selected?.id);
     if (!current || summaryBusyRef.current) return;
     const isFinal = final ?? !["recording", "paused"].includes(current.status);
     const finalTranscript = current.transcript.filter((segment) => segment.status === "final");
@@ -203,10 +204,10 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
           template
         }
       });
-      const latest = meetingRef.current;
+      const latest = useMeetingStore.getState().meetings.find((item) => item.id === current.id);
       // 新转录在模型生成期间到达是正常情况：把结果合入最新快照，并将尚未覆盖部分标记
       // 为 stale。人工锁定字段始终由 mergeSummaryRevision 保留，不再整次丢弃结果。
-      if (!latest || latest.id !== current.id) return;
+      if (!latest) return;
       const latestThroughMs = latest.transcript
         .filter((segment) => segment.status === "final")
         .reduce((maximum, segment) => Math.max(maximum, segment.endMs), 0);
@@ -214,6 +215,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       // 记录本次归纳视角：本机兜底纪要也沿用用户选择的模板说明，界面据此显示模板标签。
       merged.template = template;
       merged.stale = latestThroughMs > (summary.sourceThroughMs ?? sourceThroughMs)
+        || latest.title !== current.title
         || JSON.stringify(latest.notes) !== baseNotes;
       await updateSummary(current.id, merged);
       if (degraded && degradedReason) setWarning(degradedReason);
@@ -227,7 +229,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       summaryBusyRef.current = false;
       setSummaryBusy(false);
     }
-  }, [llmProfile?.id, preferences.summaryTemplate, resolveRecordingMeeting, updateMeeting, updateSummary]);
+  }, [llmProfile?.id, preferences.summaryTemplate, resolveRecordingMeeting, updateSummary]);
 
   /** 只根据已经保存的普通纪要重试视觉版，不重复发送完整转录。 */
   const generateVisualSummary = useCallback(async () => {
@@ -385,7 +387,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     if (summaryTimerRef.current) window.clearInterval(summaryTimerRef.current);
     summaryTimerRef.current = null;
     try {
-      if (recorder) await recorder.stop(elapsed);
+      if (recorder) await recorder.stop(elapsed, () => flushMeeting(target.id));
       // 收尾前清掉仍在途的临时（provisional）转写段，避免“转写中…”残留到会后文档。
       dropProvisionalTranscript(target.id);
       await updateMeeting(target.id, (current) => ({

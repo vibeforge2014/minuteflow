@@ -9,7 +9,7 @@
 import { BrowserWindow, dialog } from "electron";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Document, HeadingLevel, Packer, Paragraph, TextRun } from "docx";
+import { Document, HeadingLevel, Packer, Paragraph, Table, TableCell, TableRow, TextRun, WidthType } from "docx";
 import JSZip from "jszip";
 import { exportNameSuffix, formatTime, markdown, subtitle } from "./formatters.mjs";
 
@@ -80,17 +80,42 @@ async function docxBuffer(meeting, options = {}) {
     new Paragraph({ children: [new TextRun(`参与者：${meeting.participants.join("、") || "未填写"}`)] }),
     new Paragraph({ children: [new TextRun(`时长：${formatTime(meeting.durationSeconds * 1000)}`)] })
   ];
-  const section = (title, values) => {
-    children.push(new Paragraph({ text: title, heading: HeadingLevel.HEADING_1 }));
-    for (const value of values?.length ? values : ["暂无"]) {
+  const section = (title, values, heading = HeadingLevel.HEADING_1) => {
+    if (!values?.length) return;
+    children.push(new Paragraph({ text: title, heading }));
+    for (const value of values) {
       children.push(new Paragraph({ text: value, bullet: { level: 0 } }));
     }
   };
   if (scope !== "transcript") {
+    if (meeting.summary?.overview) {
+      children.push(
+        new Paragraph({ text: "会议概览", heading: HeadingLevel.HEADING_1 }),
+        new Paragraph({ text: meeting.summary.overview })
+      );
+    }
+    section("关键要点", meeting.summary?.keyPoints);
+    if (meeting.summary?.discussionSections?.length) {
+      children.push(new Paragraph({ text: "分议题纪要", heading: HeadingLevel.HEADING_1 }));
+      for (const { title, points, table } of meeting.summary.discussionSections) {
+        children.push(new Paragraph({ text: title, heading: HeadingLevel.HEADING_2 }));
+        if (table) {
+          children.push(new Table({
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            rows: [table.columns, ...table.rows].map((row, index) => new TableRow({
+              tableHeader: index === 0,
+              children: row.map((text) => new TableCell({ children: [new Paragraph({ text })] }))
+            }))
+          }));
+        }
+        for (const { heading, text } of points) {
+          children.push(new Paragraph({ text: heading ? `${heading}：${text}` : text, bullet: { level: 0 } }));
+        }
+      }
+    }
     // 与 Markdown 预览保持同一组章节：少一段就会让「预览看到的」和「Word 里有的」不一致。
     section("会议目标", meeting.goals);
     section("我的记录", meeting.notes);
-    section("关键要点", meeting.summary?.keyPoints);
     section("已确认决策", meeting.summary?.decisions);
     section("行动项", meeting.summary?.actionItems?.map((item) => `${item.title}｜${item.owner || "待确认"}｜${item.dueDate || "待确认"}`));
     section("未决问题", meeting.summary?.openQuestions);

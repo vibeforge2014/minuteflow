@@ -85,18 +85,19 @@ export function parsePcmWav(buffer) {
  * 480k 采样块在主线程做全量循环；统计特征对抽样不敏感。
  * @returns {{rms:number, peak:number, activeRatio:number, durationMs:number, sampleCount:number}|null}
  */
-export function measurePcmWav(buffer, { maxSamples = 160_000 } = {}) {
+export function measurePcmWav(buffer, { maxSamples = 160_000, leadingMs = 0 } = {}) {
   const wav = parsePcmWav(buffer);
   if (!wav) return null;
-  const sampleCount = Math.floor(wav.length / 2);
-  if (!sampleCount) return null;
+  const firstSample = Math.max(0, Math.round(leadingMs / 1000 * wav.sampleRate) * wav.channels);
+  const sampleCount = Math.floor(wav.length / 2) - firstSample;
+  if (sampleCount <= 0) return null;
   const step = Math.max(1, Math.floor(sampleCount / Math.max(1, maxSamples)));
   let sumSquares = 0;
   let peak = 0;
   let active = 0;
   let counted = 0;
   for (let index = 0; index < sampleCount; index += step) {
-    const sample = buffer.readInt16LE(wav.start + index * 2) / 32768;
+    const sample = buffer.readInt16LE(wav.start + (firstSample + index) * 2) / 32768;
     const magnitude = Math.abs(sample);
     sumSquares += sample * sample;
     if (magnitude > peak) peak = magnitude;
@@ -109,7 +110,7 @@ export function measurePcmWav(buffer, { maxSamples = 160_000 } = {}) {
     peak,
     activeRatio: active / counted,
     durationMs: Math.round((sampleCount / Math.max(1, wav.sampleRate) / Math.max(1, wav.channels)) * 1000),
-    sampleCount
+    sampleCount, firstSample
   };
 }
 
@@ -123,7 +124,31 @@ export function isSilentPcmWav(buffer, options = {}) {
   const rmsThreshold = options.rmsThreshold ?? DEFAULT_SILENCE_RMS_THRESHOLD;
   const peakThreshold = options.peakThreshold ?? DEFAULT_SILENCE_PEAK_THRESHOLD;
   const activeThreshold = options.activeRatioThreshold ?? DEFAULT_SILENCE_ACTIVE_RATIO;
-  return energy.rms < rmsThreshold
-    && energy.peak < peakThreshold
-    && energy.activeRatio < activeThreshold;
+  if (energy.rms >= rmsThreshold || energy.peak >= peakThreshold || energy.activeRatio >= activeThreshold) return false;
+  if (energy.peak < 0.00024) return true;
+
+  // A quiet voice can sit below all three absolute limits. Keep sustained bursts
+  // above the local noise floor so they can reach the enhancement stage.
+  const wav = parsePcmWav(buffer);
+  const windowSize = Math.max(1, Math.round(wav.sampleRate * wav.channels * 0.02));
+  const levels = [];
+  for (let start = 0; start + windowSize <= energy.sampleCount; start += windowSize) {
+    let sum = 0;
+    let squares = 0;
+    for (let index = start; index < start + windowSize; index += 1) {
+      const sample = buffer.readInt16LE(wav.start + (energy.firstSample + index) * 2) / 32768;
+      sum += sample;
+      squares += sample * sample;
+    }
+    levels.push(Math.sqrt(Math.max(0, squares / windowSize - (sum / windowSize) ** 2)));
+  }
+  const sorted = [...levels].sort((left, right) => left - right);
+  const floor = sorted[Math.floor(sorted.length / 4)] ?? 0;
+  const threshold = Math.max(0.00024, 3 * floor);
+  let consecutive = 0;
+  for (const level of levels) {
+    consecutive = level >= threshold ? consecutive + 1 : 0;
+    if (consecutive >= 3) return false;
+  }
+  return true;
 }

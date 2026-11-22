@@ -12,7 +12,7 @@
  */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
@@ -21,6 +21,7 @@ import {
   buildSpeechWindows,
   computeClusterCentroids,
   computeVoiceprintEmbedding,
+  diarizeAudioWindows,
   matchVoiceprint,
   mergeDiarizationClusters,
   windowsToTurns
@@ -125,9 +126,10 @@ async function diarize(request, reportProgress) {
       turns = mergeDiarizationClusters(clustered, centroids);
     } else {
       reportProgress({ phase: "loading" });
+      const numThreads = Math.max(1, Math.min(3, availableParallelism() - 1));
       const diarizer = new sherpaOnnx.OfflineSpeakerDiarization({
-        segmentation: { pyannote: { model: segmentationModel } },
-        embedding: { model: embeddingModel },
+        segmentation: { pyannote: { model: segmentationModel }, numThreads },
+        embedding: { model: embeddingModel, numThreads },
         clustering: {
           numClusters: request.clustering?.numClusters ?? -1,
           threshold: request.clustering?.threshold ?? 0.5
@@ -139,15 +141,14 @@ async function diarize(request, reportProgress) {
       if (diarizer.sampleRate !== wave.sampleRate) {
         throw new Error(`说话人模型需要 ${diarizer.sampleRate}Hz 音频，实际为 ${wave.sampleRate}Hz。`);
       }
-      reportProgress({
-        phase: "analyzing",
-        audioDurationMs: Math.round((wave.samples.length / Math.max(1, wave.sampleRate)) * 1000)
+      const audioDurationMs = Math.round(wave.samples.length / wave.sampleRate * 1000);
+      reportProgress({ phase: "analyzing", audioDurationMs });
+      // 长录音会把整小时的特征和聚类数据塞进同一次原生调用。限制单次窗口，
+      // 再用整场归档音频上的声纹簇心合并各窗口身份。
+      const rawTurns = diarizeAudioWindows(wave, (samples) => diarizer.process(samples), {
+        checkpoint: request.diarizationCheckpoint,
+        onWindow: (window) => reportProgress({ phase: "analyzing", audioDurationMs, window })
       });
-      const rawTurns = diarizer.process(wave.samples).map((turn) => ({
-        startMs: Math.round((turn.start ?? turn.startSeconds ?? 0) * 1000),
-        endMs: Math.round((turn.end ?? turn.endSeconds ?? 0) * 1000),
-        speakerId: `speaker-${Number(turn.speaker ?? turn.speakerId ?? 0) + 1}`
-      }));
       // 阈值聚类在真实嘈杂音频上常把同一人劈成多个簇：算出簇心后做后处理合并。
       reportProgress({ phase: "refining" });
       const centroidEmbeddings = computeClusterCentroids(sherpaOnnx, embeddingModel, wave, rawTurns);

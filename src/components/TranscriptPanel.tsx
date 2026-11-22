@@ -26,7 +26,7 @@ import {
   Waveform,
   X
 } from "@phosphor-icons/react";
-import type { ImportJob, Meeting, TranscriptSegment, VoiceprintPerson } from "../types";
+import type { ImportJob, Meeting, ModelProfile, TranscriptSegment, VoiceprintPerson } from "../types";
 import { api } from "../lib/api";
 import { ConfirmDialog, useConfirmDialog } from "./ConfirmDialog";
 import { findPlayingSegment } from "../lib/workspace";
@@ -37,7 +37,9 @@ import { useEnteringItemIds } from "../hooks/useContentMotion";
 import { useExitPresence } from "../hooks/useExitPresence";
 import { ImportProcessingMeta } from "./ImportProcessingMeta";
 import {
+  canRetryTranscriptionGaps,
   describeImportProcessing,
+  hasUnassignedImportSpeakers,
   isActiveImportJob,
   isRetryableImportJob
 } from "../lib/import-status";
@@ -53,9 +55,17 @@ import {
 import type { GlossarySuggestion } from "../lib/glossary-suggestions";
 import type { WorkspaceStage } from "../lib/workspace";
 
+export interface TranscriptJump {
+  ms: number;
+  nonce: number;
+  segmentId?: string;
+}
+
 interface TranscriptViewProps {
   meeting: Meeting;
   importJob?: ImportJob;
+  sttProfiles?: ModelProfile[];
+  splitWorkspace?: boolean;
   stage: WorkspaceStage;
   onChange(meeting: Meeting): void;
   /** 当前播放位置（毫秒），用于高亮同步段落。 */
@@ -67,7 +77,7 @@ interface TranscriptViewProps {
   emptyActionLabel?: string;
   onEmptyAction?(): void;
   /** 关键结论回链：跳到该时刻所在段落并短暂高亮（nonce 变化触发一次性定位）。 */
-  jumpTarget?: { ms: number; nonce: number } | null;
+  jumpTarget?: TranscriptJump | null;
   summaryBusy?: boolean;
   onGenerateSummary?(): void;
   /** 实时转写连续失败后的持久提示；录音结束后也保留，直到用户处理或忽略。 */
@@ -77,7 +87,7 @@ interface TranscriptViewProps {
   onChooseTranscriptionService?(): void;
   onDismissTranscriptionFailure?(): void;
   /** 导入任务可恢复操作：失败/取消后重试，处理中暂停。 */
-  onRetryImport?(id: string): void;
+  onRetryImport?(id: string, sttProfileId?: string): void;
   onCancelImport?(id: string): void;
   /** 跳过说话人识别，保留转写继续生成纪要。 */
   onSkipDiarization?(id: string): void;
@@ -86,7 +96,7 @@ interface TranscriptViewProps {
   onConfigureTranscription?(): void;
 }
 
-export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs = 0, playbackPlaying = false, onSeek, emptyActionLabel, onEmptyAction, jumpTarget, summaryBusy, onGenerateSummary, transcriptionFailure, transcriptionIsLocal = false, onUseLocalWhisper, onChooseTranscriptionService, onDismissTranscriptionFailure, onRetryImport, onCancelImport, onSkipDiarization, onRetranscribe, onConfigureTranscription }: TranscriptViewProps) {
+export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, splitWorkspace = stage === "live", onChange, playbackMs = 0, playbackPlaying = false, onSeek, emptyActionLabel, onEmptyAction, jumpTarget, summaryBusy, onGenerateSummary, transcriptionFailure, transcriptionIsLocal = false, onUseLocalWhisper, onChooseTranscriptionService, onDismissTranscriptionFailure, onRetryImport, onCancelImport, onSkipDiarization, onRetranscribe, onConfigureTranscription }: TranscriptViewProps) {
   /** 段落批量改写（查找替换 / 撤销）走 store：在最新转写上执行，不会被渲染快照覆盖。 */
   const patchTranscript = useMeetingStore((state) => state.patchTranscript);
   /** 正在重命名的说话人 id（显示浮层输入框）。 */
@@ -140,11 +150,14 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   const [jumpHighlightId, setJumpHighlightId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   /** 自定义术语：识别时进 prompt，识别后生成可确认的纠错建议。 */
-  const glossary = useMeetingStore((state) => state.preferences.glossary);
+  const globalGlossary = useMeetingStore((state) => state.preferences.glossary);
+  const glossary = useMemo(() => [...new Set([...(importJob?.transcriptionTerms ?? []), ...globalGlossary])], [globalGlossary, importJob?.transcriptionTerms]);
+  const speakersUnassigned = hasUnassignedImportSpeakers(importJob);
   // 从转写中提取去重后的说话人 (id → name) 列表。
   const speakers = useMemo(() => Array.from(new Map(
-    meeting.transcript.map((segment) => [segment.speakerId, segment.speakerName])
-  )), [meeting.transcript]);
+    meeting.transcript.filter((segment) => !speakersUnassigned || segment.speakerId !== "speaker-1" || segment.speakerName !== "发言人1")
+      .map((segment) => [segment.speakerId, segment.speakerName])
+  )), [meeting.transcript, speakersUnassigned]);
   // 转写流式揭示：导入进行中（任务未终结）或会议进行中时，新到达文本按打字机
   // 节奏逐拍铺开，与 AI 问答同一观感；历史内容与 Reduced Motion 直接透传。
   const importActive = Boolean(importJob) && !["complete", "failed", "cancelled"].includes(importJob?.status ?? "");
@@ -392,16 +405,24 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
   // 一次性动作只由 nonce 驱动；双 rAF 等待扩窗重渲染完成后再定位。
   useEffect(() => {
     if (!jumpTarget) return;
-    const target = findPlayingSegment(meeting.transcript, jumpTarget.ms);
+    const target = jumpTarget.segmentId
+      ? meeting.transcript.find((segment) => segment.id === jumpTarget.segmentId)
+      : findPlayingSegment(meeting.transcript, jumpTarget.ms);
     if (!target) return;
+    if (!filteredTranscript.some((segment) => segment.id === target.id)) {
+      setQuery("");
+      setSpeakerFilter("");
+      setOnlyLowConfidence(false);
+    }
     const index = meeting.transcript.findIndex((segment) => segment.id === target.id);
     if (index >= 0 && index < meeting.transcript.length - visibleCount) {
       setVisibleCount((count) => Math.max(count, meeting.transcript.length - index + 20));
     }
     followGuardUntil.current = performance.now() + 450;
+    setAutoScroll(false);
     const list = listRef.current;
     const frame = requestAnimationFrame(() => requestAnimationFrame(() => {
-      const el = list?.querySelector<HTMLElement>(`[data-segment-id="${target.id}"]`);
+      const el = list?.querySelector<HTMLElement>(`[data-segment-id="${CSS.escape(target.id)}"]`);
       if (!el || !list) return;
       const top = el.getBoundingClientRect().top - list.getBoundingClientRect().top;
       list.scrollTo({
@@ -617,28 +638,36 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
 
   const transcriptStatus = stage === "live"
     ? { label: "实时接收", tone: "live" }
-    : importActive
+    : isActiveImportJob(importJob)
       ? { label: "后台处理中", tone: "active" }
+      : importJob?.transcriptionGaps?.length
+        ? { label: "有漏段", tone: "idle" }
+      : importJob?.transcriptionNoSpeech
+        ? { label: "无语音", tone: "idle" }
+      : importJob && importJob.status !== "complete"
+        ? null
       : meeting.transcript.length
         ? { label: "转写已完成", tone: "done" }
         : { label: "等待内容", tone: "idle" };
   const transcriptSubtitle = meeting.transcript.length
-    ? `${meeting.transcript.length} 段内容${speakers.length ? ` · ${speakers.length} 位发言人` : ""}`
+    ? `${meeting.transcript.length} 段内容${speakersUnassigned
+      ? importJob?.diarizationOutcome === "pending" && isActiveImportJob(importJob) ? " · 正在分离发言人" : " · 未分离发言人"
+      : speakers.length ? ` · ${speakers.length} 位发言人` : ""}`
     : "语音与录音时间轴自动同步";
 
   return (
     <>
-      <header className={`transcript-header ${stage === "live" ? "live-transcript-header transcript-header--live" : ""}`}>
+      <header className={`transcript-header ${splitWorkspace ? "live-transcript-header transcript-header--live" : ""}`}>
         <div className="transcript-header__identity">
           <span className="transcript-header__symbol" aria-hidden="true">
             <Waveform size={22} weight="duotone" />
           </span>
           <div className="transcript-header__copy">
             <div className="transcript-header__title-row">
-              <h2 id={stage === "live" ? "live-transcript-title" : undefined}>{stage === "live" ? "实时转写" : "会议转写"}</h2>
-              <span className={`transcript-header__status is-${transcriptStatus.tone}`}>
+              <h2 id={splitWorkspace ? "live-transcript-title" : undefined}>{stage === "live" ? "实时转写" : splitWorkspace ? "转写" : "会议转写"}</h2>
+              {transcriptStatus && <span className={`transcript-header__status is-${transcriptStatus.tone}`}>
                 <i aria-hidden="true" />{transcriptStatus.label}
-              </span>
+              </span>}
             </div>
             <p>{transcriptSubtitle}</p>
           </div>
@@ -858,7 +887,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           </button>
         </section>
       )}
-      {importJob && (isActiveImportJob(importJob) || [
+      {importJob && (isActiveImportJob(importJob) || isRetryableImportJob(importJob) || [
         "failed", "cancelled", "waiting_for_network", "waiting_for_model",
         "waiting_for_summary_model", "waiting_for_audio_tool"
       ].includes(importJob.status)) && (
@@ -868,18 +897,16 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
         >
           <div className="transcript-import-status__head">
             <strong>
-              {importJob.status === "cancelled"
-                ? "处理已停止，可继续未完成的阶段"
-                : describeImportProcessing(importJob)}
+              {describeImportProcessing(importJob) ?? `${importJob.transcriptionGaps?.length ?? 0} 段待补转`}
             </strong>
             <div className="transcript-import-status__actions">
-              {isRetryableImportJob(importJob) && onRetryImport && (
+              {isRetryableImportJob(importJob) && onRetryImport && !canRetryTranscriptionGaps(importJob) && (
                 <button type="button" className="text-button" onClick={() => onRetryImport(importJob.id)}>
                   <ArrowClockwise size={13} />
                   {importJob.status === "waiting_for_network" ? "立即重试" : "重试"}
                 </button>
               )}
-              {["waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(importJob.status)
+              {["waiting_for_model", "waiting_for_summary_model"].includes(importJob.status)
                 && onConfigureTranscription && (
                   <button type="button" className="text-button" onClick={onConfigureTranscription}>配置模型</button>
                 )}
@@ -901,17 +928,26 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
             </div>
           </div>
           <ImportProcessingMeta job={importJob} compact />
+          {canRetryTranscriptionGaps(importJob) && isRetryableImportJob(importJob) && (
+            <TranscriptionGapRetry
+              key={`${importJob.id}:${importJob.sttProfileId ?? ""}`}
+              job={importJob}
+              profiles={sttProfiles}
+              onRetry={onRetryImport}
+              onSeek={onSeek}
+            />
+          )}
         </section>
       )}
       <div
         className="transcript-list"
         id="transcript-content"
-        role={stage === "live" ? "region" : undefined}
-        aria-labelledby={stage === "live" ? "live-transcript-title" : undefined}
+        role={splitWorkspace ? "region" : undefined}
+        aria-labelledby={splitWorkspace ? "live-transcript-title" : undefined}
         ref={listRef}
         onScroll={handleTranscriptScroll}
       >
-        {stage !== "live" && <TranscriptOverview
+        {!splitWorkspace && <TranscriptOverview
           key={meeting.id}
           summary={meeting.summary}
           busy={summaryBusy}
@@ -927,6 +963,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
           const previous = visibleSegments[index - 1];
           const continuation = previous?.speakerId === segment.speakerId && segment.startMs - previous.endMs < 1500;
           const segmentSpeakerColor = speakerColor(segment.speakerId);
+          const speakerUnassigned = speakersUnassigned && segment.speakerId === "speaker-1" && segment.speakerName === "发言人1";
           return (
             // is-playing：当前播放位置命中的段落整行高亮；data-segment-id 供回放跟随定位。
             <article
@@ -936,13 +973,15 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
               style={enteringIndex >= 0 ? { animationDelay: `${Math.min(enteringIndex, 2) * 40}ms` } : undefined}
             >
             <div className="transcript-item__meta">
-              <button className={`speaker-name speaker-name--${segmentSpeakerColor}`} onClick={() => openSpeakerEditor(segment.speakerId)}>
+              {speakerUnassigned ? (
+                <span className="speaker-name">未分离</span>
+              ) : <button className={`speaker-name speaker-name--${segmentSpeakerColor}`} onClick={() => openSpeakerEditor(segment.speakerId)}>
                 <span className="transcript-speaker-avatar" aria-hidden="true">{segment.speakerName.trim().charAt(0) || "人"}</span>
                 <span>{segment.speakerName}</span>
                 {voiceprints.some((person) => person.name === segment.speakerName) && (
                   <FingerprintSimple size={11} weight="fill" aria-label="已保存在本地声纹簿" />
                 )}
-              </button>
+              </button>}
               <button className="transcript-time" aria-label={`定位到 ${formatTranscriptTime(segment.startMs)}`} onClick={() => onSeek?.(segment.startMs)}>{formatTranscriptTime(segment.startMs)}</button>
               {playbackPlaying && playingSegment?.id === segment.id && (
                 <span className="transcript-playing" aria-label="正在播放当前段落">
@@ -1047,7 +1086,7 @@ export function TranscriptView({ meeting, importJob, stage, onChange, playbackMs
               </>
             ) : (
               <>
-                <strong>{stage === "live" || importActive ? "正在聆听，文字即将出现" : "这场会议还没有逐字稿"}</strong>
+                <strong>{stage === "live" ? "正在聆听，文字即将出现" : "暂无转写内容"}</strong>
                 <p>{importJob
                   ? importTranscriptStatus(importJob)
                   : stage === "review"
@@ -1139,7 +1178,7 @@ function TranscriptOverview({ summary, busy, onRefresh }: {
 }) {
   const [expanded, setExpanded] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
-  const points = summary.keyPoints.filter((point) => point.trim());
+  const points = summary.overview ? [summary.overview] : summary.keyPoints.filter((point) => point.trim());
   const text = points.join("\n");
   useEffect(() => { setCopyState("idle"); }, [text]);
 
@@ -1229,14 +1268,51 @@ function HighlightedTranscriptCopy({ text, query }: { text: string; query: strin
 }
 
 /** 导入任务阶段 → 即时状态；已有文本时仍保留状态行，不替换转写内容。 */
+function TranscriptionGapRetry({ job, profiles, onRetry, onSeek }: {
+  job: ImportJob;
+  profiles: ModelProfile[];
+  onRetry?: TranscriptViewProps["onRetryImport"];
+  onSeek?: TranscriptViewProps["onSeek"];
+}) {
+  const [profileId, setProfileId] = useState("");
+  return (
+    <details className="transcript-gap-retry">
+      <summary>查看待补转时段</summary>
+      <ul>
+        {job.transcriptionGaps?.map(({ startMs, endMs }, index) => {
+          const timeRange = `${formatTranscriptTime(startMs)} – ${formatTranscriptTime(endMs)}`;
+          return <li key={`${startMs}:${endMs}:${index}`}>{onSeek
+            ? <button type="button" className="text-button" onClick={() => onSeek(startMs)}>{timeRange}</button>
+            : timeRange}</li>;
+        })}
+      </ul>
+      {onRetry && <div className="transcript-import-status__actions">
+        {profiles.some((profile) => profile.id) && (
+          <select aria-label="补转模型" value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+            <option value="">{profiles.find((profile) => profile.id === job.sttProfileId)?.name ?? "当前默认模型"}</option>
+            {profiles.filter((profile) => profile.id && profile.id !== job.sttProfileId).map((profile) => (
+              <option value={profile.id} key={profile.id}>{profile.name}</option>
+            ))}
+          </select>
+        )}
+        <button type="button" className="text-button" onClick={() => onRetry(job.id, profileId || undefined)}>
+          <ArrowClockwise size={13} />补转漏段
+        </button>
+      </div>}
+    </details>
+  );
+}
+
 function importTranscriptStatus(job: ImportJob) {
+  if (job.transcriptionNoSpeech) return "这段录音没有检测到语音。";
   if (job.status === "queued" && job.stage === "copying") return "等待归档录音…";
   if (job.status === "copying" || job.stage === "copying") return "正在归档录音…";
   if (job.status === "preparing" || job.stage === "preparing") return "正在准备音频…";
   if (job.status === "waiting_for_model") return "等待配置转录模型，录音已安全归档。";
+  if (job.status === "waiting_for_summary_model") return "等待配置总结模型。";
   if (job.status === "waiting_for_audio_tool") return "音频组件需要恢复后才能继续转录。";
   if (job.status === "waiting_for_network") {
-    return `转录服务暂时不可达，稍后将自动从第 ${(job.completedChunks || 0) + 1} 段断点继续（已等待 ${job.transcriptionRetryAttempts || 1} 次）。`;
+    return "转录服务暂时不可达，稍后将自动从断点继续。";
   }
   if (job.status === "failed") return `转录暂停：${job.error || "处理失败"}`;
   if (job.status === "cancelled") return "处理已暂停，已有转录仍会保留，可随时继续未完成的阶段。";

@@ -6,6 +6,8 @@
  * 主要导出：Meeting、TranscriptSegment、MeetingSummary、ModelProfile、MeetingPreferences、MeetingAPI 等。
  */
 
+import type { TranscriptionComputeMode } from "../shared/transcription-options.mjs";
+
 /** 会议生命周期状态：草稿 / 录音中 / 已暂停 / 已完成 / 被中断（如系统睡眠导致）。 */
 export type MeetingStatus = "draft" | "recording" | "paused" | "complete" | "interrupted";
 /** 会议形式：online（线上会议，录制麦克风+系统音频）或 offline（线下，仅麦克风）。 */
@@ -40,8 +42,14 @@ export interface TranscriptSegment {
 /** 一个音频传输块内的原子识别片段；传输块本身不再等同于可见段落。 */
 export interface TranscriptionChunkResult {
   segments: TranscriptSegment[];
-  /** auto 模式下本块实际锁定/推断出的语种（zh/en），供渲染层在后续块固定沿用。 */
+  /** 只有通过原始 PCM 静音检测的块才标记为 silent。 */
+  outcome?: "recognized" | "silent" | "unrecognized";
   language?: string;
+}
+
+export interface TranscriptionTimeRange {
+  startMs: number;
+  endMs: number;
 }
 
 /**
@@ -117,6 +125,12 @@ export type SummaryTemplateId = "general" | "weekly" | "interview" | "retro";
  * stale 表示转写有更新而纪要尚未重新生成；manualLocks 记录用户手动锁定、AI 不得覆盖的字段键。
  */
 export interface MeetingSummary {
+  overview?: string;
+  discussionSections?: {
+    title: string;
+    points: { heading?: string; text: string; evidenceSegmentId?: string }[];
+    table?: { columns: string[]; rows: string[][] };
+  }[];
   /** 讨论主题列表。 */
   topics: string[];
   /** 关键要点列表。 */
@@ -185,6 +199,22 @@ export interface Meeting {
   deletedAt?: string;
 }
 
+export interface TranscriptionModelOptions {
+  transcriptionLanguage?: "auto" | "zh" | "en" | "ja" | "ko" | "yue";
+  initialPrompt?: string;
+  temperature?: number;
+  temperatureStep?: number;
+  beamSize?: number;
+  bestOf?: number;
+  noSpeechThreshold?: number;
+  logprobThreshold?: number;
+  entropyThreshold?: number;
+  compressionRatioThreshold?: number;
+  cpuThreads?: number;
+  usePreviousText?: boolean;
+  vadFilter?: boolean;
+}
+
 /**
  * 模型档案：一个可用的转录/总结/说话人分离服务配置。
  * kind 区分用途；transport 决定调用协议；密钥明文不落在本对象里，只存 secretId 引用（由主进程经安全存储解析）。
@@ -203,16 +233,12 @@ export interface ModelProfile {
   model: string;
   /** 凭据引用 id（实际密钥保存在主进程安全存储，渲染层不接触明文）。 */
   secretId?: string;
-  options: {
+  options: TranscriptionModelOptions & {
+    /** 同一服务里切到其他模型时，保存非当前模型的转写参数。 */
+    transcriptionByModel?: Record<string, TranscriptionModelOptions>;
+    /** 本地推理设备；旧档案未设置时保留引擎的自动选择。 */
+    computeMode?: TranscriptionComputeMode;
     /** 请求超时（毫秒）。 */
-    transcriptionLanguage?: "auto" | "zh" | "en" | "ja" | "ko" | "yue";
-    initialPrompt?: string;
-    temperature?: number;
-    temperatureStep?: number;
-    beamSize?: number;
-    noSpeechThreshold?: number;
-    logprobThreshold?: number;
-    entropyThreshold?: number;
     timeoutMs?: number;
     /** 本地 whisper.cpp 可执行文件路径（仅高级排查场景使用，正常流程不出现）。 */
     executablePath?: string;
@@ -385,6 +411,8 @@ export interface MeetingPreferences {
   retentionDays: number | null;
   /** 新手引导是否已完成。 */
   onboardingCompleted: boolean;
+  /** macOS 出厂转录服务已初始化，之后保留用户对服务列表的改动。 */
+  appleSpeechBootstrapCompleted?: boolean;
   /** 首run系统权限引导是否已完成。 */
   systemPermissionsCompleted: boolean;
   /** 权限引导流程版本号，递增以便老用户重新走新版流程。 */
@@ -420,6 +448,7 @@ export interface HardwareInfo {
   chipName: string | null;
   memoryBytes: number;
   platform: "darwin" | "win32" | "linux" | "web";
+  arch?: string;
 }
 
 /**
@@ -527,6 +556,10 @@ export interface LocalModelFile {
   format: string;
   engine: "whisper-cpp" | "whisper-python" | "faster-whisper" | "mlx-whisper" | "sense-voice" | "parakeet-tdt" | "qwen3-asr";
   sizeBytes: number;
+}
+
+export interface DownloadedTranscriptionModel extends LocalModelFile {
+  usedBy: string[];
 }
 
 /**
@@ -648,9 +681,15 @@ export interface ImportJob {
   totalChunks?: number;
   /** 已完成并落盘的分段数。 */
   completedChunks?: number;
+  /** 已检查但仍未得到文本的时段，保留到有文本或确认静音。 */
+  transcriptionGaps?: TranscriptionTimeRange[];
+  transcriptionNoSpeech?: boolean;
+  recordingBackfill?: boolean;
+  retryingTranscriptionGaps?: boolean;
   /** 阶段断点：任务重启/重试时从这里继续，不重复已完成的阶段。 */
   transcriptionComplete?: boolean;
   diarizationComplete?: boolean;
+  diarizationOutcome?: "pending" | "identified" | "unavailable" | "unresolved" | "skipped";
   /** 用户主动跳过说话人识别：转写保留、直接进入纪要阶段。 */
   diarizationSkipped?: boolean;
   /** 重新转录已有会议：清空旧逐字稿后从归档录音重建（旧稿随任务存档）。 */
@@ -677,7 +716,9 @@ export interface ImportJob {
   diarizationPhase?: "preparing" | "loading" | "analyzing" | "refining" | "naming" | "skipping";
   /** 说话人分离实际处理的音频时长（毫秒）。 */
   diarizationAudioDurationMs?: number;
+  diarizationProcessedMs?: number;
   language: string;
+  transcriptionTerms?: string[];
   sttProfileId?: string;
   llmProfileId?: string;
   diarizationEnabled: boolean;
@@ -748,6 +789,14 @@ export interface MeetingAPI {
       meetingId: string;
       sessionId: string;
       durationSeconds: number;
+      transcriptionBackfill?: {
+        sttProfileId?: string;
+        language?: string;
+        ranges: (TranscriptionTimeRange & {
+          track: Exclude<AudioTrackKind, "mixed">;
+          offsetMs: number;
+        })[];
+      };
     }): Promise<Record<string, string>>;
     abort(payload: { meetingId: string; sessionId: string }): Promise<{ ok: true }>;
     open(meetingId: string): Promise<{ path: string }>;
@@ -860,6 +909,8 @@ export interface MeetingAPI {
     scanDiarization(): Promise<DiarizationScanResult>;
     chooseLocal(kind?: "diarization"): Promise<LocalModelFile | null>;
     catalog(): Promise<DownloadableModel[]>;
+    downloaded(): Promise<DownloadedTranscriptionModel[]>;
+    trashDownloaded(file: string): Promise<void>;
     download(modelId: string): Promise<LocalModelFile>;
     /** 从自定义直链下载模型（.pt/.bin/.gguf；无官方摘要，跳过完整性校验）。 */
     downloadFromUrl(url: string): Promise<LocalModelFile>;
@@ -876,11 +927,12 @@ export interface MeetingAPI {
       sttProfileId?: string;
       llmProfileId?: string;
       language?: string;
+      transcriptionTerms?: string[];
       diarizationEnabled?: boolean;
       autoSummarize?: boolean;
     }): Promise<ImportJob[]>;
     list(): Promise<ImportJob[]>;
-    retry(id: string): Promise<ImportJob>;
+    retry(id: string, sttProfileId?: string): Promise<ImportJob>;
     cancel(id: string): Promise<ImportJob>;
     /** 跳过说话人识别：保留已完成的转写并继续生成纪要。 */
     skipDiarization(id: string): Promise<ImportJob>;

@@ -34,7 +34,7 @@ import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import TurndownService from "turndown";
-import type { ImportJob, Meeting, SummaryTemplateId } from "../types";
+import type { ImportJob, Meeting, ModelProfile, SummaryTemplateId } from "../types";
 import { api } from "../lib/api";
 import { lockSummaryField, removeSummaryListItem, toggleSummaryLock } from "../lib/summary";
 import { formatDuration, formatInterval } from "../lib/format";
@@ -42,26 +42,29 @@ import { markdownToHtml } from "../lib/markdown";
 import { useMeetingStore } from "../store/meetingStore";
 import type { RecordingReadiness, WorkspaceStage } from "../lib/workspace";
 import { VisualSummaryView } from "./VisualSummaryView";
-import { TranscriptView, formatTranscriptTime } from "./TranscriptPanel";
+import { TranscriptView, type TranscriptJump } from "./TranscriptPanel";
+import { MinutesOverview, MinutesSections, MinutesSource, type MinutesSourceJump } from "./MinutesSections";
 import { ImportProcessingMeta } from "./ImportProcessingMeta";
-import { isActiveImportJob, isRetryableImportJob } from "../lib/import-status";
+import { canRetryTranscriptionGaps, isActiveImportJob, isRetryableImportJob } from "../lib/import-status";
 import type { ContentChangeKind } from "../lib/content-motion";
 import type { LiveTranscriptionFailure } from "../services/recording";
 import { useEnteringItemIds, useSummaryContentMotion } from "../hooks/useContentMotion";
 import { useDialogFocus } from "../hooks/useDialogFocus";
-import { SUMMARY_TEMPLATES, summaryTemplateById } from "../../shared/summary-templates.mjs";
+import { SUMMARY_TEMPLATES } from "../../shared/summary-templates.mjs";
 
 interface DocumentWorkspaceProps {
   meeting: Meeting;
   stage: WorkspaceStage;
+  splitWorkspace: boolean;
   readiness: RecordingReadiness;
   elapsed: number;
   recentlyFinalized: boolean;
   processingStatus?: string;
   /** 导入任务（转写视图顶部的即时状态行）。 */
   importJob?: ImportJob;
+  sttProfiles: ModelProfile[];
   /** 重试/取消后台导入处理；失败后可直接在会后文档里恢复。 */
-  onRetryImport?(id: string): void;
+  onRetryImport?(id: string, sttProfileId?: string): void;
   onCancelImport?(id: string): void;
   /** 跳过说话人识别：转写已就绪时先用现有发言人占位继续生成纪要。 */
   onSkipDiarization?(id: string): void;
@@ -72,6 +75,8 @@ interface DocumentWorkspaceProps {
   playbackPlaying?: boolean;
   /** 点击转写时间戳时请求播放器跳转。 */
   onSeek?(ms: number): void;
+  minutesJump: TranscriptJump | null;
+  onJumpToMinutesSource: MinutesSourceJump;
   /** 空逐字稿在会后提供唯一、明确的恢复动作（继续录音）。 */
   emptyActionLabel?: string;
   onEmptyAction?(): void;
@@ -103,11 +108,13 @@ interface DocumentWorkspaceProps {
 export function DocumentWorkspace({
   meeting,
   stage,
+  splitWorkspace,
   readiness,
   elapsed,
   recentlyFinalized,
   processingStatus,
   importJob,
+  sttProfiles,
   onRetryImport,
   onCancelImport,
   onSkipDiarization,
@@ -115,6 +122,8 @@ export function DocumentWorkspace({
   playbackMs = 0,
   playbackPlaying = false,
   onSeek,
+  minutesJump,
+  onJumpToMinutesSource,
   emptyActionLabel,
   onEmptyAction,
   onChange,
@@ -135,7 +144,7 @@ export function DocumentWorkspace({
   liveDocument,
   onCloseLiveDocument
 }: DocumentWorkspaceProps) {
-  const showLiveDocument = stage === "live" && liveDocument !== null;
+  const showLiveDocument = splitWorkspace && liveDocument !== null;
   const liveDialogRef = useDialogFocus<HTMLElement>(showLiveDocument, { onEscape: onCloseLiveDocument });
   useEffect(() => {
     if (!showLiveDocument) return;
@@ -146,22 +155,24 @@ export function DocumentWorkspace({
   const profiles = useMeetingStore((state) => state.profiles);
   const visualCapable = profiles.some((profile) => profile.kind === "llm" && profile.enabled
     && profile.options.visualSummaryEnabled && profile.options.visualSummaryVerifiedAt);
-  const hasOrdinarySummary = meeting.summary.keyPoints.length > 0
+  const hasOrdinarySummary = Boolean(meeting.summary.overview || meeting.summary.discussionSections?.length)
+    || meeting.summary.keyPoints.length > 0
     || meeting.summary.decisions.length > 0
     || meeting.summary.actionItems.length > 0
     || meeting.summary.openQuestions.length > 0
     || meeting.summary.risks.length > 0
     || meeting.summary.nextSteps.length > 0;
-  /** 「已整理 …」按全部纪要字段计数：只报结论与行动项会与页面上的决策/问题内容自相矛盾。 */
-  const summaryParts = ([
-    [meeting.summary.keyPoints.length, "条结论"],
-    [meeting.summary.actionItems.length, "个行动项"],
-    [meeting.summary.decisions.length, "条决策"],
-    [meeting.summary.openQuestions.length, "个未决问题"],
-    [meeting.summary.risks.length, "条风险"],
-    [meeting.summary.nextSteps.length, "条下一步"]
-  ] as Array<[number, string]>).filter(([count]) => count > 0).map(([count, unit]) => `${count} ${unit}`);
+  const detailFields = [
+    ["decisions", "已确认决策"],
+    ["openQuestions", "未决问题"],
+    ["risks", "风险"],
+    ["nextSteps", "下一步"]
+  ] as const;
+  const emptyDetailFields = detailFields.filter(([key]) => !meeting.summary[key].length);
   const [summaryView, setSummaryView] = useState<"normal" | "visual">("normal");
+  // 用户是否手动切换过纪要视图：true 时后台生成视觉纪要不再抢回视图，
+  // 避免正在编辑普通纪要时字段突然消失。换会议/换阶段视为新上下文，重新自动选择。
+  const manualSummaryViewRef = useRef(false);
   /** 会后文档头「更多」菜单：重新转录等低频维护动作收在这里，避免与主操作抢注意力。 */
   const [heroMenuOpen, setHeroMenuOpen] = useState(false);
   const heroMenuRef = useRef<HTMLDivElement>(null);
@@ -189,8 +200,8 @@ export function DocumentWorkspace({
   useEffect(() => {
     setWorkspaceView("document");
   }, [meeting.id, stage]);
-  const showViewSwitch = stage === "review";
-  const showTranscript = stage === "live" || (showViewSwitch && workspaceView === "transcript");
+  const showViewSwitch = stage === "review" && !splitWorkspace;
+  const showTranscript = splitWorkspace || (showViewSwitch && workspaceView === "transcript");
   /** 标签页遵循桌面键盘惯例：左右方向键切换，Home/End 到首尾。 */
   const handleWorkspaceTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
@@ -246,10 +257,12 @@ export function DocumentWorkspace({
   }, [editor, meeting.id, meeting.notes, meeting.notesMarkdown]);
 
   useEffect(() => {
+    manualSummaryViewRef.current = false;
     setSummaryView(stage === "review" && meeting.summary.visualSummary && !meeting.summary.visualSummary.stale ? "visual" : "normal");
   }, [meeting.id, stage]);
 
   useEffect(() => {
+    if (manualSummaryViewRef.current) return;
     if (stage === "review" && meeting.summary.visualSummary && !meeting.summary.visualSummary.stale) setSummaryView("visual");
   }, [meeting.summary.visualSummary?.generatedAt, stage]);
 
@@ -274,8 +287,6 @@ export function DocumentWorkspace({
 
   /** 关键结论折叠阈值：超过后收起为前 5 条 +「展开全部」；会议进行中始终全量展示。 */
   const [keyPointsExpanded, setKeyPointsExpanded] = useState(false);
-  /** 关键结论回链目标（切到转写视图并定位到该时刻的段落）。 */
-  const [transcriptJump, setTranscriptJump] = useState<{ ms: number; nonce: number } | null>(null);
   /** 刚通过「添加结论」插入的行索引：聚焦输入，失焦仍为空则自动移除。 */
   const [addingKeyPointIndex, setAddingKeyPointIndex] = useState<number | null>(null);
   /** Escape 回退用的行内旧值：记录 {index, value}，只回退当前聚焦行，
@@ -340,11 +351,10 @@ export function DocumentWorkspace({
     onChange({ ...meeting, summary: removeSummaryListItem(meeting.summary, "keyPoints", index) });
 
   /** 关键结论回链：切到转写视图、定位并短暂高亮目标段落；有音频时同时请求播放器跳转。 */
-  const jumpToTranscript = (ms: number) => {
-    if (stage === "live") onCloseLiveDocument();
+  const jumpToTranscript: MinutesSourceJump = (ms, segmentId) => {
+    if (splitWorkspace) onCloseLiveDocument();
     else setWorkspaceView("transcript");
-    setTranscriptJump({ ms, nonce: Date.now() });
-    if (stage !== "live") onSeek?.(ms);
+    onJumpToMinutesSource(ms, segmentId);
   };
 
   /** 更新单个行动项字段；手动改动即锁定该行动项（`action:<id>`），防止 AI 重算时丢失。 */
@@ -440,7 +450,7 @@ export function DocumentWorkspace({
         )}
 
         {stage === "review" && (
-          <section className={`review-hero ${recentlyFinalized || processingStatus ? "is-fresh" : ""}`}>
+          <section className={`review-hero ${recentlyFinalized || processingStatus ? "is-fresh" : ""} ${hasOrdinarySummary && !processingStatus && !summaryBusy ? "review-hero--compact" : ""}`}>
             <div className="review-hero__main">
               <div className="review-hero__head">
                 {processingStatus && (
@@ -456,7 +466,7 @@ export function DocumentWorkspace({
                   // 安静的文本切换，不再放第二个分段控件在工作区标签旁边。
                   <button
                     className="review-hero__view-toggle"
-                    onClick={() => setSummaryView(summaryView === "visual" ? "normal" : "visual")}
+                    onClick={() => { manualSummaryViewRef.current = true; setSummaryView(summaryView === "visual" ? "normal" : "visual"); }}
                     aria-label={summaryView === "visual" ? "切换到普通纪要" : "切换到视觉纪要"}
                   >
                     {summaryView === "visual" ? <FileText size={14} /> : <Sparkle size={14} />}
@@ -468,7 +478,7 @@ export function DocumentWorkspace({
                 )}
               </div>
               {importJob && processingStatus && <ImportProcessingMeta job={importJob} />}
-              <p>{processingStatus
+              {(!hasOrdinarySummary || processingStatus || summaryBusy) && <p>{processingStatus
                 ? importJob?.status === "failed" || importJob?.status === "cancelled"
                   ? "已保存完成的内容；重试会从当前阶段继续。"
                   : importJob?.status === "diarizing"
@@ -481,11 +491,9 @@ export function DocumentWorkspace({
                       {hasOrdinarySummary ? "正在更新纪要…" : "正在生成纪要…"}
                     </span>
                   )
-                : hasOrdinarySummary
-                  ? `${summaryParts.join(" · ")}${meeting.summary.template && meeting.summary.template !== "general" ? ` · ${summaryTemplateById(meeting.summary.template).label}` : ""}`
-                  : recentlyFinalized
-                    ? "录音已保存。"
-                    : "还没有纪要。"}</p>
+                : recentlyFinalized
+                  ? "录音已保存。"
+                  : "还没有纪要。"}</p>}
             </div>
             <div className="review-hero__side">
               {importJob?.status === "diarizing" && (
@@ -511,7 +519,7 @@ export function DocumentWorkspace({
               )}
               {importJob && !isActiveImportJob(importJob) && isRetryableImportJob(importJob) && onRetryImport && (
                 <button className="button button--primary" onClick={() => onRetryImport(importJob.id)}>
-                  <ArrowClockwise size={16} />重试处理
+                  <ArrowClockwise size={16} />{canRetryTranscriptionGaps(importJob) ? "补转漏段" : "重试处理"}
                 </button>
               )}
               {!processingStatus && (summaryBusy ? (
@@ -646,6 +654,9 @@ export function DocumentWorkspace({
           )}
         </DocumentSection>
 
+        {meeting.summary.overview && summaryView === "normal" && (
+          <MinutesOverview text={meeting.summary.overview} />
+        )}
         <DocumentSection
           kind="summary"
           icon={<FileText size={20} weight="duotone" />}
@@ -676,7 +687,7 @@ export function DocumentWorkspace({
         >
           {meeting.summary.stale && (
             <div className="summary-stale">
-              转录或笔记已修改，当前纪要需要更新。
+              会议内容已更新，纪要待更新。
             </div>
           )}
           {summaryBusy && !meeting.summary.keyPoints.length ? (
@@ -764,15 +775,7 @@ export function DocumentWorkspace({
                           )}
                         />
                         </div>
-                        {typeof timeMs === "number" && (
-                          <button
-                            className="summary-point__time"
-                            title="跳到转写中的对应位置"
-                            onClick={() => jumpToTranscript(timeMs)}
-                          >
-                            {formatTranscriptTime(timeMs)}
-                          </button>
-                        )}
+                        <MinutesSource ms={timeMs} onJump={jumpToTranscript} />
                         <div className="summary-point__actions">
                           <button
                             className={`icon-button summary-lock ${locked ? "is-locked" : ""}`}
@@ -823,36 +826,41 @@ export function DocumentWorkspace({
           )}
         </DocumentSection>
 
-        <DocumentSection kind="actions" icon={<CheckSquare size={20} weight="duotone" />} title="行动项">
+        {summaryView === "normal" && (
+          <MinutesSections sections={meeting.summary.discussionSections} transcript={meeting.transcript} onJump={jumpToTranscript} />
+        )}
+        {meeting.summary.actionItems.length > 0 ? <DocumentSection kind="actions" icon={<CheckSquare size={20} weight="duotone" />} title="行动项">
           <div className="action-table">
-            {meeting.summary.actionItems.length > 0 && (
-              <div className="action-table__head">
-                <span>任务</span><span>负责人</span><span>截止时间</span><span>状态</span>
-              </div>
-            )}
-            {meeting.summary.actionItems.length ? meeting.summary.actionItems.map((item) => {
+            <div className="action-table__head">
+              <span>任务</span><span>负责人</span><span>截止时间</span><span>状态</span>
+            </div>
+            {meeting.summary.actionItems.map((item) => {
               const actionLocked = meeting.summary.manualLocks?.includes(`action:${item.id}`) ?? false;
+              const source = meeting.transcript.find((segment) => segment.status === "final" && item.evidenceSegmentIds?.includes(segment.id));
               return (
               <div
                 className={`action-row ${enteringActionIds.has(item.id) || summaryMotion.actions[item.id] === "added" ? "content-motion-enter" : summaryMotion.actions[item.id] === "updated" ? "content-motion-update" : ""}`}
                 key={item.id}
               >
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={item.done}
-                    onChange={() => updateAction(item.id, {
-                      done: !item.done,
-                      status: !item.done ? "done" : "todo"
-                    })}
-                  />
-                  <input
-                    aria-label={`编辑行动项 ${item.title}`}
-                    className={item.done ? "is-done" : ""}
-                    value={item.title}
-                    onChange={(event) => updateAction(item.id, { title: event.target.value })}
-                  />
-                </label>
+                <div className="action-row__task">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={item.done}
+                      onChange={() => updateAction(item.id, {
+                        done: !item.done,
+                        status: !item.done ? "done" : "todo"
+                      })}
+                    />
+                    <input
+                      aria-label={`编辑行动项 ${item.title}`}
+                      className={item.done ? "is-done" : ""}
+                      value={item.title}
+                      onChange={(event) => updateAction(item.id, { title: event.target.value })}
+                    />
+                  </label>
+                  <MinutesSource ms={source?.startMs} segmentId={source?.id} onJump={jumpToTranscript} />
+                </div>
                 <input aria-label="负责人" value={item.owner} onChange={(event) => updateAction(item.id, { owner: event.target.value })} />
                 <input aria-label="截止时间" value={item.dueDate} onChange={(event) => updateAction(item.id, { dueDate: event.target.value })} />
                 <select
@@ -881,28 +889,36 @@ export function DocumentWorkspace({
                 </button>
               </div>
               );
-            }) : (
-              <div className="section-empty-row">
-                <span>还没有行动项。</span>
-                <button className="text-button" onClick={addActionItem}><Plus size={13} />添加行动项</button>
-              </div>
-            )}
-            {meeting.summary.actionItems.length > 0 && (
-              <button className="text-button action-add" onClick={addActionItem}>
-                <Plus size={14} />添加行动项
-              </button>
-            )}
+            })}
+            <button className="text-button action-add" onClick={addActionItem}>
+              <Plus size={14} />添加行动项
+            </button>
           </div>
-        </DocumentSection>
+        </DocumentSection> : null}
 
-        <DocumentSection kind="details" icon={<CheckSquare size={20} weight="duotone" />} title="决策、问题与下一步">
-          <div className="summary-detail-grid">
-            <EditableSummaryList title="已确认决策" values={meeting.summary.decisions} motionKinds={summaryMotion.lists.decisions} locks={meeting.summary.manualLocks} lockKey="decisions" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("decisions", values, index)} />
-            <EditableSummaryList title="未决问题" values={meeting.summary.openQuestions} motionKinds={summaryMotion.lists.openQuestions} locks={meeting.summary.manualLocks} lockKey="openQuestions" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("openQuestions", values, index)} />
-            <EditableSummaryList title="风险" values={meeting.summary.risks} motionKinds={summaryMotion.lists.risks} locks={meeting.summary.manualLocks} lockKey="risks" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("risks", values, index)} />
-            <EditableSummaryList title="下一步" values={meeting.summary.nextSteps} motionKinds={summaryMotion.lists.nextSteps} locks={meeting.summary.manualLocks} lockKey="nextSteps" onToggleLock={(key) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, key) })} onChange={(values, index) => setSummaryList("nextSteps", values, index)} />
-          </div>
-        </DocumentSection>
+        {detailFields.some(([key]) => meeting.summary[key].length > 0) && (
+          <DocumentSection kind="details" icon={<CheckSquare size={20} weight="duotone" />} title="决策、问题与下一步">
+            <div className="summary-detail-grid">
+              {detailFields.filter(([key]) => meeting.summary[key].length > 0).map(([key, label]) => (
+                <EditableSummaryList key={key} title={label} values={meeting.summary[key]}
+                  motionKinds={summaryMotion.lists[key]} locks={meeting.summary.manualLocks} lockKey={key}
+                  onToggleLock={(field) => onChange({ ...meeting, summary: toggleSummaryLock(meeting.summary, field) })}
+                  onChange={(values, index) => setSummaryList(key, values, index)} />
+              ))}
+            </div>
+          </DocumentSection>
+        )}
+        {stage !== "prepare" && (!meeting.summary.actionItems.length || emptyDetailFields.length > 0) && (
+          <details className="minutes-add">
+            <summary>补充纪要</summary>
+            <div>
+              {!meeting.summary.actionItems.length && <button className="text-button" onClick={addActionItem}>添加行动项</button>}
+              {emptyDetailFields.map(([key, label]) => (
+                <button className="text-button" key={key} onClick={() => setSummaryList(key, [`新的${label}`], 0)}>添加{label}</button>
+              ))}
+            </div>
+          </details>
+        )}
       </article>
   );
 
@@ -935,16 +951,18 @@ export function DocumentWorkspace({
         </div>
       )}
       {showTranscript ? (
-        <div className="workspace-transcript" id="transcript-panel" role="tabpanel" aria-labelledby="transcript-tab">
+        <div className="workspace-transcript" id="transcript-panel" role={showViewSwitch ? "tabpanel" : undefined} aria-labelledby={showViewSwitch ? "transcript-tab" : undefined}>
           <TranscriptView
             meeting={meeting}
             importJob={importJob}
+            sttProfiles={sttProfiles}
             stage={stage}
+            splitWorkspace={splitWorkspace}
             onChange={onChange}
             playbackMs={playbackMs}
             playbackPlaying={playbackPlaying}
             onSeek={onSeek}
-            jumpTarget={transcriptJump}
+            jumpTarget={minutesJump}
             emptyActionLabel={emptyActionLabel}
             onEmptyAction={onEmptyAction}
             summaryBusy={summaryBusy || Boolean(processingStatus)}

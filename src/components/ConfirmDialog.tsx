@@ -14,6 +14,7 @@ export interface ConfirmRequest {
   title: string;
   body: string;
   confirmLabel?: string;
+  destructive?: boolean;
 }
 
 export function useConfirmDialog() {
@@ -56,22 +57,22 @@ export function ConfirmDialog({ open, request, onSettle }: {
 }) {
   const { mounted, closing } = useExitPresence(open, 170);
   const dialogRef = useDialogFocus<HTMLElement>(open, {
-    initialFocus: ".confirm-dialog__actions .button--primary"
+    initialFocus: request?.destructive ? ".confirm-dialog__cancel" : ".confirm-dialog__actions .button--primary"
   });
-  if (!mounted || !request) return null;
+  if ((!open && !mounted) || !request) return null;
   return (
     <div className={`modal-backdrop ${closing ? "is-closing" : ""}`} onMouseDown={(event) => event.target === event.currentTarget && onSettle(false)}>
-      <section ref={dialogRef} className="dialog confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
+      <section ref={dialogRef} className="dialog confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-description">
         <header className="confirm-dialog__header">
           <WarningCircle size={26} weight="duotone" />
           <div>
             <h2 id="confirm-dialog-title">{request.title}</h2>
-            <p>{request.body}</p>
+            <p id="confirm-dialog-description">{request.body}</p>
           </div>
         </header>
         <footer className="confirm-dialog__actions">
-          <button className="button" onClick={() => onSettle(false)}>取消</button>
-          <button className="button button--primary" onClick={() => onSettle(true)}>{request.confirmLabel ?? "确认"}</button>
+          <button className="button confirm-dialog__cancel" onClick={() => onSettle(false)}>取消</button>
+          <button className={`button ${request.destructive ? "button--danger" : "button--primary"}`} onClick={() => onSettle(true)}>{request.confirmLabel ?? "确认"}</button>
         </footer>
       </section>
     </div>

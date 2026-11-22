@@ -59,6 +59,18 @@ function normalizeKeyPointHeadlines(headlines, length) {
   });
 }
 
+function normalizeDiscussionTable(table) {
+  const columns = table?.columns;
+  if (!Array.isArray(columns) || columns.length < 2 || columns.length > 5
+    || !columns.every((column) => typeof column === "string" && column.trim())) return undefined;
+  const clean = (cell) => simplifyChinese(cell.trim());
+  const rows = Array.isArray(table.rows)
+    ? table.rows.filter((row) => Array.isArray(row) && row.length === columns.length
+      && row.every((cell) => typeof cell === "string") && row.some((cell) => cell.trim())).map((row) => row.map(clean))
+    : [];
+  return rows.length >= 2 ? { columns: columns.map(clean), rows } : undefined;
+}
+
 export function simplifySummary(summary = {}) {
   const list = (value) => Array.isArray(value) ? value.map((item) => simplifyChinese(String(item))) : [];
   const visualSummary = summary.visualSummary && typeof summary.visualSummary === "object"
@@ -93,6 +105,26 @@ export function simplifySummary(summary = {}) {
   const keyPoints = list(summary.keyPoints).map(stripKeyPointDecoration);
   return {
     ...summary,
+    overview: typeof summary.overview === "string"
+      ? simplifyChinese(summary.overview.trim()).slice(0, 240) || undefined
+      : undefined,
+    discussionSections: Array.isArray(summary.discussionSections)
+      ? summary.discussionSections.flatMap((section) => {
+          if (typeof section?.title !== "string" || !section.title.trim() || !Array.isArray(section.points)) return [];
+          const points = section.points.flatMap((point) => {
+            if (typeof point?.text !== "string" || !point.text.trim()) return [];
+            return [{
+              heading: typeof point.heading === "string" ? simplifyChinese(point.heading.trim()).slice(0, 100) || undefined : undefined,
+              text: simplifyChinese(point.text.trim()).slice(0, 1000),
+              evidenceSegmentId: typeof point.evidenceSegmentId === "string" ? point.evidenceSegmentId.trim() || undefined : undefined
+            }];
+          });
+          const table = normalizeDiscussionTable(section.table);
+          return points.length || table
+            ? [{ title: simplifyChinese(section.title.trim()).slice(0, 100), points, ...(table ? { table } : {}) }]
+            : [];
+        })
+      : undefined,
     topics: list(summary.topics),
     keyPoints,
     // 读路径自愈：剥掉旧版本烤进文本的标签/列表符号后，证据时间与文本逐位重新对齐。
@@ -125,49 +157,38 @@ export function simplifyMeetingAiText(meeting) {
   };
 }
 
-/**
- * 无总结模型时生成压缩后的关键要点。按句/分句评分，每条只取信息密度最高的一个分句
- * （行长纪律：一条结论一行，绝不「；」拼接多个要点），截到 KEY_POINT_MAX_CHARS，
- * 并把来源段落的开始时间带回，供关键结论卡片做「跳到原文」回链。
- * 输入段可缺 startMs（如数据库迁移只喂 text/status），此时 timeMs 为 undefined。
- * @returns {Array<{text: string, timeMs?: number}>}
- */
+/** 过滤脱离上文就无法理解的口语片段，规则兜底不自行推断主语。 */
+export function isStandaloneSummaryText(text) {
+  return !/^(?:[这那](?:个|件|块|项|些|边)(?:是|有|就|还|要|也|能|的|[，,。？！?!]|$)|(?:目前|现在)(?:是|为|有|到|到了|达到)?\s*\d|(?:是|为|有|到了|达到)\s*\d|(?:他|他们|对方)(?:说|觉得|表示))/.test(text.trim());
+}
+
+/** 本机基础纪要保留能独立读懂的原句，带回来源段落的时间。 */
 export function buildBasicKeyPoints(transcript = []) {
   const informationPattern = /(确认|决定|结论|完成|进展|方案|目标|问题|原因|数据|结果|计划|建议|需要|风险|负责|下一步)/g;
-  const fillerPattern = /^(嗯+|啊+|呃+|然后|就是|那个|这个|所以说|对对对|好的)[，,。.!！\s]*/;
-  let unitIndex = 0;
+  const fillerPattern = /^(?:嗯+|啊+|呃+|然后|就是|所以说|对对对|好的)[，,。.!！\s]*/;
+  const score = (text) => (text.match(informationPattern)?.length ?? 0) * 3
+    + (/[0-9]/.test(text) ? 2 : 0) + Math.min(2, Math.floor(text.length / 18));
   const units = transcript
     .filter((segment) => segment.status === "final")
-    .flatMap((segment) => String(segment.text || "")
-      .split(/(?<=[。！？!?…])\s*/)
-      .map((text) => ({
-        text,
-        startMs: typeof segment.startMs === "number" ? segment.startMs : undefined
-      })))
-    .map((unit) => ({ ...unit, text: simplifyChinese(unit.text).replace(fillerPattern, "").replace(/\s+/g, " ").trim(), index: unitIndex++ }))
-    .filter((unit) => unit.text.length >= 8 && !/[？?]$/.test(unit.text))
-    .map((unit) => ({
-      ...unit,
-      score: (unit.text.match(informationPattern)?.length ?? 0) * 3
-        + Math.min(3, Math.floor(unit.text.length / 18))
-        + unit.index / Math.max(1, transcript.length)
+    .flatMap((segment) => String(segment.text || "").split(/(?<=[。！？!?…；;])\s*/).flatMap((utterance) => {
+      const sentence = simplifyChinese(utterance).replace(fillerPattern, "").replace(/\s+/g, " ").trim().replace(/[。；;]$/, "");
+      if (/[？?]$/.test(sentence)) return [];
+      const candidates = sentence.length <= KEY_POINT_MAX_CHARS && isStandaloneSummaryText(sentence)
+        ? [sentence]
+        : sentence.split(/[，,；;]/).map((clause) => clause.trim());
+      const text = candidates
+        .filter((clause) => clause.length >= 8 && clause.length <= KEY_POINT_MAX_CHARS && isStandaloneSummaryText(clause))
+        .sort((left, right) => score(right) - score(left))[0];
+      return text ? [{ text, timeMs: segment.startMs, score: score(text) }] : [];
     }))
     .sort((left, right) => right.score - left.score);
   const seen = new Set();
   const points = [];
-  for (const unit of units) {
-    const clauses = unit.text.split(/[，,；;。]/).map((value) => value.trim()).filter((value) => value.length >= 6);
-    // 只取信息密度最高的一个分句：关键结论一行只表达一件事。
-    const best = clauses.length
-      ? clauses
-        .map((text, index) => ({ text, index, score: (text.match(informationPattern)?.length ?? 0) * 3 + text.length / 40 }))
-        .sort((left, right) => right.score - left.score)[0].text
-      : unit.text;
-    const core = best.slice(0, KEY_POINT_MAX_CHARS).replace(/[，,；;：:]$/, "");
-    const normalized = core.replace(/[\s，。！？、,.!?;；:：'"“”‘’]/g, "");
+  for (const { text, timeMs } of units) {
+    const normalized = text.replace(/[\s，。！？、,.!?;；:：'"“”‘’]/g, "");
     if (!normalized || [...seen].some((value) => value.includes(normalized) || normalized.includes(value))) continue;
     seen.add(normalized);
-    points.push({ text: `${core}${best.length > core.length ? "…" : ""}`, ...(unit.startMs !== undefined ? { timeMs: unit.startMs } : {}) });
+    points.push({ text, ...(typeof timeMs === "number" ? { timeMs } : {}) });
     if (points.length >= 6) break;
   }
   return points;

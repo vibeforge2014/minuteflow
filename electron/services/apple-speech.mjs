@@ -23,8 +23,8 @@ const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
  * 让新装用户第一次录音即实时转写（零下载零配置）。已有 Whisper/在线配置的老用户
  * 与非 macOS 平台不受影响。
  */
-export function shouldSeedAppleSpeechProfile(platform, sttProfileCount) {
-  return platform === "darwin" && sttProfileCount === 0;
+export function shouldSeedAppleSpeechProfile(platform, sttProfileCount, initialized = false) {
+  return platform === "darwin" && sttProfileCount === 0 && !initialized;
 }
 
 /** 出厂默认的 Apple 语音识别档案（智谱式多可用：保存即启用；首条 stt 档案自动成为默认档）。 */

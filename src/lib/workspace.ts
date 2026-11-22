@@ -5,6 +5,8 @@
  * 共同推导，避免为了 UI 再新增数据库字段。
  */
 import type {
+  ImportJob,
+  Meeting,
   MeetingMode,
   MeetingStatus,
   SystemPermissionValue,
@@ -13,6 +15,10 @@ import type {
 
 export type RecorderPhase = "idle" | "starting" | "recording" | "paused" | "stopping";
 export type WorkspaceStage = "prepare" | "live" | "review";
+
+export function isImportedMeeting(meeting: Pick<Meeting, "tags">, job?: Pick<ImportJob, "retranscribe" | "recordingBackfill">) {
+  return Boolean(job && !job.retranscribe && !job.recordingBackfill) || meeting.tags.includes("导入");
+}
 
 /** 本地 Whisper 的四种运行时（whisper.cpp / Python / CT2 / MLX）在 UI 上统一为一个选项。 */
 export function isLocalTranscriptionTransport(transport: string | undefined) {

@@ -175,6 +175,7 @@ export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
     // 直播录音传入转写区间：worker 改用「转写当 VAD」的窗口化路径
     // （pyannote 在 WebRTC 处理过的远场音频上会漏检大部分语音，实测塌缩成 1 人）。
     ...(options.transcriptSpans?.length ? { transcriptSpans: options.transcriptSpans } : {}),
+    ...(options.diarizationCheckpoint ? { diarizationCheckpoint: options.diarizationCheckpoint } : {}),
     voiceprintSamples,
     voiceprintThreshold: profile.options?.voiceprintThreshold,
     voiceprintMargin: profile.options?.voiceprintMargin
@@ -182,7 +183,7 @@ export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
 }
 
 /**
- * 把分离轮次套回转录段：取每段的时间中点落在哪个轮次内即标记为该说话人；
+ * 把分离轮次套回转录段：按真实时间重叠量选择说话人；
  * 轮次之间总有间隙，命不中任何轮次的段落归给时间上最近的轮次——沿用旧标签
  * 会与分离结果的 speaker-N 撞 id，同一个人分裂成两个名字。
  * @param {Array} transcript 转录段落
@@ -193,12 +194,16 @@ export function applyDiarization(transcript, turns) {
   if (!turns.length) return transcript;
   return transcript.map((segment) => {
     const midpoint = (segment.startMs + segment.endMs) / 2;
-    let turn = turns.find((item) => midpoint >= item.startMs && midpoint <= item.endMs);
-    if (!turn) {
-      let nearestGap = Number.POSITIVE_INFINITY;
-      for (const item of turns) {
-        const gap = Math.max(item.startMs - midpoint, 0, midpoint - item.endMs);
-        if (gap < nearestGap) { nearestGap = gap; turn = item; }
+    let turn;
+    let bestOverlap = 0;
+    let nearestGap = Number.POSITIVE_INFINITY;
+    for (const item of turns) {
+      const overlap = Math.max(0, Math.min(segment.endMs, item.endMs) - Math.max(segment.startMs, item.startMs));
+      const gap = Math.max(item.startMs - midpoint, 0, midpoint - item.endMs);
+      if (overlap > bestOverlap || (overlap === bestOverlap && gap < nearestGap)) {
+        bestOverlap = overlap;
+        nearestGap = gap;
+        turn = item;
       }
     }
     const speakerNumber = turn.speakerId.replace(/\D/g, "") || "1";

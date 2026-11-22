@@ -77,12 +77,10 @@ export function groupTranscriptSegments(segments: TranscriptSegment[]): Transcri
       grouped.push(current);
       return grouped;
     }
-    const previousKey = normalizedText(previous.text);
-    const currentKey = normalizedText(current.text);
     grouped[grouped.length - 1] = {
       ...previous,
       endMs: Math.max(previous.endMs, current.endMs),
-      text: previousKey.includes(currentKey) ? previous.text : combinedText,
+      text: combinedText,
       confidence: previous.confidence === undefined ? current.confidence
         : current.confidence === undefined ? previous.confidence
           : Math.min(previous.confidence, current.confidence)

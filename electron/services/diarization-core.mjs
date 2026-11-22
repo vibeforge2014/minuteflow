@@ -53,6 +53,40 @@ export const DIARIZATION_MERGE_SIMILARITY = 0.7;
 export const DIARIZATION_FRAGMENT_SECONDS = 10;
 export const DIARIZATION_FRAGMENT_SIMILARITY_FLOOR = 0.55;
 
+/** 分批调用原生离线分离器，并把轮次还原为整场录音的时间轴。 */
+export function diarizeAudioWindows(wave, processWindow, {
+  windowMs = 240_000,
+  paddingMs = 1_500,
+  checkpoint,
+  onWindow
+} = {}) {
+  const { samples, sampleRate } = wave;
+  const windowSamples = Math.max(1, Math.round(windowMs * sampleRate / 1000));
+  const paddingSamples = Math.round(paddingMs * sampleRate / 1000);
+  const turns = [...(checkpoint?.turns ?? [])];
+  const shortTailSamples = Math.min(5 * sampleRate, windowSamples / 10);
+  for (let start = checkpoint?.throughSample ?? 0; start < samples.length;) {
+    const gridEnd = start + windowSamples;
+    const end = samples.length - gridEnd < shortTailSamples ? samples.length : gridEnd;
+    const from = Math.max(0, start - paddingSamples);
+    const to = Math.min(samples.length, end + paddingSamples);
+    const windowTurns = processWindow(samples.subarray(from, to)).flatMap((turn) => {
+      const startMs = Math.max(start / sampleRate, from / sampleRate + (turn.start ?? turn.startSeconds ?? 0)) * 1000;
+      const endMs = Math.min(end / sampleRate, from / sampleRate + (turn.end ?? turn.endSeconds ?? 0)) * 1000;
+      if (Math.round(endMs) <= Math.round(startMs)) return [];
+      return [{
+        startMs: Math.round(startMs),
+        endMs: Math.round(endMs),
+        speakerId: `${start}:${turn.speaker ?? turn.speakerId ?? 0}`
+      }];
+    });
+    turns.push(...windowTurns);
+    onWindow?.({ throughSample: end, processedMs: Math.round(1000 * end / sampleRate), turns: windowTurns });
+    start = end;
+  }
+  return turns;
+}
+
 /**
  * 聚类后处理合并。真实嘈杂音频里逐段嵌入噪声大，sherpa 的阈值聚类常把同一个
  * 说话人劈成多个簇（碎片簇可达十几个）。两阶段修正：

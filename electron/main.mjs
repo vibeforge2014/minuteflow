@@ -28,7 +28,7 @@ import {
   systemPreferences
 } from "electron";
 import { mkdir, open, readFile, rename, stat, statfs, unlink, writeFile } from "node:fs/promises";
-import { createReadStream } from "node:fs";
+import { createReadStream, realpathSync } from "node:fs";
 import { Readable } from "node:stream";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -106,6 +106,8 @@ import {
   downloadFromUrl,
   downloadModel,
   listDownloadableModels,
+  listDownloadedTranscriptionModels,
+  hasActiveModelDownloads,
   managedFfmpegPath,
   resolveLocalModelProfile,
   scanDiarizationModels
@@ -141,6 +143,7 @@ import {
   listImportJobs,
   removeImportJob,
   retryImport,
+  enqueueRecordingBackfill,
   skipImportDiarization,
   wakeImportQueue
 } from "./services/import-queue.mjs";
@@ -172,6 +175,17 @@ let activeUpdateDownload = null;
 // 录音会话的运行时状态（文件句柄 + 串行写队列 + 首个错误），键为 `${sessionId}:${track}`。
 // 仅存在于内存中；崩溃重启后由 database 的 markInterruptedRecordings 兜底为 interrupted 状态。
 const recordingFiles = new Map();
+const activeImportModelStatuses = new Set(["queued", "copying", "preparing", "transcribing", "diarizing", "summarizing"]);
+
+function modelPathIdentity(file) {
+  try { return realpathSync(file); }
+  catch { return path.resolve(file); }
+}
+
+function profilesUsingModelFile(file, profiles) {
+  const identity = modelPathIdentity(file);
+  return profiles.filter((profile) => profile.options?.modelPath && modelPathIdentity(profile.options.modelPath) === identity);
+}
 // 进行中的总结请求（AbortController），键为 meetingId；summary:cancel 据此中止对应请求。
 const activeSummaryRequests = new Map();
 // 进行中的问答请求（AbortController），键为 streamId；chat:cancel 据此停止该次回答，
@@ -258,6 +272,8 @@ const defaultPreferences = {
   silenceSkip: true,
   retentionDays: null,
   onboardingCompleted: false,
+  // 出厂 Apple Speech 预置只做一次：写完即为 true，渲染层旧状态不得回写重置。
+  appleSpeechBootstrapCompleted: false,
   systemPermissionsCompleted: false,
   permissionsVersion: 0,
   permissionSetupResume: false,
@@ -390,6 +406,12 @@ async function loadPreferences() {
  * @returns {Promise<object>} 校验后的最终落盘值
  */
 async function persistPreferences(preferences) {
+  // Apple Speech 出厂预置是一次性闩锁：只允许 false→true，绝不让渲染层
+  // 缓存的旧偏好把它写回 false，否则用户删空档案后重启会被再次预置。
+  let persistedBootstrap = false;
+  try {
+    persistedBootstrap = JSON.parse(await readFile(preferencesPath(), "utf8")).appleSpeechBootstrapCompleted === true;
+  } catch { /* 首次写入/文件损坏：以入参为准 */ }
   const validated = {
     summaryIntervalSeconds: Math.max(30, Number(preferences.summaryIntervalSeconds) || 60),
     summaryCadenceVersion: 1,
@@ -414,6 +436,7 @@ async function persistPreferences(preferences) {
       ? null
       : Math.max(0, Number(preferences.retentionDays) || 0),
     onboardingCompleted: Boolean(preferences.onboardingCompleted),
+    appleSpeechBootstrapCompleted: persistedBootstrap || preferences.appleSpeechBootstrapCompleted === true,
     systemPermissionsCompleted: Boolean(preferences.systemPermissionsCompleted),
     permissionsVersion: Math.max(0, Number(preferences.permissionsVersion) || 0),
     permissionSetupResume: Boolean(preferences.permissionSetupResume),
@@ -1079,6 +1102,7 @@ function registerIpc() {
       const key = `${payload.sessionId}:${track}`;
       const record = recordingFiles.get(key);
       if (!record) continue;
+      if (record.meetingId !== payload.meetingId) throw new Error("录音会话与会议不匹配。");
       record.closing = true;
       await record.writeQueue.catch((error) => {
         record.lastError ??= error instanceof Error ? error : new Error(String(error));
@@ -1136,6 +1160,9 @@ function registerIpc() {
       });
       if (hasError) {
         throw new Error(`录音文件写入未完成：${errors.join("；")}`);
+      }
+      if (Array.isArray(payload.transcriptionBackfill?.ranges)) {
+        enqueueRecordingBackfill(payload.meetingId, payload.sessionId, payload.transcriptionBackfill, output);
       }
       // 线下多人会议：录音安全落盘后，后台跑本地说话人分离并按声纹簿命名。
       // 线上会议保持按轨「我/远端」标签——双轨已天然区分本机与远端，再分离反而容易误标。
@@ -1211,7 +1238,7 @@ function registerIpc() {
       ? await resolveLocalTranscriptionProfile(profile)
       : profile;
     // auto 不能原样下发：whisper.cpp 认 -l auto，Python Whisper 与远程网关会把它当
-    // 非法语言代码。统一转空串让引擎自行检测，再把首块结果回传给渲染层锁定。
+    // 非法语言代码。空串由各引擎转换为自己的自动检测选项。
     const engineLanguage = transcriptionLanguageForEngine(resolveTranscriptionLanguage(payload.language, profile.options, (await loadPreferences()).transcriptionLanguage));
     // 在入口统一归一化成 16k 单声道 WAV：远程网关需要可读的时长元数据、
     // Apple Speech 不读 WebM、sherpa 只吃 WAV。更重要的是，只有这样所有引擎才能
@@ -1228,18 +1255,18 @@ function registerIpc() {
       // 音频组件缺失时不能连本地引擎一起拖垮：保留原始块，各分支按原路径处理。
       console.warn("[stt] 实时音频归一化不可用，回退原始块：", error instanceof Error ? error.message : error);
     }
-    if (normalizedWav && isSilenceSkipEnabled() && isSilentPcmWav(prepared.audio)) {
+    const silent = normalizedWav && isSilentPcmWav(prepared.audio);
+    if (silent && isSilenceSkipEnabled()) {
       // 会议里的停顿会被 Whisper 补成「谢谢观看」等幻觉文字；静音块直接出空结果。
       // 时间轴与按序提交由渲染层维持，空结果不会留下缺口。
-      return { segments: [], language: engineLanguage || undefined };
+      return { segments: [], outcome: "silent" };
     }
     if (normalizedWav) {
       prepared.audio = await enhanceTranscriptionAudio(prepared.audio, ffmpegPath);
     }
     let rawResult;
     if (isAppleSpeech) {
-      // macOS 内置 Apple Speech：无模型就绪检查。会议中的自然停顿会让系统识别器报
-      // No speech detected：按空块继续，不当失败重试、不留缺口。
+      // 系统识别器的 no_speech 只是模型判断，PCM 未确认静音时仍记录为待补转。
       try {
         rawResult = await transcribeWithAppleSpeech(
           profile,
@@ -1281,8 +1308,6 @@ function registerIpc() {
       );
     }
     const result = withSegmentConfidence(simplifyTranscriptResult(rawResult));
-    // 自动识别模式下把首块语种回传给录音器，后续块固定沿用，避免每个 8 秒块
-    // 各自判语种（尤其中英混说、只有语气词的短块）导致用词漂移。
     const resolvedLanguage = resolveChunkLanguage({
       configured: engineLanguage,
       resultLanguage: result.language,
@@ -1319,8 +1344,7 @@ function registerIpc() {
       }
     }
     let fragmentIndex = 0;
-    return {
-      segments: sourceSegments.flatMap((segment) => {
+    const segments = sourceSegments.flatMap((segment) => {
         const relativeStartMs = Math.max(0, Math.min(Math.max(0, chunkDurationMs - 1), Number(segment.startMs) || 0));
         const relativeEndMs = Math.max(
           relativeStartMs + 1,
@@ -1337,7 +1361,10 @@ function registerIpc() {
           track: payload.track,
           ...(segment.confidence === undefined ? {} : { confidence: segment.confidence })
         }));
-      }),
+      }).filter((segment) => segment.text.trim());
+    return {
+      segments,
+      outcome: segments.length ? "recognized" : silent ? "silent" : "unrecognized",
       ...(resolvedLanguage ? { language: resolvedLanguage } : {})
     };
   });
@@ -1580,8 +1607,22 @@ function registerIpc() {
   // models:delete — 删除档案并清理其凭据；删的是默认档时同类自动补位。
   trustedHandle("models:delete", (_event, id) => {
     if (typeof id !== "string" || !id) throw new Error("档案参数无效。");
+    const profiles = listModelProfiles();
+    const target = profiles.find((profile) => profile.id === id);
+    if (!target) throw new Error("档案不存在，无法删除。");
+    if (recordingFiles.size && target.kind !== "llm") throw new Error("录音进行中，请结束录音后再删除此配置。");
+    const inUse = listImportJobs().some((job) => {
+      if (!activeImportModelStatuses.has(job.status)) return false;
+      if (target.kind === "llm" && job.autoSummarize === false) return false;
+      if (target.kind === "diarization" && job.diarizationEnabled === false) return false;
+      const chosenId = target.kind === "stt" ? job.sttProfileId : target.kind === "llm" ? job.llmProfileId : undefined;
+      return resolveProfile(profiles, target.kind, chosenId)?.id === id;
+    });
+    if (inUse) throw new Error("音频导入任务正在使用此配置，请等待完成或停止任务后再删除。");
     const deleted = deleteModelProfile(id);
-    if (deleted.secretId) deleteSecret(deleted.secretId);
+    if (deleted.secretId && !profiles.some((profile) => profile.id !== id && profile.secretId === deleted.secretId)) {
+      deleteSecret(deleted.secretId);
+    }
     wakeImportQueue();
     return deleted;
   });
@@ -1660,6 +1701,25 @@ function registerIpc() {
   }));
   // models:catalog — 列出可下载模型目录及其本机安装状态，设置页下载列表调用。
   trustedHandle("models:catalog", () => listDownloadableModels(localModelDirectory()));
+  trustedHandle("models:downloaded", async () => {
+    const models = await listDownloadedTranscriptionModels(localModelDirectory());
+    const profiles = listModelProfiles();
+    return models.map((model) => ({ ...model, usedBy: profilesUsingModelFile(model.path, profiles).map((profile) => profile.name) }));
+  });
+  trustedHandle("models:trash-downloaded", async (_event, file) => {
+    if (typeof file !== "string" || !path.isAbsolute(file)) throw new Error("模型文件无效。");
+    const modelDirectory = localModelDirectory();
+    const models = await listDownloadedTranscriptionModels(modelDirectory);
+    const model = models.find((item) => item.path === file);
+    const realUserData = realpathSync(app.getPath("userData"));
+    const expected = path.resolve(realUserData, path.relative(app.getPath("userData"), file));
+    if (!model || modelPathIdentity(file) !== expected) throw new Error("只能移除 MinuteFlow 下载的转录模型。");
+    if (profilesUsingModelFile(file, listModelProfiles()).length) {
+      throw new Error("有配置正在使用此模型。请先更换模型或删除对应配置。");
+    }
+    if (hasActiveModelDownloads()) throw new Error("正在下载模型，请等待下载完成后再移除。");
+    await shell.trashItem(file);
+  });
   // models:download — 下载模型到应用托管目录，进度经 models:download-progress 事件推送回渲染层。
   // 下载源取自偏好（官方 / 镜像 / 自定义），单源失败时由服务层自动回退其余预设源。
   trustedHandle("models:download", async (event, modelId) => {
@@ -1731,17 +1791,21 @@ function registerIpc() {
       }
     }
     for (const item of items) recentImportPaths.delete(item.sourcePath);
-    // 导入抽屉未显式指定语言时跟随全局转写语言偏好，与实时录音保持一致。
     const preferences = await loadPreferences();
     return enqueueImports(items, {
       ...options,
-      language: resolveTranscriptionLanguage(options?.language, resolveProfile(listModelProfiles(), "stt", options?.sttProfileId)?.options, preferences.transcriptionLanguage)
+      defaultLanguage: preferences.transcriptionLanguage
     });
   });
   // imports:list — 列出导入任务及状态，导入中心/队列面板调用。
   trustedHandle("imports:list", () => listImportJobs());
   // imports:retry — 重试失败的导入任务（付费功能）。
-  trustedHandle("imports:retry", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return retryImport(id); });
+  trustedHandle("imports:retry", async (_event, id, sttProfileId) => {
+    await requireLicense();
+    assertUuid(id, "任务 ID");
+    if (sttProfileId) assertUuid(sttProfileId, "转录模型 ID");
+    return retryImport(id, sttProfileId, await loadPreferences());
+  });
   // imports:cancel — 取消进行中/排队的导入任务（付费功能）：中止 AbortController 并杀掉子进程。
   trustedHandle("imports:cancel", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return cancelImport(id); });
   // imports:skip-diarization — 跳过说话人识别，保留已完成的转写并继续生成纪要（付费功能）。
@@ -1955,7 +2019,7 @@ function registerIpc() {
         // sysctl 不可用时保留 os.cpus() 的型号字符串
       }
     }
-    cachedHardwareInfo = { chipName, memoryBytes: totalmem(), platform: process.platform };
+    cachedHardwareInfo = { chipName, memoryBytes: totalmem(), platform: process.platform, arch: process.arch };
     return cachedHardwareInfo;
   });
   // system:request-microphone — 仅在 macOS 主动申请麦克风权限（其余平台由系统在录制时弹出）。
@@ -2082,14 +2146,18 @@ app.whenReady().then(async () => {
   markRunningJobsInterrupted();
   // 历史多启用档案收敛为同类单选「正在使用」（保留实际生效的那个，其余停用不删）。
   normalizeExclusiveModelProfiles();
-  // macOS 出厂即转录：还没有任何 stt 档案时预启用免费的 Apple 语音识别（零下载、
-  // 本机离线），新装用户第一次录音即实时转写。已有配置的老用户与 Windows 不受影响。
-  if (shouldSeedAppleSpeechProfile(process.platform, listModelProfiles().filter((profile) => profile.kind === "stt").length)) {
-    const seeded = saveModelProfile(appleSpeechDefaultProfile());
-    console.log("[stt] 已为 macOS 预启用 Apple 语音识别出厂默认档案:", seeded.id);
-  }
   // 读取一次偏好，把音频增强/静音跳过开关同步进主进程模块单例（首块录音前就绪）。
-  await loadPreferences();
+  const preferences = await loadPreferences();
+  // 出厂初始化最多一次。用户删除最后一个档案后，空列表是合法状态。
+  if (process.platform === "darwin" && !preferences.appleSpeechBootstrapCompleted) {
+    const sttCount = listModelProfiles().filter((profile) => profile.kind === "stt").length;
+    if (shouldSeedAppleSpeechProfile(process.platform, sttCount, preferences.appleSpeechBootstrapCompleted)) {
+      saveModelProfile(appleSpeechDefaultProfile());
+    }
+    await persistPreferences({ ...preferences, appleSpeechBootstrapCompleted: true }).catch((error) => {
+      console.error("无法保存 Apple 语音识别初始化状态：", error);
+    });
+  }
   // 导入队列的任务状态变化经 imports:job-updated 推送给渲染层（后台执行，不抢焦点）。
   configureImportQueue({
     notify: (job) => {

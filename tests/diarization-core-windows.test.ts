@@ -9,6 +9,8 @@ import {
   assignWindowsToClusters,
   buildSpeechWindows,
   decodePcm16Wav,
+  diarizeAudioWindows,
+  mergeDiarizationClusters,
   windowsToTurns
 } from "../electron/services/diarization-core.mjs";
 
@@ -19,6 +21,29 @@ function syntheticVector(base: number[], jitter: number, seed: number): Float32A
   const norm = Math.sqrt(values.reduce((total, value) => total + value * value, 0));
   return Float32Array.from(values, (value) => value / norm);
 }
+
+describe("diarizeAudioWindows", () => {
+  it("clips overlapping input and resumes with stable time ranges and speaker IDs", () => {
+    const wave = { samples: new Float32Array(81), sampleRate: 10 };
+    const completed: Array<{ throughSample: number; turns: Array<{ startMs: number; endMs: number; speakerId: string }> }> = [];
+    const sizeByCall: number[] = [];
+    const processWindow = (samples: Float32Array) => {
+      sizeByCall.push(samples.length);
+      return [{ start: 0, end: samples.length / wave.sampleRate, speaker: 0 }];
+    };
+    const options = { windowMs: 4_000, paddingMs: 1_000 };
+    const turns = diarizeAudioWindows(wave, processWindow, { ...options, onWindow: (window) => completed.push(window) });
+    expect(sizeByCall).toEqual([50, 51]);
+    expect(turns).toEqual([
+      { startMs: 0, endMs: 4_000, speakerId: "0:0" },
+      { startMs: 4_000, endMs: 8_100, speakerId: "40:0" }
+    ]);
+    expect(diarizeAudioWindows(wave, processWindow, { ...options, checkpoint: completed[0] })).toEqual(turns);
+    expect(sizeByCall).toEqual([50, 51, 51]);
+    const sameVoice = new Map(turns.map((turn) => [turn.speakerId, new Float32Array([1, 0])]));
+    expect(new Set(mergeDiarizationClusters(turns, sameVoice).map((turn) => turn.speakerId))).toEqual(new Set(["speaker-1"]));
+  });
+});
 
 describe("buildSpeechWindows", () => {
   it("把长区间切成滑窗、丢弃不足 2 秒的尾巴", () => {

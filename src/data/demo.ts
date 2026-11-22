@@ -110,7 +110,40 @@ export const demoMeetings: Meeting[] = [
     tags: ["复盘"],
     goals: ["复盘移动端体验问题"],
     notes: ["聚焦首屏速度与导航层级"],
-    summary: { ...baseSummary, topics: ["移动端体验"], keyPoints: ["确认首屏加载和导航层级是主要改进点。"], actionItems: [] },
+    summary: {
+      topics: ["移动端体验", "灰度验证"],
+      overview: "会议复盘了首屏加载、导航和数据导出三个高频路径。首屏优化已有收益，下一阶段先完善登录异常反馈，再以 5% 流量验证核心任务。",
+      keyPoints: ["首屏优化已有明显收益，登录失败后的恢复路径仍需补齐状态反馈。", "第一阶段先以 5% 流量灰度，观察成功率和任务耗时。"],
+      keyPointHeadlines: ["登录异常反馈待补", "5% 流量灰度验证"],
+      keyPointTimes: [96_000, 210_000],
+      discussionSections: [
+        {
+          title: "首屏与登录体验",
+          table: {
+            columns: ["环节", "复盘观察"],
+            rows: [["首屏加载", "优化已有明显收益"], ["登录恢复", "仍缺少异常状态反馈"]]
+          },
+          points: [
+            { heading: "首屏加载", text: "优化已有明显收益，会议未给出具体提升幅度。", evidenceSegmentId: "mr2" },
+            { heading: "登录恢复", text: "登录失败后的恢复路径缺少状态反馈，设计需补齐异常提示。", evidenceSegmentId: "mr4" }
+          ]
+        },
+        {
+          title: "灰度计划与复盘",
+          points: [
+            { heading: "首批范围", text: "以 5% 流量覆盖核心任务，观察任务成功率和耗时。", evidenceSegmentId: "mr3" },
+            { heading: "复盘节点", text: "研发同步回归窗口，两周后统一复盘数据。", evidenceSegmentId: "mr4" }
+          ]
+        }
+      ],
+      decisions: [],
+      actionItems: [
+        { id: "mr-action-1", title: "补齐空状态和异常提示", owner: "设计", dueDate: "待确认", status: "todo", done: false, evidenceSegmentIds: ["mr4"] },
+        { id: "mr-action-2", title: "同步回归窗口", owner: "研发", dueDate: "待确认", status: "todo", done: false, evidenceSegmentIds: ["mr4"] }
+      ],
+      openQuestions: [], risks: [], nextSteps: ["两周后复盘灰度数据。"],
+      generationMode: "online", stale: false
+    },
     transcript: [
       { id: "mr1", startMs: 28_000, endMs: 52_000, speakerId: "me", speakerName: "我", text: "今天重点复盘首屏加载、导航层级和数据导出三个高频路径。", status: "final", track: "microphone" },
       { id: "mr2", startMs: 96_000, endMs: 136_000, speakerId: "zhaoyu", speakerName: "赵宇", text: "首屏优化已经有明显收益，但登录失败后的恢复路径还需要补齐状态反馈。", status: "final", track: "system" },
