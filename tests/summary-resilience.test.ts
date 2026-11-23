@@ -45,10 +45,10 @@ const gatewayHtml = `<!DOCTYPE html><html><head><title>504 Gateway Time-out</tit
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe("在线纪要请求容错", () => {
-  it("把旧档案的 60 秒超时抬到 180 秒下限，显式更长的配置仍生效", () => {
-    expect(summaryRequestTimeoutMs(legacyProfile)).toBe(180_000);
-    expect(summaryRequestTimeoutMs({ options: {} })).toBe(180_000);
-    expect(summaryRequestTimeoutMs({ options: { timeoutMs: 300_000 } })).toBe(300_000);
+  it("把旧档案的 60 秒超时抬到 300 秒下限，显式更长的配置仍生效", () => {
+    expect(summaryRequestTimeoutMs(legacyProfile)).toBe(300_000);
+    expect(summaryRequestTimeoutMs({ options: {} })).toBe(300_000);
+    expect(summaryRequestTimeoutMs({ options: { timeoutMs: 600_000 } })).toBe(600_000);
   });
 
   it("深度提炼用更宽的 300 秒下限，显式更长的配置仍生效", () => {
@@ -97,7 +97,7 @@ describe("在线纪要请求容错", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockRejectedValue(new DOMException("timed out", "TimeoutError"));
     await expect(summarizeWithOpenAICompatible(legacyProfile, "secret", input, false))
-      .rejects.toThrow(/总结模型请求超时（180 秒）/);
+      .rejects.toThrow(/总结模型请求超时（300 秒）/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

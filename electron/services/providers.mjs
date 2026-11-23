@@ -745,12 +745,14 @@ const TRANSIENT_SUMMARY_STATUSES = new Set([429, 500, 502, 503, 504]);
  * 纪要请求超时（毫秒）。
  * 历史档案与服务商预设普遍写 60_000，但真实会议的完整 JSON 输出常需 1–3 分钟；
  * 终稿路径早就抬到 180 秒，滚动/「更新纪要」此前仍用 60 秒，导致同一模型在
- * 会后手动更新时必然超时降级。两条路径统一 180 秒下限，显式配置更长的档案仍生效。
+ * 会后手动更新时必然超时降级。企业推理网关实测：8k 字符的提炼提示要 156 秒，
+ * 30k 全文纪要必然越过 180 秒——这正是库里所有会议都降级成本机口语碎片的原因。
+ * 统一抬到 300 秒下限（与深度提炼一致），显式配置更长的档案仍生效。
  * 流式响应会持续吐 token，不会被代理按「空闲 60 秒」切断，因此这个上限是兜底。
  */
 export function summaryRequestTimeoutMs(profile) {
   const configured = Math.max(0, Number(profile?.options?.timeoutMs) || 0);
-  return Math.max(configured, 180_000);
+  return Math.max(configured, 300_000);
 }
 
 /**
