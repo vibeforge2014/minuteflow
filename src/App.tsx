@@ -511,6 +511,11 @@ export function App() {
     if (requirePremium("生成 AI 会议纪要", generate)) generate();
   };
 
+  const refineKeyPoints = () => {
+    const refine = () => void recorder.refineKeyPoints();
+    if (requirePremium("AI 深度提炼关键结论", refine)) refine();
+  };
+
   const handleCreate = async (input: CreateMeetingInput, options?: { startRecording?: boolean }) => {
     const created = await createMeeting(input);
     setNewMeetingOpen(false);
@@ -1025,6 +1030,7 @@ export function App() {
               onDismissTranscriptionFailure={recorder.dismissTranscriptionFailure}
               onOpenPermissions={() => setPermissionsOpen(true)}
               onGenerateSummary={generateMeetingSummary}
+              onRefineKeyPoints={refineKeyPoints}
               onCancelSummary={() => void recorder.cancelSummary()}
               onRetryVisualSummary={() => {
                 if (requirePremium("生成视觉会议纪要", () => void recorder.generateVisualSummary())) void recorder.generateVisualSummary();

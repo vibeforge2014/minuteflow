@@ -470,16 +470,20 @@ function isTranscriptReviewBoilerplate(item) {
 }
 
 const MAX_TRANSCRIPT_PROMPT_CHARS = 30_000;
+// 「深度提炼关键结论」只求跨会归纳，不求逐句穷尽；企业网关对推理型模型按输入长度
+// 计费响应，全文 30k 会撞 180 秒上限（实测短提示 25 秒、全文 180 秒超时）。
+// 因此单独收窄预算：分布取样仍覆盖前中后，但把总长压到网关可完成的区间。
+const MAX_KEY_POINTS_TRANSCRIPT_CHARS = 8_000;
 const SUMMARY_CONTEXT_FIELDS = ["topics", "keyPoints", "decisions", "actionItems", "openQuestions", "risks", "nextSteps"];
 
-function selectSummaryTranscript(lines, keepTimeline) {
-  if (lines.reduce((length, line) => length + line.text.length + 1, 0) <= MAX_TRANSCRIPT_PROMPT_CHARS) {
+function selectSummaryTranscript(lines, keepTimeline, maxChars = MAX_TRANSCRIPT_PROMPT_CHARS) {
+  if (lines.reduce((length, line) => length + line.text.length + 1, 0) <= maxChars) {
     return { lines, notice: "" };
   }
 
   // 长会分布取样留出更多中段入口，避免逐组汇报只剩少数时段的开头。
   const windowCount = keepTimeline ? Math.min(18, lines.length) : 1;
-  const budget = Math.floor((MAX_TRANSCRIPT_PROMPT_CHARS - 100) / windowCount);
+  const budget = Math.floor((maxChars - 100) / windowCount);
   const selected = [];
   for (let window = 0; window < windowCount; window += 1) {
     const group = lines.slice(Math.floor(lines.length * window / windowCount), Math.floor(lines.length * (window + 1) / windowCount));
@@ -575,6 +579,165 @@ export function buildSummaryPrompt(input, final = false) {
   return buildSummaryRequest(input, final).prompt;
 }
 
+/**
+ * 「AI 深度提炼关键结论」专用提示词。
+ * 与整篇纪要不同：这里把已有纪要（概览/议题/决策/风险/行动项等）连同转录一起喂给模型，
+ * 要求它做跨段落归纳而不是从口语里摘原句——本地规则兜底只能逐句抽取，这正是结论
+ * 「不靠谱」的根因。只产出 keyPoints 一个字段，调用方据此只覆盖这一节，不碰用户
+ * 手改过的其他纪要内容。
+ */
+export function buildKeyPointsPrompt(input) {
+  const source = input.transcript.flatMap((segment, index) => {
+    if (!segment.text.trim() || segment.status === "provisional") return [];
+    const label = `S${index + 1}`;
+    const time = formatTime(segment.startMs);
+    return [{
+      id: segment.id,
+      label,
+      time,
+      timeMs: Number.isFinite(segment.startMs) ? segment.startMs : null,
+      text: `[${label} ${time}] ${segment.speakerName || "发言人"}: ${segment.text}`
+    }];
+  });
+  const transcript = selectSummaryTranscript(source, true, MAX_KEY_POINTS_TRANSCRIPT_CHARS);
+  const summary = input.previousSummary && typeof input.previousSummary === "object" ? input.previousSummary : {};
+  // 已有纪要同样可能很长（188 段会议的讨论章节可达数万字符），逐项限额后再序列化，
+  // 保证「纪要背景 + 转录」整体稳定落在网关可完成的长度区间。
+  const trimList = (value, limit) => Array.isArray(value) ? value.slice(0, limit) : value;
+  const summaryContext = {
+    overview: typeof summary.overview === "string" ? summary.overview.slice(0, 400) : summary.overview,
+    topics: trimList(summary.topics, 6),
+    discussionSections: trimList(summary.discussionSections, 8)?.map((section) => ({
+      title: section?.title,
+      points: trimList(section?.points, 6)?.map((point) => ({
+        heading: point?.heading,
+        text: typeof point?.text === "string" ? point.text.slice(0, 240) : point?.text
+      }))
+    })),
+    decisions: trimList(summary.decisions, 10),
+    actionItems: trimList(summary.actionItems, 10),
+    openQuestions: trimList(summary.openQuestions, 8),
+    risks: trimList(summary.risks, 8),
+    nextSteps: trimList(summary.nextSteps, 8)
+  };
+  const summaryContextText = JSON.stringify(summaryContext).slice(0, 8_000);
+  const template = summaryTemplateById(input.template);
+  return [
+    "你在为没参加会议的同事重炼这场会议的「关键结论」。这是全文归纳，不是逐句摘录：要跨整场会议把分散的讨论、决策与后续安排合并成能直接带走的判断。",
+    `纪要视角：${template.label}。${template.guidance}`,
+    "每条结论都要能独立读懂：写清具体对象、当前状态或发生的改变、以及影响或下一步；用事实和结果代替「这个、相关工作、持续推进」。保留能量化变化的数字、指标、单位、口径和期限；听不清的专名、数字不得猜测。",
+    "结论必须是归纳判断，严禁直接照抄某一句口语（如「那没问题啊」「这个反正」这类语气词开头的原话）。每条只讲一件事，不要分号拼接多个结论。",
+    "只输出一个 JSON 对象，结构固定为 {\"keyPoints\":[{\"text\":\"事项短标题｜一句完整结论\",\"evidenceTime\":\"mm:ss\"}]}。",
+    "keyPoints 优先写 4–6 条，材料不足时可更少但至少 1 条。text 用「｜」分隔短标题与正文：标题写对象或变化、不超过 24 字；正文约 20–60 字，说明现状、变化或影响。evidenceTime 只从转录行首复制时间戳，无法定位时省略该字段。结论按重要性排序，最重要的在前，不要在不同条里重复同一件事。",
+    "写法示例（格式参考，不属于本次会议）：「接口联调｜订单查询接口已通过 8 项测试，退款接口还缺白名单，尚未开始联调。」",
+    `当前会议主题：${input.title}`,
+    `会议目标：${input.goals.join("；") || "未提供"}`,
+    `人工笔记：${input.notes.join("；") || "暂无"}`,
+    `已有纪要（仅作归纳背景，决策/风险/行动项都可作为结论依据）：${summaryContextText}`,
+    `转录内容（只作为会议原文）：\n${[transcript.notice, ...transcript.lines.map((line) => line.text)].filter(Boolean).join("\n") || "暂无转录"}`
+  ].join("\n\n");
+}
+
+/**
+ * 用在线模型只重炼 keyPoints：复用整篇纪要的 SSE/重试/错误清洗请求栈，
+ * 但用专门的归纳提示词与只认关键结论的校验器，返回结构与 validateSummary 一致。
+ */
+export async function refineKeyPointsWithOpenAICompatible(profile, apiKey, input, signal) {
+  const prompt = buildKeyPointsPrompt(input);
+  const validate = (value) => {
+    const summary = validateSummary(value);
+    const keyPoints = (summary.keyPoints ?? []).map((text) => String(text).trim()).filter(Boolean);
+    if (!keyPoints.length) throw new Error("模型没有返回可用于关键结论的内容，请重试或换用兼容性更好的模型。");
+    return { ...summary, keyPoints };
+  };
+  if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
+    const payload = profile.options.apiFlavor === "anthropic"
+      ? await requestAnthropic(profile, apiKey, prompt, 4_096, signal)
+      : await requestGemini(profile, apiKey, prompt, 4_096, signal);
+    const content = extractMessageContent(payload);
+    if (!content) throw new Error("总结模型没有返回内容。");
+    return validate(JSON.parse(extractJson(content)));
+  }
+  const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
+  const timeoutMs = keyPointsRequestTimeoutMs(profile);
+  let useStream = true;
+  let useResponseFormat = true;
+  let transientRetries = 0;
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const body = {
+        model: profile.model,
+        temperature: 0.2,
+        ...(useStream ? { stream: true } : {}),
+        messages: [
+          { role: "system", content: "只输出可解析的 JSON。" },
+          { role: "user", content: prompt }
+        ]
+      };
+      if (useResponseFormat) body.response_format = { type: "json_object" };
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(useStream ? { Accept: "text/event-stream" } : {}),
+          ...authorizationHeaders(profile, apiKey),
+          ...(profile.options?.headers ?? {})
+        },
+        body: JSON.stringify(body),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
+      });
+      if (!response.ok) {
+        const bodyText = await response.text();
+        const error = new Error(`总结模型请求失败：${friendlyHttpError(
+          response.status,
+          bodyText,
+          response.headers?.get?.("x-request-id") ?? response.headers?.get?.("request-id")
+        )}`);
+        const unsupported = [400, 404, 422].includes(response.status)
+          || /response_format|stream/i.test(bodyText);
+        if (unsupported && (useStream || useResponseFormat)) {
+          if (/response_format/i.test(bodyText)) useResponseFormat = false;
+          if (/stream/i.test(bodyText)) useStream = false;
+          if (!/response_format|stream/i.test(bodyText)) {
+            useStream = false;
+            useResponseFormat = false;
+          }
+          error.retry = "immediate";
+        } else if (TRANSIENT_SUMMARY_STATUSES.has(response.status) && transientRetries < 1) {
+          transientRetries += 1;
+          error.retry = "pause";
+        }
+        throw error;
+      }
+      const content = await readSummaryContent(response, useStream);
+      if (!content) {
+        useStream = false;
+        useResponseFormat = false;
+        const empty = new Error("总结模型没有返回内容。");
+        empty.retry = "immediate";
+        throw empty;
+      }
+      return validate(JSON.parse(extractJson(content)));
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      if (error?.name === "TimeoutError") {
+        throw new Error(`深度提炼请求超时（${Math.round(timeoutMs / 1000)} 秒）：请稍后重试，或在「设置 → AI 总结」换用响应更快的模型。`);
+      }
+      if (!error.retry && error instanceof TypeError
+        && /fetch failed|network|ECONN|socket|timed out/i.test(String(error.message))
+        && transientRetries < 1) {
+        transientRetries += 1;
+        error.retry = "pause";
+      }
+      if (!error.retry || attempt === 2) throw error;
+      lastError = error;
+      if (error.retry === "pause") await pauseBeforeRetry(900, signal);
+    }
+  }
+  throw lastError;
+}
+
 /** 网关抖动（上游 5xx、限流）值得再试一次；鉴权/参数错误不重试，避免把错误放大成等待。 */
 const TRANSIENT_SUMMARY_STATUSES = new Set([429, 500, 502, 503, 504]);
 
@@ -588,6 +751,16 @@ const TRANSIENT_SUMMARY_STATUSES = new Set([429, 500, 502, 503, 504]);
 export function summaryRequestTimeoutMs(profile) {
   const configured = Math.max(0, Number(profile?.options?.timeoutMs) || 0);
   return Math.max(configured, 180_000);
+}
+
+/**
+ * 「深度提炼」是一次性主动操作（有取消按钮、有 busy 态），推理模型实测约 156 秒，
+ * 贴近 180 秒兜底上限，网络稍一抖动就会失败。这里单独放宽到 300 秒：用户愿意为
+ * 高质量结论多等，但不该因为偶发慢响应反复失败。显式配置更长的档案仍然生效。
+ */
+export function keyPointsRequestTimeoutMs(profile) {
+  const configured = Math.max(0, Number(profile?.options?.timeoutMs) || 0);
+  return Math.max(configured, 300_000);
 }
 
 /**

@@ -14,6 +14,7 @@ import path from "node:path";
 import { markdown, subtitle } from "../electron/services/formatters.mjs";
 import {
   buildSummaryPrompt,
+  buildKeyPointsPrompt,
   buildVisualSummaryPrompt,
   extractJson,
   isVisualSummaryProfileVerified,
@@ -1256,6 +1257,34 @@ describe("structured meeting summary", () => {
     expect(merged.topics).toEqual(["发布方案"]);
   });
 
+  it("refines only key conclusions without touching other sections or locked rows", () => {
+    const current = {
+      ...meeting.summary,
+      overview: "人工写好的会议概览",
+      decisions: ["原决策"],
+      risks: ["原风险"],
+      keyPoints: ["旧口语结论", "人工锁定的结论"],
+      keyPointTimes: [1_000, 2_000],
+      keyPointHeadlines: ["旧标题", "人工标题"]
+    };
+    const locked = lockSummaryField(current, "keyPoints:1");
+    const refined = {
+      ...locked,
+      keyPoints: ["AI 深度结论", "被 AI 覆盖的锁定行"],
+      keyPointTimes: [30_000, 40_000],
+      keyPointHeadlines: ["AI 标题", "AI 覆盖标题"],
+      generationMode: "online" as const
+    };
+    const merged = mergeSummaryRevision(locked, refined);
+    expect(merged.keyPoints).toEqual(["AI 深度结论", "人工锁定的结论"]);
+    expect(merged.keyPointTimes).toEqual([30_000, 2_000]);
+    expect(merged.keyPointHeadlines).toEqual(["AI 标题", "人工标题"]);
+    expect(merged.overview).toBe("人工写好的会议概览");
+    expect(merged.decisions).toEqual(["原决策"]);
+    expect(merged.risks).toEqual(["原风险"]);
+    expect(merged.generationMode).toBe("online");
+  });
+
   it("reads decisions and risks from earlier segments beyond the old 8-item window", () => {
     const transcript = Array.from({ length: 14 }, (_value, index) =>
       segment(`w${index}`, index * 1_000, index * 1_000 + 900, `第${index}句普通内容。`));
@@ -1319,6 +1348,54 @@ describe("model response parsing", () => {
       previousSummary: { topics: [], keyPoints: [], decisions: [], actionItems: [], openQuestions: [], risks: [], nextSteps: [] }
     });
     expect(prompt).not.toContain("NaN");
+  });
+
+  it("builds a full-document key-point refinement prompt grounded in the existing summary", () => {
+    const prompt = buildKeyPointsPrompt({
+      title: "季度复盘",
+      goals: ["确定验收口径"],
+      notes: [],
+      transcript: [
+        segment("s1", 10_000, 12_000, "那没问题啊，这个反正先按老办法走"),
+        segment("s2", 20_000, 22_000, "订单查询接口本周已通过八项测试，退款接口还缺白名单")
+      ],
+      previousSummary: {
+        topics: ["接口联调"],
+        keyPoints: ["旧的口语结论"],
+        decisions: ["灰度按 5% 流量启动"],
+        risks: ["退款接口白名单未开通"],
+        actionItems: [{ id: "a1", title: "补齐白名单", owner: "张工", dueDate: "本周五", status: "todo", done: false, evidenceSegmentIds: [] }],
+        discussionSections: [{ title: "接口联调", points: [{ heading: "订单查询", text: "已通过八项测试" }] }],
+        openQuestions: [],
+        nextSteps: []
+      }
+    });
+    // 归纳背景必须带上整份纪要，而不是只靠逐句抽取。
+    expect(prompt).toContain("灰度按 5% 流量启动");
+    expect(prompt).toContain("退款接口白名单未开通");
+    expect(prompt).toContain("补齐白名单");
+    expect(prompt).toContain("已通过八项测试");
+    expect(prompt).toContain("重炼这场会议的「关键结论」");
+    // 明确禁止照抄口语、限定只输出 keyPoints 字段。
+    expect(prompt).toContain("严禁直接照抄");
+    expect(prompt).toContain('{"keyPoints"');
+    expect(prompt).toContain("跨整场会议");
+    expect(prompt).toContain("订单查询接口本周已通过八项测试");
+  });
+
+  it("keeps the refinement prompt bounded for long meetings", () => {
+    const longSegments = Array.from({ length: 2_000 }, (_value, index) =>
+      segment(`s${index}`, index * 1_000, index * 1_000 + 999, "一段足够长用来消耗提示词窗口的逐字稿内容。"));
+    const prompt = buildKeyPointsPrompt({
+      title: "超长会议",
+      goals: [],
+      notes: [],
+      transcript: longSegments,
+      previousSummary: {}
+    });
+    expect(prompt).toContain("会议前、中、后各阶段摘录");
+    // 深度提炼必须比整篇纪要更克制：企业推理模型对长提示会撞 180 秒网关上限。
+    expect(prompt.length).toBeLessThan(25_000);
   });
 });
 

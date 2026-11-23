@@ -94,6 +94,8 @@ interface DocumentWorkspaceProps {
   onOpenPermissions(): void;
   /** 手动触发 AI 纪要（录音中为滚动增量，会后为终稿）。 */
   onGenerateSummary(): void;
+  /** 会后：AI 读整份纪要与转写，只重炼关键结论这一节。 */
+  onRefineKeyPoints(): void;
   /** 取消进行中的总结请求（生成按钮在 busy 态变为“取消”）。 */
   onCancelSummary(): void;
   /** 仅用普通纪要重试视觉版。 */
@@ -137,6 +139,7 @@ export function DocumentWorkspace({
   onDismissTranscriptionFailure,
   onOpenPermissions,
   onGenerateSummary,
+  onRefineKeyPoints,
   onCancelSummary,
   onRetryVisualSummary,
   summaryTemplate,
@@ -665,19 +668,25 @@ export function DocumentWorkspace({
                 : "尚未生成"}{stage === "live" ? ` · 约每 ${formatInterval(summaryIntervalSeconds)}` : ""}
             </span>
           }
-          action={stage === "review" ? undefined :
+          action={
             summaryBusy ? (
               <button className="text-button" onClick={onCancelSummary} title="中止这次总结请求">
                 <XCircle size={15} />取消生成
+              </button>
+            ) : stage === "review" ? (
+              <button
+                className="text-button"
+                onClick={onRefineKeyPoints}
+                title="AI 重读整份纪要与逐字稿，只重新归纳关键结论，不覆盖你手改的其他内容"
+              >
+                <Sparkle size={15} />AI 深度提炼
               </button>
             ) : (
               <button className="text-button" onClick={onGenerateSummary}>
                 <ArrowClockwise size={15} />
                 {meeting.summary.stale
                   ? "更新纪要"
-                  : stage === "live"
-                    ? "立即总结"
-                    : "生成最终纪要"}
+                  : "立即总结"}
               </button>
             )
           }

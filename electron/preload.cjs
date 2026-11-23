@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
   },
   summary: {
     generate: (payload) => invoke("summary:generate", payload),
+    refineKeyPoints: (payload) => invoke("summary:refine-key-points", payload),
     generateVisual: (payload) => invoke("summary:generate-visual", payload),
     cancel: (meetingId) => invoke("summary:cancel", meetingId)
   },

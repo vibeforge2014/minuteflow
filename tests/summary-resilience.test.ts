@@ -8,7 +8,8 @@ import {
   friendlyHttpError,
   generateVisualSummaryWithOpenAICompatible,
   summarizeWithOpenAICompatible,
-  summaryRequestTimeoutMs
+  summaryRequestTimeoutMs,
+  keyPointsRequestTimeoutMs
 } from "../electron/services/providers.mjs";
 
 const legacyProfile = {
@@ -48,6 +49,12 @@ describe("在线纪要请求容错", () => {
     expect(summaryRequestTimeoutMs(legacyProfile)).toBe(180_000);
     expect(summaryRequestTimeoutMs({ options: {} })).toBe(180_000);
     expect(summaryRequestTimeoutMs({ options: { timeoutMs: 300_000 } })).toBe(300_000);
+  });
+
+  it("深度提炼用更宽的 300 秒下限，显式更长的配置仍生效", () => {
+    expect(keyPointsRequestTimeoutMs(legacyProfile)).toBe(300_000);
+    expect(keyPointsRequestTimeoutMs({ options: {} })).toBe(300_000);
+    expect(keyPointsRequestTimeoutMs({ options: { timeoutMs: 600_000 } })).toBe(600_000);
   });
 
   it("HTML 错误页只留标题与可见文字，不带标签和 base64", () => {

@@ -385,6 +385,17 @@ const browserApi: MeetingAPI = {
       }
       return summary;
     },
+    async refineKeyPoints(payload) {
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      const summary = localSummary(payload.input);
+      return {
+        keyPoints: summary.keyPoints,
+        keyPointTimes: summary.keyPointTimes ?? [],
+        keyPointHeadlines: summary.keyPointHeadlines ?? [],
+        generationMode: "online",
+        updatedAt: new Date().toISOString()
+      };
+    },
     async generateVisual(payload) {
       await new Promise((resolve) => setTimeout(resolve, 650));
       return browserVisualSummary(payload.title, payload.summary);

@@ -78,6 +78,7 @@ import {
   isVisualSummaryProfileVerified,
   listOllamaModelSizes,
   listRemoteModels,
+  refineKeyPointsWithOpenAICompatible,
   summarizeLocally,
   summarizeWithOpenAICompatible,
   testModelProfile,
@@ -1453,6 +1454,53 @@ function registerIpc() {
         stale: false,
         degraded: true,
         degradedReason: `在线总结失败（${reason}），已回退生成本机基础纪要。`
+      };
+    } finally {
+      if (activeSummaryRequests.get(meetingKey) === controller) activeSummaryRequests.delete(meetingKey);
+    }
+  });
+
+  // summary:refine-key-points — 「AI 深度提炼关键结论」：读整份纪要 + 转录，
+  // 用专门的归纳提示词只重炼关键结论这一节。刻意不复用 summary:generate 的整篇结果，
+  // 避免覆盖用户手改过的概览/决策/行动项；也不做本地降级——本机规则正是粗劣结论的来源，
+  // 提炼失败就直接告诉用户，让用户决定重试或换模型。
+  trustedHandle("summary:refine-key-points", async (_event, payload) => {
+    await requireLicense();
+    const input = payload?.input;
+    if (!input || !Array.isArray(input.transcript) || !input.transcript.length) {
+      throw new Error("会议还没有可归纳的转写内容，无法深度提炼。");
+    }
+    const sanitized = {
+      title: String(input.title ?? ""),
+      participants: Array.isArray(input.participants) ? input.participants.map((item) => String(item)) : [],
+      goals: Array.isArray(input.goals) ? input.goals.map((item) => String(item)) : [],
+      notes: Array.isArray(input.notes) ? input.notes.map((item) => String(item)) : [],
+      transcript: input.transcript.filter((segment) => segment && typeof segment.text === "string"),
+      previousSummary: input.previousSummary ?? {},
+      template: SUMMARY_TEMPLATE_IDS.includes(input.template) ? input.template : undefined
+    };
+    const profiles = listModelProfiles();
+    const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "llm")
+      ?? profiles.find((item) => item.isDefault && item.kind === "llm" && item.transport !== "local-summary");
+    if (!profile || profile.transport === "local-summary") {
+      throw new Error("请先在「设置 → AI 总结」配置在线总结模型，再用 AI 深度提炼关键结论。");
+    }
+    const meetingKey = typeof payload.meetingId === "string" ? payload.meetingId : "default";
+    const controller = new AbortController();
+    activeSummaryRequests.set(meetingKey, controller);
+    try {
+      const result = await refineKeyPointsWithOpenAICompatible(
+        profile,
+        readSecret(profile.secretId),
+        sanitized,
+        controller.signal
+      );
+      return {
+        keyPoints: result.keyPoints,
+        keyPointTimes: result.keyPointTimes ?? [],
+        keyPointHeadlines: result.keyPointHeadlines ?? [],
+        generationMode: "online",
+        updatedAt: new Date().toISOString()
       };
     } finally {
       if (activeSummaryRequests.get(meetingKey) === controller) activeSummaryRequests.delete(meetingKey);

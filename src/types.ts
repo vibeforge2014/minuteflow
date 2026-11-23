@@ -846,6 +846,29 @@ export interface MeetingAPI {
       visualDegraded?: boolean;
       visualDegradedReason?: string;
     }>;
+    /**
+     * AI 深度提炼关键结论：读整份纪要 + 转录，只重炼关键结论这一节。
+     * 成功即在线结果；失败直接抛错，不回退本机规则（那正是粗劣结论的来源）。
+     */
+    refineKeyPoints(payload: {
+      meetingId: string;
+      profileId?: string;
+      input: {
+        title: string;
+        participants?: string[];
+        goals: string[];
+        notes: string[];
+        transcript: TranscriptSegment[];
+        previousSummary: MeetingSummary;
+        template?: SummaryTemplateId;
+      };
+    }): Promise<{
+      keyPoints: string[];
+      keyPointTimes: (number | null)[];
+      keyPointHeadlines: (string | null)[];
+      generationMode: "online";
+      updatedAt: string;
+    }>;
     /** 仅根据已经保存的普通纪要重试视觉版，不再次上传完整转录。 */
     generateVisual(payload: {
       meetingId: string;

@@ -231,6 +231,57 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     }
   }, [llmProfile?.id, preferences.summaryTemplate, resolveRecordingMeeting, updateSummary]);
 
+  /**
+   * AI 深度提炼关键结论：只覆盖 keyPoints 及其平行的标题/时间字段，其余纪要字段
+   * （概览、议题、决策、行动项、风险、用户手改与锁）原样保留。提炼失败直接提示，
+   * 不回退本机规则——那正是粗劣结论的来源。
+   */
+  const refineKeyPoints = useCallback(async () => {
+    const current = meetingRef.current;
+    if (!current || summaryBusyRef.current) return;
+    const finalTranscript = current.transcript.filter((segment) => segment.status === "final");
+    if (!finalTranscript.length) {
+      setWarning("会议还没有可归纳的转写内容，无法深度提炼。");
+      return;
+    }
+    summaryBusyRef.current = true;
+    setSummaryBusy(true);
+    try {
+      const refined = await api.summary.refineKeyPoints({
+        meetingId: current.id,
+        profileId: llmProfile?.id,
+        input: {
+          title: current.title,
+          participants: current.participants,
+          goals: current.goals,
+          notes: current.notes,
+          transcript: finalTranscript,
+          previousSummary: current.summary,
+          template: preferences.summaryTemplate ?? "general"
+        }
+      });
+      const latest = useMeetingStore.getState().meetings.find((item) => item.id === current.id);
+      if (!latest) return;
+      // 用整份纪要作为 incoming 交给既有的合并器：列表锁、平行字段镜像、行动项锁定
+      // 全部沿用既有规则；由于只有关键结论字段被替换，其他节保持不变。
+      const merged = mergeSummaryRevision(latest.summary, {
+        ...latest.summary,
+        keyPoints: refined.keyPoints,
+        keyPointTimes: refined.keyPointTimes,
+        keyPointHeadlines: refined.keyPointHeadlines,
+        generationMode: refined.generationMode
+      });
+      await updateSummary(current.id, merged);
+    } catch (error) {
+      const abort = (error as { name?: string })?.name === "AbortError"
+        || /abort/i.test(String((error as Error)?.message ?? ""));
+      if (!abort) setWarning(error instanceof Error ? error.message : "深度提炼关键结论失败");
+    } finally {
+      summaryBusyRef.current = false;
+      setSummaryBusy(false);
+    }
+  }, [llmProfile?.id, preferences.summaryTemplate, updateSummary]);
+
   /** 只根据已经保存的普通纪要重试视觉版，不重复发送完整转录。 */
   const generateVisualSummary = useCallback(async () => {
     const current = meetingRef.current;
@@ -475,6 +526,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     pause,
     stop,
     generateSummary,
+    refineKeyPoints,
     generateVisualSummary,
     cancelSummary
   };
