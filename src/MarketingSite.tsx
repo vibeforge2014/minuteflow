@@ -7,7 +7,7 @@
  * 平台对比、结尾 CTA、规格页（七节）、政策页四件套、页脚。
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import QRCode from "qrcode";
 import {
   AppleLogo,
@@ -20,6 +20,7 @@ import {
   ClockCountdown,
   CloudSlash,
   Copy,
+  Cpu,
   Desktop,
   DeviceMobile,
   Export,
@@ -28,7 +29,9 @@ import {
   HardDrive,
   List,
   LockKey,
+  MagicWand,
   Microphone,
+  PlayCircle,
   QrCode,
   ShieldCheck,
   Sparkle,
@@ -40,13 +43,16 @@ import {
   WindowsLogo,
   X
 } from "@phosphor-icons/react";
-import productWorkspace from "./assets/product-workspace.png";
+import productWorkspace from "./assets/product-workspace.webp";
+import productMinutes from "./assets/product-minutes.webp";
+import productTranscript from "./assets/product-transcript.webp";
+import productVisualSummary from "./assets/product-visual-summary.webp";
 import { BrandMark } from "./components/BrandMark";
 
 /** 站点路由：首页 / 规格 / 定价 / 购买 / 找回 / 条款 / 隐私 / 退款。 */
 type SiteRoute = "home" | "specs" | "pricing" | "buy" | "recover" | "terms" | "privacy" | "refund";
-/** 演示区块的三个阶段：会中记录 / 会中整理 / 会后行动。 */
-type DemoMode = "record" | "organize" | "act";
+/** 实机截图展示的四个核心视图：实时双栏 / 正式纪要 / 校对与声纹 / 视觉纪要。 */
+type ShowcaseId = "live" | "minutes" | "transcript" | "visual";
 
 /** 桌面版下载入口：按访客系统跳官网稳定下载页（安装包由 zensoft.top dl/ 自有承接）。 */
 function desktopDownloadHref(): string {
@@ -54,32 +60,97 @@ function desktopDownloadHref(): string {
   return siteHref(windows ? "/downloads/windows/latest/" : "/downloads/macos/latest/");
 }
 
-/** 三阶段演示的文案数据（LandingPage 的记录/整理/行动切换器使用）。 */
-const featureDemo: Record<DemoMode, {
-  eyebrow: string;
+/** 首页四视图真实截图展示数据。 */
+const showcaseViews: {
+  id: ShowcaseId;
+  tab: string;
+  windowTitle: string;
+  badge: string;
   title: string;
   description: string;
   points: string[];
-}> = {
-  record: {
-    eyebrow: "会中",
-    title: "说话的时候，纪要已经开始成形。",
-    description: "麦克风与桌面系统音频分轨采集，中文与中英混合语音实时转写。你的手动笔记始终留在文档正中，不必被 AI 打断。",
-    points: ["15 秒音频块安全落盘", "发言人标签与重点时间戳", "暂停、继续与迷你录音栏"]
+  image: string;
+  alt: string;
+}[] = [
+  {
+    id: "live",
+    tab: "实时双栏",
+    windowTitle: "产品团队周会 · 双栏实时工作区",
+    badge: "实时记录",
+    title: "说话与导入，纪要同步成形。",
+    description: "麦克风与系统音频双轨采集，左右双栏独立滚动：左侧逐句实时转写，右侧约每分钟滚动总结，并可随时针对当前会议发起 AI 问答。",
+    points: ["8 秒音频块持续落盘 · 异常不丢块", "导入音频同样边转写边出滚动纪要", "悬浮录音栏与一键展开个人笔记"],
+    image: productWorkspace,
+    alt: "MinuteFlow 双栏实时工作区：左侧实时转写与悬浮录音工具栏，右侧实时总结与 AI 问答输入框"
   },
-  organize: {
-    eyebrow: "理解",
-    title: "从逐字稿里提取真正重要的事。",
-    description: "默认每两分钟滚动更新结构化纪要，持续整理关键结论、风险、开放问题与下一步，同时保留证据上下文。",
-    points: ["增量纪要与最终总结", "手动内容锁定，避免被覆盖", "会议术语表与上下文续写"]
+  {
+    id: "minutes",
+    tab: "正式纪要",
+    windowTitle: "项目复盘：移动端体验优化 · AI 纪要",
+    badge: "已核验",
+    title: "长会不漏项，每条结论可回溯。",
+    description: "自动识别复盘、评审、访谈等会议类型；长会议按语义全量分章提取，高精度模式独立核验数字与责任人，点击时间戳直达原声。",
+    points: ["100% 语义分章提取 · 覆盖整场讨论", "独立事实核验 · 自动标注「已核验」", "单章节局部重生成 · 锁定人工编辑"],
+    image: productMinutes,
+    alt: "MinuteFlow 正式 AI 纪要视图：会议概览、已核验关键结论、结构化对比表与右侧 AI 问答"
   },
-  act: {
-    eyebrow: "会后",
-    title: "会议结束，行动已经可以开始。",
-    description: "把讨论自动收束为有负责人、截止日期和状态的行动项。需要分享时，按团队习惯导出为文档、字幕或完整备份。",
-    points: ["负责人、截止日期与状态", "Markdown / PDF / DOCX", "SRT / VTT / JSON / ZIP"]
+  {
+    id: "transcript",
+    tab: "校对与声纹",
+    windowTitle: "项目复盘：移动端体验优化 · 会议转写",
+    badge: "AI 校对",
+    title: "听得清术语，认得出是谁。",
+    description: "内置 5 大行业领域热词库与自定义同音别名，受控 AI 校对严守数值与否定护栏并保留原稿；本地声纹分离并行运行，跨会记忆说话人。",
+    points: ["软件 / AI / 金融 / 医疗 / 法律领域热词", "自定义同音别名 · 保留原稿一键撤销", "本地声纹簿 + 单段局部重识别"],
+    image: productTranscript,
+    alt: "MinuteFlow 智能转写阅读视图：折叠纪要概览、AI 校对工具栏、已校对标记与发言人段落"
+  },
+  {
+    id: "visual",
+    tab: "视觉纪要",
+    windowTitle: "产品团队周会 · 视觉纪要海报",
+    badge: "原生排版",
+    title: "一键生成可直接分享的视觉海报。",
+    description: "把结构化会议结论自动编排为高可读性的原生视觉纪要，含对比表、状态卡片与重点定调；需要归档或二次编辑时，支持全格式开放导出。",
+    points: ["对比表、状态卡与定调高亮自动排版", "支持 Markdown / PDF / DOCX 导出", "支持 SRT / VTT / JSON / ZIP 完整备份"],
+    image: productVisualSummary,
+    alt: "MinuteFlow 原生视觉纪要海报视图：顶部摘要横幅、方案与风险对比表、系统对接卡片"
   }
-};
+];
+
+/** 首页 6 格能力矩阵（精炼呈现 v0.1.49 核心能力）。 */
+const capabilityCards = [
+  {
+    icon: <Cpu size={21} weight="duotone" />,
+    title: "多引擎本地转写",
+    body: "统一内置 Whisper（whisper.cpp / MLX / Python）、Apple Speech、SenseVoice、Parakeet 与 Qwen3-ASR，模型自动发现与托管下载。"
+  },
+  {
+    icon: <MagicWand size={21} weight="duotone" />,
+    title: "领域热词与安全校对",
+    body: "一键勾选 5 大行业热词并添加同音别名；受控 AI 语义校对绝不篡改金额、比例与否定词，随时一键还原原稿。"
+  },
+  {
+    icon: <UsersThree size={21} weight="duotone" />,
+    title: "并行声纹分离",
+    body: "转写与说话人分离并行推进，分段即时回填；支持本地声纹注册，后续会议自动识别同事声音。"
+  },
+  {
+    icon: <BracketsCurly size={21} weight="duotone" />,
+    title: "自由自带任意模型",
+    body: "本地直连 Ollama，在线原生预设 DeepSeek、Claude、Gemini、OpenAI、通义千问、豆包、智谱、Kimi、MiniMax 与 New API。"
+  },
+  {
+    icon: <PlayCircle size={21} weight="duotone" />,
+    title: "歌词级回放与导入队列",
+    body: "拖入 MP3、M4A、WAV、MP4 等音视频即可后台队列处理；回放归档录音时，转写段落随进度自动高亮定位。"
+  },
+  {
+    icon: <Stack size={21} weight="duotone" />,
+    title: "全文搜索与 Markdown 笔记",
+    body: "SQLite FTS5 毫秒级检索会议库，支持收藏置顶、软删除恢复与独立 Markdown 笔记导入编辑。"
+  }
+];
 
 /** 规格页目录（左侧锚点导航，id 与各 SpecSection 一一对应）。 */
 const specSections = [
@@ -275,140 +346,195 @@ function SiteHeader({
   );
 }
 
-/** 首页：Hero（含产品截图舞台与浮动徽标）→ 特性信号条 → 工作区解剖 → 三阶段演示 → 隐私 → 平台 → 结尾 CTA。 */
+/** 首页：Hero（实机工作区舞台）→ 核心信号条 → 四视图实机展示 → 能力矩阵 → 隐私 → 平台 → 结尾 CTA。 */
 function LandingPage() {
-  // 演示区块当前阶段（记录/整理/行动），驱动文案与右侧示意图切换。
-  const [demoMode, setDemoMode] = useState<DemoMode>("record");
-  const demo = featureDemo[demoMode];
+  const [activeView, setActiveView] = useState<ShowcaseId>("live");
+  const tabRefs = useRef<Partial<Record<ShowcaseId, HTMLButtonElement | null>>>({});
+
+  const selectShowcase = (id: ShowcaseId, focusTab = false) => {
+    setActiveView(id);
+    const button = tabRefs.current[id];
+    if (button) {
+      if (focusTab) button.focus();
+      button.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  };
+
+  const handleTabKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const ids = showcaseViews.map((item) => item.id);
+    const currentIndex = ids.indexOf(activeView);
+    if (currentIndex < 0) return;
+    let nextIndex = -1;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % ids.length;
+    else if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + ids.length) % ids.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = ids.length - 1;
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    selectShowcase(ids[nextIndex], true);
+  };
 
   return (
     <main id="main-content" tabIndex={-1}>
-      {/* —— Hero：主张、下载按钮、平台徽标、产品截图与两枚浮动特性卡 —— */}
+      {/* —— Hero：主张、下载与买断按钮、平台徽标、实机桌面端截图 —— */}
       <section className="hero">
         <div className="hero__ambient hero__ambient--one" />
         <div className="hero__ambient hero__ambient--two" />
         <div className="hero__content">
           <div className="eyebrow-chip">
             <span className="status-dot" />
-            本地优先 · 为中文会议而生
+            v0.1.49 · 本地优先 · 为中文会议而生
           </div>
           <h1>会议在流动，<br />好想法不再溜走。</h1>
           <p className="hero__lede">
-            一边录音，一边转写，一边把零散讨论整理成清晰的会议文档。
-            从开会到行动，不必再切换工具。
+            录音、导入、实时转写、AI 校对与多阶段核验纪要，都在同一份轻量文档里完成。
           </p>
           <div className="hero__actions">
             <a className="site-button site-button--primary" href={desktopDownloadHref()} target="_blank" rel="noreferrer">
               <Desktop size={17} weight="bold" /> 下载桌面版
             </a>
+            <a className="site-button site-button--ghost" href={siteHref("/pricing/")}>
+              ¥99 一次买断 <ArrowRight size={15} />
+            </a>
           </div>
           <div className="hero__meta" aria-label="平台与隐私特性">
-            <span><AppleLogo size={17} weight="fill" /> macOS 14.2+</span>
-            <span><WindowsLogo size={17} weight="fill" /> Windows 10 22H2+</span>
-            <span><LockKey size={17} weight="fill" /> 数据默认留在本机</span>
+            <span><AppleLogo size={16} weight="fill" /> macOS 14.2+ 已公证</span>
+            <span><WindowsLogo size={16} weight="fill" /> Windows 10 22H2+</span>
+            <span><LockKey size={16} weight="fill" /> 数据默认留在本机</span>
           </div>
         </div>
 
-        <div className="product-stage" aria-label="MinuteFlow产品界面预览">
+        <div className="product-stage" aria-label="MinuteFlow 桌面端实机界面预览">
           <div className="product-stage__glow" />
           <div className="product-window">
             <div className="product-window__bar">
               <div className="window-dots" aria-hidden="true"><i /><i /><i /></div>
-              <span>产品团队周会 · 正在记录</span>
+              <span>产品团队周会 · 双栏实时工作区</span>
               <span className="window-live"><i /> LIVE</span>
             </div>
-            <img src={productWorkspace} alt="MinuteFlow桌面端三栏会议工作区" />
+            <img
+              src={productWorkspace}
+              alt="MinuteFlow 桌面端双栏实时会议工作区：左侧实时转写与悬浮录音栏，右侧实时总结与 AI 问答"
+              width={1440}
+              height={900}
+              fetchPriority="high"
+            />
           </div>
           <div className="floating-note floating-note--summary">
             <span className="floating-note__icon"><Sparkle size={16} weight="fill" /></span>
-            <span><strong>实时纪要已更新</strong><small>新增 3 条关键结论</small></span>
+            <span><strong>多阶段 AI 纪要</strong><small>独立事实核验 · 时间戳回链</small></span>
           </div>
           <div className="floating-note floating-note--private">
             <span className="floating-note__icon floating-note__icon--green"><ShieldCheck size={17} weight="fill" /></span>
-            <span><strong>本地保存</strong><small>内容未上传</small></span>
+            <span><strong>本地优先存储</strong><small>未配置模型绝不上传</small></span>
           </div>
         </div>
       </section>
 
-      {/* —— 特性信号条：实时转写 / 滚动纪要 / 本地优先 / 开放导出 —— */}
+      {/* —— 特性信号条：多引擎转写 / 热词校对 / 核验纪要 / 一次买断 —— */}
       <section className="signal-strip" aria-label="核心特性">
-        <div><Waveform size={21} /><span><strong>实时转写</strong> 中文与中英混合</span></div>
-        <div><Sparkle size={21} /><span><strong>滚动纪要</strong> 两分钟持续更新</span></div>
-        <div><CloudSlash size={21} /><span><strong>本地优先</strong> 由你决定是否联网</span></div>
-        <div><Export size={21} /><span><strong>开放导出</strong> 文档、字幕与备份</span></div>
+        <div><Waveform size={21} /><span><strong>多引擎本地转写</strong> Whisper · Apple · SenseVoice</span></div>
+        <div><MagicWand size={21} /><span><strong>热词与 AI 校对</strong> 5 大领域热词 · 留原稿</span></div>
+        <div><Sparkle size={21} /><span><strong>多阶段核验纪要</strong> 长会分章 · 视觉海报</span></div>
+        <div><CloudSlash size={21} /><span><strong>本地优先买断</strong> 数据存本机 · ¥99 无订阅</span></div>
       </section>
 
-      {/* —— 工作区解剖：会议库 / 会议文档 / 实时侧栏 三张结构卡 —— */}
-      <section className="site-section intro-section" id="features">
+      {/* —— 四视图实机展示：实时双栏 / 正式纪要 / 校对与声纹 / 视觉纪要 —— */}
+      <section className="site-section showcase-section" id="features">
         <div className="section-heading section-heading--center">
-          <span className="section-kicker">一个持续生长的会议文档</span>
-          <h2>让记录跟上讨论，<br />让讨论自然变成行动。</h2>
-          <p>会议库、可编辑文档、实时转录与 AI 纪要同时在场，各自清楚，彼此相连。</p>
+          <span className="section-kicker">实机界面一览</span>
+          <h2>从第一句话到会议交付，<br />每个环节都清晰可见。</h2>
+          <p>切换下方视图，查看实时双栏记录、独立核验纪要、AI 校对转写与原生视觉海报。</p>
         </div>
 
-        <div className="workspace-anatomy">
-          <div className="anatomy-card">
-            <span className="anatomy-card__number">01</span>
-            <div className="anatomy-card__visual anatomy-card__visual--library">
-              <i /><i /><i className="is-selected" /><i />
-            </div>
-            <h3>会议库</h3>
-            <p>搜索、收藏、标签与软删除，让每一次讨论都有清楚的归处。</p>
-          </div>
-          <div className="anatomy-card anatomy-card--featured">
-            <span className="anatomy-card__number">02</span>
-            <div className="anatomy-card__visual anatomy-card__visual--document">
-              <b />
-              <i /><i /><i />
-              <span /><span />
-            </div>
-            <h3>会议文档</h3>
-            <p>目标、手动笔记、滚动纪要与行动项，保持在同一条思考主线上。</p>
-          </div>
-          <div className="anatomy-card">
-            <span className="anatomy-card__number">03</span>
-            <div className="anatomy-card__visual anatomy-card__visual--transcript">
-              <span><b>我</b><i /></span>
-              <span><b>刘婷</b><i /></span>
-              <span><b>周哲</b><i /></span>
-            </div>
-            <h3>实时侧栏</h3>
-            <p>逐字稿和 AI 结论并排出现，回看上下文时不必离开当前文档。</p>
-          </div>
-        </div>
-      </section>
-
-      {/* —— 三阶段演示：记录/整理/行动 分段切换器 + 左文右图 —— */}
-      <section className="site-section demo-section">
-        <div className="demo-shell">
-          <div className="demo-copy">
-            <span className="section-kicker">从声音到结果</span>
-            <div className="segmented-control" role="tablist" aria-label="产品阶段">
-              {(["record", "organize", "act"] as DemoMode[]).map((mode) => (
+        <div className="showcase-tabs-wrap">
+          <div
+            className="showcase-tabs"
+            role="tablist"
+            aria-label="核心工作视图"
+            onKeyDown={handleTabKeyDown}
+          >
+            {showcaseViews.map((item) => {
+              const selected = activeView === item.id;
+              return (
                 <button
-                  key={mode}
+                  key={item.id}
+                  ref={(node) => { tabRefs.current[item.id] = node; }}
                   type="button"
                   role="tab"
-                  aria-selected={demoMode === mode}
-                  className={demoMode === mode ? "is-active" : ""}
-                  onClick={() => setDemoMode(mode)}
+                  id={`showcase-tab-${item.id}`}
+                  aria-selected={selected}
+                  tabIndex={selected ? 0 : -1}
+                  onClick={() => selectShowcase(item.id)}
                 >
-                  {mode === "record" ? "记录" : mode === "organize" ? "整理" : "行动"}
+                  {item.tab}
                 </button>
-              ))}
-            </div>
-            <div className="demo-copy__body" key={demoMode}>
-              <span className="demo-eyebrow">{demo.eyebrow}</span>
-              <h2>{demo.title}</h2>
-              <p>{demo.description}</p>
-              <ul>
-                {demo.points.map((point) => (
-                  <li key={point}><CheckCircle size={18} weight="fill" /> {point}</li>
-                ))}
-              </ul>
-            </div>
+              );
+            })}
           </div>
-          <DemoVisual mode={demoMode} />
+        </div>
+
+        <div className="showcase-panels">
+          {showcaseViews.map((item) => {
+            const selected = activeView === item.id;
+            return (
+              <div
+                key={item.id}
+                role="tabpanel"
+                aria-labelledby={`showcase-tab-${item.id}`}
+                hidden={!selected}
+                tabIndex={selected ? 0 : undefined}
+              >
+                <div className="showcase-panel__inner">
+                  <div className="showcase-panel__header">
+                    <div className="showcase-panel__copy">
+                      <span className="showcase-badge">{item.badge}</span>
+                      <h3>{item.title}</h3>
+                      <p>{item.description}</p>
+                    </div>
+                    <ul className="showcase-panel__points">
+                      {item.points.map((point) => (
+                        <li key={point}><CheckCircle size={17} weight="fill" /> {point}</li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  <div className="showcase-frame">
+                    <div className="product-window__bar">
+                      <div className="window-dots" aria-hidden="true"><i /><i /><i /></div>
+                      <span>{item.windowTitle}</span>
+                      <span className="showcase-frame__tag">{item.badge}</span>
+                    </div>
+                    <img
+                      src={item.image}
+                      alt={item.alt}
+                      width={1440}
+                      height={900}
+                      loading="lazy"
+                    />
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* —— 6 格核心能力矩阵 —— */}
+      <section className="site-section capabilities-section">
+        <div className="section-heading">
+          <span className="section-kicker">全链路质量增强</span>
+          <h2>不是简单的录音转文字，<br />而是为准确度设计的流水线。</h2>
+        </div>
+
+        <div className="capability-grid">
+          {capabilityCards.map((card) => (
+            <article className="capability-card" key={card.title}>
+              <span className="capability-card__icon">{card.icon}</span>
+              <h3>{card.title}</h3>
+              <p>{card.body}</p>
+            </article>
+          ))}
         </div>
       </section>
 
@@ -419,8 +545,8 @@ function LandingPage() {
             <span className="section-kicker section-kicker--light">隐私不是设置项，是默认值</span>
             <h2>你的会议，<br />首先属于你的设备。</h2>
             <p>
-              会议内容、逐字稿、笔记、索引与录音默认存储在本机。
-              未配置远程模型时，应用不会把会议内容发送到外部服务。
+              录音、逐字稿、声纹簿、个人笔记与全文索引全部默认存储在本地。
+              支持全本地转写与 Ollama 离线总结；仅当你主动配置在线模型时，才按任务发送必要文本。
             </p>
             <a href="#/specs" className="text-link text-link--light">
               阅读数据与隐私规格 <ArrowRight size={16} />
@@ -430,7 +556,7 @@ function LandingPage() {
             <div className="privacy-device">
               <HardDrive size={31} weight="duotone" />
               <strong>本机资料库</strong>
-              <span>录音 · 转录 · 笔记 · 索引</span>
+              <span>录音 · 转录 · 声纹 · 笔记</span>
             </div>
             <div className="privacy-flow">
               <span>仅在你配置后</span>
@@ -439,13 +565,13 @@ function LandingPage() {
             <div className="privacy-provider">
               <BracketsCurly size={29} weight="duotone" />
               <strong>你选择的模型</strong>
-              <span>按任务发送必要内容</span>
+              <span>Ollama 或自有 API 密钥</span>
             </div>
           </div>
         </div>
       </section>
 
-      {/* —— 平台对比：桌面三栏工作区 vs iPhone/iPad 原生 SwiftUI —— */}
+      {/* —— 平台对比：桌面双栏/三栏工作区 vs iPhone/iPad 原生 SwiftUI —— */}
       <section className="site-section platform-section">
         <div className="section-heading">
           <span className="section-kicker">桌面深度工作，移动随身捕捉</span>
@@ -455,10 +581,10 @@ function LandingPage() {
           <article className="platform-card platform-card--desktop">
             <div className="platform-card__top">
               <span className="platform-icon"><Desktop size={24} weight="duotone" /></span>
-              <span>Windows · macOS</span>
+              <span>macOS 已公证 · Windows x64</span>
             </div>
-            <h3>完整三栏工作区</h3>
-            <p>系统音频与麦克风双轨采集，适合线上会议和长时间桌面工作。</p>
+            <h3>双栏实时与会后整理</h3>
+            <p>麦克风与系统音频双轨录制、非阻塞音频导入队列、本地多引擎转写、声纹分离与应用内自动更新。</p>
             <div className="desktop-mini">
               <i /><b /><span />
             </div>
@@ -469,7 +595,7 @@ function LandingPage() {
               <span>iPhone · iPad</span>
             </div>
             <h3>原生 SwiftUI 体验</h3>
-            <p>iPhone 快速记录，iPad 自适应三栏工作区；使用 Apple Speech 完成本地转写路径。</p>
+            <p>iPhone 极简记录、iPad 三栏工作区；支持后台连续录音、中断自动恢复与停录后 Apple Speech 断档补转。</p>
             <div className="mobile-mini">
               <i /><b /><span />
             </div>
@@ -482,73 +608,17 @@ function LandingPage() {
         <div className="closing-cta__orb" />
         <span className="section-kicker">少一点整理，多一点推进</span>
         <h2>下一场会议，<br />让结果自然留下来。</h2>
-        <p>下载桌面版即可开始记录，会议内容默认只保存在你的设备。</p>
+        <p>下载桌面版即可开始本地记录；¥99 一次买断，最多激活 2 台个人设备。</p>
         <div className="hero__actions">
           <a className="site-button site-button--primary" href={desktopDownloadHref()} target="_blank" rel="noreferrer">
             <Desktop size={17} weight="bold" /> 下载桌面版
           </a>
+          <a className="site-button site-button--ghost" href={siteHref("/pricing/")}>
+            查看定价与授权
+          </a>
         </div>
       </section>
     </main>
-  );
-}
-
-/** 演示区右侧的静态示意图：按阶段渲染 文档+波形 / 时间线纪要 / 行动项表格 + 底部录音条。 */
-function DemoVisual({ mode }: { mode: DemoMode }) {
-  return (
-    <div className={`demo-visual demo-visual--${mode}`} aria-hidden="true">
-      <div className="demo-visual__top">
-        <div><i /><i /><i /></div>
-        <span>产品团队周会</span>
-        <b>已自动保存</b>
-      </div>
-      <div className="demo-visual__content">
-        <div className="demo-document">
-          <small>2026 年 7 月 30 日 · 10:00</small>
-          <h4>{mode === "act" ? "行动项" : mode === "organize" ? "实时纪要" : "产品团队周会"}</h4>
-          {mode === "record" && (
-            <>
-              <p><span>会议目标</span></p>
-              <ul><li>对齐本周重点进展与风险</li><li>决定登录流程改版的下一步</li></ul>
-              <div className="recording-wave">
-                {[12, 21, 15, 27, 19, 31, 14, 24, 18, 28, 16, 22].map((height, index) => (
-                  <i key={index} style={{ height }} />
-                ))}
-              </div>
-            </>
-          )}
-          {mode === "organize" && (
-            <div className="summary-lines">
-              <p><time>10:02</time><span>A 方案已完成可用性测试，整体反馈更好。</span></p>
-              <p><time>10:06</time><span>登录失败原因需要再细分几个类型。</span><b>新增</b></p>
-              <p><time>10:10</time><span>先灰度 5% 流量，验证转化和留存。</span><b>新增</b></p>
-              <p><time>10:14</time><span>下周邀请客服共同完成需求评审。</span></p>
-            </div>
-          )}
-          {mode === "act" && (
-            <div className="action-rows">
-              <p><i><Check size={12} /></i><span>输出登录流程 AB 测试方案</span><b>刘婷</b></p>
-              <p><i /><span>补充失败原因埋点设计</span><b>周哲</b></p>
-              <p><i /><span>完成第三方登录合规评估</span><b>王敏</b></p>
-              <p><i /><span>整理高频问题处理方案</span><b>我</b></p>
-            </div>
-          )}
-        </div>
-        <div className="demo-transcript">
-          <span>实时转写</span>
-          <p><b>我</b> 我们先快速对齐议程。</p>
-          <p><b>刘婷</b> A 方案的可用性测试已经完成。</p>
-          <p><b>周哲</b> 有个补充，失败原因需要细分。</p>
-        </div>
-      </div>
-      <div className="demo-recorder">
-        <i />
-        <strong>{mode === "record" ? "00:24:37" : "00:46:12"}</strong>
-        <span><Microphone size={15} /> 麦克风</span>
-        <span><Waveform size={15} /> 系统音频</span>
-        <b>{mode === "record" ? "暂停" : "已记录"}</b>
-      </div>
-    </div>
   );
 }
 
@@ -585,11 +655,11 @@ function SpecsPage() {
   return (
     <main className="spec-page" id="main-content" tabIndex={-1}>
       <section className="spec-hero">
-        <span className="eyebrow-chip"><FileText size={15} weight="fill" /> 产品规格 · v0.1</span>
+        <span className="eyebrow-chip"><FileText size={15} weight="fill" /> 产品规格 · v0.1.49</span>
         <h1>功能边界，<br />清清楚楚。</h1>
-        <p>从支持的平台、采集方式到数据存储和模型连接，一页了解MinuteFlow当前版本的完整能力。</p>
+        <p>从多引擎本地转写、领域热词校对、说话人声纹分离到多阶段核验纪要，一页了解 MinuteFlow 当前版本的完整能力。</p>
         <div className="spec-hero__meta">
-          <span><CheckCircle size={17} weight="fill" /> 已实现</span>
+          <span><CheckCircle size={17} weight="fill" /> 已发布并签名公证</span>
           <span><Stack size={17} weight="fill" /> 本地优先架构</span>
           <span><Translate size={17} weight="fill" /> 中文 / 中英混合优先</span>
         </div>
@@ -624,20 +694,20 @@ function SpecsPage() {
             index="01"
             kicker="产品概览"
             title="一份围绕会议持续生长的文档"
-            intro="MinuteFlow是本地优先的跨平台会议工作台。它把会前目标、会中笔记、实时转录、滚动纪要和会后行动项放在一个连贯空间里。"
+            intro="MinuteFlow 是本地优先的跨平台会议工作台，把双轨录音、音频导入、智能转写校对、声纹分离、核验纪要与 AI 问答统一在同一份文档里。"
           >
             <div className="spec-summary-grid">
-              <SpecMetric icon={<Desktop />} label="桌面端" value="Windows + macOS" />
+              <SpecMetric icon={<Desktop />} label="桌面端" value="macOS + Windows" />
               <SpecMetric icon={<DeviceMobile />} label="移动端" value="iPhone + iPad" />
-              <SpecMetric icon={<ClockCountdown />} label="纪要节奏" value="默认每 2 分钟" />
+              <SpecMetric icon={<ClockCountdown />} label="滚动纪要" value="默认约每 60 秒" />
               <SpecMetric icon={<LockKey />} label="数据策略" value="默认只存本地" />
             </div>
             <SpecTable rows={[
-              ["产品形态", "Electron 桌面应用；原生 SwiftUI iOS / iPadOS 应用"],
-              ["首发语言", "简体中文；重点支持中文与中英混合会议"],
-              ["核心工作流", "创建 / 导入 → 录音 → 转录 → 增量纪要 → 最终总结 → 导出"],
-              ["账号要求", "核心本地功能不依赖云端账号"],
-              ["模型策略", "本地模型与用户自带远程模型配置并存"]
+              ["产品形态", "Electron 桌面应用（macOS 已公证支持应用内自动更新，Windows x64 安装包）；原生 SwiftUI iOS / iPadOS 应用"],
+              ["首发语言", "简体中文；重点优化中文与中英混合会议"],
+              ["核心工作流", "录音 / 拖拽导入 → 多引擎转写 → 热词与 AI 校对 → 声纹分离 → 滚动 & 正式核验纪要 → 视觉海报 / 导出"],
+              ["账号要求", "无需云端账号，离线可完成录音、笔记、本地转写与检索"],
+              ["授权方式", "¥99 一次性买断，支持最多 2 台个人设备，7 天退款保证"]
             ]} />
           </SpecSection>
 
@@ -646,14 +716,14 @@ function SpecsPage() {
             index="02"
             kicker="桌面端"
             title="为长时间会议设计的完整工作区"
-            intro="桌面端保留三栏信息架构：左侧会议库、中间可编辑文档、右侧实时转录与 AI 纪要，底部录音控制始终触手可及。"
+            intro="现场录音与导入音频共用双栏实时工作区，会后自动切入轻量正式纪要与阅读层级转写视图，右侧随时唤出会议 AI 问答。"
           >
             <FeatureRows rows={[
-              { icon: <Microphone />, title: "双轨录音", body: "分别采集麦克风与桌面系统音频；15 秒音频块持续落盘，支持暂停、继续与停止。", badge: "Windows / macOS" },
-              { icon: <FileText />, title: "可编辑会议文档", body: "会议目标、个人笔记、实时纪要和行动项集中编辑，保留人工内容优先权。", badge: "自动保存" },
-              { icon: <Waveform />, title: "实时逐字稿", body: "实时与最终转写状态分离，支持发言人改名、合并及“我 / 远端”声道初分。", badge: "说话人标签" },
-              { icon: <Sparkle />, title: "结构化纪要", body: "提取议题、关键点、决策、风险、开放问题、下一步和行动项。", badge: "增量 + 最终" },
-              { icon: <Stack />, title: "资料库管理", body: "全文搜索、标签、收藏、软删除与恢复；支持会议模板和术语表。", badge: "SQLite / FTS5" }
+              { icon: <Microphone />, title: "双轨录音与防丢块补转", body: "分别采集麦克风与桌面系统音频；8 秒音频块持续安全落盘，模型未就绪或短暂异常时自动排队补转不丢段。", badge: "Windows / macOS" },
+              { icon: <Waveform />, title: "AI 校对与声纹识别", body: "内置 5 大领域热词与自定义同音别名；受控 AI 语义校对严守数值/否定护栏并留存原稿；后台并行声纹分离与本地声纹簿跨会匹配。", badge: "支持局部重识别" },
+              { icon: <Sparkle />, title: "多阶段核验纪要与视觉海报", body: "自动识别会议类型，长会议 100% 语义分章提取并独立事实核验；支持单章节重生成、原文时间戳回链与一键原生视觉纪要海报。", badge: "已核验 + 海报" },
+              { icon: <FileText />, title: "可编辑文档与 Markdown 笔记", body: "个人笔记完整保留 Markdown 源码并支持 .md 导入；归档音频播放器支持歌词式段落高亮联动。", badge: "自动保存" },
+              { icon: <Stack />, title: "资料库与会议 AI 问答", body: "SQLite FTS5 全文搜索、收藏、软删除恢复；围绕当前会议纪要与转写直接提问并可按时间戳回看原声。", badge: "SQLite / FTS5" }
             ]} />
           </SpecSection>
 
@@ -662,7 +732,7 @@ function SpecsPage() {
             index="03"
             kicker="iPhone 与 iPad"
             title="原生、随身，并尊重系统边界"
-            intro="iOS 版使用 SwiftUI 与 SwiftData，围绕快速记录和移动查看重新组织交互，而不是缩小桌面界面。"
+            intro="iOS 版采用 SwiftUI 与 SwiftData，iPhone 极简双栏导航，iPad 自适应三栏工作区，并针对移动场景做了后台稳录与断档补转。"
           >
             <div className="ios-callout">
               <ShieldCheck size={25} weight="duotone" />
@@ -673,7 +743,8 @@ function SpecsPage() {
             </div>
             <SpecTable rows={[
               ["最低系统", "iOS / iPadOS 18+"],
-              ["界面", "iPhone 自适应导航栈；iPad 三栏工作区"],
+              ["界面", "iPhone 双标签导航与手势弹层问答；iPad 三栏工作区"],
+              ["后台与恢复", "支持后台连续录音、通话/Siri 中断自动恢复及停录后断档补转"],
               ["本地数据", "SwiftData"],
               ["内置转写", "Apple Speech"],
               ["模型密钥", "Keychain"],
@@ -686,37 +757,37 @@ function SpecsPage() {
             id="intelligence"
             index="04"
             kicker="转写与 AI"
-            title="模型由你选择，体验保持一致"
-            intro="应用提供本地与远程适配层。只有在用户主动配置远程服务后，相关任务才会连接外部模型。"
+            title="模型由你选择，质量层层把关"
+            intro="所有新生成的纪要、校对与问答均由你配置的本地或在线模型产出，不混入规则凑数；未配置远程服务时不向外部发送任何会议内容。"
           >
             <div className="provider-grid">
               <div>
                 <span className="provider-grid__icon"><HardDrive size={22} /></span>
                 <h3>本地转写</h3>
-                <p>whisper.cpp、sherpa-onnx</p>
+                <p>Whisper（whisper.cpp / MLX / Python）、Apple Speech、SenseVoice、Parakeet、Qwen3-ASR</p>
               </div>
               <div>
                 <span className="provider-grid__icon"><BracketsCurly size={22} /></span>
                 <h3>远程转写</h3>
-                <p>OpenAI 兼容音频接口</p>
+                <p>OpenAI Whisper、New API 及兼容音频接口</p>
               </div>
               <div>
                 <span className="provider-grid__icon"><Sparkle size={22} /></span>
-                <h3>远程总结</h3>
-                <p>OpenAI、Azure OpenAI、DeepSeek、通义千问等兼容接口</p>
+                <h3>本机与在线总结</h3>
+                <p>Ollama 本地模型；DeepSeek、Claude、Gemini、OpenAI、通义千问、豆包、智谱、Kimi、MiniMax、New API</p>
               </div>
               <div>
-                <span className="provider-grid__icon"><CloudSlash size={22} /></span>
-                <h3>离线基础纪要</h3>
-                <p>未配置服务时仍保留本地工作流</p>
+                <span className="provider-grid__icon"><MagicWand size={22} /></span>
+                <h3>热词与事实核验</h3>
+                <p>5 大行业热词、自定义同音别名、受控语义校对与高精度独立事实核验</p>
               </div>
             </div>
             <SpecTable rows={[
-              ["转录上下文", "语言、术语表、前文上下文"],
-              ["总结输入", "会议目标、手动笔记、逐字稿、上一版纪要"],
-              ["更新策略", "默认每 120 秒增量更新；停止录音后生成最终版本"],
-              ["冲突保护", "手动锁定内容与文档版本保护"],
-              ["连接测试", "保存模型前可验证服务地址、模型名与凭据"]
+              ["转录上下文", "中英混合识别、5 大行业领域热词、自定义术语同音别名、单段局部重识别"],
+              ["总结输入", "会议主题、参会人、个人笔记、转写逐字稿与长会语义分章上下文"],
+              ["更新策略", "会中默认每 60 秒滚动更新，导入音频达阈值即刻出稿；会后按需生成正式纪要与视觉海报"],
+              ["冲突保护", "支持单章节局部重生成，手动锁定内容与文档版本保护"],
+              ["连接测试", "保存模型前可验证服务地址、模型名与凭据，支持识别 Base URL 自动套用预设"]
             ]} />
           </SpecSection>
 
@@ -728,8 +799,8 @@ function SpecsPage() {
             intro="本地存储不是离线模式下的退路，而是产品的默认架构。远程能力是由用户明确开启的可选项。"
           >
             <FeatureRows rows={[
-              { icon: <HardDrive />, title: "本地资料库", body: "会议、逐字稿、笔记、索引与录音默认保存在应用数据目录。", badge: "默认" },
-              { icon: <LockKey />, title: "安全凭据", body: "桌面端使用系统安全存储，iOS 使用 Keychain 保存第三方 API 凭据。", badge: "密钥不入文档" },
+              { icon: <HardDrive />, title: "本地资料库", body: "会议、逐字稿、声纹簿、笔记、索引与录音默认保存在应用数据目录。", badge: "默认" },
+              { icon: <LockKey />, title: "安全凭据", body: "桌面端使用系统安全存储（safeStorage），iOS 使用 Keychain 保存第三方 API 凭据。", badge: "密钥不入文档" },
               { icon: <CloudSlash />, title: "无静默上传", body: "未配置远程模型时不上传会议内容；配置后仅向所选服务发送对应任务所需输入。", badge: "用户控制" },
               { icon: <ShieldCheck />, title: "可管理保留周期", body: "可设置录音保留周期；删除使用软删除机制，避免误操作造成即时丢失。", badge: "可恢复" }
             ]} />
@@ -740,12 +811,12 @@ function SpecsPage() {
             index="06"
             kicker="导入与导出"
             title="信息进得来，也带得走"
-            intro="支持常见音视频来源，并提供面向阅读、字幕、数据迁移和完整备份的多种输出。"
+            intro="拖拽或选择常见音视频文件即可进入非阻塞导入队列，处理期间仍可正常浏览其他会议；支持多格式开放导出。"
           >
             <div className="format-columns">
               <div>
                 <span>可导入</span>
-                <div>{["MP3", "M4A", "WAV", "FLAC", "OGG", "WebM", "MP4", "MOV"].map((item) => <b key={item}>{item}</b>)}</div>
+                <div>{["MP3", "M4A", "WAV", "FLAC", "OGG", "WebM", "MP4", "MOV", "Markdown (.md)"].map((item) => <b key={item}>{item}</b>)}</div>
               </div>
               <div>
                 <span>桌面端可导出</span>
@@ -759,20 +830,20 @@ function SpecsPage() {
             index="07"
             kicker="系统要求"
             title="当前版本支持范围"
-            intro="以下是原型与首发版本的目标环境。实际发布包仍需完成对应平台的签名与公证。"
+            intro="macOS 发布包已完成 Developer ID 签名与 Apple 公证，支持应用内静默更新；Windows 提供标准 x64 安装程序。"
           >
             <SpecTable rows={[
-              ["macOS", "14.2 或更高版本"],
-              ["Windows", "Windows 10 22H2 或更高版本"],
+              ["macOS", "14.2 或更高版本（Apple Silicon 签名公证，支持应用内自动更新）"],
+              ["Windows", "Windows 10 22H2 或更高版本（Windows x64 安装包）"],
               ["iPhone / iPad", "iOS / iPadOS 18 或更高版本"],
               ["桌面运行时", "Electron"],
-              ["本地模型", "模型可自主选择，音频工具随应用内置"],
-              ["远程服务", "需要用户自行提供兼容服务地址与凭据"]
+              ["本地模型", "支持自动发现与托管下载，音频与转写工具随应用引导就绪"],
+              ["远程服务", "可选，由用户自行提供兼容服务地址与 API 凭据"]
             ]} />
             <div className="spec-endcap">
               <div>
-                <span>准备好亲自看看了吗？</span>
-                <strong>打开一场示例会议，体验完整工作流。</strong>
+                <span>准备好亲自试试了吗？</span>
+                <strong>下载桌面版，用本地工作台开启下一场会议。</strong>
               </div>
               <a className="site-button site-button--primary" href={desktopDownloadHref()} target="_blank" rel="noreferrer">
                 下载桌面版 <ArrowUpRight size={16} weight="bold" />

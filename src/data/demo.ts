@@ -141,12 +141,23 @@ export const demoMeetings: Meeting[] = [
         { id: "mr-action-1", title: "补齐空状态和异常提示", owner: "设计", dueDate: "待确认", status: "todo", done: false, evidenceSegmentIds: ["mr4"] },
         { id: "mr-action-2", title: "同步回归窗口", owner: "研发", dueDate: "待确认", status: "todo", done: false, evidenceSegmentIds: ["mr4"] }
       ],
-      openQuestions: [], risks: [], nextSteps: ["两周后复盘灰度数据。"],
-      generationMode: "online", stale: false
+      openQuestions: ["登录异常埋点是否需要细化到客户端网络环境维度？"],
+      risks: ["第三方登录合规评估进度可能影响灰度排期。"],
+      nextSteps: ["两周后复盘 5% 灰度转化与异常恢复数据。"],
+      detectedMeetingType: "项目复盘会",
+      qualityMode: "high",
+      verification: {
+        verified: true,
+        checkedAt: "2026-07-28T17:01:00+08:00",
+        issuesFound: 2,
+        issuesFixed: 2
+      },
+      generationMode: "online",
+      stale: false
     },
     transcript: [
       { id: "mr1", startMs: 28_000, endMs: 52_000, speakerId: "me", speakerName: "我", text: "今天重点复盘首屏加载、导航层级和数据导出三个高频路径。", status: "final", track: "microphone" },
-      { id: "mr2", startMs: 96_000, endMs: 136_000, speakerId: "zhaoyu", speakerName: "赵宇", text: "首屏优化已经有明显收益，但登录失败后的恢复路径还需要补齐状态反馈。", status: "final", track: "system" },
+      { id: "mr2", startMs: 96_000, endMs: 136_000, speakerId: "zhaoyu", speakerName: "赵宇", text: "首屏优化已经有明显收益，但登录失败后的恢复路径还需要补齐状态反馈，并核对 API 错误码。", rawText: "首屏优化已经有明显收益，但登录失败后的恢复路径还需要补齐状态反馈，并核对艾皮艾错误码。", corrected: true, status: "final", track: "system" },
       { id: "mr3", startMs: 210_000, endMs: 254_000, speakerId: "me", speakerName: "我", text: "第一阶段先锁定核心任务闭环，以 5% 流量灰度观察成功率和任务耗时。", status: "final", track: "microphone" },
       { id: "mr4", startMs: 328_000, endMs: 372_000, speakerId: "zhaoyu", speakerName: "赵宇", text: "设计会补齐空状态和异常提示，研发同步回归窗口，两周后统一复盘数据。", status: "final", track: "system" }
     ],
