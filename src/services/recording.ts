@@ -627,9 +627,12 @@ export class MeetingRecorder {
     this.commitCompletedTranscriptions(entry.track);
   }
 
+  /** 补转在途互斥锁：防止定时器与 updateSttProfile 并发重发同一个最旧挂起块。 */
+  private drainingBacklog = false;
+
   /** 补转队列非空时安排下一次重试；节奏随最旧块的尝试次数在 4s/8s/15s 间循环。 */
   private ensureBacklogDrain() {
-    if (this.backlogTimer !== null || this.stopTranscription) return;
+    if (this.backlogTimer !== null || this.drainingBacklog || this.stopTranscription || !this.sttProfile?.id) return;
     const oldest = this.oldestBacklogChunk();
     if (!oldest) return;
     const delay = BACKLOG_RETRY_DELAYS_MS[oldest.attempts % BACKLOG_RETRY_DELAYS_MS.length];
@@ -644,17 +647,17 @@ export class MeetingRecorder {
   /**
    * 补转一轮：取最旧的挂起块用当前档案重发。成功则按序提交（顺带放行
    * 之后已成功的块）；仍不就绪或网络失败则留在队列按节奏继续，模型
-   * 就绪后首个成功块会触发 onTranscriptionRecovered 收起提示。
+   * 就绪后首个成功块（含静音块）会触发 onTranscriptionRecovered 收起提示。
    */
   private async drainBacklogOnce() {
-    if (this.stopTranscription || this.discardLateTranscriptions || this.paused) return;
+    if (this.drainingBacklog || this.stopTranscription || this.discardLateTranscriptions || this.paused) return;
     const entry = this.oldestBacklogChunk();
     if (!entry) return;
     if (!this.sttProfile?.id) {
-      // 档案尚未配置：不发请求，配置/切换档案时 updateSttProfile 会再次唤醒。
-      this.ensureBacklogDrain();
+      // 档案尚未配置：不发请求、不空转定时器；配置/切换档案时 updateSttProfile 会再次唤醒。
       return;
     }
+    this.drainingBacklog = true;
     entry.attempts += 1;
     try {
       const result = await api.transcription.processChunk({
@@ -671,8 +674,9 @@ export class MeetingRecorder {
       });
       if (this.discardLateTranscriptions || !this.transcriptionStates.get(entry.track)?.backlog.includes(entry)) return;
       const recognized = result.segments.some((segment) => segment.text.trim());
-      if (recognized || result.outcome === "silent") this.uncoveredChunks.delete(entry.provisionalId);
-      if (recognized && this.transcriptionFailureStreak > 0) {
+      const recovered = recognized || result.outcome === "silent";
+      if (recovered) this.uncoveredChunks.delete(entry.provisionalId);
+      if (recovered && this.transcriptionFailureStreak > 0) {
         this.transcriptionFailureStreak = 0;
         this.callbacks.onTranscriptionRecovered?.();
       }
@@ -701,7 +705,8 @@ export class MeetingRecorder {
       }
       // 其余错误（网络/5xx）留在队列按节奏重试；持续失败由既有 banner 呈现。
     } finally {
-      if (this.hasBacklogChunks()) this.ensureBacklogDrain();
+      this.drainingBacklog = false;
+      if (this.hasBacklogChunks() && this.sttProfile?.id) this.ensureBacklogDrain();
     }
   }
 

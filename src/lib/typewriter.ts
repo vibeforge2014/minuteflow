@@ -9,10 +9,11 @@ export const TYPEWRITER_BASE_CPS = 40;
 export const TYPEWRITER_RAMP = 0.35;
 export const TYPEWRITER_MAX_CPS = 160;
 
-/** 本拍计划出多少字：目标速率（字/秒）× 拍长（毫秒）。 */
-export function plannedCharacters(pending: string): number {
+/** 本拍计划出多少字：目标速率（字/秒）× 拍长（毫秒）；支持传入整队列积压字数平滑提速。 */
+export function plannedCharacters(pending: string, backlogLength = pending.length): number {
   if (!pending) return 0;
-  const cps = Math.min(TYPEWRITER_MAX_CPS, Math.max(TYPEWRITER_BASE_CPS, pending.length * TYPEWRITER_RAMP));
+  const pressure = Math.max(pending.length, backlogLength);
+  const cps = Math.min(TYPEWRITER_MAX_CPS, Math.max(TYPEWRITER_BASE_CPS, pressure * TYPEWRITER_RAMP));
   return Math.max(1, Math.round((cps * TYPEWRITER_TICK_MS) / 1000));
 }
 
@@ -35,10 +36,16 @@ export function punctuationCut(planned: string): { emit: string; pauseTicks: num
 /**
  * 出字一拍：返回本拍应展示的增量与随后的停顿拍数。
  * 缓冲为空返回 null（调用方无需重渲染）。
+ * 当外部队列严重积压（backlogLength ≥ 180）时缩短标点停顿，跟紧导入转写进度。
  */
-export function typewriterStep(pending: string): { emit: string; pauseTicks: number } | null {
+export function typewriterStep(
+  pending: string,
+  backlogLength = pending.length
+): { emit: string; pauseTicks: number } | null {
   if (!pending) return null;
-  const planned = pending.slice(0, plannedCharacters(pending));
+  const planned = pending.slice(0, plannedCharacters(pending, backlogLength));
   const cut = punctuationCut(planned);
-  return cut ?? { emit: planned, pauseTicks: 0 };
+  if (!cut) return { emit: planned, pauseTicks: 0 };
+  const pauseTicks = backlogLength >= 260 ? 0 : backlogLength >= 140 ? Math.min(1, cut.pauseTicks) : cut.pauseTicks;
+  return { emit: cut.emit, pauseTicks };
 }

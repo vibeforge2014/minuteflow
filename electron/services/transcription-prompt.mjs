@@ -15,6 +15,8 @@
  * 只有语气词的块）极易误判；这里提供从首块结果锁定语言的决策函数。
  */
 
+import { parseGlossaryEntry } from "../../shared/hotword-domains.mjs";
+
 /** Whisper prompt 的安全字符预算；留出余量避免被 tokenizer 截断后丢掉术语表。 */
 export const DEFAULT_PROMPT_MAX_CHARS = 220;
 /** 前文只取尾部这一小段，过长会把 prompt 预算吃光并污染当前块。 */
@@ -25,12 +27,14 @@ const SENTENCE_END = /[。！？!?…；;]/g;
 const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g;
 const LATIN = /[a-z\u00c0-\u024f]/gi;
 
-/** 术语表清洗：去空、去过长误粘贴段落、按原样去重。 */
+/** 术语表清洗：去空、去过长误粘贴段落、剥离用户自定义别名后缀只保留标准写法、按原样去重。 */
 export function normalizeGlossary(glossary = []) {
   const seen = new Set();
   const result = [];
   for (const raw of Array.isArray(glossary) ? glossary : []) {
-    const term = String(raw ?? "").trim();
+    const parsed = parseGlossaryEntry(raw);
+    if (!parsed) continue;
+    const term = parsed.term;
     if (!term || term.length > 40) continue;
     if (seen.has(term)) continue;
     seen.add(term);

@@ -15,7 +15,7 @@ export const diarizationPathKey = (slot: DiarizationSlot) => slot === "segmentat
 export function findDiarizationFiles(profile: ModelProfile, models: DownloadableModel[], scan: DiarizationScanResult): DiarizationModelFiles {
   const files: DiarizationModelFiles = {};
   for (const slot of ["segmentation", "embedding"] as const) {
-    if (profile.options[diarizationPathKey(slot)]) continue;
+    if (profile.options[diarizationPathKey(slot)]?.trim()) continue;
     const installed = models.find((model) => model.group === "diarization" && model.installed && model.localPath && diarizationSlotOf(model.id) === slot);
     const found = installed?.localPath ? { path: installed.localPath, name: installed.fileName ?? installed.id } : scan[slot][0];
     if (found) files[slot] = found;
@@ -30,4 +30,30 @@ export function configureDiarizationModels(profile: ModelProfile, files: Diariza
     if (files[slot]) options[diarizationPathKey(slot)] = files[slot]!.path;
   }
   return save({ ...profile, kind: "diarization", transport: "sherpa-onnx", name: "本地声纹识别", enabled: true, options });
+}
+
+/** Reuse installed files first and persist each completed slot so retries resume. */
+export async function prepareDiarizationModels(profile: ModelProfile, models: {
+  catalog(): Promise<DownloadableModel[]>;
+  scanDiarization(): Promise<DiarizationScanResult>;
+  download(id: string): Promise<{ path: string; name: string }>;
+  save(profile: ModelProfile): Promise<ModelProfile>;
+}, onDownload: (model: DownloadableModel) => void) {
+  const [catalog, scan] = await Promise.all([
+    models.catalog().catch(() => DIARIZATION_SETUP_MODELS),
+    models.scanDiarization().catch(() => ({ segmentation: [], embedding: [] }))
+  ]);
+  const detected = findDiarizationFiles(profile, catalog, scan);
+  let current = Object.keys(detected).length
+    ? await configureDiarizationModels(profile, detected, models.save)
+    : profile;
+
+  for (const model of DIARIZATION_SETUP_MODELS) {
+    const slot = diarizationSlotOf(model.id);
+    if (current.options[diarizationPathKey(slot)]?.trim()) continue;
+    onDownload(model);
+    const file = await models.download(model.id);
+    current = await configureDiarizationModels(current, { [slot]: file }, models.save);
+  }
+  return current;
 }

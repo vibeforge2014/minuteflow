@@ -18,20 +18,19 @@ export function ImportProcessingMeta({ job, compact = false, showDetail = true, 
   queuePosition?: number;
 }) {
   const [now, setNow] = useState(() => Date.now());
-  // 仅分离阶段需要每秒重绘（已用时间）；其它阶段由任务推送驱动即可。
+  const timedStage = job.status === "summarizing" || job.status === "diarizing";
   useEffect(() => {
-    if (job.status !== "diarizing" || !job.diarizationStartedAt) return;
+    if (!timedStage) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [job.status, job.diarizationStartedAt]);
+  }, [timedStage]);
 
   const fraction = importProgressFraction(job);
   const detail = job.status === "queued" && queuePosition
     ? `排队第 ${queuePosition} 位`
     : describeImportProgressDetail(job, now);
-  // 排队与说话人分离都没有细粒度百分比：用流动进度条表示“仍在推进”。
-  const indeterminate = job.status === "diarizing" || job.status === "queued";
+  const indeterminate = timedStage || job.status === "queued";
   return (
     <div className={`import-processing-meta ${compact ? "is-compact" : ""}`}>
       <div

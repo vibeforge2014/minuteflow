@@ -34,7 +34,7 @@ interface Props {
   /** 从队列移除终态/等待态任务记录（不影响已创建的会议）。 */
   onRemove(id: string): void;
   onOpenMeeting(id: string): void;
-  onConfigure(): void;
+  onConfigure(kind: "llm" | "transcription"): void;
 }
 
 const LANGUAGE_LABELS: Record<string, string> = {
@@ -170,7 +170,7 @@ export function ImportDrawer(props: Props) {
                 : `${props.candidates.length} 个文件 · 后台按顺序处理。`;
             })()}
           </p>
-          {!sttProfiles.length && <button className="import-model-hint" onClick={props.onConfigure}><GearSix size={16} /><span><strong>尚未配置转录模型</strong>音频仍会先安全归档，配置后自动继续。</span></button>}
+          {!sttProfiles.length && <button className="import-model-hint" onClick={() => props.onConfigure("transcription")}><GearSix size={16} /><span><strong>尚未配置转录模型</strong>音频仍会先安全归档，配置后自动继续。</span></button>}
           {/* 空标题不需要拦住提交：主进程会用文件名兜底命名（import-queue.mjs），
               不让「忘了改标题」挡住一键导入。 */}
           <button className="button button--primary import-submit" disabled={busy} onClick={async () => {
@@ -199,7 +199,7 @@ export function ImportDrawer(props: Props) {
             <div className="import-job__actions" onClick={(event) => event.stopPropagation()}>
               {/* 行内操作按钮阻止冒泡，避免触发整行「打开会议」。 */}
               {isRetryableImportJob(job) && <button onClick={() => props.onRetry(job.id)}><ArrowClockwise size={14} />{canRetryTranscriptionGaps(job) ? "补转漏段" : job.status === "waiting_for_network" ? "立即重试" : "重试当前阶段"}</button>}
-              {["waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(job.status) && <button onClick={props.onConfigure}><GearSix size={14} />配置</button>}
+              {["waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool"].includes(job.status) && <button onClick={() => props.onConfigure(job.status === "waiting_for_summary_model" ? "llm" : "transcription")}><GearSix size={14} />配置</button>}
               {job.status === "diarizing" && <button onClick={() => props.onSkipDiarization(job.id)}>跳过识别</button>}
               {!['complete', 'cancelled', 'failed'].includes(job.status) && <button onClick={() => props.onCancel(job.id)}>暂停</button>}
               {["complete", "cancelled", "failed", "waiting_for_model", "waiting_for_summary_model", "waiting_for_audio_tool", "waiting_for_network"].includes(job.status) && <button className="import-job__remove" onClick={() => props.onRemove(job.id)}><Trash size={14} />删除</button>}

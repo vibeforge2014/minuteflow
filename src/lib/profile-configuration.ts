@@ -22,3 +22,11 @@ export function validateProfileConfiguration(profile: ModelProfile, apiKey: stri
 export function profileConfigurationKey(profile: ModelProfile | null): string {
   return JSON.stringify(profile);
 }
+
+
+/** Keep explicit configuration names and replace placeholders with the selected model. */
+export function summaryProfileDisplayName(profile: ModelProfile): string {
+  return profile.kind === "llm" && ["自定义总结服务", "自定义模型", "OpenAI 兼容模型", "New API 大模型", ""].includes(profile.name.trim())
+    ? profile.model.trim() || profile.name
+    : profile.name;
+}

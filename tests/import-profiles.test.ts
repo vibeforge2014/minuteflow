@@ -8,7 +8,7 @@
  * 2) 任务显式钉住的档案（含未启用）优先于全局启用项。
  */
 import { describe, expect, it } from "vitest";
-import { chunkPlanDefaults, importTranscriptionRoute, isLocalModelGatedRoute, resolveJobProfile } from "../electron/services/import-profiles.mjs";
+import { chunkPlanDefaults, importTranscriptionRoute, isLocalModelGatedRoute, resolveImportSummaryRetryProfile, resolveJobProfile } from "../electron/services/import-profiles.mjs";
 
 const appleSpeech = { id: "stt-apple", kind: "stt", transport: "apple-speech", enabled: true };
 const newApiWhisper = { id: "stt-newapi", kind: "stt", transport: "openai", enabled: false };
@@ -37,6 +37,17 @@ describe("resolveJobProfile", () => {
   it("该类别没有任何档案时返回 null（任务进入 waiting_for_model）", () => {
     expect(resolveJobProfile([llmProfile], "stt", undefined)).toBeNull();
     expect(resolveJobProfile([], "stt", "stt-apple")).toBeNull();
+  });
+});
+
+describe("resolveImportSummaryRetryProfile", () => {
+  it("uses the current default for summary retries and honors an explicit previous-model selection", () => {
+    const official = { ...llmProfile, id: "deepseek-api", isDefault: true };
+    const saved = [...profiles, official];
+    expect(resolveImportSummaryRetryProfile(saved, llmProfile.id)).toBe(official);
+    expect(resolveImportSummaryRetryProfile(saved, llmProfile.id, llmProfile.id)).toBe(llmProfile);
+    expect(resolveJobProfile(saved, "llm", llmProfile.id)).toBe(llmProfile);
+    expect(resolveImportSummaryRetryProfile(saved, llmProfile.id, appleSpeech.id)).toBeNull();
   });
 });
 

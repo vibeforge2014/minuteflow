@@ -307,7 +307,7 @@ struct SettingsView: View {
   private func taskSummary(_ task: ModelServiceTask) -> String {
     switch task {
     case .summary:
-      preferences.summaryProvider == .local ? "本机运行 · 无需联网" : "在线服务 · \(preferences.summaryModel)"
+      preferences.summaryProvider == .local ? "待配置" : "在线服务 · \(preferences.summaryModel)"
     case .transcription:
       preferences.transcriptionProvider == .appleSpeech ? "本机运行 · Apple Speech" : "在线服务 · \(preferences.transcriptionModel)"
     }
@@ -358,7 +358,7 @@ private struct TaskModelSettingsView: View {
   /// 该任务当前是否走在线服务。
   private var isOnline: Bool {
     switch task {
-    case .summary: preferences.summaryProvider == .openAICompatible
+    case .summary: true
     case .transcription: preferences.transcriptionProvider == .remoteWhisper
     }
   }
@@ -385,12 +385,12 @@ private struct TaskModelSettingsView: View {
     Form {
       // 运行位置：结果导向二选一，不先暴露协议细节。
       Section {
-        Picker("运行位置", selection: runLocationBinding) {
-          Text("在本机运行").tag(false)
-          Text("使用在线服务").tag(true)
-        }
-        .pickerStyle(.segmented)
         if task == .transcription {
+          Picker("运行位置", selection: runLocationBinding) {
+            Text("在本机运行").tag(false)
+            Text("使用在线服务").tag(true)
+          }
+          .pickerStyle(.segmented)
           Picker("主要语言", selection: $preferences.language) {
             Text("中文（简体）").tag("zh-CN")
             Text("English").tag("en-US")
@@ -493,7 +493,7 @@ private struct TaskModelSettingsView: View {
       set: { online in
         switch task {
         case .summary:
-          preferences.summaryProvider = online ? .openAICompatible : .local
+          break
         case .transcription:
           preferences.transcriptionProvider = online ? .remoteWhisper : .appleSpeech
         }
@@ -541,7 +541,7 @@ private struct TaskModelSettingsView: View {
   private var localOnlyDescription: String {
     switch task {
     case .summary:
-      "本机基础纪要由关键词引擎生成，完全离线，不上传任何数据。"
+      "请配置 AI 总结模型。"
     case .transcription:
       "Apple Speech 由系统提供，免费即时；识别是否完全在设备端取决于语言与系统资源。"
     }
@@ -557,6 +557,7 @@ private struct TaskModelSettingsView: View {
         try KeychainService().remove(account: account)
       } else {
         try KeychainService().save(key, account: account)
+        if task == .summary { preferences.summaryProvider = .openAICompatible }
       }
       statusMessage = "已安全保存到系统钥匙串"
     } catch {
@@ -638,7 +639,7 @@ private struct RecentlyDeletedView: View {
 
 /// 四步首次引导：产品说明 → 权限 → 语音转录 → 大模型总结。
 /// iOS 内置 Apple Speech，因此把它作为无需账号的本机转录路径，同时明确提供远程
-/// Whisper 配置；大模型可跳过，随后稳定降级为本机基础纪要。
+/// Whisper 和 AI 总结模型配置。
 struct OnboardingView: View {
   @Environment(RecordingCoordinator.self) private var recorder
   @Environment(AppPreferences.self) private var preferences
@@ -744,7 +745,7 @@ struct OnboardingView: View {
         onboardingFeature("waveform", title: "语音转录", detail: "Apple Speech 或 Whisper")
         Image(systemName: "arrow.right")
           .foregroundStyle(.tertiary)
-        onboardingFeature("sparkles", title: "AI 纪要", detail: "本机基础或在线大模型")
+        onboardingFeature("sparkles", title: "AI 纪要", detail: "使用已配置的大模型")
       }
     }
   }
@@ -847,22 +848,10 @@ struct OnboardingView: View {
         "sparkles",
         eyebrow: "第二项 · AI 总结",
         title: "把文字整理成可执行纪要",
-        detail: "在线模型生成更完整的终稿；不配置时会自动使用本机基础纪要。"
+        detail: "配置模型后即可生成纪要。"
       )
 
       VStack(alignment: .leading, spacing: 14) {
-        Picker("纪要方式", selection: Binding(
-          get: { preferences.summaryProvider },
-          set: { preferences.summaryProvider = $0 }
-        )) {
-          ForEach(SummaryProviderKind.allCases) { provider in
-            Text(provider.rawValue).tag(provider)
-          }
-        }
-        .pickerStyle(.segmented)
-        .accessibilityIdentifier("onboarding-summary-provider")
-
-        if preferences.summaryProvider == .openAICompatible {
           // 常用厂商预设：一键预填官方端点与推荐模型，通常只需再填密钥。
           ModelPresetMenu(
             presets: ModelServicePreset.summaryPresets,
@@ -898,11 +887,7 @@ struct OnboardingView: View {
           Text("视觉纪要需要稍后在设置中测试连接并通过结构验证，模型配置不会按名称猜测能力。")
             .font(.footnote)
             .foregroundStyle(.secondary)
-        } else {
-          Label("无需密钥，会议内容不上传；信息密度会低于在线终稿。", systemImage: "lock.shield.fill")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-        }
+
       }
       .padding(18)
       .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -921,12 +906,10 @@ struct OnboardingView: View {
       }
       Spacer()
 
-      // 一键跳过：落推荐默认（Apple Speech + 本机纪要），不想逐页配置的用户
-      // 两次点击即可开始用；详细配置之后随时可在设置里补。
+      // 可以跳过模型配置，之后从设置补充。
       if page > 0 {
-        Button("跳过，使用推荐配置") {
+        Button("跳过，稍后配置") {
           preferences.transcriptionProvider = .appleSpeech
-          preferences.summaryProvider = .local
           preferences.hasCompletedOnboarding = true
         }
         .foregroundStyle(.secondary)
@@ -966,7 +949,7 @@ struct OnboardingView: View {
         .disabled(!transcriptionConfigurationIsComplete)
         .accessibilityIdentifier("onboarding-transcription-next")
       } else {
-        Button(preferences.summaryProvider == .local ? "使用本机纪要并完成" : "保存并完成") {
+        Button("保存并完成") {
           do {
             try saveSummaryConfiguration()
             preferences.hasCompletedOnboarding = true
@@ -993,7 +976,7 @@ struct OnboardingView: View {
   }
 
   private var summaryConfigurationIsComplete: Bool {
-    preferences.summaryProvider == .local || (
+    (
       !preferences.summaryBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         && !preferences.summaryModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         && !summaryAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1013,11 +996,11 @@ struct OnboardingView: View {
   }
 
   private func saveSummaryConfiguration() throws {
-    guard preferences.summaryProvider == .openAICompatible else { return }
     try KeychainService().save(
       summaryAPIKey.trimmingCharacters(in: .whitespacesAndNewlines),
       account: KeychainService.summaryAPIKeyAccount
     )
+    preferences.summaryProvider = .openAICompatible
   }
 
   private func onboardingSymbol(_ name: String) -> some View {

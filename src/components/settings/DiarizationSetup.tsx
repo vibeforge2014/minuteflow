@@ -6,10 +6,11 @@ import { configureDiarizationModels, DIARIZATION_SETUP_MODELS, diarizationPathKe
 import { useMeetingStore } from "../../store/meetingStore";
 import type { DiarizationScanResult, DownloadableModel, ModelDownloadProgress, ModelProfile } from "../../types";
 
-export function DiarizationSetup({ profile, onChange, onCommit }: {
+export function DiarizationSetup({ profile, onChange, onCommit, onBusyChange }: {
   profile: ModelProfile;
   onChange(profile: ModelProfile): void;
   onCommit?(profile: ModelProfile): void;
+  onBusyChange?(busy: boolean): void;
 }) {
   const [catalog, setCatalog] = useState<DownloadableModel[]>(DIARIZATION_SETUP_MODELS);
   const [catalogBusy, setCatalogBusy] = useState(true);
@@ -52,6 +53,7 @@ export function DiarizationSetup({ profile, onChange, onCommit }: {
     if (operation.current) return;
     operation.current = true;
     setBusy(true);
+    onBusyChange?.(true);
     setMessage(null);
     try { await action(); }
     catch (error) {
@@ -59,6 +61,7 @@ export function DiarizationSetup({ profile, onChange, onCommit }: {
     } finally {
       operation.current = false;
       if (mounted.current) setBusy(false);
+      onBusyChange?.(false);
     }
   };
 

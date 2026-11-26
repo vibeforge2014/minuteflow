@@ -9,7 +9,7 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
 import { mergeTranscriptSegments } from "../lib/transcript";
-import { mergeSummaryRevision } from "../lib/summary";
+import { mergeSummaryRevision, resolveImportedSummaryMerge } from "../lib/summary";
 import type { CreateMeetingInput, Meeting, MeetingPreferences, MeetingSummary, ModelProfile, TranscriptSegment } from "../types";
 
 /**
@@ -211,10 +211,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
         }),
         durationSeconds: incoming.durationSeconds,
         status: incoming.status,
-        summary: {
-          ...mergeSummaryRevision(current.summary, incoming.summary),
-          stale: incoming.summary.stale || (current.title !== incoming.title && Boolean(incoming.summary.updatedAt))
-        },
+        summary: resolveImportedSummaryMerge(current.summary, incoming.summary, current.title !== incoming.title),
         participants: incoming.participants,
         updatedAt: incoming.updatedAt
       };

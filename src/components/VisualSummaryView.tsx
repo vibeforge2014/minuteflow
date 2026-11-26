@@ -7,24 +7,24 @@ interface VisualSummaryViewProps {
   visual?: VisualSummary;
   capable: boolean;
   busy: boolean;
+  error?: string;
   onRetry(): void;
 }
 
 /** 受限 schema 的原生视觉纪要渲染器；不使用 dangerouslySetInnerHTML。 */
-export function VisualSummaryView({ meeting, participants, visual, capable, busy, onRetry }: VisualSummaryViewProps) {
+export function VisualSummaryView({ meeting, participants, visual, capable, busy, error, onRetry }: VisualSummaryViewProps) {
   const visibleParticipants = participants ?? meeting.participants;
 
   if (!visual) {
     return (
       <section className="visual-summary-empty">
-        <span><ImageSquare size={28} weight="duotone" /></span>
-        <h2>{capable ? "视觉纪要尚未生成" : "当前使用普通纪要"}</h2>
-        <p>{capable
-          ? "会随最终纪要一起生成。"
-          : "在「设置 → AI 总结」开启视觉纪要并完成验证。"}</p>
-        {capable && (
-          <button className="button button--primary" disabled={busy} onClick={onRetry}>
-            {busy ? <><span className="button-spinner" />正在生成</> : <><Sparkle size={16} />生成视觉纪要</>}
+        <span aria-hidden="true">{error ? <WarningCircle size={28} /> : <ImageSquare size={28} weight="duotone" />}</span>
+        <h2>{error ? "视觉纪要生成失败" : capable ? "视觉纪要尚未生成" : "当前使用普通纪要"}</h2>
+        {error && <p role="alert">{error}</p>}
+        {!capable && <p>在「设置 → AI 总结」开启视觉纪要并完成验证。</p>}
+        {capable && !busy && (
+          <button className="button button--primary" onClick={onRetry}>
+            {error ? <ArrowClockwise size={16} /> : <Sparkle size={16} />}{error ? "重试生成" : "生成视觉纪要"}
           </button>
         )}
       </section>
@@ -34,11 +34,11 @@ export function VisualSummaryView({ meeting, participants, visual, capable, busy
   const stale = visual.stale || (meeting.summary.updatedAt && visual.sourceSummaryUpdatedAt !== meeting.summary.updatedAt);
   return (
     <div className="visual-summary-shell">
-      {stale && (
+      {(stale || error) && (
         <div className="visual-summary-stale">
-          <WarningCircle size={17} weight="fill" />
-          <span>普通纪要已有更新，当前视觉版基于上一版本。</span>
-          <button className="text-button" disabled={busy} onClick={onRetry}><ArrowClockwise size={14} />重试视觉版</button>
+          <WarningCircle size={17} weight="fill" aria-hidden="true" />
+          <span role={error ? "alert" : undefined}>{error || "普通纪要已有更新，当前视觉版基于上一版本。"}</span>
+          {!busy && capable && <button className="text-button" onClick={onRetry}><ArrowClockwise size={14} />{error ? "重试生成" : "更新视觉纪要"}</button>}
         </div>
       )}
       <article className="visual-summary-canvas" data-visual-summary-export>

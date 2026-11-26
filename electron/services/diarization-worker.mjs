@@ -21,6 +21,8 @@ import {
   buildSpeechWindows,
   computeClusterCentroids,
   computeVoiceprintEmbedding,
+  createVoiceprintExtractor,
+  embedVoiceprintSamples,
   diarizeAudioWindows,
   matchVoiceprint,
   mergeDiarizationClusters,
@@ -67,7 +69,7 @@ async function ensureWave(filePath, sherpaOnnx, ffmpegPath) {
 }
 
 /** 一次完整的离线分离：分段聚类 → 簇心合并 → （有声纹簿时）自动命名。 */
-async function diarize(request, reportProgress) {
+async function diarize(request, reportProgress, reportUnnamedTurns) {
   const { audioFilePath, ffmpegPath, segmentationModel, embeddingModel } = request;
   let sherpaOnnx;
   try {
@@ -89,16 +91,12 @@ async function diarize(request, reportProgress) {
     // 处理过的远场多人音频上只检出零头（实测 452s 里 24s），窗口化后真实说话人
     // 才能分开。导入音频（近场、检出充分）继续走 pyannote 全量路径。
     let turns;
+    let extractor;
     if (request.transcriptSpans?.length) {
       reportProgress({ phase: "loading" });
       const windows = buildSpeechWindows(request.transcriptSpans);
       if (!windows.length) return [];
-      const extractor = new sherpaOnnx.SpeakerEmbeddingExtractor({
-        model: embeddingModel,
-        numThreads: 2,
-        debug: false,
-        provider: "cpu"
-      });
+      extractor = createVoiceprintExtractor(sherpaOnnx, embeddingModel);
       reportProgress({
         phase: "analyzing",
         audioDurationMs: Math.round((wave.samples.length / Math.max(1, wave.sampleRate)) * 1000)
@@ -113,16 +111,13 @@ async function diarize(request, reportProgress) {
           embeddings.push(null);
           continue;
         }
-        const stream = extractor.createStream();
-        stream.acceptWaveform({ sampleRate: wave.sampleRate, samples: wave.samples.subarray(start, end) });
-        const embedding = extractor.compute(stream, false);
-        embeddings.push(embedding?.length ? Float32Array.from(embedding) : null);
+        embeddings.push(embedVoiceprintSamples(extractor, wave.sampleRate, wave.samples.subarray(start, end)));
       }
       reportProgress({ phase: "refining" });
       // 初筛宁粗勿碎（0.5），再复用导入链路的簇心合并 + 碎片归并收口——
       // 真实直播录音上 4s 窗初筛 + merge 恰好还原真实的说话人数。
       const clustered = windowsToTurns(windows, assignWindowsToClusters(embeddings));
-      const centroids = computeClusterCentroids(sherpaOnnx, embeddingModel, wave, clustered);
+      const centroids = computeClusterCentroids(extractor, wave, clustered);
       turns = mergeDiarizationClusters(clustered, centroids);
     } else {
       reportProgress({ phase: "loading" });
@@ -146,16 +141,21 @@ async function diarize(request, reportProgress) {
       // 长录音会把整小时的特征和聚类数据塞进同一次原生调用。限制单次窗口，
       // 再用整场归档音频上的声纹簇心合并各窗口身份。
       const rawTurns = diarizeAudioWindows(wave, (samples) => diarizer.process(samples), {
+        windowMs: 60_000,
         checkpoint: request.diarizationCheckpoint,
         onWindow: (window) => reportProgress({ phase: "analyzing", audioDurationMs, window })
       });
       // 阈值聚类在真实嘈杂音频上常把同一人劈成多个簇：算出簇心后做后处理合并。
       reportProgress({ phase: "refining" });
-      const centroidEmbeddings = computeClusterCentroids(sherpaOnnx, embeddingModel, wave, rawTurns);
+      if (!rawTurns.length) return [];
+      extractor = createVoiceprintExtractor(sherpaOnnx, embeddingModel);
+      const centroidEmbeddings = computeClusterCentroids(extractor, wave, rawTurns);
       turns = mergeDiarizationClusters(rawTurns, centroidEmbeddings);
     }
-    if (!samples.length) return turns;
+    const compatibleSamples = samples.filter((sample) => sample.embedding.length === extractor?.dim);
+    if (!turns.length || !compatibleSamples.length) return turns;
 
+    reportUnnamedTurns(turns);
     reportProgress({ phase: "naming" });
     const identified = new Map();
     const claimedNames = new Set();
@@ -163,12 +163,11 @@ async function diarize(request, reportProgress) {
     for (const speakerId of new Set(turns.map((turn) => turn.speakerId))) {
       try {
         const embedding = computeVoiceprintEmbedding(
-          sherpaOnnx,
-          embeddingModel,
+          extractor,
           wave,
           turns.filter((turn) => turn.speakerId === speakerId)
         );
-        const match = matchVoiceprint(embedding, samples, {
+        const match = matchVoiceprint(embedding, compatibleSamples, {
           threshold: request.voiceprintThreshold,
           margin: request.voiceprintMargin
         });
@@ -193,7 +192,8 @@ process.parentPort.on("message", (event) => {
   const { id, ...request } = event.data ?? {};
   // 进度帧与结果帧共用 id；父进程按 message.progress 区分，不会误当结果。
   const reportProgress = (progress) => process.parentPort.postMessage({ id, progress });
-  diarize(request, reportProgress)
+  const reportUnnamedTurns = (unnamedTurns) => process.parentPort.postMessage({ id, unnamedTurns });
+  diarize(request, reportProgress, reportUnnamedTurns)
     .then((turns) => process.parentPort.postMessage({ id, ok: true, turns }))
     .catch((error) => process.parentPort.postMessage({
       id, ok: false, error: error instanceof Error ? error.message : String(error ?? "说话人分离失败。")

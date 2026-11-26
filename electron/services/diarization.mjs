@@ -14,7 +14,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
 import { managedFfmpegPath } from "./local-models.mjs";
-import { computeVoiceprintEmbedding } from "./diarization-core.mjs";
+import { computeVoiceprintEmbedding, createVoiceprintExtractor } from "./diarization-core.mjs";
+import { splitTimedTranscriptClauses } from "./transcript-grouping.mjs";
 
 export {
   cosineSimilarity,
@@ -87,7 +88,7 @@ export async function extractVoiceprintEmbedding(profile, audioFilePath, interva
   const waveAsset = await ensureWave(audioFilePath, sherpaOnnx);
   try {
     const wave = sherpaOnnx.readWave(waveAsset.filePath, false);
-    return computeVoiceprintEmbedding(sherpaOnnx, embeddingModel, wave, intervals);
+    return computeVoiceprintEmbedding(createVoiceprintExtractor(sherpaOnnx, embeddingModel), wave, intervals);
   } finally {
     if (waveAsset.temporary) await unlink(waveAsset.filePath).catch(() => {});
   }
@@ -114,6 +115,8 @@ function runDiarizationWorker(request, { signal, onProgress } = {}) {
       return;
     }
     let settled = false;
+    let unnamedTurns;
+    let phase = "startup";
     const finish = (settle, value) => {
       if (settled) return;
       settled = true;
@@ -130,14 +133,26 @@ function runDiarizationWorker(request, { signal, onProgress } = {}) {
       if (settled) return;
       // 进度帧没有 ok 字段：先转给调用方，Promise 仍挂起等待最终结果。
       if (message?.progress) {
+        phase = message.progress.phase;
         onProgress?.(message.progress);
+        return;
+      }
+      if (Array.isArray(message?.unnamedTurns)) {
+        unnamedTurns = message.unnamedTurns;
         return;
       }
       if (message?.ok) finish(resolve, message.turns);
       else finish(reject, new Error(message?.error || "说话人分离失败。"));
     });
     child.once("exit", (code) => {
-      if (!settled) finish(reject, new Error(`说话人分离进程异常退出（代码 ${code ?? "?"}）。`));
+      if (settled) return;
+      if (unnamedTurns) {
+        console.warn(`[diarization] 声纹匹配进程退出（代码 ${code ?? "?"}），已保留分离结果。`);
+        finish(resolve, unnamedTurns);
+        return;
+      }
+      console.warn(`[diarization] 进程在 ${phase} 阶段退出（代码 ${code ?? "?"}）。`);
+      finish(reject, new Error(`说话人分离进程异常退出（代码 ${code ?? "?"}）。`));
     });
     child.postMessage({ id: 1, ...request });
   });
@@ -182,36 +197,111 @@ export async function diarizeWithSherpa(profile, audioFilePath, options = {}) {
   }, { signal: options.signal, onProgress: options.onProgress });
 }
 
+function pickTurnForRange(startMs, endMs, turns) {
+  const midpoint = (startMs + endMs) / 2;
+  let turn;
+  let bestOverlap = 0;
+  let nearestGap = Number.POSITIVE_INFINITY;
+  for (const item of turns) {
+    const overlap = Math.max(0, Math.min(endMs, item.endMs) - Math.max(startMs, item.startMs));
+    const gap = Math.max(item.startMs - midpoint, 0, midpoint - item.endMs);
+    if (overlap > bestOverlap || (overlap === bestOverlap && gap < nearestGap)) {
+      bestOverlap = overlap;
+      nearestGap = gap;
+      turn = item;
+    }
+  }
+  return { turn, bestOverlap };
+}
+
+function labelFromTurn(turn) {
+  const speakerNumber = turn.speakerId.replace(/\D/g, "") || "1";
+  return {
+    speakerId: turn.speakerId,
+    // 未匹配声纹库的聚类用「发言人N」占位，用户在转写里改名即注册声纹。
+    speakerName: turn.speakerName || `发言人${speakerNumber}`
+  };
+}
+
+/** 判断一个转录段是否实质性跨越了 ≥2 位说话人（排除轮次边缘的轻微溢出）。 */
+function hasMultipleSignificantSpeakers(startMs, endMs, turns) {
+  const overlapBySpeaker = new Map();
+  for (const item of turns) {
+    const overlap = Math.max(0, Math.min(endMs, item.endMs) - Math.max(startMs, item.startMs));
+    if (overlap <= 0) continue;
+    overlapBySpeaker.set(item.speakerId, (overlapBySpeaker.get(item.speakerId) ?? 0) + overlap);
+  }
+  if (overlapBySpeaker.size < 2) return false;
+  const sorted = [...overlapBySpeaker.values()].sort((left, right) => right - left);
+  const duration = Math.max(1, endMs - startMs);
+  const minSecondaryOverlap = Math.min(800, Math.max(400, Math.round(duration * 0.2)));
+  return sorted[1] >= minSecondaryOverlap;
+}
+
+const PLACEHOLDER_SPEAKER_NAME = /^(?:我|远端发言人|未分离|发言人\d*(?:\s*·\s*待校准)?)$/;
+
+/** 判断一条段落的发言人名是否是用户手工改名（非系统默认/占位标签）。 */
+export function isManualSpeakerName(name) {
+  const trimmed = String(name || "").trim();
+  return Boolean(trimmed) && !PLACEHOLDER_SPEAKER_NAME.test(trimmed);
+}
+
 /**
- * 把分离轮次套回转录段：按真实时间重叠量选择说话人；
- * 轮次之间总有间隙，命不中任何轮次的段落归给时间上最近的轮次——沿用旧标签
- * 会与分离结果的 speaker-N 撞 id，同一个人分裂成两个名字。
+ * 把分离轮次套回转录段：
+ * - 单说话人段：按真实时间重叠量选择说话人；轮次间隙归给时间上最近的轮次。
+ * - 跨说话人段（例如直播合并后的插话、或 STT 返回的长段跨两人）：按句子/子句拆开
+ *   逐片匹配说话人，相邻同人片段自动合回，确保突然插话能被独立拆出。
+ * - preserveManualLabels=true（录音后后台分离回填）：跳过用户已手工改名的段落，
+ *   避免后台跑完后把用户刚才改好的「张三」回滚成「发言人2」。
  * @param {Array} transcript 转录段落
  * @param {Array<{startMs,endMs,speakerId}>} turns diarizeWithSherpa 的轮次
  * @returns {Array} 更新说话人标签后的转录段
  */
-export function applyDiarization(transcript, turns) {
+export function applyDiarization(transcript, turns, { requireOverlap = false, preserveManualLabels = false } = {}) {
   if (!turns.length) return transcript;
-  return transcript.map((segment) => {
-    const midpoint = (segment.startMs + segment.endMs) / 2;
-    let turn;
-    let bestOverlap = 0;
-    let nearestGap = Number.POSITIVE_INFINITY;
-    for (const item of turns) {
-      const overlap = Math.max(0, Math.min(segment.endMs, item.endMs) - Math.max(segment.startMs, item.startMs));
-      const gap = Math.max(item.startMs - midpoint, 0, midpoint - item.endMs);
-      if (overlap > bestOverlap || (overlap === bestOverlap && gap < nearestGap)) {
-        bestOverlap = overlap;
-        nearestGap = gap;
-        turn = item;
+  return transcript.flatMap((segment) => {
+    if (preserveManualLabels && isManualSpeakerName(segment.speakerName)) {
+      return [segment];
+    }
+    if (segment.status === "final" && hasMultipleSignificantSpeakers(segment.startMs, segment.endMs, turns)) {
+      const clauses = splitTimedTranscriptClauses(segment.text, segment.startMs, segment.endMs);
+      if (clauses.length > 1) {
+        const assigned = clauses.map((clause) => {
+          const picked = pickTurnForRange(clause.startMs, clause.endMs, turns);
+          if (requireOverlap && !picked.bestOverlap) {
+            return { ...clause, speakerId: segment.speakerId, speakerName: segment.speakerName };
+          }
+          return { ...clause, ...labelFromTurn(picked.turn) };
+        });
+        const merged = [];
+        for (const item of assigned) {
+          const previous = merged.at(-1);
+          if (previous && previous.speakerId === item.speakerId) {
+            const spacer = /[a-z\d]$/i.test(previous.text) && /^[a-z\d]/i.test(item.text) ? " " : "";
+            previous.endMs = Math.max(previous.endMs, item.endMs);
+            previous.text = `${previous.text}${spacer}${item.text}`;
+          } else {
+            merged.push({ ...item });
+          }
+        }
+        if (merged.length > 1) {
+          return merged.map((piece, index) => ({
+            ...segment,
+            id: index === 0 ? segment.id : `${segment.id}:turn:${index}`,
+            startMs: piece.startMs,
+            endMs: piece.endMs,
+            text: piece.text,
+            speakerId: piece.speakerId,
+            speakerName: piece.speakerName
+          }));
+        }
       }
     }
-    const speakerNumber = turn.speakerId.replace(/\D/g, "") || "1";
-    return {
+    const { turn, bestOverlap } = pickTurnForRange(segment.startMs, segment.endMs, turns);
+    if (requireOverlap && !bestOverlap) return [segment];
+    return [{
       ...segment,
-      speakerId: turn.speakerId,
-      // 未匹配声纹库的聚类用「发言人N」占位，用户在转写里改名即注册声纹。
-      speakerName: turn.speakerName || `发言人${speakerNumber}`
-    };
+      ...labelFromTurn(turn)
+    }];
   });
 }

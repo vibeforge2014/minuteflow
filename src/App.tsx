@@ -46,15 +46,17 @@ import { useMeetingStore } from "./store/meetingStore";
 import { useMeetingRecorder } from "./hooks/useMeetingRecorder";
 import { useExitPresence } from "./hooks/useExitPresence";
 import { api } from "./lib/api";
-import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Meeting } from "./types";
+import type { CreateMeetingInput, ImportCandidate, ImportJob, LicenseStatus, Meeting, ModelProfile } from "./types";
 import { BrandMark } from "./components/BrandMark";
 import { buildRecordingReadiness, deriveWorkspaceStage, isImportedMeeting, isLocalTranscriptionTransport, shouldAutoOpenRightPanel, shouldUseTranscriptionWorkspace, type WorkspaceStage } from "./lib/workspace";
-import { describeImportProcessing, isActiveImportJob, mergeImportJob, mergeImportJobs, selectMeetingImportJob } from "./lib/import-status";
+import { describeImportProcessing, isActiveImportJob, mergeImportJob, mergeImportJobs, selectMeetingImportJob, shouldRollImportSummary } from "./lib/import-status";
 import type { SystemPermissionStatus } from "./types";
 import { finishPermissionSetup, shouldOpenPermissionSetup } from "./lib/permissions";
 // 工作台主题覆盖层放在 App 内：开发态 Electron 走 main.tsx + lazy App、生产态走
 // desktop-main.tsx，两者都会加载它；官网只渲染 MarketingSite、不加载 App，因此零影响。
 import "./styles-professional.css";
+// Warm Studio 视觉刷新层：只调整表面、强调色用量与组件形态，删除此行即可回滚。
+import "./styles-refresh.css";
 
 export function App() {
   const forceMacPermissionPreview = import.meta.env.DEV
@@ -87,8 +89,10 @@ export function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>();
   /** 打开设置时的定位意图：直达本地 Whisper 或在线转写表单，而不是让用户自己找。 */
   const [settingsFocus, setSettingsFocus] = useState<SettingsFocus>();
+  const [guidedSettings, setGuidedSettings] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingSavedModel, setOnboardingSavedModel] = useState<ModelProfile>();
   const [permissionsOpen, setPermissionsOpen] = useState(false);
   const [paywallOpen, setPaywallOpen] = useState(false);
   const [paywallReason, setPaywallReason] = useState<string>();
@@ -119,6 +123,9 @@ export function App() {
   const [minutesJump, setMinutesJump] = useState<{ meetingId: string; ms: number; segmentId?: string; nonce: number } | null>(null);
   const [playerAvailable, setPlayerAvailable] = useState(false);
   const [playerOpen, setPlayerOpen] = useState(false);
+  // 有音频的会议首次进入时自动展开播放器一次，让「录音回放」第一眼可见，而不是
+  // 藏在标题栏的小按钮后。按会议 id 记录：用户主动收起后不再自动弹出打扰。
+  const autoOpenedPlayerRef = useRef<string | null>(null);
   const [permissionStatus, setPermissionStatus] = useState<SystemPermissionStatus | null>(null);
   const [recentlyFinalizedId, setRecentlyFinalizedId] = useState<string | null>(null);
   // 已提示过“导入完成/失败”的任务 id 集合：防止事件订阅重放历史任务时重复弹 Toast。
@@ -156,7 +163,8 @@ export function App() {
   };
 
   /** 打开设置，可选直达某个标签页与具体配置表单。 */
-  const openSettings = useCallback((tab?: SettingsTab, focus?: SettingsFocus) => {
+  const openSettings = useCallback((tab?: SettingsTab, focus?: SettingsFocus, guided = false) => {
+    setGuidedSettings(guided);
     setSettingsTab(tab);
     setSettingsFocus(focus);
     setSettingsOpen(true);
@@ -308,8 +316,21 @@ export function App() {
     setPlaybackMs(0);
     setSeekToMs(null);
   }, [meeting?.id]);
+  // 播放资产就绪时自动展开一次回放条：入口不该只藏在标题栏的小按钮后。
+  // 每场会议只自动展开一次；用户手动收起后尊重其选择、不再弹出打扰。
+  const handlePlayerAvailability = useCallback((available: boolean) => {
+    setPlayerAvailable(available);
+    if (available && meeting?.id && autoOpenedPlayerRef.current !== meeting.id) {
+      autoOpenedPlayerRef.current = meeting.id;
+      setPlayerOpen(true);
+    }
+  }, [meeting?.id]);
+  // 导入转写期间同样滚动生成阶段性纪要：转写分段会实时推送到 store，右侧 AI 纪要
+  // 不该只显示「转写完成后生成纪要」。仅正在转写时启用，识别发言人/生成终稿阶段交给
+  // 主进程终稿，避免两条写路径互相覆盖。
+  const importTranscribing = shouldRollImportSummary(meetingImportJob);
   // 录音生命周期 hook：传入当前会议，返回 phase/elapsed/levels/queue 等驱动 RecorderBar 的状态。
-  const recorder = useMeetingRecorder(meeting);
+  const recorder = useMeetingRecorder(meeting, importTranscribing, meetingImportJob);
   // 录音态只属于发起录音的那场会议：切到别的会议时不能把它伪装成「会议进行中」。
   const selectedIsRecording = Boolean(meeting && recorder.recordingMeetingId === meeting.id);
   const selectedRecorderPhase = selectedIsRecording ? recorder.phase : "idle";
@@ -684,9 +705,9 @@ export function App() {
    * 重试导入任务：失败、取消或等待网络时从持久化断点续跑。
    * 主进程会推送任务更新；这里同时乐观合并返回值，浏览器预览也能立即看到状态。
    */
-  const retryImportJob = useCallback(async (id: string, sttProfileId?: string) => {
+  const retryImportJob = useCallback(async (id: string, sttProfileId?: string, llmProfileId?: string) => {
     try {
-      const job = await api.imports.retry(id, sttProfileId);
+      const job = await api.imports.retry(id, sttProfileId, llmProfileId);
       if (job) setImportJobs((current) => mergeImportJobs(current, [job]));
     } catch (error) {
       notify(error instanceof Error ? error.message : "重试导入任务失败，请稍后再试。");
@@ -861,11 +882,6 @@ export function App() {
                       </button>
                     )}
                   </div>
-                  {!splitWorkspace && (
-                    <span className={`workspace-stage workspace-stage--${workspaceStage}`}>
-                      {workspaceStage === "prepare" ? "会前准备" : "会后整理"}
-                    </span>
-                  )}
                 </div>
                 <button
                   className={`icon-button ${meeting.favorite ? "is-active" : ""}`}
@@ -986,7 +1002,7 @@ export function App() {
                 setPlayerOpen(false);
                 setPlaybackMs(0);
               }}
-              onAvailabilityChange={setPlayerAvailable}
+              onAvailabilityChange={handlePlayerAvailability}
               onTimeChange={setPlaybackMs}
               onPlayingChange={setPlaybackPlaying}
               onError={notify}
@@ -1032,12 +1048,14 @@ export function App() {
               onGenerateSummary={generateMeetingSummary}
               onRefineKeyPoints={refineKeyPoints}
               onCancelSummary={() => void recorder.cancelSummary()}
+              visualSummaryError={recorder.visualSummaryError}
               onRetryVisualSummary={() => {
                 if (requirePremium("生成视觉会议纪要", () => void recorder.generateVisualSummary())) void recorder.generateVisualSummary();
               }}
               summaryTemplate={preferences.summaryTemplate ?? "general"}
               onSummaryTemplateChange={(template) => void updatePreferences({ ...preferences, summaryTemplate: template })}
               summaryBusy={recorder.summaryBusy}
+              summaryProgress={recorder.summaryProgress}
               liveDocument={liveDocument}
               onCloseLiveDocument={closeLiveDocument}
             />
@@ -1132,9 +1150,14 @@ export function App() {
               importJob={workspaceStage === "live" ? undefined : meetingImportJob}
               recording={workspaceStage === "live"}
               busy={recorder.summaryBusy}
+              progress={recorder.summaryProgress}
               onRefresh={generateMeetingSummary}
               onCancel={() => void recorder.cancelSummary()}
+              onPauseImport={(id) => void cancelImportJob(id)}
               onEdit={() => setLiveDocument("summary")}
+              onConfigureSummary={() => openSettings("llm")}
+              summaryProfiles={profiles}
+              onRetryImport={(id, llmProfileId) => retryImportJob(id, undefined, llmProfileId)}
               onJumpToSource={(ms, segmentId) => jumpToMinutesSource(meeting.id, ms, segmentId)}
             />
           ) : undefined}
@@ -1157,10 +1180,11 @@ export function App() {
           onPremiumRequired={(reason, resume) => requirePremium(reason, resume)}
         />
       )}
-      <SettingsDialog open={settingsOpen} initialTab={settingsTab} initialFocus={settingsFocus} licenseStatus={licenseStatus} onLicenseStatusChange={setLicenseStatus} recordingActive={recorder.phase !== "idle"} importActive={importJobs.some(isActiveImportJob)} onClose={() => {
+      <SettingsDialog open={settingsOpen} initialTab={settingsTab} initialFocus={settingsFocus} guided={guidedSettings} onGuidedSave={setOnboardingSavedModel} onOpenOnboarding={() => {
         setSettingsOpen(false);
-        // 首次配置期间从设置返回时继续留在向导当前步骤，不提前写入完成标记。
-        if (!preferences.onboardingCompleted) setOnboardingOpen(true);
+        setOnboardingOpen(true);
+      }} licenseStatus={licenseStatus} onLicenseStatusChange={setLicenseStatus} recordingActive={recorder.phase !== "idle"} importActive={importJobs.some(isActiveImportJob)} onClose={() => {
+        setSettingsOpen(false);
         // 从导入抽屉进入设置：保存/关闭后回到抽屉，候选文件与任务队列都还在。
         if (settingsReturnRef.current === "import") {
           settingsReturnRef.current = null;
@@ -1176,14 +1200,14 @@ export function App() {
       <OnboardingDialog
         open={onboardingOpen && !settingsOpen}
         profiles={profiles}
+        savedModel={onboardingSavedModel}
+        canGenerateSample={licenseStatus?.state === "licensed"}
         onComplete={async () => {
+          setOnboardingSavedModel(undefined);
           await updatePreferences({ ...preferences, onboardingCompleted: true });
           setOnboardingOpen(false);
         }}
-        onConfigureModels={(tab, focus) => {
-          setOnboardingOpen(false);
-          openSettings(tab, focus);
-        }}
+        onConfigureModels={(tab, focus) => openSettings(tab, focus, true)}
       />
       <SystemPermissionsDialog
         open={permissionsOpen}
@@ -1241,10 +1265,10 @@ export function App() {
           }
         }}
         onOpenMeeting={(id) => { selectMeeting(id); setImportOpen(false); }}
-        onConfigure={() => {
+        onConfigure={(kind) => {
           settingsReturnRef.current = "import";
           setImportOpen(false);
-          openSettings();
+          openSettings(kind);
         }}
       />
 

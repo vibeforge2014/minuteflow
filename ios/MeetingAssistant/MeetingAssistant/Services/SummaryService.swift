@@ -2,8 +2,10 @@
 //  SummaryService.swift
 //  MeetingAssistant
 //
-//  纪要生成服务：本地模式直接调用 SummaryEngine；远程模式向 OpenAI 兼容
-//  chat/completions 接口发送转录与笔记，解析 JSON 模式的结构化纪要草稿。
+//  纪要生成服务：向 OpenAI 兼容 chat/completions 接口发送转录与笔记，
+//  对齐桌面端 SSE 流式契约（stream:true + delta 拼接 + 300s 预算），
+//  防止企业网关 60s 空闲上限切断长会议请求；网关忽略 stream 时自动按整包 JSON 解码，
+//  不支持 stream/response_format 时自动回退重试一次。
 //  所属层：服务层（网络调用）。
 //
 
@@ -18,6 +20,7 @@ enum SummaryServiceError: LocalizedError {
   case invalidResponse
   case invalidVisualSummary
   case visualSummaryNotVerified
+  case outputTruncated
   case server(String)
 
   var errorDescription: String? {
@@ -32,6 +35,8 @@ enum SummaryServiceError: LocalizedError {
       "模型返回的视觉纪要结构不符合要求"
     case .visualSummaryNotVerified:
       "请先在设置中开启视觉纪要并通过连接测试"
+    case .outputTruncated:
+      "总结模型达到输出长度上限，未能返回完整纪要，请更换模型后重试"
     case .server(let message):
       message
     }
@@ -40,9 +45,12 @@ enum SummaryServiceError: LocalizedError {
 
 // MARK: - 纪要服务
 
-/// 纪要生成入口：按用户偏好选择本地引擎或 OpenAI 兼容接口。
+/// 纪要生成入口：使用用户配置的 OpenAI 兼容模型流式生成结构化纪要与视觉纪要。
 @MainActor
 struct SummaryService {
+  /// 与桌面端对齐的 300 秒总超时预算（SSE 持续吐 token，避免企业网关 60 秒空闲掐断）。
+  private static let requestTimeoutSeconds: TimeInterval = 300
+
   // MARK: - 请求/响应 DTO
 
   /// chat 消息载荷。
@@ -51,17 +59,19 @@ struct SummaryService {
     let content: String
   }
 
-  /// chat/completions 请求体（强制 response_format=json_object）。
+  /// chat/completions 请求体（可选 stream 与 response_format，兼容回退时按需剥离）。
   private struct ChatRequest: Encodable {
     let model: String
     let messages: [ChatMessage]
     let temperature: Double
-    let responseFormat: ResponseFormat
+    let stream: Bool?
+    let responseFormat: ResponseFormat?
 
     enum CodingKeys: String, CodingKey {
       case model
       case messages
       case temperature
+      case stream
       case responseFormat = "response_format"
     }
   }
@@ -71,15 +81,38 @@ struct SummaryService {
     let type = "json_object"
   }
 
-  /// chat/completions 响应的最小解析模型（choices[0].message.content）。
+  /// 非流式 chat/completions 响应最小模型。
   private struct ChatResponse: Decodable {
     struct Choice: Decodable {
       struct Message: Decodable {
-        let content: String
+        let content: String?
       }
-      let message: Message
+      let message: Message?
+      let finishReason: String?
+
+      enum CodingKeys: String, CodingKey {
+        case message
+        case finishReason = "finish_reason"
+      }
     }
     let choices: [Choice]
+  }
+
+  /// SSE 流式分片最小模型（choices[0].delta.content + finish_reason）。
+  private struct ChatStreamChunk: Decodable {
+    struct Choice: Decodable {
+      struct Delta: Decodable {
+        let content: String?
+      }
+      let delta: Delta?
+      let finishReason: String?
+
+      enum CodingKeys: String, CodingKey {
+        case delta
+        case finishReason = "finish_reason"
+      }
+    }
+    let choices: [Choice]?
   }
 
   /// 模型仅返回内容 schema；时间与来源版本由客户端写入，不能由模型伪造。
@@ -97,18 +130,16 @@ struct SummaryService {
   /// - Parameters:
   ///   - transcript: 转录文本（可拼接录音中的实时文本）。
   ///   - notes: 人工笔记。
-  ///   - preferences: 决定本地/远程及接口参数。
+  ///   - preferences: 决定远程接口参数。
   /// - Returns: 结构化的 SummaryDraft。
-  /// - 副作用：远程模式读取 Keychain API Key 并发起 HTTPS POST（超时 45 秒）；
-  ///   本地模式纯计算、无副作用。
+  /// - 副作用：读取 Keychain API Key 并流式请求总结模型。
   func summarize(
     transcript: String,
     notes: String,
     preferences: AppPreferences
   ) async throws -> SummaryDraft {
-    // 本地 Provider 直接走离线关键词引擎。
     guard preferences.summaryProvider == .openAICompatible else {
-      return SummaryEngine.summarize(transcript: transcript, notes: notes)
+      throw SummaryServiceError.server("请先在「设置 → AI 总结」配置模型。")
     }
 
     guard
@@ -140,35 +171,18 @@ struct SummaryService {
       我的记录：
       \(notes)
       """
-    let body = ChatRequest(
+    let content = try await requestChatCompletion(
+      endpoint: endpoint,
+      apiKey: apiKey,
       model: preferences.summaryModel,
-      messages: [
-        ChatMessage(role: "system", content: "输出结构化、可追溯且不夸大的会议纪要。"),
-        ChatMessage(role: "user", content: instruction),
-      ],
+      systemPrompt: "输出结构化、可追溯且不夸大的会议纪要。",
+      userPrompt: instruction,
       temperature: 0.2,
-      responseFormat: ResponseFormat()
+      errorPrefix: "模型请求失败"
     )
-    var request = URLRequest(url: endpoint)
-    request.httpMethod = "POST"
-    request.timeoutInterval = 45
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-    request.httpBody = try JSONEncoder().encode(body)
-
-    let (data, response) = try await URLSession.shared.data(for: request)
-    guard let http = response as? HTTPURLResponse else {
-      throw SummaryServiceError.invalidResponse
-    }
-    guard (200..<300).contains(http.statusCode) else {
-      let message = String(data: data, encoding: .utf8) ?? "请求失败"
-      throw SummaryServiceError.server("模型请求失败（\(http.statusCode)）：\(message)")
-    }
-    // 模型内容是“JSON 字符串”，需要二次解码为 SummaryDraft。
-    let chat = try JSONDecoder().decode(ChatResponse.self, from: data)
+    let jsonText = Self.extractJSONObject(from: content)
     guard
-      let content = chat.choices.first?.message.content,
-      let payload = content.data(using: .utf8),
+      let payload = jsonText.data(using: .utf8),
       let draft = try? JSONDecoder().decode(SummaryDraft.self, from: payload)
     else {
       throw SummaryServiceError.invalidResponse
@@ -219,6 +233,154 @@ struct SummaryService {
 
   // MARK: - 私有方法
 
+  /// 专用 300s 会话：URLSession.shared 默认 resource 超时较长但 request 超时仅 60s。
+  private static func makeStreamingSession() -> URLSession {
+    let config = URLSessionConfiguration.ephemeral
+    config.timeoutIntervalForRequest = requestTimeoutSeconds
+    config.timeoutIntervalForResource = requestTimeoutSeconds
+    return URLSession(configuration: config)
+  }
+
+  /// 向 OpenAI 兼容端点发 SSE 流式请求并拼接 delta.content；
+  /// 若网关返回非流式 JSON 自动直接解包；若 400/404/422 不认 stream 或 response_format 则剥离重试。
+  private func requestChatCompletion(
+    endpoint: URL,
+    apiKey: String,
+    model: String,
+    systemPrompt: String,
+    userPrompt: String,
+    temperature: Double,
+    errorPrefix: String
+  ) async throws -> String {
+    let session = Self.makeStreamingSession()
+    defer { session.finishTasksAndInvalidate() }
+
+    var useStream = true
+    var useResponseFormat = true
+    var lastError: Error = SummaryServiceError.invalidResponse
+
+    for attempt in 0..<3 {
+      let body = ChatRequest(
+        model: model,
+        messages: [
+          ChatMessage(role: "system", content: systemPrompt),
+          ChatMessage(role: "user", content: userPrompt),
+        ],
+        temperature: temperature,
+        stream: useStream ? true : nil,
+        responseFormat: useResponseFormat ? ResponseFormat() : nil
+      )
+      var request = URLRequest(url: endpoint)
+      request.httpMethod = "POST"
+      request.timeoutInterval = Self.requestTimeoutSeconds
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+      if useStream {
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+      }
+      request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+      request.httpBody = try JSONEncoder().encode(body)
+
+      let (bytes, response) = try await session.bytes(for: request)
+      guard let http = response as? HTTPURLResponse else {
+        throw SummaryServiceError.invalidResponse
+      }
+
+      if !(200..<300).contains(http.statusCode) {
+        let errorData = try await Self.collectData(from: bytes)
+        let bodyText = String(data: errorData, encoding: .utf8) ?? "请求失败"
+        let error = SummaryServiceError.server("\(errorPrefix)（\(http.statusCode)）：\(bodyText)")
+        let lower = bodyText.lowercased()
+        let unsupported = [400, 404, 422].contains(http.statusCode)
+          || lower.contains("response_format") || lower.contains("stream")
+        if unsupported && (useStream || useResponseFormat) && attempt < 2 {
+          if lower.contains("response_format") { useResponseFormat = false }
+          if lower.contains("stream") { useStream = false }
+          if !lower.contains("response_format") && !lower.contains("stream") {
+            useStream = false
+            useResponseFormat = false
+          }
+          lastError = error
+          continue
+        }
+        throw error
+      }
+
+      let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+      let content: String
+      if useStream && contentType.contains("text/event-stream") {
+        content = try await Self.readSSEContent(from: bytes)
+      } else {
+        let data = try await Self.collectData(from: bytes)
+        let chat = try JSONDecoder().decode(ChatResponse.self, from: data)
+        if chat.choices.first?.finishReason == "length" {
+          throw SummaryServiceError.outputTruncated
+        }
+        content = chat.choices.first?.message?.content ?? ""
+      }
+
+      let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !trimmed.isEmpty {
+        return trimmed
+      }
+      // 网关声称支持 SSE 却返回空流：回退最小非流式请求体再试一次。
+      if (useStream || useResponseFormat) && attempt < 2 {
+        useStream = false
+        useResponseFormat = false
+        lastError = SummaryServiceError.invalidResponse
+        continue
+      }
+      throw SummaryServiceError.invalidResponse
+    }
+    throw lastError
+  }
+
+  /// 读取 SSE `data:` 行并拼接 choices[0].delta.content。
+  private static func readSSEContent(from bytes: URLSession.AsyncBytes) async throws -> String {
+    var content = ""
+    let decoder = JSONDecoder()
+    for try await rawLine in bytes.lines {
+      let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard line.hasPrefix("data:") else { continue }
+      let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+      if payload == "[DONE]" { break }
+      guard !payload.isEmpty, let data = payload.data(using: .utf8),
+        let chunk = try? decoder.decode(ChatStreamChunk.self, from: data),
+        let choice = chunk.choices?.first
+      else { continue }
+      if let piece = choice.delta?.content, !piece.isEmpty {
+        content += piece
+      }
+      if choice.finishReason == "length" {
+        throw SummaryServiceError.outputTruncated
+      }
+      if choice.finishReason == "stop" {
+        break
+      }
+    }
+    return content
+  }
+
+  private static func collectData(from bytes: URLSession.AsyncBytes) async throws -> Data {
+    var data = Data()
+    for try await byte in bytes {
+      data.append(byte)
+    }
+    return data
+  }
+
+  /// 剥离推理模型可能内联的 `<think>...</think>` 与 Markdown 代码围栏，提取 JSON 对象。
+  private static func extractJSONObject(from raw: String) -> String {
+    var text = raw.replacingOccurrences(
+      of: "<think>[\\s\\S]*?</think>",
+      with: "",
+      options: .regularExpression
+    ).trimmingCharacters(in: .whitespacesAndNewlines)
+    if let firstBrace = text.firstIndex(of: "{"), let lastBrace = text.lastIndex(of: "}") {
+      text = String(text[firstBrace...lastBrace])
+    }
+    return text
+  }
+
   /// 把 Base URL 归一化为 …/<path> 端点（容忍末尾斜杠与已带路径）。
   private func endpoint(baseURL: String, path: String) -> URL? {
     guard
@@ -268,29 +430,18 @@ struct SummaryService {
       参与者：\(participants.joined(separator: "、"))
       普通纪要：\(summaryJSON)
       """
-    let body = ChatRequest(
+    let content = try await requestChatCompletion(
+      endpoint: endpoint,
+      apiKey: apiKey,
       model: preferences.summaryModel,
-      messages: [
-        ChatMessage(role: "system", content: "只输出符合要求的视觉纪要 JSON。"),
-        ChatMessage(role: "user", content: prompt),
-      ],
+      systemPrompt: "只输出符合要求的视觉纪要 JSON。",
+      userPrompt: prompt,
       temperature: 0.15,
-      responseFormat: ResponseFormat()
+      errorPrefix: "视觉纪要请求失败"
     )
-    var request = URLRequest(url: endpoint)
-    request.httpMethod = "POST"
-    request.timeoutInterval = 60
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-    request.httpBody = try JSONEncoder().encode(body)
-    let (data, response) = try await URLSession.shared.data(for: request)
-    guard let http = response as? HTTPURLResponse else { throw SummaryServiceError.invalidResponse }
-    guard (200..<300).contains(http.statusCode) else {
-      throw SummaryServiceError.server("视觉纪要请求失败（\(http.statusCode)）：\(String(data: data, encoding: .utf8) ?? "请求失败")")
-    }
-    let chat = try JSONDecoder().decode(ChatResponse.self, from: data)
-    guard let content = chat.choices.first?.message.content,
-      let payloadData = content.data(using: .utf8),
+    let jsonText = Self.extractJSONObject(from: content)
+    guard
+      let payloadData = jsonText.data(using: .utf8),
       let payload = try? JSONDecoder().decode(VisualPayload.self, from: payloadData)
     else { throw SummaryServiceError.invalidVisualSummary }
     return try VisualSummary(

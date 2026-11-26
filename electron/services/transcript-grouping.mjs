@@ -18,9 +18,8 @@ export function splitTranscriptText(value = "") {
   return text.match(/[^。！？!?…]+(?:[。！？!?…]+|$)/g)?.map((part) => part.trim()).filter(Boolean) ?? [text];
 }
 
-/** 按文字长度把句子映射到给定时间窗口；仅作为缺少模型时间片时的近似降级。 */
-export function splitTimedTranscriptText(text, startMs, endMs) {
-  const parts = splitTranscriptText(text);
+/** 把给定文本碎片按字数比例映射到 [startMs, endMs]。 */
+function mapFragmentsToWindow(parts, startMs, endMs) {
   if (parts.length <= 1) return parts.map((part) => ({ startMs, endMs, text: part }));
   const duration = Math.max(parts.length, endMs - startMs);
   const weights = parts.map((part) => Math.max(1, normalizedText(part).length));
@@ -36,6 +35,26 @@ export function splitTimedTranscriptText(text, startMs, endMs) {
     cursor = fragment.endMs;
     return fragment;
   });
+}
+
+/** 按文字长度把句子映射到给定时间窗口；仅作为缺少模型时间片时的近似降级。 */
+export function splitTimedTranscriptText(text, startMs, endMs) {
+  return mapFragmentsToWindow(splitTranscriptText(text), startMs, endMs);
+}
+
+/**
+ * 说话人拆段专用分句器：优先按句末标点拆成句子；当整段没有句末标点（例如插话
+ * 与原句仅由逗号分隔）时，退化为按逗号/分号/冒号拆分子句，保留标点在原句末尾。
+ */
+export function splitTimedTranscriptClauses(text, startMs, endMs) {
+  const sentences = splitTranscriptText(text);
+  if (sentences.length > 1) return mapFragmentsToWindow(sentences, startMs, endMs);
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return [];
+  const clauses = trimmed.match(/[^，,；;：:。！？!?…]+(?:[，,；;：:。！？!?…]+|$)/g)
+    ?.map((part) => part.trim())
+    .filter(Boolean) ?? [trimmed];
+  return mapFragmentsToWindow(clauses, startMs, endMs);
 }
 
 /** Electron 导入链路使用的自然段落整理器；策略与渲染层实时录音保持一致。 */

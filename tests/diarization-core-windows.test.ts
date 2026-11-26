@@ -46,32 +46,30 @@ describe("diarizeAudioWindows", () => {
 });
 
 describe("buildSpeechWindows", () => {
-  it("把长区间切成滑窗、丢弃不足 2 秒的尾巴", () => {
-    const windows = buildSpeechWindows([{ startMs: 0, endMs: 10_000 }]);
+  it("把长区间切成更细的滑窗、保留短插话并丢弃不足 1.5 秒的尾巴", () => {
+    const windows = buildSpeechWindows([{ startMs: 0, endMs: 5_000 }]);
     expect(windows).toEqual([
-      { startMs: 0, endMs: 4_000 },
-      { startMs: 2_000, endMs: 6_000 },
-      { startMs: 4_000, endMs: 8_000 },
-      { startMs: 6_000, endMs: 10_000 }
+      { startMs: 0, endMs: 2_500 },
+      { startMs: 1_000, endMs: 3_500 },
+      { startMs: 2_000, endMs: 4_500 },
+      { startMs: 3_000, endMs: 5_000 }
     ]);
-    // 10s 区间推进到 8s 后剩 2s 窗口（≥ minWindowMs 保留），不再多切。
-    expect(windows.at(-1)?.endMs).toBe(10_000);
+    expect(windows.at(-1)?.endMs).toBe(5_000);
   });
 
   it("合并重叠区间的重复窗口并按时间排序", () => {
     const windows = buildSpeechWindows([
-      { startMs: 6_000, endMs: 12_000 },
-      { startMs: 0, endMs: 6_000 }
+      { startMs: 4_000, endMs: 7_500 },
+      { startMs: 0, endMs: 4_000 }
     ]);
     const starts = windows.map((window) => `${window.startMs}-${window.endMs}`);
     expect(new Set(starts).size).toBe(starts.length);
-    // 每个区间滑到「窗口终点触达区间末尾」为止，不再补切短尾巴。
-    expect(starts).toEqual(["0-4000", "2000-6000", "6000-10000", "8000-12000"]);
+    expect(starts).toEqual(["0-2500", "1000-3500", "2000-4000", "4000-6500", "5000-7500"]);
   });
 
-  it("短于最小窗口的区间不产出窗口", () => {
-    expect(buildSpeechWindows([{ startMs: 0, endMs: 1_999 }])).toEqual([]);
-    expect(buildSpeechWindows([{ startMs: 0, endMs: 4_000 }])).toEqual([{ startMs: 0, endMs: 4_000 }]);
+  it("2 秒短插话可以独立成窗，短于最小窗口（1.5 秒）才丢弃", () => {
+    expect(buildSpeechWindows([{ startMs: 0, endMs: 1_499 }])).toEqual([]);
+    expect(buildSpeechWindows([{ startMs: 0, endMs: 2_000 }])).toEqual([{ startMs: 0, endMs: 2_000 }]);
   });
 });
 
@@ -107,7 +105,7 @@ describe("assignWindowsToClusters", () => {
 });
 
 describe("windowsToTurns", () => {
-  it("时间相邻且同簇的窗口合并成一个轮次，异簇切分", () => {
+  it("时间相邻且同簇的窗口合并成一个轮次，异簇在重叠中点清晰切分", () => {
     const windows = [
       { startMs: 0, endMs: 4_000 },
       { startMs: 2_000, endMs: 6_000 },
@@ -116,8 +114,8 @@ describe("windowsToTurns", () => {
     ];
     const turns = windowsToTurns(windows, [0, 0, 1, 1]);
     expect(turns).toEqual([
-      { startMs: 0, endMs: 6_000, speakerId: "speaker-1" },
-      { startMs: 4_000, endMs: 10_000, speakerId: "speaker-2" }
+      { startMs: 0, endMs: 5_000, speakerId: "speaker-1" },
+      { startMs: 5_000, endMs: 10_000, speakerId: "speaker-2" }
     ]);
   });
 

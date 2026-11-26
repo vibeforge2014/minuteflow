@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { profileConfigurationKey, validateProfileConfiguration } from "../src/lib/profile-configuration";
+import { profileConfigurationKey, summaryProfileDisplayName, validateProfileConfiguration } from "../src/lib/profile-configuration";
 import type { ModelProfile } from "../src/types";
 
 const profile: ModelProfile = {
@@ -29,6 +29,12 @@ describe("profile configuration validation", () => {
     expect(validateProfileConfiguration({ ...profile, secretId: "stored-key" }, "", true)).toEqual({});
     expect(validateProfileConfiguration(profile, "", false)).toEqual({});
     expect(validateProfileConfiguration(profile, " ", true).apiKey).toBeTruthy();
+  });
+
+  it("shows the configured summary model for legacy generic profile names", () => {
+    const summary: ModelProfile = { ...profile, kind: "llm", transport: "openai-chat", name: "自定义模型", model: "qwen-plus" };
+    expect(summaryProfileDisplayName(summary)).toBe("qwen-plus");
+    expect(summaryProfileDisplayName({ ...summary, name: "团队纪要" })).toBe("团队纪要");
   });
 
   it("invalidates displayed test results when protocol or capability options change", () => {

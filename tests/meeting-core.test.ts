@@ -78,7 +78,7 @@ import {
 import { derivePermissionSetupPhase, finishPermissionSetup, isMicrophonePermissionError, isScreenPermissionError, shouldOpenPermissionSetup, shouldRequestMicrophone } from "../src/lib/permissions";
 import { lockSummaryField, mergeSummaryRevision, removeSummaryListItem, toggleSummaryLock, unlockSummaryField } from "../src/lib/summary";
 import { buildBasicKeyPoints, KEY_POINT_MAX_CHARS } from "../electron/services/chinese.mjs";
-import { cancelImport, enqueueRetranscription, normalizeImportChunkSegments, removeImportJob, resolveImportedParticipants, retryImport, wakeImportQueue } from "../electron/services/import-queue.mjs";
+import { cancelImport, enqueueRetranscription, finalizePendingSpeakerLabels, normalizeImportChunkSegments, removeImportJob, resolveImportedParticipants, retryImport, wakeImportQueue } from "../electron/services/import-queue.mjs";
 import {
   describeDiarizationPhase,
   describeImportProcessing,
@@ -88,7 +88,8 @@ import {
   isRetryableImportJob,
   mergeImportJob,
   mergeImportJobs,
-  selectMeetingImportJob
+  selectMeetingImportJob,
+  shouldRollImportSummary
 } from "../src/lib/import-status";
 import type { ImportJob } from "../src/types";
 import { parseSilenceMidpoints, planTranscriptionChunkBoundaries } from "../electron/services/chunk-planning.mjs";
@@ -642,17 +643,39 @@ describe("transcript streaming reveal", () => {
     return emitted.join("");
   };
 
-  it("seeds existing content as fully revealed and streams only new arrivals", () => {
-    const state = seedTranscriptReveal([segment("a", 0, 5_000, "已有内容")], emptyRevealState(), true);
+  it("seeds existing content as fully revealed and hides queued segments until their first characters emerge", () => {
+    const segments = [
+      segment("a", 0, 5_000, "已有内容"),
+      segment("b", 6_000, 12_000, "新到达的句子。"),
+      segment("c", 13_000, 18_000, "第二段还没轮到。")
+    ];
+    const state = seedTranscriptReveal([segments[0]], emptyRevealState(), true);
     expect(revealPending(state)).toBe(false);
-    absorbTranscriptSegments([segment("a", 0, 5_000, "已有内容"), segment("b", 6_000, 12_000, "新到达的句子。")], state, true);
-    expect(state.queue).toEqual(["b"]);
-    const shown = displayedTranscriptSegments([segment("a", 0, 5_000, "已有内容"), segment("b", 6_000, 12_000, "新到达的句子。")], state);
-    expect(shown[0].text).toBe("已有内容");
-    expect(shown[1].text).toBe("");
-    const all = drainAll([segment("a", 0, 5_000, "已有内容"), segment("b", 6_000, 12_000, "新到达的句子。")], state);
-    expect(all).toBe("新到达的句子。");
+    absorbTranscriptSegments(segments, state, true);
+    expect(state.queue).toEqual(["b", "c"]);
+    // 尚未出第一字的新段暂不露出，避免提前刷出一排没有文字的空时间戳。
+    const beforeTick = displayedTranscriptSegments(segments, state);
+    expect(beforeTick.map((item) => item.id)).toEqual(["a"]);
+    // 首拍开始揭示 b 时，b 才带正文入场；排在后面的 c 仍然等待。
+    const firstTick = revealTick(segments, state);
+    expect(firstTick?.id).toBe("b");
+    const afterFirstTick = displayedTranscriptSegments(segments, state);
+    expect(afterFirstTick.map((item) => item.id)).toEqual(["a", "b"]);
+    expect(afterFirstTick[1].text.length).toBeGreaterThan(0);
+    const rest = drainAll(segments, state);
+    expect((firstTick?.emit ?? "") + rest).toBe("新到达的句子。第二段还没轮到。");
     expect(revealPending(state)).toBe(false);
+  });
+
+  it("accelerates typewriter pacing when multiple import segments backlog in the queue", () => {
+    const segments = Array.from({ length: 12 }, (_, idx) =>
+      segment(`imp-${idx}`, idx * 4_000, (idx + 1) * 4_000, "这是一段导入音频连续识别出来的正常中文句子内容。")
+    );
+    const state = seedTranscriptReveal([], emptyRevealState(), true);
+    absorbTranscriptSegments(segments, state, true);
+    const first = revealTick(segments, state);
+    // 12 段约 276 字积压时，单拍出字应明显快于单段起步速率（2 字/拍），跟紧导入进度。
+    expect((first?.emit ?? "").length).toBeGreaterThanOrEqual(4);
   });
 
   it("queues appended text on an already-revealed segment and reveals segments in arrival order", () => {
@@ -876,6 +899,97 @@ describe("transcript window merge", () => {
     expect(result[0]).toMatchObject({ speakerId: "speaker-1", speakerName: "刘婷" });
   });
 
+  it("only labels covered transcript segments during progressive diarization", () => {
+    const covered = segment("covered", 500, 1_500, "已分析");
+    const later = segment("later", 2_500, 3_500, "尚未分析");
+    const result = applyDiarization([covered, later], [
+      { startMs: 0, endMs: 2_000, speakerId: "pending-speaker-2" }
+    ], { requireOverlap: true });
+    expect(result[0]).toMatchObject({ speakerId: "pending-speaker-2", text: covered.text });
+    expect(result[1]).toEqual(later);
+  });
+
+  it("splits a merged paragraph when a sudden interrupter overlaps part of its span", () => {
+    const mergedParagraph = segment(
+      "merged-1",
+      0,
+      12_000,
+      "我们先把登录流程定下来。下周安排评审。等等，登录失败的埋点还没补齐。"
+    );
+    const turns = [
+      { startMs: 0, endMs: 7_200, speakerId: "speaker-1", speakerName: "刘婷" },
+      { startMs: 7_200, endMs: 12_000, speakerId: "speaker-2", speakerName: "周哲" }
+    ];
+    const result = applyDiarization([mergedParagraph], turns);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({
+      id: "merged-1",
+      speakerId: "speaker-1",
+      speakerName: "刘婷",
+      text: "我们先把登录流程定下来。下周安排评审。"
+    });
+    expect(result[1]).toMatchObject({
+      id: "merged-1:turn:1",
+      speakerId: "speaker-2",
+      speakerName: "周哲",
+      text: "等等，登录失败的埋点还没补齐。"
+    });
+  });
+
+  it("falls back to clause boundaries when an interruption shares a comma-only segment", () => {
+    const commaSegment = segment(
+      "comma-1",
+      0,
+      9_000,
+      "我先同步一下移动端进展，等一下，这个方案还没跟法务对齐"
+    );
+    const turns = [
+      { startMs: 0, endMs: 4_000, speakerId: "speaker-1" },
+      { startMs: 4_000, endMs: 9_000, speakerId: "speaker-2" }
+    ];
+    const result = applyDiarization([commaSegment], turns);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ speakerId: "speaker-1", text: "我先同步一下移动端进展，" });
+    expect(result[1]).toMatchObject({ speakerId: "speaker-2", text: "等一下，这个方案还没跟法务对齐" });
+  });
+
+  it("does not split a segment on tiny boundary overlap from an adjacent turn", () => {
+    const single = segment("edge-1", 0, 5_000, "先过一遍主流程。然后看数据。");
+    const turns = [
+      { startMs: 0, endMs: 4_750, speakerId: "speaker-1" },
+      { startMs: 4_750, endMs: 9_000, speakerId: "speaker-2" }
+    ];
+    const result = applyDiarization([single], turns);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ id: "edge-1", speakerId: "speaker-1", text: single.text });
+  });
+
+  it("preserves manually renamed speakers when preserveManualLabels is enabled", () => {
+    const manual = { ...segment("m-1", 0, 4_000, "我已经改名了"), speakerId: "live-speaker-2", speakerName: "张三" };
+    const placeholder = { ...segment("m-2", 4_500, 8_000, "默认占位"), speakerId: "me", speakerName: "我" };
+    const turns = [
+      { startMs: 0, endMs: 4_200, speakerId: "speaker-1" },
+      { startMs: 4_200, endMs: 8_500, speakerId: "speaker-2" }
+    ];
+    const result = applyDiarization([manual, placeholder], turns, { preserveManualLabels: true });
+    expect(result[0]).toMatchObject({ speakerId: "live-speaker-2", speakerName: "张三" });
+    expect(result[1]).toMatchObject({ speakerId: "speaker-2", speakerName: "发言人2" });
+  });
+
+  it("preserves distinct pending speaker numbers when skipping import diarization", () => {
+    const pending = [
+      { ...segment("p-1", 0, 3_000, "第一人"), speakerId: "pending-speaker-1", speakerName: "发言人1" },
+      { ...segment("p-2", 3_500, 6_000, "第二人"), speakerId: "pending-speaker-2", speakerName: "发言人2" },
+      { ...segment("p-3", 6_500, 9_000, "第三人"), speakerId: "pending-speaker-3", speakerName: "发言人3 · 待校准" }
+    ];
+    const finalized = finalizePendingSpeakerLabels(pending);
+    expect(finalized.map((item) => ({ speakerId: item.speakerId, speakerName: item.speakerName }))).toEqual([
+      { speakerId: "speaker-1", speakerName: "发言人1" },
+      { speakerId: "speaker-2", speakerName: "发言人2" },
+      { speakerId: "speaker-3", speakerName: "发言人3" }
+    ]);
+  });
+
   it("matches voiceprints conservatively and rejects ambiguous or weak candidates", () => {
     const samples = [
       { name: "刘婷", embedding: new Float32Array([1, 0, 0]) },
@@ -937,6 +1051,15 @@ describe("diarization cluster merging", () => {
     expect(new Set(merged.map((item) => item.speakerId)).size).toBe(2);
     expect(merged.find((item) => item.startMs === 150_500)?.speakerId)
       .toBe(merged.find((item) => item.startMs === 95_000)?.speakerId);
+  });
+
+  it("preserves a short interrupter cluster whose voiceprint is clearly distinct", () => {
+    const merged = mergeDiarizationClusters(
+      [turn(0, 90_000, "a"), turn(40_000, 44_000, "interrupter")],
+      new Map([["a", sameVoice], ["interrupter", otherVoice]])
+    );
+    expect(new Set(merged.map((item) => item.speakerId)).size).toBe(2);
+    expect(merged.find((item) => item.startMs === 40_000)?.speakerId).toBe("speaker-2");
   });
 
   it("resolves chained merges through cluster roots", () => {
@@ -2854,6 +2977,55 @@ describe("导入任务的进度与可操作性文案", () => {
     expect(describeReviewProcessing({ meetingEnded: true, job: base({ status: "complete" }) })).toBeUndefined();
   });
 
+  it("uses reported summary stages and elapsed time without treating an unconfigured service as running", () => {
+    const startedAt = "2026-11-25T17:16:00.000Z";
+    const job = base({ status: "summarizing", stage: "summarizing", summaryPhase: "reasoning", summaryStartedAt: startedAt });
+    expect(describeImportProgressDetail(job, Date.parse(startedAt) + 125_000)).toBe("模型正在分析会议内容 · 已用 02:05");
+    const pending = base({ status: "waiting_for_summary_model", stage: "summarizing" });
+    expect(describeReviewProcessing({ meetingEnded: true, job: pending })?.detail).toContain("等待配置总结模型");
+  });
+
+  it("renders summary progress and pause once in the review and split workspaces", async () => {
+    vi.stubGlobal("window", { matchMedia: () => ({ matches: false }) });
+    vi.doMock("../src/lib/markdown", async (importOriginal) => ({
+      ...await importOriginal<typeof import("../src/lib/markdown")>(),
+      markdownToHtml: () => ""
+    }));
+    vi.doMock("@tiptap/react", () => ({ useEditor: () => null, EditorContent: () => null }));
+    try {
+      const { createElement } = await import("react");
+      const { renderToStaticMarkup } = await import("react-dom/server");
+      const { DocumentWorkspace } = await import("../src/components/DocumentWorkspace");
+      const { LiveSummary } = await import("../src/components/LiveSummary");
+      const job = base({ status: "summarizing", stage: "summarizing", summaryPhase: "reasoning", transcriptionComplete: true });
+      const idle = () => {};
+      const props = {
+        meeting, stage: "review" as const, readiness: buildRecordingReadiness({ mode: "online", microphone: null }),
+        elapsed: 0, recentlyFinalized: false, processingStatus: describeImportProcessing(job),
+        importJob: job, sttProfiles: [], onCancelImport: idle, minutesJump: null, onJumpToMinutesSource: idle,
+        onChange: idle, onStartRecording: async () => {}, onConfigureTranscription: idle, onOpenPermissions: idle,
+        onGenerateSummary: idle, onRefineKeyPoints: idle, onCancelSummary: idle, onRetryVisualSummary: idle,
+        summaryTemplate: "general" as const, onSummaryTemplateChange: idle, summaryBusy: false, summaryProgress: null,
+        liveDocument: null, onCloseLiveDocument: idle
+      };
+      const single = renderToStaticMarkup(createElement(DocumentWorkspace, { ...props, splitWorkspace: false }));
+      const left = renderToStaticMarkup(createElement(DocumentWorkspace, { ...props, splitWorkspace: true }));
+      const right = renderToStaticMarkup(createElement(LiveSummary, {
+        meeting, importJob: job, recording: false, busy: false, progress: null, summaryProfiles: [],
+        onRefresh: idle, onCancel: idle, onPauseImport: idle, onEdit: idle, onConfigureSummary: idle,
+        onRetryImport: async () => {}, onJumpToSource: idle
+      }));
+      for (const view of [single, left + right]) {
+        expect(view.match(/>模型正在分析会议内容/g)).toHaveLength(1);
+        expect(view.match(/>暂停处理/g)).toHaveLength(1);
+      }
+    } finally {
+      vi.doUnmock("@tiptap/react");
+      vi.doUnmock("../src/lib/markdown");
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("处理中的任务可停止，失败/取消/网络等待可重试", () => {
     expect(isActiveImportJob(base())).toBe(true);
     expect(isRetryableImportJob(base())).toBe(false);
@@ -2861,6 +3033,17 @@ describe("导入任务的进度与可操作性文案", () => {
     expect(isRetryableImportJob(base({ status: "cancelled" }))).toBe(true);
     expect(isRetryableImportJob(base({ status: "waiting_for_network" }))).toBe(true);
     expect(isActiveImportJob(base({ status: "complete" }))).toBe(false);
+  });
+
+  it("只在转写阶段滚动生成阶段性纪要，识别/总结阶段交给主进程终稿", () => {
+    expect(shouldRollImportSummary(undefined)).toBe(false);
+    expect(shouldRollImportSummary(base({ status: "transcribing" }))).toBe(true);
+    // 分段推送时 status 可能已推进但 stage 仍是 transcribing。
+    expect(shouldRollImportSummary(base({ status: "diarizing", stage: "transcribing" }))).toBe(true);
+    expect(shouldRollImportSummary(base({ status: "diarizing", stage: "diarizing" }))).toBe(false);
+    expect(shouldRollImportSummary(base({ status: "summarizing", stage: "summarizing" }))).toBe(false);
+    expect(shouldRollImportSummary(base({ status: "complete", stage: "complete" }))).toBe(false);
+    expect(shouldRollImportSummary(base({ status: "transcribing", autoSummarize: false }))).toBe(false);
   });
 
   it("重试会清掉上一轮分离的耗时/阶段字段，避免界面继续显示旧进度", () => {

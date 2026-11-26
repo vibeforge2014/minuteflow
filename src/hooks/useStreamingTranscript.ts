@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Meeting, TranscriptSegment } from "../types";
 import {
   absorbTranscriptSegments,
+  activeRevealSegmentId,
   displayedTranscriptSegments,
   emptyRevealState,
   revealPending,
@@ -10,14 +11,20 @@ import {
 } from "../lib/transcript-reveal";
 import { TYPEWRITER_TICK_MS } from "../lib/typewriter";
 
+export interface StreamingTranscriptView {
+  segments: TranscriptSegment[];
+  /** 当前正在逐字揭示的段落 id（用于在气泡尾端展示柔和出字光标）。 */
+  streamingSegmentId: string | null;
+}
+
 /**
  * 转录流式揭示：转录进行中，新到达的文本按 typewriter 节奏逐拍铺开，
- * 与 AI 问答的回答同一观感。历史内容、切换会议与 Reduced Motion 直接透传
- * （不打字机）；会话结束立即把剩余内容揭示到位。
+ * 与 AI 问答的回答同一观感。尚未轮到出字的段落暂不露出空时间戳，等首字到达时
+ * 与时间戳一起入场；历史内容、切换会议与 Reduced Motion 直接透传。
  * @param meeting 当前会议（以 meeting.transcript 为唯一事实源，仅显示层截断）
  * @param active 是否处于转录进行中（导入任务未终结，或会议进行中）
  */
-export function useStreamingTranscript(meeting: Meeting, active: boolean): TranscriptSegment[] {
+export function useStreamingTranscript(meeting: Meeting, active: boolean): StreamingTranscriptView {
   const stateRef = useRef(emptyRevealState());
   const meetingRef = useRef(meeting);
   const [revision, setRevision] = useState(0);
@@ -34,9 +41,13 @@ export function useStreamingTranscript(meeting: Meeting, active: boolean): Trans
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meeting.id]);
 
-  // 新内容到达：登记揭示记账（新段入队、追加增量入队、改写立即到位）。
+  // 新内容到达：登记揭示记账；若原本空闲且新段入队，立即出一拍首字，避免首帧闪空态。
   useLayoutEffect(() => {
+    const wasIdle = !revealPending(stateRef.current);
     absorbTranscriptSegments(meeting.transcript, stateRef.current, enabled);
+    if (enabled && wasIdle && revealPending(stateRef.current)) {
+      revealTick(meeting.transcript, stateRef.current);
+    }
     setRevision((value) => value + 1);
   }, [meeting.transcript, enabled]);
 
@@ -52,9 +63,12 @@ export function useStreamingTranscript(meeting: Meeting, active: boolean): Trans
   }, [enabled]);
 
   return useMemo(
-    () => displayedTranscriptSegments(meeting.transcript, stateRef.current),
+    () => ({
+      segments: displayedTranscriptSegments(meeting.transcript, stateRef.current),
+      streamingSegmentId: enabled ? activeRevealSegmentId(stateRef.current) : null
+    }),
     // revision 触发出字后的重渲染；stateRef 是稳定引用。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [meeting.transcript, revision]
+    [meeting.transcript, revision, enabled]
   );
 }

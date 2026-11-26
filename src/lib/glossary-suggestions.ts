@@ -11,6 +11,8 @@
  * 中文与拉丁文使用不同的最小长度门槛，避免两字词在长段落里刷屏误报。
  */
 
+import { parseGlossaryEntry } from "../../shared/hotword-domains.mjs";
+
 export interface GlossarySuggestion {
   /** 稳定 id：段落 id + 原文位置 + 目标术语。 */
   id: string;
@@ -32,12 +34,14 @@ export const MAX_SUGGESTION_TERMS = 24;
 const SKIPPED_CHARS = /[\s\u3000·・\-_.、，,;；:：/\\]/u;
 const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u;
 
-/** 术语表清洗：去空、去过长误粘贴段落、按原样去重、限容量。 */
+/** 术语表清洗：去空、去过长误粘贴段落、剥离别名后缀提取标准词、按原样去重、限容量。 */
 export function normalizeGlossaryTerms(glossary: string[] = []): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
   for (const raw of Array.isArray(glossary) ? glossary : []) {
-    const term = String(raw ?? "").trim();
+    const parsed = parseGlossaryEntry(raw);
+    if (!parsed) continue;
+    const term = parsed.term;
     if (!term || term.length > 40 || seen.has(term)) continue;
     seen.add(term);
     result.push(term);
@@ -126,6 +130,21 @@ export function findGlossarySuggestions(text: string, glossary: string[] = [], l
   };
 
   const candidates: RankedSuggestion[] = [];
+  // 先匹配用户显式配置的同音/易错别名（例如「MinuteFlow = 密尼特弗洛」）：命中即给出高优建议。
+  for (const rawEntry of (Array.isArray(glossary) ? glossary : []).slice(0, MAX_SUGGESTION_TERMS)) {
+    const parsed = parseGlossaryEntry(rawEntry);
+    if (!parsed?.aliases.length) continue;
+    for (const alias of parsed.aliases) {
+      const foldedAlias = fold(alias);
+      if (foldedAlias.length < 2) continue;
+      const hitAt = foldedSource.indexOf(foldedAlias);
+      if (hitAt >= 0) {
+        const found = toSuggestion(hitAt, hitAt + foldedAlias.length, parsed.term, "typo", -1);
+        if (found) candidates.push(found);
+      }
+    }
+  }
+
   for (const term of normalizeGlossaryTerms(glossary)) {
     // 标准写法已经原样出现：不需要任何建议。
     if (source.includes(term)) continue;

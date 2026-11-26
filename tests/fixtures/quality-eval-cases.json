@@ -1,0 +1,129 @@
+{
+  "hotwordCases": [
+    {
+      "name": "中英混合研发会议",
+      "input": {
+        "title": "Q3 WebRTC 弱网优化与「登录改版」评审",
+        "participants": ["我", "张伟（架构）", "李敏", "发言人2"],
+        "goals": ["确认 SDK 2.4 接入方案", "对齐 SLA 指标"],
+        "notes": ["排查 Kafka 消费延迟，参考《合规清单》"],
+        "globalGlossary": ["MinuteFlow", "Whisper"]
+      },
+      "expectedIncludes": ["MinuteFlow", "Whisper", "张伟", "李敏", "Q3", "WebRTC", "登录改版", "SDK", "SLA", "Kafka", "合规清单"],
+      "expectedExcludes": ["我", "发言人2", "评审"]
+    }
+  ],
+  "correctionSafetyCases": [
+    {
+      "name": "允许同音术语修正",
+      "original": "我们今天同步一下危波RTC和卡夫卡的延迟问题。",
+      "candidate": "我们今天同步一下 WebRTC 和 Kafka 的延迟问题。",
+      "expectAccepted": true
+    },
+    {
+      "name": "拒绝修改百分比数字",
+      "original": "目前转化率提升了 12%，预计下月达到 15%。",
+      "candidate": "目前转化率提升了 20%，预计下月达到 15%。",
+      "expectAccepted": false,
+      "expectReason": "numeric_mismatch"
+    },
+    {
+      "name": "拒绝翻转否定极性",
+      "original": "这个版本暂时不上线退款自动化，等下周压测通过再定。",
+      "candidate": "这个版本暂时上线退款自动化，等下周压测通过再定。",
+      "expectAccepted": false,
+      "expectReason": "negation_flip"
+    },
+    {
+      "name": "拒绝大幅缩水改写",
+      "original": "华东区目前完成了 320 万，目标 400 万，缺口主要是两个大客户还在走采购审批流程。",
+      "candidate": "华东区未达标。",
+      "expectAccepted": false,
+      "expectReason": "length_drift"
+    },
+    {
+      "name": "允许保留原数值并修人名",
+      "original": "请张伟在周五前把 3 个接口文档发给李明。",
+      "candidate": "请张伟在周五前把 3 个接口文档发给李敏。",
+      "expectAccepted": true
+    }
+  ],
+  "cerCases": [
+    {
+      "reference": "我们今天确认一下WebRTC和Kafka在Q3版本的上线排期。",
+      "rawAsr": "我们今天确认一下危波RTC和卡夫卡在Q三版本的上线排期。",
+      "corrected": "我们今天确认一下WebRTC和Kafka在Q3版本的上线排期。"
+    },
+    {
+      "reference": "MinuteFlow桌面端默认开启本地声纹识别与动态热词增强。",
+      "rawAsr": "密尼特弗洛桌面端默认开启本地声闻识别与动态热词增强。",
+      "corrected": "MinuteFlow桌面端默认开启本地声纹识别与动态热词增强。"
+    }
+  ],
+  "meetingTypeCases": [
+    {
+      "title": "Q3 区域经营分析与业绩达成复核",
+      "goals": ["核对各单位营收、毛利与完成率缺口"],
+      "expectedTypeId": "business_review"
+    },
+    {
+      "title": "支付网关架构重构与 API 延迟评审",
+      "goals": ["评估数据库迁移与缓存并发方案"],
+      "expectedTypeId": "tech_review"
+    },
+    {
+      "title": "移动端改版 PRD 需求与交互验收",
+      "goals": ["对齐版本功能和埋点方案"],
+      "expectedTypeId": "product_spec"
+    },
+    {
+      "title": "核心版本联调进度同步周会",
+      "goals": ["确认提测排期与当前阻塞卡点"],
+      "expectedTypeId": "project_sync"
+    },
+    {
+      "title": "1024 线上故障根因复盘会",
+      "goals": ["梳理事故时间线与长期改进措施"],
+      "expectedTypeId": "retrospective"
+    },
+    {
+      "title": "企业版大客户使用痛点访谈调研",
+      "goals": ["记录受访者反馈与真实使用习惯"],
+      "expectedTypeId": "interview"
+    },
+    {
+      "title": "某银行 POC 试用与商务报价沟通",
+      "goals": ["对齐合同交付边界与签约节奏"],
+      "expectedTypeId": "customer_call"
+    },
+    {
+      "title": "季度数据安全合规专项工作部署会",
+      "goals": ["明确红线要求与各责任单位整改分工"],
+      "expectedTypeId": "deployment"
+    }
+  ],
+  "domainAliasCases": [
+    {
+      "title": "本地语音大模型推理部署会",
+      "transcriptText": "今天测了欧拉马和维斯珀，还有迪普西克的延迟，以及卡夫卡的消费积压。",
+      "expectedDomains": ["ai", "software"],
+      "expectedAliasPairs": [
+        ["欧拉马", "Ollama"],
+        ["维斯珀", "Whisper"],
+        ["迪普西克", "DeepSeek"],
+        ["卡夫卡", "Kafka"]
+      ]
+    },
+    {
+      "title": "客户 POC 与等保合规签约沟通",
+      "transcriptText": "对方要求先签恩DA再看皮欧西演示，并且要满足登保三级与数据出镜要求。",
+      "expectedDomains": ["business"],
+      "expectedAliasPairs": [
+        ["恩DA", "NDA"],
+        ["皮欧西", "POC"],
+        ["登保三级", "等保三级"],
+        ["数据出镜", "数据出境"]
+      ]
+    }
+  ]
+}

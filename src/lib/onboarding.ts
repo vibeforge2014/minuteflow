@@ -13,7 +13,9 @@ export const LOCAL_WHISPER_TRANSPORTS = new Set([
 export function isOnboardingTranscriptionReady(profile: ModelProfile) {
   if (profile.enabled === false || profile.kind !== "stt") return false;
   if (profile.transport === "apple-speech") return true;
-  if (LOCAL_WHISPER_TRANSPORTS.has(profile.transport)) return Boolean(profile.options.modelPath);
+  if (LOCAL_WHISPER_TRANSPORTS.has(profile.transport) || ["sense-voice", "parakeet-tdt", "qwen3-asr"].includes(profile.transport)) {
+    return Boolean(profile.options.modelPath?.trim());
+  }
   return Boolean(profile.baseUrl.trim() && profile.model.trim());
 }
 
@@ -21,4 +23,12 @@ export function isOnboardingTranscriptionReady(profile: ModelProfile) {
 export function isOnboardingSummaryReady(profile: ModelProfile) {
   if (profile.enabled === false || profile.kind !== "llm" || profile.transport === "local-summary") return false;
   return Boolean(profile.baseUrl.trim() && profile.model.trim());
+}
+
+
+export function isOnboardingDiarizationReady(profile: ModelProfile) {
+  return profile.enabled !== false
+    && profile.kind === "diarization"
+    && profile.transport === "sherpa-onnx"
+    && Boolean(profile.options.segmentationModelPath?.trim() && profile.options.embeddingModelPath?.trim());
 }

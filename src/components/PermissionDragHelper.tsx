@@ -58,7 +58,8 @@ export function PermissionDragHelper() {
     }
   };
 
-  const copy = helperCopy(state);
+  const applicationName = previewParameters?.get("permissionApp") === "Electron" ? "Electron" : "MinuteFlow";
+  const copy = helperCopy(state, applicationName);
 
   return (
     <main className={`permission-helper permission-helper--${state}${previewWidth ? " permission-helper--compact" : ""}`} style={previewWidth ? { width: previewWidth } : undefined} aria-label="MinuteFlow 权限拖拽助手">
@@ -67,13 +68,13 @@ export function PermissionDragHelper() {
         draggable={state !== "restarting" && state !== "success"}
         onDragStart={startDrag}
         onDragEnd={() => setState("dropped")}
-        aria-label="拖动 MinuteFlow 到系统设置应用列表"
+        aria-label={`拖动 ${applicationName} 到系统设置应用列表`}
         aria-describedby="permission-helper-instruction"
         disabled={state === "restarting" || state === "success"}
       >
         <DotsSixVertical size={18} weight="bold" />
         <BrandMark size={42} />
-        <span><strong>MinuteFlow</strong><small>{copy.tile}</small></span>
+        <span><strong>{applicationName}</strong><small>{copy.tile}</small></span>
       </button>
       {state === "success" ? <CheckCircle className="permission-helper__arrow" size={32} weight="fill" /> : <ArrowUp className="permission-helper__arrow" size={32} weight="bold" />}
       <div className="permission-helper__copy">
@@ -99,7 +100,7 @@ function parseHelperPreviewState(value: string | null): HelperState | null {
     : null;
 }
 
-function helperCopy(state: HelperState) {
+function helperCopy(state: HelperState, applicationName: string) {
   if (state === "dragging") return {
     tile: "继续向上拖动",
     title: "移到应用列表后松手",
@@ -107,7 +108,7 @@ function helperCopy(state: HelperState) {
   };
   if (state === "dropped") return {
     tile: "已完成拖动",
-    title: "现在打开 MinuteFlow 右侧开关",
+    title: `现在打开 ${applicationName} 右侧开关`,
     description: "打开开关后再重启。"
   };
   if (state === "restarting") return {

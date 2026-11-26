@@ -13,7 +13,7 @@ import { api } from "../lib/api";
 import { MeetingRecorder } from "../services/recording";
 import type { LiveTranscriptionFailure } from "../services/recording";
 import { useMeetingStore } from "../store/meetingStore";
-import type { Meeting } from "../types";
+import type { ImportJob, Meeting } from "../types";
 import { mergeSummaryRevision } from "../lib/summary";
 import { formatDuration } from "../lib/format";
 
@@ -29,7 +29,7 @@ export interface LevelSource {
   subscribe(listener: (levels: AudioLevels) => void): () => void;
 }
 
-export function useMeetingRecorder(meeting: Meeting | undefined) {
+export function useMeetingRecorder(meeting: Meeting | undefined, importTranscribing = false, importJob?: ImportJob) {
   const profiles = useMeetingStore((state) => state.profiles);
   const preferences = useMeetingStore((state) => state.preferences);
   const updateMeeting = useMeetingStore((state) => state.updateMeeting);
@@ -62,7 +62,10 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   const [transcriptionFailure, setTranscriptionFailure] = useState<LiveTranscriptionFailure | null>(null);
   /** 「暂时忽略」后抑制同一场失败的横幅，直到转写恢复成功或开始新录音。 */
   const transcriptionFailureDismissedRef = useRef(false);
-  const [summaryBusy, setSummaryBusy] = useState(false);
+  const [summaryProgress, setSummaryProgress] = useState<{ meetingId: string; startedAt: number; receiving: boolean; modelName?: string } | null>(null);
+  const [visualSummaryFailure, setVisualSummaryFailure] = useState<{ meetingId: string; message: string } | null>(null);
+  const summaryBusy = summaryProgress !== null && summaryProgress.meetingId === meeting?.id;
+
   // 正在录音的会议 id：与界面当前选中项解耦。用户录音中切换到别的会议时，
   // 暂停/停止/睡眠暂停/自动纪要仍必须作用于这场会议，而不是“现在看着的那场”。
   const [recordingMeetingId, setRecordingMeetingId] = useState<string | null>(null);
@@ -79,6 +82,14 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   const recorderRef = useRef<MeetingRecorder | null>(null);
   const timerRef = useRef<number | null>(null);
   const summaryTimerRef = useRef<number | null>(null);
+  // 导入转写期间的阶段性纪要定时器。与录音滚动定时器分开：导入转写不是录音会话，
+  // 但同样需要在转写增长时定期出阶段性纪要，而不是等整段转录完成才 summaries。
+  const importSummaryTimerRef = useRef<number | null>(null);
+  const importInitialTriggerRef = useRef<number | null>(null);
+  const importTranscribingRef = useRef(importTranscribing);
+  importTranscribingRef.current = importTranscribing;
+  const importJobRef = useRef(importJob);
+  importJobRef.current = importJob;
   // ref 镜像：让定时器与事件回调读到最新的会议/时长/偏好，而不必重建定时器。
   const meetingRef = useRef(meeting);
   const elapsedRef = useRef(elapsed);
@@ -146,9 +157,12 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     [profiles, recordingSttProfileId]
   );
   const llmProfile = useMemo(
-    () => profiles.find((profile) => profile.kind === "llm" && profile.isDefault)
-      || profiles.find((profile) => profile.kind === "llm" && profile.enabled),
-    [profiles]
+    () => (importJob?.llmProfileId
+        ? profiles.find((profile) => profile.id === importJob.llmProfileId && profile.kind === "llm" && profile.transport !== "local-summary")
+        : undefined)
+      || profiles.find((profile) => profile.kind === "llm" && profile.transport !== "local-summary" && profile.isDefault)
+      || profiles.find((profile) => profile.kind === "llm" && profile.transport !== "local-summary" && profile.enabled),
+    [profiles, importJob?.llmProfileId]
   );
 
   // 录音中改选转写档案（例如在线 Whisper 不可用后切到本地 Whisper）立即生效：
@@ -166,16 +180,21 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
    * 生成 AI 纪要。final 省略时自动推导：会议不在录音/暂停中即为“会后终稿”，
    * 手动按钮因此能在录音结束后产出终稿总结（终稿路径不再不可达）。
    * 请求返回后合入最新会议，主题、笔记或转写在生成期间变化时将纪要标记为 stale。
-   * 主进程降级（未配置 LLM 或在线失败回退本地引擎）时返回 degraded 标记，
-   * 这里合入结果的同时用 warning 告知用户，不再静默。
    */
   const generateSummary = useCallback(async (final?: boolean, automatic = false) => {
-    // 定时滚动纪要属于录音会话：即使界面已切到别的会议，也只总结正在录的那场；
-    // 手动点击则总结用户当前正在看的会议。
+    // 定时滚动纪要：录音会话总结正在录的那场（即使界面已切走）；导入转写总结当前
+    // 正在看的那场（没有 recording meeting 时回退）。手动点击总结当前查看的会议。
     const selected = meetingRef.current;
-    const current = automatic ? resolveRecordingMeeting()
+    const current = automatic ? (resolveRecordingMeeting()
+      ?? (importTranscribingRef.current
+        ? useMeetingStore.getState().meetings.find((item) => item.id === selected?.id)
+        : undefined))
       : useMeetingStore.getState().meetings.find((item) => item.id === selected?.id);
     if (!current || summaryBusyRef.current) return;
+    // 导入转写的自动滚动没配总结模型时静默跳过：定时器每间隔触发，否则会反复弹
+    // 「请先配置」toast。转写完成后主进程会进入 waiting_for_summary_model 给出明确提示；
+    // 录音滚动与手动生成保持既有行为不变。
+    if (automatic && !llmProfile && importTranscribingRef.current) return;
     const isFinal = final ?? !["recording", "paused"].includes(current.status);
     const finalTranscript = current.transcript.filter((segment) => segment.status === "final");
     const sourceThroughMs = finalTranscript.reduce((maximum, segment) => Math.max(maximum, segment.endMs), 0);
@@ -188,7 +207,12 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     const baseNotes = JSON.stringify(current.notes);
     const template = preferences.summaryTemplate ?? "general";
     summaryBusyRef.current = true;
-    setSummaryBusy(true);
+    setSummaryProgress({
+      meetingId: current.id,
+      startedAt: Date.now(),
+      receiving: false,
+      modelName: llmProfile?.model || llmProfile?.name
+    });
     try {
       const { degraded, degradedReason, visualDegraded, visualDegradedReason, ...summary } = await api.summary.generate({
         meetingId: current.id,
@@ -203,11 +227,24 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
           previousSummary: current.summary,
           template
         }
-      });
+      }, () => setSummaryProgress((progress) => progress && { ...progress, receiving: true }));
       const latest = useMeetingStore.getState().meetings.find((item) => item.id === current.id);
       // 新转录在模型生成期间到达是正常情况：把结果合入最新快照，并将尚未覆盖部分标记
       // 为 stale。人工锁定字段始终由 mergeSummaryRevision 保留，不再整次丢弃结果。
       if (!latest) return;
+      // 导入期间：若主进程已进入终稿总结或已完成终稿（generationMode=online 且覆盖到本次或更晚），
+      // 丢弃迟到的阶段性滚动结果，避免覆盖终稿；在 diarizing 阶段允许在途阶段性纪要正常落盘展示。
+      const activeJob = importJobRef.current;
+      const mainSummarizingOrDone = Boolean(
+        activeJob && activeJob.meetingId === current.id
+        && (activeJob.status === "summarizing" || activeJob.summaryComplete)
+      );
+      const finalArrived = !isFinal
+        && (mainSummarizingOrDone
+          || (latest.summary.generationMode === "online"
+            && summary.sourceThroughMs !== undefined
+            && (latest.summary.sourceThroughMs ?? 0) >= summary.sourceThroughMs));
+      if (finalArrived) return;
       const latestThroughMs = latest.transcript
         .filter((segment) => segment.status === "final")
         .reduce((maximum, segment) => Math.max(maximum, segment.endMs), 0);
@@ -227,7 +264,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       if (!abort) setWarning(error instanceof Error ? error.message : "生成纪要失败");
     } finally {
       summaryBusyRef.current = false;
-      setSummaryBusy(false);
+      setSummaryProgress(null);
     }
   }, [llmProfile?.id, preferences.summaryTemplate, resolveRecordingMeeting, updateSummary]);
 
@@ -245,7 +282,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       return;
     }
     summaryBusyRef.current = true;
-    setSummaryBusy(true);
+    setSummaryProgress({ meetingId: current.id, startedAt: Date.now(), receiving: false });
     try {
       const refined = await api.summary.refineKeyPoints({
         meetingId: current.id,
@@ -278,7 +315,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       if (!abort) setWarning(error instanceof Error ? error.message : "深度提炼关键结论失败");
     } finally {
       summaryBusyRef.current = false;
-      setSummaryBusy(false);
+      setSummaryProgress(null);
     }
   }, [llmProfile?.id, preferences.summaryTemplate, updateSummary]);
 
@@ -286,8 +323,9 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   const generateVisualSummary = useCallback(async () => {
     const current = meetingRef.current;
     if (!current || summaryBusyRef.current) return;
+    setVisualSummaryFailure(null);
     summaryBusyRef.current = true;
-    setSummaryBusy(true);
+    setSummaryProgress({ meetingId: current.id, startedAt: Date.now(), receiving: false });
     try {
       const visualSummary = await api.summary.generateVisual({
         meetingId: current.id,
@@ -303,10 +341,14 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       // 与普通纪要一致：用户取消不是失败，不弹告警。
       const abort = (error as { name?: string })?.name === "AbortError"
         || /abort/i.test(String((error as Error)?.message ?? ""));
-      if (!abort) setWarning(error instanceof Error ? error.message : "生成视觉纪要失败");
+      if (!abort) {
+        const message = error instanceof Error ? error.message : "生成视觉纪要失败";
+        if (message.startsWith("[LICENSE_REQUIRED]")) setWarning(message);
+        else setVisualSummaryFailure({ meetingId: current.id, message });
+      }
     } finally {
       summaryBusyRef.current = false;
-      setSummaryBusy(false);
+      setSummaryProgress(null);
     }
   }, [llmProfile?.id, updateSummary]);
 
@@ -330,6 +372,76 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
       preferencesSummaryIntervalRef.current * 1_000
     );
   }, []);
+
+  /**
+   * 导入转写期间的阶段性纪要：
+   * 1. 导入转写速度远快于实时录音（数秒即可产出 30s+ 语音），因此不再空等 60 秒才发首次请求：
+   *    一旦积累够首批可归纳内容（≥30s 或 ≥4 段），1.5 秒防抖后立即生成首版阶段性纪要；
+   * 2. 之后每 20 秒（或用户设定更短间隔）随新增转写滚动刷新；
+   * 3. 转写完成进入说话人分离（diarizing）时停止发起新轮次，但放行已在途的阶段性纪要，
+   *    只在主进程真正进入终稿总结（summarizing）或用户暂停时才中止在途滚动请求。
+   */
+  const finalTranscriptMetrics = useMemo(() => {
+    if (!meeting) return { count: 0, endMs: 0 };
+    let count = 0;
+    let endMs = 0;
+    for (const segment of meeting.transcript) {
+      if (segment.status !== "final" || !segment.text.trim()) continue;
+      count += 1;
+      if (segment.endMs > endMs) endMs = segment.endMs;
+    }
+    return { count, endMs };
+  }, [meeting?.transcript]);
+  const hasExistingSummary = Boolean(
+    meeting && (
+      meeting.summary.overview?.trim()
+      || meeting.summary.discussionSections?.length
+      || meeting.summary.keyPoints.length > 0
+      || meeting.summary.actionItems.length > 0
+    )
+  );
+  const importFirstSummaryReady = Boolean(
+    importTranscribing
+    && meeting
+    && llmProfile
+    && !hasExistingSummary
+    && (finalTranscriptMetrics.count >= 4 || finalTranscriptMetrics.endMs >= 30_000)
+  );
+
+  useEffect(() => {
+    if (!importTranscribing || !meeting || !llmProfile) return;
+    const tick = () => generateSummaryRef.current(false, true);
+    const intervalMs = Math.min(Math.max(15, preferencesSummaryIntervalRef.current), 25) * 1_000;
+    importSummaryTimerRef.current = window.setInterval(tick, intervalMs);
+    return () => {
+      if (importSummaryTimerRef.current) window.clearInterval(importSummaryTimerRef.current);
+      importSummaryTimerRef.current = null;
+    };
+  }, [importTranscribing, meeting?.id, llmProfile?.id]);
+
+  // 达到首批可归纳门槛（≥4 段或 ≥30s 语音）即刻触发一次首版阶段性纪要：
+  // 依赖布尔态而非段落计数，避免高频分块到达（每 0.5-1s 一块）不断重置定时器导致永不触发。
+  useEffect(() => {
+    if (!importFirstSummaryReady || summaryBusyRef.current) return;
+    importInitialTriggerRef.current = window.setTimeout(() => {
+      importInitialTriggerRef.current = null;
+      void generateSummaryRef.current(false, true);
+    }, 600);
+    return () => {
+      if (importInitialTriggerRef.current) {
+        window.clearTimeout(importInitialTriggerRef.current);
+        importInitialTriggerRef.current = null;
+      }
+    };
+  }, [importFirstSummaryReady, meeting?.id, llmProfile?.id]);
+
+  // 主进程进入终稿总结阶段时，取消任何仍在途的阶段性滚动请求，避免与终稿并发写库。
+  useEffect(() => {
+    if (!meeting?.id) return;
+    if (importJob?.status === "summarizing" && summaryBusyRef.current) {
+      void api.summary.cancel(meeting.id).catch(() => {});
+    }
+  }, [importJob?.status, meeting?.id]);
 
   /**
    * 开始录音。可传入 meeting 覆盖参数：一键「创建并开始录音」时，闭包里的 meeting
@@ -463,6 +575,7 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
   useEffect(() => () => {
     if (timerRef.current) window.clearInterval(timerRef.current);
     if (summaryTimerRef.current) window.clearInterval(summaryTimerRef.current);
+    if (importSummaryTimerRef.current) window.clearInterval(importSummaryTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -520,6 +633,8 @@ export function useMeetingRecorder(meeting: Meeting | undefined) {
     warning,
     transcriptionFailure,
     summaryBusy,
+    summaryProgress: summaryBusy ? summaryProgress : null,
+    visualSummaryError: visualSummaryFailure?.meetingId === meeting?.id ? visualSummaryFailure?.message : undefined,
     setWarning,
     dismissTranscriptionFailure,
     start,

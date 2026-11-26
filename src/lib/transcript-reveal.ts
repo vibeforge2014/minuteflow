@@ -86,9 +86,20 @@ export function seedTranscriptReveal(
   return state;
 }
 
+/** 按 segments 数组引用缓存 id→segment 索引，避免长会议每 40ms 重建整张 Map。 */
+const segmentIndexCache = new WeakMap<TranscriptSegment[], Map<string, TranscriptSegment>>();
+
+function segmentByIdMap(segments: TranscriptSegment[]): Map<string, TranscriptSegment> {
+  const cached = segmentIndexCache.get(segments);
+  if (cached) return cached;
+  const map = new Map(segments.map((item) => [item.id, item]));
+  segmentIndexCache.set(segments, map);
+  return map;
+}
+
 /**
  * 出字一拍：停顿拍直接跳过；否则揭示队首段的一个增量（typewriter 节奏，
- * 标点处断句并留下小停）。返回 null 表示本拍无字可出（队列空或暂停中）。
+ * 按整个队列积压字数平滑提速，标点处断句并留下小停）。返回 null 表示本拍无字可出。
  */
 export function revealTick(
   segments: TranscriptSegment[],
@@ -98,15 +109,23 @@ export function revealTick(
     state.pauseTicks -= 1;
     return null;
   }
+  const byId = segmentByIdMap(segments);
+  let totalPending = 0;
+  for (const queuedId of state.queue) {
+    const queued = byId.get(queuedId);
+    if (!queued) continue;
+    const done = state.revealed.get(queuedId) ?? 0;
+    if (queued.text.length > done) totalPending += queued.text.length - done;
+  }
   while (state.queue.length) {
     const id = state.queue[0];
-    const segment = segments.find((item) => item.id === id);
+    const segment = byId.get(id);
     const revealed = state.revealed.get(id) ?? 0;
     if (!segment || revealed >= segment.text.length) {
       state.queue.shift();
       continue;
     }
-    const step = typewriterStep(segment.text.slice(revealed));
+    const step = typewriterStep(segment.text.slice(revealed), totalPending);
     if (!step) {
       state.queue.shift();
       continue;
@@ -125,15 +144,28 @@ export function revealPending(state: TranscriptRevealState): boolean {
   return state.queue.length > 0;
 }
 
-/** 计算显示用转录：揭示中的段截断到已揭示长度，其余原样透传。 */
+/** 当前正在逐字铺开的段 id（尚未开始出字时返回 null，避免空行挂光标）。 */
+export function activeRevealSegmentId(state: TranscriptRevealState): string | null {
+  const head = state.queue[0];
+  if (!head) return null;
+  return (state.revealed.get(head) ?? 0) > 0 ? head : null;
+}
+
+/**
+ * 计算显示用转录：
+ * - 仍在排队且尚未出第一字的新段（revealed === 0）暂不渲染，防止先冒出一排空时间戳和空泡泡；
+ *   等轮到它出第一字时，说话人标签、时间戳与正文再一起丝滑入场；
+ * - 正在出字的段截断到已揭示长度，其余原样透传。
+ */
 export function displayedTranscriptSegments(
   segments: TranscriptSegment[],
   state: TranscriptRevealState
 ): TranscriptSegment[] {
   if (!state.revealed.size) return segments;
-  return segments.map((segment) => {
+  return segments.flatMap((segment) => {
     const revealed = state.revealed.get(segment.id);
-    if (revealed === undefined || revealed >= segment.text.length) return segment;
-    return { ...segment, text: segment.text.slice(0, revealed) };
+    if (revealed === undefined || revealed >= segment.text.length) return [segment];
+    if (revealed <= 0 && segment.status !== "provisional" && segment.text.length > 0) return [];
+    return [{ ...segment, text: segment.text.slice(0, revealed) }];
   });
 }

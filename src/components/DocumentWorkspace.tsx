@@ -1,3 +1,4 @@
+import { SummaryProgress, type SummaryProgressState } from "./SummaryProgress";
 /**
  * 中央会议文档（工作区中栏）：自上而下依次是日期/参与者行、标题、
  * 会议目标、个人笔记（Tiptap 富文本 + Markdown 源码/预览三态 + .md 导入）、
@@ -100,10 +101,12 @@ interface DocumentWorkspaceProps {
   onCancelSummary(): void;
   /** 仅用普通纪要重试视觉版。 */
   onRetryVisualSummary(): void;
+  visualSummaryError?: string;
   /** 纪要模板：只改归纳视角，不改纪要结构；生成前可选。 */
   summaryTemplate: SummaryTemplateId;
   onSummaryTemplateChange(template: SummaryTemplateId): void;
   summaryBusy: boolean;
+  summaryProgress: SummaryProgressState | null;
   liveDocument: "notes" | "summary" | null;
   onCloseLiveDocument(): void;
 }
@@ -142,9 +145,11 @@ export function DocumentWorkspace({
   onRefineKeyPoints,
   onCancelSummary,
   onRetryVisualSummary,
+  visualSummaryError,
   summaryTemplate,
   onSummaryTemplateChange,
   summaryBusy,
+  summaryProgress,
   liveDocument,
   onCloseLiveDocument
 }: DocumentWorkspaceProps) {
@@ -176,9 +181,10 @@ export function DocumentWorkspace({
   const [summaryView, setSummaryView] = useState<"normal" | "visual">("normal");
   // 用户是否手动切换过纪要视图：true 时后台生成视觉纪要不再抢回视图，
   // 避免正在编辑普通纪要时字段突然消失。换会议/换阶段视为新上下文，重新自动选择。
-  const manualSummaryViewRef = useRef(false);
   /** 会后文档头「更多」菜单：重新转录等低频维护动作收在这里，避免与主操作抢注意力。 */
   const [heroMenuOpen, setHeroMenuOpen] = useState(false);
+  const [regeneratingSectionIndex, setRegeneratingSectionIndex] = useState<number | null>(null);
+  const [sectionRegenError, setSectionRegenError] = useState("");
   const heroMenuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!heroMenuOpen) return;
@@ -197,7 +203,24 @@ export function DocumentWorkspace({
   }, [heroMenuOpen]);
   useEffect(() => {
     setHeroMenuOpen(false);
+    setRegeneratingSectionIndex(null);
+    setSectionRegenError("");
   }, [meeting.id]);
+
+  /** 局部重生成单个讨论议题章节，不覆盖其他章节与人工锁定项。 */
+  const handleRegenerateSection = async (sectionIndex: number) => {
+    if (regeneratingSectionIndex !== null || summaryBusy) return;
+    setRegeneratingSectionIndex(sectionIndex);
+    setSectionRegenError("");
+    try {
+      const result = await api.summary.regenerateSection({ meetingId: meeting.id, sectionIndex });
+      onChange(result.meeting);
+    } catch (error) {
+      setSectionRegenError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRegeneratingSectionIndex(null);
+    }
+  };
   /** 中央列视图：AI 纪要文档 / 转写。会前只展示文档（还没有转写内容）。 */
   const [workspaceView, setWorkspaceView] = useState<"document" | "transcript">("document");
   // 会中固定展示转写，会前与会后默认展示文档。
@@ -206,6 +229,7 @@ export function DocumentWorkspace({
   }, [meeting.id, stage]);
   const showViewSwitch = stage === "review" && !splitWorkspace;
   const showTranscript = splitWorkspace || (showViewSwitch && workspaceView === "transcript");
+  const showingImportSummaryProgress = importJob?.status === "summarizing" && Boolean(processingStatus);
   const reviewProcessing = describeReviewProcessing({
     meetingEnded: meeting.status === "complete",
     job: importJob
@@ -266,14 +290,8 @@ export function DocumentWorkspace({
   }, [editor, meeting.id, meeting.notes, meeting.notesMarkdown]);
 
   useEffect(() => {
-    manualSummaryViewRef.current = false;
-    setSummaryView(stage === "review" && meeting.summary.visualSummary && !meeting.summary.visualSummary.stale ? "visual" : "normal");
+    setSummaryView("normal");
   }, [meeting.id, stage]);
-
-  useEffect(() => {
-    if (manualSummaryViewRef.current) return;
-    if (stage === "review" && meeting.summary.visualSummary && !meeting.summary.visualSummary.stale) setSummaryView("visual");
-  }, [meeting.summary.visualSummary?.generatedAt, stage]);
 
   /** 导入 .md 文件：规范化换行/BOM 后写入编辑器与 notesMarkdown，并切到预览态。 */
   const importMarkdown = async () => {
@@ -469,7 +487,7 @@ export function DocumentWorkspace({
                   // 安静的文本切换，不再放第二个分段控件在工作区标签旁边。
                   <button
                     className="review-hero__view-toggle"
-                    onClick={() => { manualSummaryViewRef.current = true; setSummaryView(summaryView === "visual" ? "normal" : "visual"); }}
+                    onClick={() => setSummaryView(summaryView === "visual" ? "normal" : "visual")}
                     aria-label={summaryView === "visual" ? "切换到普通纪要" : "切换到视觉纪要"}
                   >
                     {summaryView === "visual" ? <FileText size={14} /> : <Sparkle size={14} />}
@@ -480,19 +498,10 @@ export function DocumentWorkspace({
                   </button>
                 )}
               </div>
-              {importJob && processingStatus && <ImportProcessingMeta job={importJob} />}
-              {(!hasOrdinarySummary || processingStatus || summaryBusy) && <p>{reviewProcessing
-                ? reviewProcessing.detail
-                : summaryBusy ? (
-                    // 停止录音后滚动纪要可能仍在请求中：这一行是生成期的唯一状态指示。
-                    <span className="review-hero__generating">
-                      <ArrowClockwise size={14} className="spin" />
-                      {hasOrdinarySummary ? "正在更新纪要…" : "正在生成纪要…"}
-                    </span>
-                  )
-                : recentlyFinalized
-                  ? "录音已保存。"
-                  : "还没有纪要。"}</p>}
+              {importJob && processingStatus && !(splitWorkspace && showingImportSummaryProgress) && <ImportProcessingMeta job={importJob} />}
+              {!processingStatus && summaryProgress && !splitWorkspace && <SummaryProgress progress={summaryProgress} />}
+              {reviewProcessing && !showingImportSummaryProgress && <p>{reviewProcessing.detail}</p>}
+              {!hasOrdinarySummary && !processingStatus && !summaryBusy && <p>{recentlyFinalized ? "录音已保存。" : "还没有纪要。"}</p>}
             </div>
             <div className="review-hero__side">
               {importJob?.status === "diarizing" && (
@@ -507,7 +516,7 @@ export function DocumentWorkspace({
                   )}
                 </>
               )}
-              {importJob && isActiveImportJob(importJob) && onCancelImport && (
+              {importJob && isActiveImportJob(importJob) && onCancelImport && !(splitWorkspace && showingImportSummaryProgress) && (
                 <button
                   className="button button--secondary"
                   title="暂停后可随时继续，已完成的转写不会丢失"
@@ -521,9 +530,9 @@ export function DocumentWorkspace({
                   <ArrowClockwise size={16} />{canRetryTranscriptionGaps(importJob) ? "补转漏段" : "重试处理"}
                 </button>
               )}
-              {!processingStatus && (summaryBusy ? (
+              {!splitWorkspace && !processingStatus && (summaryBusy ? (
                 <button className="button button--secondary" onClick={onCancelSummary}><XCircle size={16} />取消生成</button>
-              ) : (
+              ) : summaryView === "normal" ? (
                 <>
                   <label className="review-hero__template" title="模板只改变归纳视角（先看什么、怎么写行动项），纪要结构与编辑方式不变">
                     <span>纪要模板</span>
@@ -546,8 +555,8 @@ export function DocumentWorkspace({
                     <ArrowClockwise size={16} />{meeting.summary.stale ? "更新纪要" : hasOrdinarySummary ? "重新生成纪要" : "生成最终纪要"}
                   </button>
                 </>
-              ))}
-              {!processingStatus && onRetranscribe && meeting.status !== "recording" && meeting.status !== "paused" && (
+              ) : null)}
+              {!processingStatus && !summaryBusy && summaryView === "normal" && (hasOrdinarySummary || onRetranscribe) && (
                 <div className="review-hero__more" ref={heroMenuRef}>
                   <button
                     className="icon-button icon-button--labeled review-hero__more-button"
@@ -561,10 +570,12 @@ export function DocumentWorkspace({
                   </button>
                   {heroMenuOpen && (
                     <div className="review-hero__menu" role="menu" aria-label="更多纪要操作">
-                      <button role="menuitem" onClick={() => { setHeroMenuOpen(false); onRetranscribe(); }}>
+                      {hasOrdinarySummary && <button role="menuitem" onClick={() => { setHeroMenuOpen(false); onRefineKeyPoints(); }}>
+                        <Sparkle size={14} />仅更新关键结论
+                      </button>}
+                      {onRetranscribe && <button role="menuitem" onClick={() => { setHeroMenuOpen(false); onRetranscribe(); }}>
                         <ArrowClockwise size={14} />重新转录
-                      </button>
-                      <small>放弃当前逐字稿，用已归档录音重新转录；笔记与手动锁定的内容会保留。</small>
+                      </button>}
                     </div>
                   )}
                 </div>
@@ -581,6 +592,7 @@ export function DocumentWorkspace({
               visual={meeting.summary.visualSummary}
               capable={Boolean(visualCapable)}
               busy={summaryBusy}
+              error={visualSummaryError}
               onRetry={onRetryVisualSummary}
             />
           </div>
@@ -662,34 +674,26 @@ export function DocumentWorkspace({
           icon={<FileText size={20} weight="duotone" />}
           title={stage === "live" ? "会议进展" : "关键结论"}
           badge={
-            <span className={`summary-cadence ${hasOrdinarySummary ? "" : "is-empty"} ${stage === "live" && summaryBusy ? "is-generating" : ""}`}>
-              <i /> {hasOrdinarySummary
-                ? meeting.summary.generationMode === "local" ? "本机基础归纳" : "AI 自动整理"
-                : "尚未生成"}{stage === "live" ? ` · 约每 ${formatInterval(summaryIntervalSeconds)}` : ""}
+            <span className="summary-badge-group">
+              <span className={`summary-cadence ${hasOrdinarySummary ? "" : "is-empty"} ${stage === "live" && summaryBusy ? "is-generating" : ""}`}>
+                <i /> {hasOrdinarySummary
+                  ? meeting.summary.generationMode === "local" ? "本机基础归纳" : "AI 自动整理"
+                  : "尚未生成"}{stage === "live" ? ` · 约每 ${formatInterval(summaryIntervalSeconds)}` : ""}
+              </span>
+              {stage !== "live" && meeting.summary.detectedMeetingType && meeting.summary.detectedMeetingType !== "通用会议" && (
+                <span className="summary-meta-pill" title="系统自动识别的会议类型">{meeting.summary.detectedMeetingType}</span>
+              )}
+              {stage !== "live" && meeting.summary.verification?.verified && (
+                <span
+                  className="summary-meta-pill summary-meta-pill--verified"
+                  title={`高精度事实核验已完成（发现 ${meeting.summary.verification.issuesFound} 项，修订 ${meeting.summary.verification.issuesFixed} 项）${meeting.summary.verification.unverifiedNotes?.length ? `\n提示：${meeting.summary.verification.unverifiedNotes.join("；")}` : ""}`}
+                >
+                  <CheckCircle size={12} weight="fill" />已核验
+                </span>
+              )}
             </span>
           }
-          action={
-            summaryBusy ? (
-              <button className="text-button" onClick={onCancelSummary} title="中止这次总结请求">
-                <XCircle size={15} />取消生成
-              </button>
-            ) : stage === "review" ? (
-              <button
-                className="text-button"
-                onClick={onRefineKeyPoints}
-                title="AI 重读整份纪要与逐字稿，只重新归纳关键结论，不覆盖你手改的其他内容"
-              >
-                <Sparkle size={15} />AI 深度提炼
-              </button>
-            ) : (
-              <button className="text-button" onClick={onGenerateSummary}>
-                <ArrowClockwise size={15} />
-                {meeting.summary.stale
-                  ? "更新纪要"
-                  : "立即总结"}
-              </button>
-            )
-          }
+
         >
           {meeting.summary.stale && (
             <div className="summary-stale">
@@ -833,7 +837,16 @@ export function DocumentWorkspace({
         </DocumentSection>
 
         {summaryView === "normal" && (
-          <MinutesSections sections={meeting.summary.discussionSections} transcript={meeting.transcript} onJump={jumpToTranscript} />
+          <>
+            {sectionRegenError && <p className="summary-stale" role="alert">{sectionRegenError}</p>}
+            <MinutesSections
+              sections={meeting.summary.discussionSections}
+              transcript={meeting.transcript}
+              onJump={jumpToTranscript}
+              onRegenerateSection={stage === "review" && !summaryBusy ? handleRegenerateSection : undefined}
+              regeneratingIndex={regeneratingSectionIndex}
+            />
+          </>
         )}
         {meeting.summary.actionItems.length > 0 ? <DocumentSection kind="actions" icon={<CheckSquare size={20} weight="duotone" />} title="行动项">
           <div className="action-table">
@@ -972,7 +985,6 @@ export function DocumentWorkspace({
             emptyActionLabel={emptyActionLabel}
             onEmptyAction={onEmptyAction}
             summaryBusy={summaryBusy || Boolean(processingStatus)}
-            onGenerateSummary={onGenerateSummary}
             transcriptionFailure={transcriptionFailure}
             transcriptionIsLocal={transcriptionIsLocal}
             onUseLocalWhisper={onUseLocalWhisper}
@@ -995,6 +1007,12 @@ export function DocumentWorkspace({
           <section ref={liveDialogRef} className="dialog live-document-dialog" role="dialog" aria-modal="true" aria-labelledby="live-document-title">
             <header>
               <h2 id="live-document-title">{liveDocument === "notes" ? "会议笔记" : "编辑纪要"}</h2>
+              {liveDocument === "summary" && summaryProgress && (
+                <>
+                  <SummaryProgress progress={summaryProgress} />
+                  <button className="text-button" onClick={onCancelSummary}>取消生成</button>
+                </>
+              )}
               <button className="icon-button" aria-label="关闭编辑" onClick={onCloseLiveDocument}><X size={19} /></button>
             </header>
             <div className="live-document-dialog__scroll">{meetingDocument}</div>

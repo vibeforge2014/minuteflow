@@ -274,3 +274,15 @@
 .local-model-config small, .transcription-options small, .transcription-options p { display: block; color: var(--settings-muted); font-size: 12px; line-height: 1.6; }
 .transcription-option input, .transcription-option select, .transcription-option textarea { box-sizing: border-box; width: 100%; font: inherit; padding: 8px 10px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
 .transcription-option textarea { resize: vertical; }
+
+/* The first-run form stays in the wizard's single-column layout. */
+.settings-backdrop > .settings-dialog--guided {
+  width: min(760px, calc(100vw - 32px));
+  height: min(610px, calc(100dvh - 32px));
+}
+.settings-dialog--guided .settings-layout {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+.settings-dialog--guided .guided-settings-return { min-height: 28px; }
+.guided-settings-actions { display: flex; justify-content: flex-end; }

@@ -79,7 +79,6 @@ interface TranscriptViewProps {
   /** 关键结论回链：跳到该时刻所在段落并短暂高亮（nonce 变化触发一次性定位）。 */
   jumpTarget?: TranscriptJump | null;
   summaryBusy?: boolean;
-  onGenerateSummary?(): void;
   /** 实时转写连续失败后的持久提示；录音结束后也保留，直到用户处理或忽略。 */
   transcriptionFailure?: LiveTranscriptionFailure | null;
   transcriptionIsLocal?: boolean;
@@ -96,7 +95,7 @@ interface TranscriptViewProps {
   onConfigureTranscription?(): void;
 }
 
-export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, splitWorkspace = stage === "live", onChange, playbackMs = 0, playbackPlaying = false, onSeek, emptyActionLabel, onEmptyAction, jumpTarget, summaryBusy, onGenerateSummary, transcriptionFailure, transcriptionIsLocal = false, onUseLocalWhisper, onChooseTranscriptionService, onDismissTranscriptionFailure, onRetryImport, onCancelImport, onSkipDiarization, onRetranscribe, onConfigureTranscription }: TranscriptViewProps) {
+export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, splitWorkspace = stage === "live", onChange, playbackMs = 0, playbackPlaying = false, onSeek, emptyActionLabel, onEmptyAction, jumpTarget, summaryBusy, transcriptionFailure, transcriptionIsLocal = false, onUseLocalWhisper, onChooseTranscriptionService, onDismissTranscriptionFailure, onRetryImport, onCancelImport, onSkipDiarization, onRetranscribe, onConfigureTranscription }: TranscriptViewProps) {
   /** 段落批量改写（查找替换 / 撤销）走 store：在最新转写上执行，不会被渲染快照覆盖。 */
   const patchTranscript = useMeetingStore((state) => state.patchTranscript);
   /** 正在重命名的说话人 id（显示浮层输入框）。 */
@@ -145,6 +144,10 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
   const [voiceprints, setVoiceprints] = useState<VoiceprintPerson[]>([]);
   const [learningSpeakerId, setLearningSpeakerId] = useState<string | null>(null);
   const [voiceprintMessage, setVoiceprintMessage] = useState("");
+  /** AI 语义校对与局部单段重识别状态。 */
+  const [correctingTranscript, setCorrectingTranscript] = useState(false);
+  const [retranscribingSegmentId, setRetranscribingSegmentId] = useState<string | null>(null);
+  const [expandedRawIds, setExpandedRawIds] = useState<Set<string>>(() => new Set());
   const confirmDialog = useConfirmDialog();
   /** 关键结论回链定位到的段落 id（短暂高亮后清除）。 */
   const [jumpHighlightId, setJumpHighlightId] = useState<string | null>(null);
@@ -159,9 +162,9 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
       .map((segment) => [segment.speakerId, segment.speakerName])
   )), [meeting.transcript, speakersUnassigned]);
   // 转写流式揭示：导入进行中（任务未终结）或会议进行中时，新到达文本按打字机
-  // 节奏逐拍铺开，与 AI 问答同一观感；历史内容与 Reduced Motion 直接透传。
+  // 节奏逐拍铺开，与 AI 问答同一观感；未轮到出字的段落暂不露出空时间戳。
   const importActive = Boolean(importJob) && !["complete", "failed", "cancelled"].includes(importJob?.status ?? "");
-  const displayTranscript = useStreamingTranscript(meeting, importActive || stage === "live");
+  const { segments: displayTranscript, streamingSegmentId } = useStreamingTranscript(meeting, importActive || stage === "live");
   /** 发言人筛选先于窗口化：只加载所选发言人的段落，长会议查找不会把无关内容一起渲染。 */
   const lowConfidenceCount = useMemo(() => countLowConfidence(displayTranscript), [displayTranscript]);
   const filteredTranscript = useMemo(
@@ -352,6 +355,8 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
     setSearchFocusId(null);
     setDismissedSuggestions(new Set());
     setOnlyLowConfidence(false);
+    setExpandedRawIds(new Set());
+    setRetranscribingSegmentId(null);
     suggestionCache.current.clear();
     refreshVoiceprints();
   }, [meeting.id, refreshVoiceprints]);
@@ -595,15 +600,91 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
     });
   };
 
+  /** 手动触发整场转写的受控 LLM 语义纠错（保留原稿 rawText 可随时对照恢复）。 */
+  const runTranscriptCorrection = async () => {
+    if (correctingTranscript || stage === "live" || importActive) return;
+    setCorrectingTranscript(true);
+    setVoiceprintMessage("");
+    try {
+      const result = await api.transcription.correct({ meetingId: meeting.id });
+      onChange(result.meeting);
+      setVoiceprintMessage(
+        result.correctedCount > 0
+          ? `已完成 AI 校对：修正 ${result.correctedCount} 段（保留原稿可恢复）`
+          : "AI 校对完成，未发现明显识别错误。"
+      );
+    } catch (error) {
+      setVoiceprintMessage(`AI 校对失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setCorrectingTranscript(false);
+    }
+  };
+
+  /** 局部重识别单个段落（只裁剪该段对应归档音频，不重跑整场）。 */
+  const retranscribeSegment = async (segmentId: string) => {
+    if (retranscribingSegmentId || stage === "live" || importActive) return;
+    setRetranscribingSegmentId(segmentId);
+    setVoiceprintMessage("");
+    try {
+      const result = await api.transcription.retranscribeSegment({ meetingId: meeting.id, segmentId });
+      onChange(result.meeting);
+      setVoiceprintMessage("已完成该段落的局部重识别。");
+    } catch (error) {
+      setVoiceprintMessage(`局部重识别失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setRetranscribingSegmentId(null);
+    }
+  };
+
+  /** 将校对或重识别后的段落一键恢复为原始 ASR 文本。 */
+  const restoreRawSegmentText = (segmentId: string) => {
+    setUndoState(null);
+    onChange({
+      ...meeting,
+      transcript: meeting.transcript.map((item) =>
+        item.id === segmentId && item.rawText != null
+          ? { ...item, text: item.rawText, rawText: undefined, corrected: false }
+          : item),
+      summary: { ...meeting.summary, stale: true }
+    });
+    setExpandedRawIds((previous) => {
+      const next = new Set(previous);
+      next.delete(segmentId);
+      return next;
+    });
+  };
+
+  const toggleRawPreview = (segmentId: string) => {
+    setExpandedRawIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(segmentId)) next.delete(segmentId);
+      else next.add(segmentId);
+      return next;
+    });
+  };
+
   const speakerButton = (speakers.length > 0 || voiceprints.length > 0) && (
     <button className="text-button transcript-speakers" aria-expanded={managerOpen} aria-controls={managerOpen ? "transcript-speaker-manager" : undefined} onClick={() => setManagerOpen((value) => !value)}>
       <Users size={16} />发言人
     </button>
   );
 
+  const canRunPostActions = stage !== "live" && !importActive && meeting.transcript.some((seg) => seg.status !== "provisional" && seg.text.trim());
+
   const transcriptToolbar = (
     <div className="transcript-toolbar">
       {speakerButton}
+      {canRunPostActions && (
+        <button
+          type="button"
+          className={`text-button transcript-correct-trigger ${correctingTranscript ? "is-busy" : ""}`}
+          disabled={correctingTranscript}
+          title="结合热词与上下文修复同音错别字和专业术语（保留原稿可恢复）"
+          onClick={() => void runTranscriptCorrection()}
+        >
+          <MagicWand size={15} />{correctingTranscript ? "校对中…" : "AI 校对"}
+        </button>
+      )}
       <button
         ref={searchTriggerRef}
         type="button"
@@ -636,19 +717,18 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
     </div>
   );
 
+  const summaryInSidePanel = splitWorkspace && importJob?.status === "summarizing";
   const transcriptStatus = stage === "live"
     ? { label: "实时接收", tone: "live" }
-    : isActiveImportJob(importJob)
+    : !summaryInSidePanel && isActiveImportJob(importJob)
       ? { label: "后台处理中", tone: "active" }
       : importJob?.transcriptionGaps?.length
         ? { label: "有漏段", tone: "idle" }
-      : importJob?.transcriptionNoSpeech
-        ? { label: "无语音", tone: "idle" }
-      : importJob && importJob.status !== "complete"
-        ? null
-      : meeting.transcript.length
-        ? { label: "转写已完成", tone: "done" }
-        : { label: "等待内容", tone: "idle" };
+        : importJob?.transcriptionNoSpeech
+          ? { label: "无语音", tone: "idle" }
+          : meeting.transcript.length || (importJob && importJob.status !== "complete")
+            ? null
+            : { label: "等待内容", tone: "idle" };
   const transcriptSubtitle = meeting.transcript.length
     ? `${meeting.transcript.length} 段内容${speakersUnassigned
       ? importJob?.diarizationOutcome === "pending" && isActiveImportJob(importJob) ? " · 正在分离发言人" : " · 未分离发言人"
@@ -887,7 +967,7 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
           </button>
         </section>
       )}
-      {importJob && (isActiveImportJob(importJob) || isRetryableImportJob(importJob) || [
+      {importJob && !summaryInSidePanel && (isActiveImportJob(importJob) || isRetryableImportJob(importJob) || [
         "failed", "cancelled", "waiting_for_network", "waiting_for_model",
         "waiting_for_summary_model", "waiting_for_audio_tool"
       ].includes(importJob.status)) && (
@@ -951,7 +1031,6 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
           key={meeting.id}
           summary={meeting.summary}
           busy={summaryBusy}
-          onRefresh={onGenerateSummary}
         />}
         {filteredTranscript.length > visibleCount && (
           <button className="load-earlier" onClick={() => setVisibleCount((value) => value + 200)}>
@@ -964,10 +1043,11 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
           const continuation = previous?.speakerId === segment.speakerId && segment.startMs - previous.endMs < 1500;
           const segmentSpeakerColor = speakerColor(segment.speakerId);
           const speakerUnassigned = speakersUnassigned && segment.speakerId === "speaker-1" && segment.speakerName === "发言人1";
+          const isStreamingSegment = streamingSegmentId === segment.id && editingSegmentId !== segment.id;
           return (
             // is-playing：当前播放位置命中的段落整行高亮；data-segment-id 供回放跟随定位。
             <article
-              className={`transcript-item transcript-item--${segment.status} transcript-item--speaker-${segmentSpeakerColor} ${continuation ? "is-continuation" : ""} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${jumpHighlightId === segment.id ? "is-jump-highlight" : ""} ${searchFocusId === segment.id ? "is-search-hit" : ""} ${enteringIndex >= 0 ? "content-motion-enter" : ""}`}
+              className={`transcript-item transcript-item--${segment.status} transcript-item--speaker-${segmentSpeakerColor} ${continuation ? "is-continuation" : ""} ${playingSegment?.id === segment.id ? "is-playing" : ""} ${isStreamingSegment ? "is-streaming" : ""} ${jumpHighlightId === segment.id ? "is-jump-highlight" : ""} ${searchFocusId === segment.id ? "is-search-hit" : ""} ${enteringIndex >= 0 ? "content-motion-enter" : ""}`}
               data-segment-id={segment.id}
               key={segment.id}
               style={enteringIndex >= 0 ? { animationDelay: `${Math.min(enteringIndex, 2) * 40}ms` } : undefined}
@@ -975,6 +1055,10 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
             <div className="transcript-item__meta">
               {speakerUnassigned ? (
                 <span className="speaker-name">未分离</span>
+              ) : segment.speakerId.startsWith("pending-speaker-") ? (
+                <span className={`speaker-name speaker-name--${segmentSpeakerColor}`} title="同一人可能暂时有多个编号，识别结束后统一校准">
+                  {segment.speakerName} · 待校准
+                </span>
               ) : <button className={`speaker-name speaker-name--${segmentSpeakerColor}`} onClick={() => openSpeakerEditor(segment.speakerId)}>
                 <span className="transcript-speaker-avatar" aria-hidden="true">{segment.speakerName.trim().charAt(0) || "人"}</span>
                 <span>{segment.speakerName}</span>
@@ -993,10 +1077,21 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
                 <button
                   type="button"
                   className="confidence-flag"
-                  title="引擎对这段的识别把握较低，建议对照录音复核（点击直接编辑）"
+                  title="引擎对这段的识别把握较低，点击编辑或使用右侧重识别按钮复核"
                   onClick={() => setEditingSegmentId(segment.id)}
                 >
                   <WarningCircle size={12} />可能不准
+                </button>
+              )}
+              {segment.corrected && segment.rawText && segment.rawText !== segment.text && (
+                <button
+                  type="button"
+                  className={`transcript-corrected-pill ${expandedRawIds.has(segment.id) ? "is-open" : ""}`}
+                  aria-expanded={expandedRawIds.has(segment.id)}
+                  title="点击对照或恢复原始识别文本"
+                  onClick={() => toggleRawPreview(segment.id)}
+                >
+                  已校对
                 </button>
               )}
             </div>
@@ -1024,9 +1119,25 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
               ) : normalizedQuery ? (
                 <p className="transcript-copy"><HighlightedTranscriptCopy text={segment.text} query={normalizedQuery} /></p>
               ) : (
-                <AnimatedTranscriptCopy text={segment.text} animate={!enteringSegmentIds.has(segment.id)} />
+                <AnimatedTranscriptCopy
+                  text={segment.text}
+                  animate={!enteringSegmentIds.has(segment.id)}
+                  streaming={isStreamingSegment}
+                />
               )}
               <ProvisionalBadge visible={segment.status === "provisional"} />
+              {expandedRawIds.has(segment.id) && segment.rawText && (
+                <div className="transcript-raw-preview">
+                  <span>原稿：{segment.rawText}</span>
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => restoreRawSegmentText(segment.id)}
+                  >
+                    <ArrowUUpLeft size={12} />恢复原稿
+                  </button>
+                </div>
+              )}
               {!normalizedQuery && editingSegmentId !== segment.id && (suggestionsBySegment.get(segment.id)?.length ?? 0) > 0 && (
                 <div className="glossary-suggestions" aria-label="术语纠错建议">
                   {suggestionsBySegment.get(segment.id)!.map((suggestion) => (
@@ -1056,6 +1167,18 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
               )}
             </div>
             <div className="transcript-item__actions">
+              {segment.status !== "provisional" && stage !== "live" && !importActive && (
+                <button
+                  type="button"
+                  className={`transcript-edit transcript-retranscribe ${retranscribingSegmentId === segment.id ? "is-busy" : ""}`}
+                  aria-label={`局部重识别 ${formatTranscriptTime(segment.startMs)} 的转写`}
+                  title="仅重识别这一段音频"
+                  disabled={Boolean(retranscribingSegmentId)}
+                  onClick={() => void retranscribeSegment(segment.id)}
+                >
+                  <ArrowClockwise size={14} />
+                </button>
+              )}
               {segment.status !== "provisional" && (
                 <button
                   className="transcript-edit"
@@ -1171,10 +1294,9 @@ export function TranscriptView({ meeting, importJob, sttProfiles = [], stage, sp
 }
 
 /** 概览只摘录已有纪要，不改写原文，也不会因打开转写页触发模型请求。 */
-function TranscriptOverview({ summary, busy, onRefresh }: {
+function TranscriptOverview({ summary, busy }: {
   summary: Meeting["summary"];
   busy?: boolean;
-  onRefresh?(): void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -1189,9 +1311,7 @@ function TranscriptOverview({ summary, busy, onRefresh }: {
       <header>
         <h2><MagicWand size={16} weight="duotone" aria-hidden="true" />纪要概览</h2>
         <div className="transcript-overview__actions">
-          {onRefresh && <button className="icon-button" disabled={busy} title="更新纪要" aria-label="更新纪要概览" onClick={onRefresh}>
-            <ArrowClockwise size={17} className={busy ? "spin" : ""} />
-          </button>}
+
           {points.length > 0 && <button className="icon-button" title="复制概览" aria-label="复制纪要概览" onClick={async () => {
             try { await navigator.clipboard.writeText(text); setCopyState("copied"); }
             catch { setCopyState("failed"); }
@@ -1232,22 +1352,23 @@ function ProvisionalBadge({ visible }: { visible: boolean }) {
   );
 }
 
-/** 同一自然段续写时只让新增尾文出现；识别修正只给当前文字一次轻强调。 */
-function AnimatedTranscriptCopy({ text, animate }: { text: string; animate: boolean }) {
+/** 同一自然段续写时只让新增尾文轻淡入；正在流式揭示的段落末尾附带柔和光标。 */
+function AnimatedTranscriptCopy({ text, animate, streaming = false }: { text: string; animate: boolean; streaming?: boolean }) {
   const previousRef = useRef(text);
   const change = animate
     ? classifyTextChange(previousRef.current, text)
     : { kind: "unchanged" as const, prefix: text, suffix: "" };
   useEffect(() => { previousRef.current = text; }, [text]);
 
+  const caret = streaming ? <span className="transcript-streaming-caret" aria-hidden="true" /> : null;
   if (change.kind === "appended") {
     return (
-      <p className="transcript-copy">
-        {change.prefix}<span className="transcript-copy__tail" key={text}>{change.suffix}</span>
+      <p className={`transcript-copy ${streaming ? "is-streaming" : ""}`}>
+        {change.prefix}<span className="transcript-copy__tail" key={text.length}>{change.suffix}</span>{caret}
       </p>
     );
   }
-  return <p className={`transcript-copy ${change.kind === "updated" ? "content-motion-update" : ""}`}>{text}</p>;
+  return <p className={`transcript-copy ${change.kind === "updated" ? "content-motion-update" : ""} ${streaming ? "is-streaming" : ""}`}>{text}{caret}</p>;
 }
 
 /** 文内查找命中片段：用 <mark> 逐段包裹，不改变原文、不影响编辑入口。 */

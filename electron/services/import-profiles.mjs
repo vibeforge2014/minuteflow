@@ -42,6 +42,16 @@ export function resolveJobProfile(profiles, kind, profileId) {
     || null;
 }
 
+/** 只重跑纪要时跟随当前默认模型，用户仍可显式选回上次的模型。 */
+export function resolveImportSummaryRetryProfile(profiles, previousProfileId, selection) {
+  const available = profiles.filter((profile) => profile.kind === "llm" && profile.enabled !== false
+    && profile.transport !== "local-summary");
+  if (selection) return available.find((profile) => profile.id === selection) ?? null;
+  return available.find((profile) => profile.isDefault)
+    ?? available.find((profile) => profile.id === previousProfileId)
+    ?? available[0] ?? null;
+}
+
 /**
  * 导入转录块走哪条执行路径。
  * apple-speech 是本机引擎：掉进 remote 路径会拿空 baseUrl 发 HTTP 请求，

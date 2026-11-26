@@ -25,13 +25,23 @@ export function isActiveImportJob(job?: ImportJob) {
   return Boolean(job && ACTIVE_IMPORT_STATUSES.includes(job.status));
 }
 
+/**
+ * 导入转写期间是否应滚动生成阶段性纪要。
+ * 仅「正在转写」阶段启用：说话人识别/生成终稿阶段交给主进程终稿，避免两条写路径
+ * 互相覆盖；用户关闭了自动生成时不启用。
+ */
+export function shouldRollImportSummary(job?: ImportJob) {
+  if (!job || job.autoSummarize === false) return false;
+  return job.status === "transcribing" || job.stage === "transcribing";
+}
+
 export function isRetryableImportJob(job?: ImportJob) {
   return Boolean(job && (RETRYABLE_IMPORT_STATUSES.includes(job.status)
     || job.status === "complete" && job.transcriptionGaps?.length));
 }
 
 export function canRetryTranscriptionGaps(job: ImportJob) {
-  return Boolean(job.transcriptionGaps?.length && (job.recordingBackfill || job.retryingTranscriptionGaps
+  return Boolean(job.stage !== "summarizing" && job.transcriptionGaps?.length && (job.recordingBackfill || job.retryingTranscriptionGaps
     || job.totalChunks && (job.completedChunks ?? 0) >= job.totalChunks));
 }
 
@@ -98,6 +108,18 @@ export function importElapsedSeconds(startedAt: string | undefined, now = Date.n
   return Math.max(0, Math.floor((now - started) / 1000));
 }
 
+/** 只展示网关或模型已报告的阶段；旧任务以是否收到正文区分。 */
+export function describeSummaryRequest(phase?: ImportJob["summaryPhase"], receiving?: boolean) {
+  switch (phase) {
+    case "requesting": return "等待总结服务响应";
+    case "waiting_body": return "已收到服务响应，等待模型输出";
+    case "reasoning": return "模型正在分析会议内容";
+    case "receiving": return "正在接收纪要";
+    case "retrying": return "正在重试总结请求";
+    default: return receiving === undefined ? "正在生成纪要" : receiving ? "正在接收纪要" : "等待总结模型输出";
+  }
+}
+
 /** 任务主标题（用于文档顶部与转写状态行）。 */
 export function describeImportProcessing(job: ImportJob | undefined) {
   if (!job || job.status === "complete") return undefined;
@@ -143,8 +165,11 @@ export function describeReviewProcessing(input: {
     if (job.status === "diarizing") {
       return { eyebrow: "会议已结束 · 识别发言人", detail: "转写已完成，正在本机识别发言人；可以先看转写。" };
     }
-    if (job.status === "summarizing" || job.status === "waiting_for_summary_model") {
-      return { eyebrow: "会议已结束 · 整理纪要", detail: "转写已完成，正在后台整理纪要；可以先编辑笔记或查看转写。" };
+    if (job.status === "waiting_for_summary_model") {
+      return { eyebrow: "会议已结束 · 待配置纪要", detail: describeImportProcessing(job) ?? "等待配置总结模型" };
+    }
+    if (job.status === "summarizing") {
+      return { eyebrow: "会议已结束 · 整理纪要", detail: describeSummaryRequest(job.summaryPhase, job.summaryReceiving) };
     }
     return {
       eyebrow: "会议已结束 · 后台处理",
@@ -176,6 +201,11 @@ export function describeImportProgressDetail(job: ImportJob | undefined, now = D
     parts.push("本地处理，不上传音频");
     return parts.join(" · ");
   }
+  if (job.status === "summarizing") {
+    const elapsed = importElapsedSeconds(job.summaryStartedAt ?? job.updatedAt, now);
+    const status = describeSummaryRequest(job.summaryPhase, job.summaryReceiving);
+    return elapsed === undefined ? status : `${status} · 已用 ${formatDuration(elapsed)}`;
+  }
   if (job.status === "waiting_for_network") return job.error || "网络恢复后会自动从断点继续";
   if (job.status === "waiting_for_model" || job.status === "waiting_for_summary_model") {
     return job.error || "配置好模型后会自动继续，已归档音频不会丢失";
@@ -190,7 +220,12 @@ export function describeImportProgressDetail(job: ImportJob | undefined, now = D
   if (job.status === "transcribing" || job.stage === "transcribing") {
     if (job.retryingTranscriptionGaps) return `${job.transcriptionGaps?.length ?? 0} 段待补转`;
     if (!job.totalChunks) return "音频会按自然停顿切段，首段文本很快出现";
-    return `已完成 ${Math.min(job.completedChunks || 0, job.totalChunks)}/${job.totalChunks} 段`;
+    const transcription = `已完成 ${Math.min(job.completedChunks || 0, job.totalChunks)}/${job.totalChunks} 段`;
+    if (!job.diarizationPhase || job.diarizationSkipped) return transcription;
+    const speakerProgress = job.diarizationProcessedMs
+      ? `已分析 ${formatDuration(job.diarizationProcessedMs / 1000)}`
+      : describeDiarizationPhase(job.diarizationPhase);
+    return `${transcription} · 发言人识别 ${speakerProgress}`;
   }
   return undefined;
 }

@@ -14,7 +14,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
-import { buildBasicKeyPoints, simplifyChinese, simplifyMeetingAiText, simplifySummary } from "./services/chinese.mjs";
+import { simplifyChinese, simplifyMeetingAiText, simplifySummary } from "./services/chinese.mjs";
 
 let database;
 // node:sqlite's DatabaseSync is a single shared connection and all its
@@ -190,6 +190,8 @@ function createSchema(db) {
       speaker_id TEXT NOT NULL,
       speaker_name TEXT NOT NULL,
       text TEXT NOT NULL,
+      raw_text TEXT,
+      corrected INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'final',
       track TEXT NOT NULL DEFAULT 'mixed',
       confidence REAL,
@@ -282,12 +284,21 @@ function createSchema(db) {
   if (!profileColumns.some((column) => column.name === "is_default")) {
     db.exec("ALTER TABLE model_profiles ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0");
   }
+  // 老库迁移：转写段落增加 raw_text（原始 ASR 文本）与 corrected（是否经 LLM 语义校对）列，
+  // 以便纠错后仍可对照或一键恢复原始识别文本。
+  const transcriptColumns = db.prepare("PRAGMA table_info(transcript_segments)").all();
+  if (!transcriptColumns.some((column) => column.name === "raw_text")) {
+    db.exec("ALTER TABLE transcript_segments ADD COLUMN raw_text TEXT");
+  }
+  if (!transcriptColumns.some((column) => column.name === "corrected")) {
+    db.exec("ALTER TABLE transcript_segments ADD COLUMN corrected INTEGER NOT NULL DEFAULT 0");
+  }
 }
 
 /** 把 meetings 行 + 关联转录段落转换为渲染层使用的驼峰字段会议对象。 */
 function rowToMeeting(db, row) {
   const transcript = db.prepare(`
-    SELECT id, start_ms, end_ms, speaker_id, speaker_name, text, status, track, confidence
+    SELECT id, start_ms, end_ms, speaker_id, speaker_name, text, raw_text, corrected, status, track, confidence
     FROM transcript_segments WHERE meeting_id = ? ORDER BY start_ms ASC
   `).all(row.id).map((segment) => ({
     id: segment.id,
@@ -296,6 +307,8 @@ function rowToMeeting(db, row) {
     speakerId: segment.speaker_id,
     speakerName: segment.speaker_name,
     text: simplifyChinese(segment.text),
+    ...(segment.raw_text != null ? { rawText: simplifyChinese(segment.raw_text) } : {}),
+    ...(segment.corrected ? { corrected: true } : {}),
     status: segment.status,
     track: segment.track,
     confidence: segment.confidence ?? undefined
@@ -421,15 +434,17 @@ function persistTranscriptSegments(db, meeting, timestamp, preserveNewerSegments
   }
   const upsertSegment = db.prepare(`
     INSERT INTO transcript_segments(
-      id, meeting_id, start_ms, end_ms, speaker_id, speaker_name, text,
+      id, meeting_id, start_ms, end_ms, speaker_id, speaker_name, text, raw_text, corrected,
       status, track, confidence, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       start_ms = excluded.start_ms,
       end_ms = excluded.end_ms,
       speaker_id = excluded.speaker_id,
       speaker_name = excluded.speaker_name,
       text = excluded.text,
+      raw_text = excluded.raw_text,
+      corrected = excluded.corrected,
       status = excluded.status,
       track = excluded.track,
       confidence = excluded.confidence
@@ -443,6 +458,8 @@ function persistTranscriptSegments(db, meeting, timestamp, preserveNewerSegments
       segment.speakerId,
       segment.speakerName,
       segment.text,
+      segment.rawText ?? null,
+      segment.corrected ? 1 : 0,
       segment.status ?? "final",
       segment.track ?? "mixed",
       segment.confidence ?? null,
@@ -515,20 +532,6 @@ function migrateAiTextToSimplified(db) {
     for (const row of db.prepare("SELECT id, summary_json FROM meetings").all()) {
       const current = safeJson(row.summary_json, {});
       const summary = simplifySummary(current);
-      if (!(summary.manualLocks ?? []).some((key) => key.startsWith("keyPoints"))) {
-        const transcript = db.prepare("SELECT text, status FROM transcript_segments WHERE meeting_id = ? ORDER BY start_ms").all(row.id);
-        const transcriptTexts = new Set(transcript.map((segment) => simplifyChinese(segment.text).trim()));
-        const legacyCopied = summary.keyPoints.some((point) => point.length > 120 || transcriptTexts.has(point.trim()));
-        if (legacyCopied) {
-          const keyDrafts = buildBasicKeyPoints(transcript);
-          summary.keyPoints = keyDrafts.map((draft) => draft.text);
-          summary.keyPointTimes = keyDrafts.map((draft) => draft.timeMs ?? null);
-          summary.generationMode = "local";
-          summary.sourceThroughMs = db.prepare("SELECT MAX(end_ms) AS value FROM transcript_segments WHERE meeting_id = ?").get(row.id)?.value ?? 0;
-          summary.stale = false;
-          summary.updatedAt = nowIso();
-        }
-      }
       if (JSON.stringify(summary) !== JSON.stringify(current)) updateSummary.run(JSON.stringify(summary), row.id);
     }
     db.exec("PRAGMA user_version = 3");

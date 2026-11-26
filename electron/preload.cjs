@@ -40,12 +40,23 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     }
   },
   transcription: {
-    processChunk: (payload) => invoke("transcription:chunk", payload)
+    processChunk: (payload) => invoke("transcription:chunk", payload),
+    correct: (payload) => invoke("transcription:correct", payload),
+    retranscribeSegment: (payload) => invoke("transcription:retranscribe-segment", payload)
   },
   summary: {
-    generate: (payload) => invoke("summary:generate", payload),
+    generate: (payload, onOutput) => {
+      if (typeof onOutput !== "function") return invoke("summary:generate", payload);
+      const listener = (_event, meetingId) => {
+        if (meetingId === payload.meetingId) onOutput();
+      };
+      ipcRenderer.on("summary:output", listener);
+      return invoke("summary:generate", payload)
+        .finally(() => ipcRenderer.removeListener("summary:output", listener));
+    },
     refineKeyPoints: (payload) => invoke("summary:refine-key-points", payload),
     generateVisual: (payload) => invoke("summary:generate-visual", payload),
+    regenerateSection: (payload) => invoke("summary:regenerate-section", payload),
     cancel: (meetingId) => invoke("summary:cancel", meetingId)
   },
   chat: {
@@ -100,7 +111,7 @@ contextBridge.exposeInMainWorld("meetingAPI", {
     fromDropped: (files) => invoke("imports:describe-dropped", Array.from(files, (file) => webUtils.getPathForFile(file))),
     enqueue: (items, options) => invoke("imports:enqueue", items, options),
     list: () => invoke("imports:list"),
-    retry: (id, sttProfileId) => invoke("imports:retry", id, sttProfileId),
+    retry: (id, sttProfileId, llmProfileId) => invoke("imports:retry", id, sttProfileId, llmProfileId),
     cancel: (id) => invoke("imports:cancel", id),
     skipDiarization: (id) => invoke("imports:skip-diarization", id),
     retranscribe: (meetingId) => invoke("imports:retranscribe", meetingId),

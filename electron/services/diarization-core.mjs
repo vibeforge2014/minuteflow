@@ -52,6 +52,12 @@ export function cosineSimilarity(left, right) {
 export const DIARIZATION_MERGE_SIMILARITY = 0.7;
 export const DIARIZATION_FRAGMENT_SECONDS = 10;
 export const DIARIZATION_FRAGMENT_SIMILARITY_FLOOR = 0.55;
+/**
+ * 保护短插话人不被「时间相邻兜底」误杀：累计语音达到此秒数、已提取出有效声纹，
+ * 且与所有已有说话人簇的最大余弦相似度低于 ceiling 时，视为明确的独立插话人保留。
+ */
+export const DIARIZATION_DISTINCT_FRAGMENT_MIN_SECONDS = 2;
+export const DIARIZATION_DISTINCT_FRAGMENT_CEILING = 0.45;
 
 /** 分批调用原生离线分离器，并把轮次还原为整场录音的时间轴。 */
 export function diarizeAudioWindows(wave, processWindow, {
@@ -98,7 +104,9 @@ export function diarizeAudioWindows(wave, processWindow, {
 export function mergeDiarizationClusters(turns, centroidEmbeddings, {
   mergeSimilarity = DIARIZATION_MERGE_SIMILARITY,
   minClusterSeconds = DIARIZATION_FRAGMENT_SECONDS,
-  fragmentSimilarityFloor = DIARIZATION_FRAGMENT_SIMILARITY_FLOOR
+  fragmentSimilarityFloor = DIARIZATION_FRAGMENT_SIMILARITY_FLOOR,
+  distinctFragmentMinSeconds = DIARIZATION_DISTINCT_FRAGMENT_MIN_SECONDS,
+  distinctFragmentCeiling = DIARIZATION_DISTINCT_FRAGMENT_CEILING
 } = {}) {
   const clusters = new Map();
   // 簇归属父指针：absorb 只合并记账，轮次对象上的旧 speakerId 由这里解析到簇根。
@@ -161,12 +169,23 @@ export function mergeDiarizationClusters(turns, centroidEmbeddings, {
     if (!fragment || fragment.durationMs >= minClusterSeconds * 1000 || clusters.size === 1) continue;
     let bestId = null;
     let bestSimilarity = fragmentSimilarityFloor;
+    let maxSimilarity = -Infinity;
     if (fragment.centroid) {
       for (const [candidateId, candidate] of clusters) {
         if (candidateId === fragmentId || !candidate.centroid) continue;
         const similarity = cosineSimilarity(fragment.centroid, candidate.centroid);
+        if (similarity > maxSimilarity) maxSimilarity = similarity;
         if (similarity >= bestSimilarity) { bestSimilarity = similarity; bestId = candidateId; }
       }
+    }
+    // 明确的短插话人（已有有效声纹、时长 ≥ distinctFragmentMinSeconds 且与所有其他簇差异显著）
+    // 保留为独立发言人，避免被时间相邻兜底强行吞并进原发言人。
+    if (!bestId
+      && fragment.centroid
+      && Number.isFinite(maxSimilarity)
+      && fragment.durationMs >= distinctFragmentMinSeconds * 1000
+      && maxSimilarity < distinctFragmentCeiling) {
+      continue;
     }
     if (!bestId) {
       // 时间相邻兜底：找该簇时间轴上前后最近的轮次所属簇。
@@ -240,9 +259,9 @@ export function matchVoiceprint(embedding, samples, options = {}) {
 }
 
 /** 从若干说话区间拼接最多 30 秒单人语音，过短时拒绝学习/识别以减少误判。 */
-export function collectIntervalSamples(wave, intervals) {
+export function collectIntervalSamples(wave, intervals, { minAudioMs = MIN_VOICEPRINT_AUDIO_MS } = {}) {
   const maximumSamples = Math.round(wave.sampleRate * MAX_VOICEPRINT_AUDIO_MS / 1000);
-  const minimumSamples = Math.round(wave.sampleRate * MIN_VOICEPRINT_AUDIO_MS / 1000);
+  const minimumSamples = Math.round(wave.sampleRate * minAudioMs / 1000);
   const chunks = [];
   let total = 0;
   for (const interval of [...intervals].sort((left, right) => left.startMs - right.startMs)) {
@@ -267,41 +286,43 @@ export function collectIntervalSamples(wave, intervals) {
   return samples;
 }
 
-/** 用当前 diarization 档案的 3D-Speaker 模型计算一份本地声纹向量。 */
-export function computeVoiceprintEmbedding(sherpaOnnx, embeddingModel, wave, intervals) {
-  const extractor = new sherpaOnnx.SpeakerEmbeddingExtractor({
+/** 同一任务复用 ONNX 会话，避免每位发言人各自分配一份模型与推理内存。 */
+export function createVoiceprintExtractor(sherpaOnnx, embeddingModel) {
+  return new sherpaOnnx.SpeakerEmbeddingExtractor({
     model: embeddingModel,
     numThreads: 2,
     debug: false,
     provider: "cpu"
   });
-  const stream = extractor.createStream();
-  stream.acceptWaveform({ sampleRate: wave.sampleRate, samples: collectIntervalSamples(wave, intervals) });
-  // compute 默认返回零拷贝外部缓冲数组；Electron 的 V8 禁用外部缓冲区，
-  // 必须传 false 让 addon 把向量拷进堆（与 readWave 的第二个参数同理）。
-  const embedding = extractor.compute(stream, false);
-  if (!embedding?.length) throw new Error("未能从所选片段提取有效声纹。");
-  return Float32Array.from(embedding);
 }
 
-/** 逐簇计算平均声纹（同一 extractor 复用，每簇最多取 30 秒）；不足 2 秒的簇记 null，交给时间相邻兜底。 */
-export function computeClusterCentroids(sherpaOnnx, embeddingModel, wave, turns) {
-  const extractor = new sherpaOnnx.SpeakerEmbeddingExtractor({
-    model: embeddingModel,
-    numThreads: 2,
-    debug: false,
-    provider: "cpu"
-  });
+export function embedVoiceprintSamples(extractor, sampleRate, samples) {
+  const stream = extractor.createStream();
+  stream.acceptWaveform({ sampleRate, samples });
+  if (!extractor.isReady(stream)) return null;
+  // Electron 的 V8 不允许外部缓冲区，第二个参数必须显式用 false 拷贝结果。
+  const embedding = extractor.compute(stream, false);
+  return embedding?.length ? embedding : null;
+}
+
+/** 从多个发言区间提取一份本地声纹。 */
+export function computeVoiceprintEmbedding(extractor, wave, intervals) {
+  const embedding = embedVoiceprintSamples(extractor, wave.sampleRate, collectIntervalSamples(wave, intervals));
+  if (!embedding) throw new Error("未能从所选片段提取有效声纹。");
+  return embedding;
+}
+
+/** 逐簇计算平均声纹；不足 1.5 秒的簇记 null，交给时间相邻兜底。 */
+export function computeClusterCentroids(extractor, wave, turns) {
   const centroids = new Map();
   for (const speakerId of new Set(turns.map((turn) => turn.speakerId))) {
     try {
-      const stream = extractor.createStream();
-      stream.acceptWaveform({
-        sampleRate: wave.sampleRate,
-        samples: collectIntervalSamples(wave, turns.filter((turn) => turn.speakerId === speakerId))
-      });
-      const embedding = extractor.compute(stream, false);
-      centroids.set(speakerId, embedding?.length ? Float32Array.from(embedding) : null);
+      const samples = collectIntervalSamples(
+        wave,
+        turns.filter((turn) => turn.speakerId === speakerId),
+        { minAudioMs: 1_500 }
+      );
+      centroids.set(speakerId, embedVoiceprintSamples(extractor, wave.sampleRate, samples));
     } catch {
       centroids.set(speakerId, null);
     }
@@ -315,10 +336,12 @@ export function computeClusterCentroids(sherpaOnnx, embeddingModel, wave, turns)
 // 聚类必然塌缩成 1 人；改用「转写结果已知有语音的区间」代替检出后，
 // 同人窗口相似 0.85+、异人 ≤0.71，真实说话人可以分开。
 
-export const SPEECH_WINDOW_MS = 4_000;
-export const SPEECH_WINDOW_HOP_MS = 2_000;
-/** 单窗语音不足 2 秒时声纹不可靠（与声纹登记同口径）。 */
-export const SPEECH_WINDOW_MIN_MS = 2_000;
+export const SPEECH_WINDOW_MS = 2_500;
+export const SPEECH_WINDOW_HOP_MS = 1_000;
+/** 单窗语音不足 1.5 秒时声纹不可靠；兼顾 2 秒左右短插话能被单独成窗。 */
+export const SPEECH_WINDOW_MIN_MS = 1_500;
+/** 直播整块标注的最小语音门槛（与声纹登记保持 2 秒口径）。 */
+export const LIVE_CHUNK_MIN_SPEECH_MS = 2_000;
 /**
  * 窗口级平均链接初筛阈值（其后还过 mergeDiarizationClusters 二段合并）。
  * 真实两场直播录音校准：0.45–0.50 初筛后 merge 恰好得到真实的 2 位说话人；
@@ -429,6 +452,7 @@ export function assignWindowsToClusters(embeddings, { threshold = WINDOW_CLUSTER
 
 /**
  * 窗口 + 簇标 → 分离轮次：时间上相邻且同簇的窗口合并成一个轮次，
+ * 相邻异簇窗口若存在滑窗重叠则在中点切分边界，消除跨说话人的归属模糊区；
  * 结构与 pyannote 路径的 turns 完全一致（speaker-N），下游 applyDiarization
  * 与声纹命名无需区分来源。
  */
@@ -437,11 +461,20 @@ export function windowsToTurns(windows, labels) {
   const pairs = (windows ?? [])
     .map((window, index) => ({ window, label: labels?.[index] }))
     .filter((item) => item.label >= 0 && item.window?.endMs > item.window?.startMs)
-    .sort((left, right) => left.window.startMs - right.window.startMs);
+    .sort((left, right) => left.window.startMs - right.window.startMs || left.window.endMs - right.window.endMs);
   for (const { window, label } of pairs) {
     const last = turns[turns.length - 1];
     if (last && last.label === label && window.startMs <= last.endMs) {
       last.endMs = Math.max(last.endMs, window.endMs);
+    } else if (last && last.label !== label && window.startMs < last.endMs) {
+      const splitMs = Math.round((window.startMs + last.endMs) / 2);
+      const boundedStart = Math.max(last.startMs + 1, Math.min(window.endMs - 1, splitMs));
+      if (boundedStart > last.startMs && boundedStart < window.endMs) {
+        last.endMs = boundedStart;
+        turns.push({ label, startMs: boundedStart, endMs: window.endMs });
+      } else {
+        turns.push({ label, startMs: window.startMs, endMs: window.endMs });
+      }
     } else {
       turns.push({ label, startMs: window.startMs, endMs: window.endMs });
     }

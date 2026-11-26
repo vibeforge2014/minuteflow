@@ -1,5 +1,6 @@
 import { resolveTranscriptionLanguage } from "../shared/transcription-options.mjs";
 import { SUMMARY_TEMPLATE_IDS } from "../shared/summary-templates.mjs";
+import { HOTWORD_DOMAIN_IDS } from "../shared/hotword-domains.mjs";
 /**
  * Electron 主进程入口（装配层）。
  * 负责创建主窗口、配置系统权限与受信任页面白名单、注册全部 prefixed IPC 通道
@@ -79,7 +80,6 @@ import {
   listOllamaModelSizes,
   listRemoteModels,
   refineKeyPointsWithOpenAICompatible,
-  summarizeLocally,
   summarizeWithOpenAICompatible,
   testModelProfile,
   transcribeRemote,
@@ -98,6 +98,10 @@ import { enhanceTranscriptionAudio, normalizeRemoteTranscriptionAudio } from "./
 import { isSilentPcmWav, isSilenceSkipEnabled, setAudioQualityPreferences } from "./services/audio-quality.mjs";
 import { withSegmentConfidence } from "./services/transcript-confidence.mjs";
 import { resolveChunkLanguage, transcriptionLanguageForEngine } from "./services/transcription-prompt.mjs";
+import { extractMeetingHotwords } from "./services/hotwords.mjs";
+import { correctTranscriptWithLLM } from "./services/transcript-correction.mjs";
+import { regenerateSummarySectionWithLLM, runSummaryPipeline } from "./services/summary-pipeline.mjs";
+import { retranscribeSingleSegment } from "./services/segment-retranscribe.mjs";
 import { appleSpeechDefaultProfile, shouldSeedAppleSpeechProfile, transcribeWithAppleSpeech } from "./services/apple-speech.mjs";
 import { isTrustedPermissionRequest, isTrustedRendererUrl } from "./services/permissions.mjs";
 import { chooseImportFiles, exportMeeting } from "./services/exports.mjs";
@@ -154,7 +158,7 @@ import {
   extractVoiceprintEmbedding,
   voiceprintModelKey
 } from "./services/diarization.mjs";
-import { labelLiveChunk, resetLiveSession } from "./services/live-diarization.mjs";
+import { labelLiveSegments, resetLiveSession } from "./services/live-diarization.mjs";
 import { groupTranscriptSegments, splitTimedTranscriptText } from "./services/transcript-grouping.mjs";
 
 // 当前文件所在目录：用于定位 preload.cjs 与打包后的前端产物。
@@ -189,6 +193,10 @@ function profilesUsingModelFile(file, profiles) {
 }
 // 进行中的总结请求（AbortController），键为 meetingId；summary:cancel 据此中止对应请求。
 const activeSummaryRequests = new Map();
+// 视觉纪要与普通纪要分离跟踪，防止并发触发视觉版时静默中止正在跑的普通纪要。
+const activeVisualSummaryRequests = new Map();
+// 录音结束后的后台说话人分离句柄（按 meetingId 互斥，续录或重跑时中止在途 worker）。
+const activePostRecordingDiarizations = new Map();
 // 进行中的问答请求（AbortController），键为 streamId；chat:cancel 据此停止该次回答，
 // 已生成的增量保留在渲染层，取消不是失败。
 const activeChatRequests = new Map();
@@ -269,6 +277,7 @@ const defaultPreferences = {
   summaryTemplate: "general",
   defaultMode: "online",
   glossary: [],
+  hotwordDomains: [],
   audioEnhancement: true,
   silenceSkip: true,
   retentionDays: null,
@@ -279,7 +288,10 @@ const defaultPreferences = {
   permissionsVersion: 0,
   permissionSetupResume: false,
   modelDownloadSourceKind: "official",
-  modelDownloadCustomBase: ""
+  modelDownloadCustomBase: "",
+  processingQuality: "standard",
+  correctionProfileId: "",
+  reviewProfileId: ""
 };
 
 /** 偏好设置 JSON 文件路径（userData/config/preferences.json）。 */
@@ -425,6 +437,9 @@ async function persistPreferences(preferences) {
     glossary: Array.isArray(preferences.glossary)
       ? preferences.glossary.map((item) => String(item).trim()).filter(Boolean).slice(0, 500)
       : [],
+    hotwordDomains: Array.isArray(preferences.hotwordDomains)
+      ? [...new Set(preferences.hotwordDomains.filter((id) => HOTWORD_DOMAIN_IDS.includes(id)))]
+      : [],
     // 语言未显式设置时省略字段：实时录音回落中文、导入回落自动识别，
     // 保证老用户升级后两条链路的默认行为都不变；用户一选就全链路统一。
     ...(["zh", "en", "auto"].includes(preferences.transcriptionLanguage)
@@ -447,7 +462,16 @@ async function persistPreferences(preferences) {
     modelDownloadCustomBase: typeof preferences.modelDownloadCustomBase === "string"
       && /^https?:\/\//.test(preferences.modelDownloadCustomBase.trim())
         ? preferences.modelDownloadCustomBase.trim().slice(0, 500)
-        : ""
+        : "",
+    processingQuality: ["fast", "standard", "high"].includes(preferences.processingQuality)
+      ? preferences.processingQuality
+      : "standard",
+    correctionProfileId: typeof preferences.correctionProfileId === "string"
+      ? preferences.correctionProfileId.trim().slice(0, 128)
+      : "",
+    reviewProfileId: typeof preferences.reviewProfileId === "string"
+      ? preferences.reviewProfileId.trim().slice(0, 128)
+      : ""
   };
   const target = preferencesPath();
   const temporary = `${target}.tmp`;
@@ -687,6 +711,7 @@ async function showPermissionHelper() {
   if (process.env.VITE_DEV_SERVER_URL) {
     const helperUrl = new URL(process.env.VITE_DEV_SERVER_URL);
     helperUrl.searchParams.set("surface", "permission-helper");
+    if (!app.isPackaged) helperUrl.searchParams.set("permissionApp", "Electron");
     await permissionHelperWindow.loadURL(helperUrl.toString());
   } else {
     await permissionHelperWindow.loadFile(path.join(currentDirectory, "..", "dist", "client", "desktop.html"), {
@@ -959,16 +984,34 @@ function registerIpc() {
   });
 
 
+  /** 中止某场会议在途的录音后后台说话人分离（继续录音或开启新一轮分离前调用）。 */
+  function cancelPostRecordingDiarization(meetingId) {
+    const active = activePostRecordingDiarizations.get(meetingId);
+    if (!active) return;
+    activePostRecordingDiarizations.delete(meetingId);
+    active.abort();
+  }
+
   /**
    * 录音结束后的本地说话人分离（线下多人会议）：整段麦克风音频过分离模型，
    * 高置信聚类按声纹簿套真实姓名，其余标「发言人N」，用户在转写里改名即注册声纹。
    * 全程本地、后台执行，不阻塞 recordings:stop 返回；失败只记日志，录音本身不受影响。
    * 单聚类（全场只有一人说话）保留原「我」标签，不给独白换占位名。
+   * 若用户期间继续录音（多段音频/状态回到 recording），自动中止或放弃本次回填，
+   * 避免用单段音频的时间轴去错贴跨会话的新段落；用户已手工改名的段落同样保留。
    */
   async function runPostRecordingDiarization(meetingId, microphonePath) {
+    cancelPostRecordingDiarization(meetingId);
+    const controller = new AbortController();
+    activePostRecordingDiarizations.set(meetingId, controller);
     try {
       const meeting = loadMeeting(meetingId);
       if (!meeting?.transcript?.length) return;
+      // 续录产生的多份录音文件时间轴各自从 0 开始，与累计转写时间轴不对齐，
+      // 此时不做单文件整场重贴，避免把旧段落和新段落互相错标。
+      const micAssets = listMeetingAudioAssets(meetingId)
+        .filter((asset) => asset.track === "microphone" && asset.sourceType === "recording");
+      if (micAssets.length > 1) return;
       const profile = resolveProfile(listModelProfiles(), "diarization");
       if (!profile) return; // 未配置分离模型：保留按轨标签，不额外打扰。
       // 转写引擎识别出语音的区间就是最可靠的 VAD：pyannote 在 WebRTC NS/AGC
@@ -977,26 +1020,38 @@ function registerIpc() {
       const transcriptSpans = meeting.transcript
         .filter((segment) => segment?.endMs > segment?.startMs)
         .map((segment) => ({ startMs: segment.startMs, endMs: segment.endMs }));
+      const maxSpanEndMs = transcriptSpans.reduce((max, span) => Math.max(max, span.endMs), 0);
       const turns = await diarizeWithSherpa(profile, microphonePath, {
         expectedSpeakers: -1,
         voiceprints: listVoiceprintSamples(),
-        transcriptSpans
+        transcriptSpans,
+        signal: controller.signal
       });
+      if (controller.signal.aborted) return;
       if (new Set(turns.map((turn) => turn.speakerId)).size <= 1) return;
       // 分离可能跑几分钟。必须重新读取会议，用最新快照承载说话人标签，
       // 否则整场 UPSERT 会把这段时间内用户改过的标题、笔记和逐字稿全部回滚。
       const latest = loadMeeting(meetingId);
-      if (!latest || latest.deletedAt || !latest.transcript?.length) return;
+      if (!latest || latest.deletedAt || latest.status === "recording" || !latest.transcript?.length) return;
+      // 若后台运行期间用户继续录音并写入了更晚的新段落，放弃本次过期回填。
+      const hasNewerRecording = latest.transcript.some((segment) => segment.startMs > maxSpanEndMs + 1_000)
+        || listMeetingAudioAssets(meetingId).filter((asset) => asset.track === "microphone" && asset.sourceType === "recording").length > 1;
+      if (hasNewerRecording) return;
       const updated = saveMeeting({
         ...latest,
-        transcript: groupTranscriptSegments(applyDiarization(latest.transcript, turns))
+        transcript: groupTranscriptSegments(applyDiarization(latest.transcript, turns, { preserveManualLabels: true }))
       });
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("imports:meeting-updated", updated);
       }
       console.log(`[diarization] 会议 ${meetingId} 录音后分离完成：${new Set(turns.map((turn) => turn.speakerId)).size} 位说话人。`);
     } catch (error) {
+      if (controller.signal.aborted) return;
       console.log(`[diarization] 会议 ${meetingId} 录音后分离跳过：${error?.message ?? error}`);
+    } finally {
+      if (activePostRecordingDiarizations.get(meetingId) === controller) {
+        activePostRecordingDiarizations.delete(meetingId);
+      }
     }
   }
 
@@ -1007,6 +1062,8 @@ function registerIpc() {
     assertUuid(meetingId, "会议 ID");
     const meeting = loadMeeting(meetingId);
     if (!meeting) throw new Error("会议不存在。");
+    // 继续录音立即中止同会议在途的后台分离，避免旧分离完成后反写污染新会话。
+    cancelPostRecordingDiarization(meetingId);
     // 同一场会议同时只允许一个活跃录音会话：清理异常路径遗留的旧会话句柄
     // （否则文件句柄与写队列会一直泄漏到应用退出）。
     for (const [staleKey, staleRecord] of recordingFiles) {
@@ -1240,7 +1297,21 @@ function registerIpc() {
       : profile;
     // auto 不能原样下发：whisper.cpp 认 -l auto，Python Whisper 与远程网关会把它当
     // 非法语言代码。空串由各引擎转换为自己的自动检测选项。
-    const engineLanguage = transcriptionLanguageForEngine(resolveTranscriptionLanguage(payload.language, profile.options, (await loadPreferences()).transcriptionLanguage));
+    const preferences = await loadPreferences();
+    const engineLanguage = transcriptionLanguageForEngine(resolveTranscriptionLanguage(payload.language, profile.options, preferences.transcriptionLanguage));
+    const meetingContext = typeof payload.meetingId === "string" && payload.meetingId
+      ? loadMeeting(payload.meetingId)
+      : null;
+    const effectiveGlossary = extractMeetingHotwords({
+      title: meetingContext?.title,
+      participants: meetingContext?.participants,
+      goals: meetingContext?.goals,
+      notes: meetingContext?.notes,
+      notesMarkdown: meetingContext?.notesMarkdown,
+      globalGlossary: preferences.glossary ?? [],
+      extraGlossary: Array.isArray(payload.glossary) ? payload.glossary : [],
+      selectedDomains: preferences.hotwordDomains ?? []
+    });
     // 在入口统一归一化成 16k 单声道 WAV：远程网关需要可读的时长元数据、
     // Apple Speech 不读 WebM、sherpa 只吃 WAV。更重要的是，只有这样所有引擎才能
     // 共用同一份 PCM 做静音门限，也才能让音质增强覆盖 Whisper / 在线服务。
@@ -1274,7 +1345,7 @@ function registerIpc() {
           prepared.audio,
           prepared.fileName,
           engineLanguage,
-          payload.glossary,
+          effectiveGlossary,
           {
             // 复用入口已解析的组件路径；已是 WAV 时该函数原样返回，不重复转码。
             prepareAudio: async (buffer, name) =>
@@ -1290,7 +1361,7 @@ function registerIpc() {
         }
       }
     } else if (isLocal) {
-      rawResult = await transcribeLocally(localProfile, prepared.audio, prepared.fileName, engineLanguage, payload.glossary, payload.previousText);
+      rawResult = await transcribeLocally(localProfile, prepared.audio, prepared.fileName, engineLanguage, effectiveGlossary, payload.previousText);
     } else {
       // 部分 New API / OpenAI 兼容网关会先解析时长计费再进入 Whisper，无 Duration
       // 元数据的短 WebM 会被直接 500；归一化已在入口完成，这里只在它失败时重试一次。
@@ -1303,7 +1374,7 @@ function registerIpc() {
         remoteAudio.audio,
         remoteAudio.fileName,
         engineLanguage,
-        payload.glossary,
+        effectiveGlossary,
         undefined,
         payload.previousText ?? ""
       );
@@ -1320,49 +1391,52 @@ function registerIpc() {
       : result.text.trim()
         ? [{ startMs: 0, endMs: chunkDurationMs, text: result.text, confidence: result.confidence }]
         : [];
-    // 直播说话人标注：线下会议的麦克风轨上坐着房间里所有人，按轨标「我」
-    // 无法区分人声。用 STT 结果区间（已知语音位置）在主进程提声纹做会话内
-    // 在线聚类——簇 1 沿用「我」，后续块可能标「发言人 N」；任何失败都回退
-    // 按轨标签，绝不拖慢转写。线上会议保持按轨语义（麦克风=我 / 系统=远端）。
-    let speakerId = payload.track === "microphone" ? "me" : "remote";
-    let speakerName = payload.track === "microphone" ? "我" : "远端发言人";
-    if (sourceSegments.length && payload.track === "microphone" && normalizedWav && typeof payload.meetingId === "string" && payload.meetingId) {
+    const defaultSpeakerId = payload.track === "microphone" ? "me" : "remote";
+    const defaultSpeakerName = payload.track === "microphone" ? "我" : "远端发言人";
+    let fragmentIndex = 0;
+    const relativeSegments = sourceSegments.flatMap((segment) => {
+      const relativeStartMs = Math.max(0, Math.min(Math.max(0, chunkDurationMs - 1), Number(segment.startMs) || 0));
+      const relativeEndMs = Math.max(
+        relativeStartMs + 1,
+        Math.min(chunkDurationMs, Number(segment.endMs) || chunkDurationMs)
+      );
+      return splitTimedTranscriptText(segment.text, relativeStartMs, relativeEndMs).map((fragment) => ({
+        id: `${payload.meetingId || randomUUID()}:live:${payload.track}:${payload.startMs}:${fragmentIndex++}`,
+        startMs: fragment.startMs,
+        endMs: fragment.endMs,
+        speakerId: defaultSpeakerId,
+        speakerName: defaultSpeakerName,
+        text: fragment.text,
+        status: "final",
+        track: payload.track,
+        ...(segment.confidence === undefined ? {} : { confidence: segment.confidence })
+      }));
+    }).filter((segment) => segment.text.trim());
+
+    // 直播说话人标注：线下会议的麦克风轨上坐着房间里所有人。
+    // 按 2.2s 子窗检测块内是否有人突然插话，单人块沿用整块高置信聚类，
+    // 混合插话块按子窗轮次切分贴标且不污染原质心；任何失败都回退按轨标签。
+    let labeledRelative = relativeSegments;
+    if (relativeSegments.length && payload.track === "microphone" && normalizedWav && typeof payload.meetingId === "string" && payload.meetingId) {
       try {
         const diarizationProfile = resolveProfile(listModelProfiles(), "diarization");
         const meetingForLabel = diarizationProfile ? loadMeeting(payload.meetingId) : null;
         if (diarizationProfile?.options?.embeddingModelPath && meetingForLabel?.mode === "offline") {
-          const label = labelLiveChunk(payload.meetingId, prepared.audio, sourceSegments.map((segment) => ({
-            startMs: Math.max(0, Math.min(Math.max(0, chunkDurationMs - 1), Number(segment.startMs) || 0)),
-            endMs: Math.max(1, Math.min(chunkDurationMs, Number(segment.endMs) || chunkDurationMs))
-          })), { embeddingModelPath: diarizationProfile.options.embeddingModelPath });
-          if (label) {
-            speakerId = label.speakerId;
-            speakerName = label.speakerName;
-          }
+          const labeled = labelLiveSegments(payload.meetingId, prepared.audio, relativeSegments, {
+            embeddingModelPath: diarizationProfile.options.embeddingModelPath
+          });
+          if (labeled?.length) labeledRelative = labeled;
         }
       } catch (error) {
         console.warn("[live-diarization] 逐块标注跳过：", error instanceof Error ? error.message : error);
       }
     }
-    let fragmentIndex = 0;
-    const segments = sourceSegments.flatMap((segment) => {
-        const relativeStartMs = Math.max(0, Math.min(Math.max(0, chunkDurationMs - 1), Number(segment.startMs) || 0));
-        const relativeEndMs = Math.max(
-          relativeStartMs + 1,
-          Math.min(chunkDurationMs, Number(segment.endMs) || chunkDurationMs)
-        );
-        return splitTimedTranscriptText(segment.text, relativeStartMs, relativeEndMs).map((fragment) => ({
-          id: `${payload.meetingId || randomUUID()}:live:${payload.track}:${payload.startMs}:${fragmentIndex++}`,
-          startMs: payload.startMs + fragment.startMs,
-          endMs: Math.min(payload.endMs, payload.startMs + fragment.endMs),
-          speakerId,
-          speakerName,
-          text: fragment.text,
-          status: "final",
-          track: payload.track,
-          ...(segment.confidence === undefined ? {} : { confidence: segment.confidence })
-        }));
-      }).filter((segment) => segment.text.trim());
+
+    const segments = labeledRelative.map((fragment) => ({
+      ...fragment,
+      startMs: payload.startMs + fragment.startMs,
+      endMs: Math.min(payload.endMs, payload.startMs + fragment.endMs)
+    }));
     return {
       segments,
       outcome: segments.length ? "recognized" : silent ? "silent" : "unrecognized",
@@ -1370,11 +1444,7 @@ function registerIpc() {
     };
   });
 
-  // summary:generate — 生成或滚动更新会议纪要（付费功能）：显式选择离线纪要走本地规则引擎，
-  // 配置了在线 LLM 档案走在线接口（失败时回退本地引擎并在响应中带 degraded 标记告知用户，
-  // 不再静默降级），未配置档案同样返回带 degraded 标记的本地纪要；
-  // 由渲染层"生成纪要"操作显式触发（录音停止不会自动触发，避免停止时才弹 Keychain）。
-  trustedHandle("summary:generate", async (_event, payload) => {
+  trustedHandle("summary:generate", async (event, payload) => {
     await requireLicense();
     // 入参防御：转写段必须是数组且逐条至少有文本，避免把任意结构喂给模型或规则引擎。
     const input = payload?.input;
@@ -1396,67 +1466,198 @@ function registerIpc() {
       0
     );
     const finishedAt = () => new Date().toISOString();
-    const profiles = listModelProfiles();
-    const profile = profiles.find((item) => item.id === payload.profileId && item.kind === "llm");
-    if (profile?.transport === "local-summary") {
-      return { ...summarizeLocally(sanitized), updatedAt: finishedAt(), generationMode: "local", sourceThroughMs, stale: false };
-    }
-    if (!profile) {
-      return {
-        ...summarizeLocally(sanitized),
-        updatedAt: finishedAt(),
-        generationMode: "local",
-        sourceThroughMs,
-        stale: false,
-        degraded: true,
-        degradedReason: "尚未配置在线总结服务，本次已用本机基础纪要生成；可在设置中选择总结服务获得更好的效果。"
-      };
-    }
+    const profiles = listModelProfiles().filter((item) => item.transport !== "local-summary");
+    const profile = resolveProfile(profiles, "llm", payload.profileId);
+    if (!profile) throw new Error("请先在「设置 → AI 总结」配置 Ollama 或在线总结模型。");
+    const preferences = await loadPreferences();
+    const qualityMode = ["fast", "standard", "high"].includes(preferences.processingQuality)
+      ? preferences.processingQuality
+      : "standard";
+    const reviewProfile = preferences.reviewProfileId
+      ? profiles.find((item) => item.id === preferences.reviewProfileId && item.kind === "llm")
+      : undefined;
     const meetingKey = typeof payload.meetingId === "string" ? payload.meetingId : "default";
     const controller = new AbortController();
     activeSummaryRequests.set(meetingKey, controller);
     try {
-      const summary = await summarizeWithOpenAICompatible(
+      const summary = await runSummaryPipeline(
         profile,
-        readSecret(profile.secretId),
+        profile.transport === "ollama" ? "" : readSecret(profile.secretId),
         sanitized,
-        Boolean(payload.final),
-        controller.signal
-      );
-      const completed = { ...summary, updatedAt: finishedAt(), generationMode: "online", sourceThroughMs, stale: false };
-      if (payload.final && isVisualSummaryProfileVerified(profile)) {
-        try {
-          completed.visualSummary = await generateVisualSummaryWithOpenAICompatible(
-            profile,
-            readSecret(profile.secretId),
-            { title: sanitized.title, participants: sanitized.participants, summary: completed },
-            controller.signal
-          );
-        } catch (error) {
-          if (controller.signal.aborted || error?.name === "AbortError") throw error;
-          return {
-            ...completed,
-            visualDegraded: true,
-            visualDegradedReason: `普通纪要已生成，但视觉版生成失败（${error instanceof Error ? error.message : String(error)}）。`
-          };
+        {
+          final: Boolean(payload.final),
+          qualityMode,
+          reviewProfile,
+          reviewApiKey: reviewProfile ? (reviewProfile.transport === "ollama" ? "" : readSecret(reviewProfile.secretId)) : undefined,
+          signal: controller.signal,
+          onOutput: () => {
+            if (!event.sender.isDestroyed()) event.sender.send("summary:output", meetingKey);
+          }
         }
-      }
-      return completed;
-    } catch (error) {
-      // 用户主动取消不降级，原样抛出；其余失败（断网/超时/鉴权）回退本地纪要并明确告知。
-      if (controller.signal.aborted || error?.name === "AbortError") throw error;
-      const reason = error instanceof Error ? error.message : String(error);
-      return {
-        ...summarizeLocally(sanitized),
-        updatedAt: finishedAt(),
-        generationMode: "local",
-        sourceThroughMs,
-        stale: false,
-        degraded: true,
-        degradedReason: `在线总结失败（${reason}），已回退生成本机基础纪要。`
-      };
+      );
+      return { ...summary, updatedAt: finishedAt(), generationMode: "online", sourceThroughMs, stale: false };
     } finally {
       if (activeSummaryRequests.get(meetingKey) === controller) activeSummaryRequests.delete(meetingKey);
+    }
+  });
+
+  // transcription:correct — 对指定会议的定稿转写执行受控 LLM 语义纠错（付费功能）：
+  // 结合动态热词与上下文修复同音/术语错别字，带数值与否定极性护栏，保留原稿 rawText。
+  trustedHandle("transcription:correct", async (_event, payload) => {
+    await requireLicense();
+    const meetingId = typeof payload?.meetingId === "string" ? payload.meetingId : "";
+    assertUuid(meetingId, "会议 ID");
+    const meeting = loadMeeting(meetingId);
+    if (!meeting) throw new Error("未找到要校对的会议。");
+    if (!meeting.transcript.some((seg) => seg.status !== "provisional" && seg.text.trim())) {
+      throw new Error("当前会议暂无可校对的转写内容。");
+    }
+    const preferences = await loadPreferences();
+    const llmProfiles = listModelProfiles().filter((item) => item.kind === "llm" && item.transport !== "local-summary");
+    const profile = resolveProfile(llmProfiles, "llm", payload?.profileId || preferences.correctionProfileId || undefined);
+    if (!profile) throw new Error("请先在「设置 → AI 总结」配置 Ollama 或在线总结模型，再使用 AI 校对。");
+    const result = await correctTranscriptWithLLM(
+      profile,
+      profile.transport === "ollama" ? "" : readSecret(profile.secretId),
+      meeting,
+      {
+        globalGlossary: preferences.glossary ?? [],
+        selectedDomains: preferences.hotwordDomains ?? []
+      }
+    );
+    const latest = loadMeeting(meetingId) || meeting;
+    let saved = latest;
+    if (result.correctedCount > 0) {
+      const correctedMap = new Map(result.transcript.map((seg) => [seg.id, seg]));
+      const mergedTranscript = latest.transcript.map((seg) => {
+        const next = correctedMap.get(seg.id);
+        if (!next || next.rawText !== seg.text) return seg;
+        return { ...seg, rawText: next.rawText, text: next.text, corrected: true };
+      });
+      saved = saveMeeting({
+        ...latest,
+        transcript: mergedTranscript,
+        summary: { ...latest.summary, stale: true }
+      });
+    }
+    return {
+      meeting: saved,
+      correctedCount: result.correctedCount,
+      rejectedCount: result.rejectedCount,
+      llmCalls: result.llmCalls,
+      durationMs: result.durationMs
+    };
+  });
+
+  // transcription:retranscribe-segment — 局部单段重识别（付费功能）：
+  // 只裁剪目标段落前后带 0.8s 缓冲的归档音频，用热词和前文上下文重新识别并回填。
+  trustedHandle("transcription:retranscribe-segment", async (_event, payload) => {
+    await requireLicense();
+    const meetingId = typeof payload?.meetingId === "string" ? payload.meetingId : "";
+    const segmentId = typeof payload?.segmentId === "string" ? payload.segmentId.trim() : "";
+    assertUuid(meetingId, "会议 ID");
+    if (!segmentId) throw new Error("缺少要重识别的段落 ID。");
+    const meeting = loadMeeting(meetingId);
+    if (!meeting) throw new Error("未找到会议记录。");
+    const profiles = listModelProfiles();
+    const sttProfile = resolveProfile(profiles, "stt", payload?.sttProfileId);
+    if (!sttProfile) throw new Error("请先在「设置 → 语音转录」配置可用的转录模型。");
+    const isAppleSpeech = sttProfile.transport === "apple-speech";
+    const isLocal = LOCAL_TRANSCRIPTION_TRANSPORTS.includes(sttProfile.transport);
+    const resolvedProfile = isLocal ? await resolveLocalTranscriptionProfile(sttProfile) : sttProfile;
+    const preferences = await loadPreferences();
+    const engineLanguage = transcriptionLanguageForEngine(
+      resolveTranscriptionLanguage(undefined, resolvedProfile.options, preferences.transcriptionLanguage)
+    );
+    const hotwords = extractMeetingHotwords({
+      title: meeting.title,
+      participants: meeting.participants,
+      goals: meeting.goals,
+      notes: meeting.notes,
+      notesMarkdown: meeting.notesMarkdown,
+      transcript: meeting.transcript,
+      globalGlossary: preferences.glossary ?? [],
+      selectedDomains: preferences.hotwordDomains ?? []
+    });
+    const ffmpegPath = await managedFfmpegPath();
+    const assets = listMeetingAudioAssets(meetingId);
+    const outcome = await retranscribeSingleSegment({
+      meeting,
+      segmentId,
+      assets,
+      ffmpegPath,
+      hotwords,
+      language: engineLanguage,
+      transcribeWav: async ({ audio, fileName, language, glossary, previousText }) => {
+        if (isAppleSpeech) {
+          return transcribeWithAppleSpeech(resolvedProfile, audio, fileName, language, glossary, {
+            allowServer: resolvedProfile.options?.allowServer === true
+          });
+        }
+        if (isLocal) {
+          return transcribeLocally(resolvedProfile, audio, fileName, language, glossary, previousText);
+        }
+        return transcribeRemote(
+          resolvedProfile,
+          readSecret(resolvedProfile.secretId),
+          audio,
+          fileName,
+          language,
+          glossary,
+          undefined,
+          previousText
+        );
+      }
+    });
+    const latest = loadMeeting(meetingId) || meeting;
+    const mergedTranscript = latest.transcript.map((seg) => (seg.id === segmentId ? outcome.segment : seg));
+    const saved = saveMeeting({
+      ...latest,
+      transcript: mergedTranscript,
+      summary: { ...latest.summary, stale: true }
+    });
+    return { meeting: saved, segment: outcome.segment };
+  });
+
+  // summary:regenerate-section — 局部重生成单个讨论议题章节（付费功能）：
+  // 仅更新 discussionSections[sectionIndex]，不影响其他已确认章节和手动锁定条目。
+  trustedHandle("summary:regenerate-section", async (_event, payload) => {
+    await requireLicense();
+    const meetingId = typeof payload?.meetingId === "string" ? payload.meetingId : "";
+    const sectionIndex = Number(payload?.sectionIndex);
+    assertUuid(meetingId, "会议 ID");
+    const meeting = loadMeeting(meetingId);
+    if (!meeting) throw new Error("未找到会议记录。");
+    const llmProfiles = listModelProfiles().filter((item) => item.kind === "llm" && item.transport !== "local-summary");
+    const profile = resolveProfile(llmProfiles, "llm", payload?.profileId);
+    if (!profile) throw new Error("请先在「设置 → AI 总结」配置 Ollama 或在线总结模型。");
+    const controller = new AbortController();
+    activeSummaryRequests.set(meetingId, controller);
+    try {
+      const section = await regenerateSummarySectionWithLLM(
+        profile,
+        profile.transport === "ollama" ? "" : readSecret(profile.secretId),
+        { meeting, sectionIndex, signal: controller.signal }
+      );
+      const latest = loadMeeting(meetingId) || meeting;
+      const sections = Array.isArray(latest.summary?.discussionSections)
+        ? [...latest.summary.discussionSections]
+        : [];
+      if (sectionIndex < 0 || sectionIndex >= sections.length) {
+        throw new Error("目标议题章节已变更，请重试。");
+      }
+      sections[sectionIndex] = section;
+      const saved = saveMeeting({
+        ...latest,
+        summary: {
+          ...latest.summary,
+          discussionSections: sections,
+          updatedAt: new Date().toISOString()
+        }
+      });
+      return { meeting: saved, section };
+    } finally {
+      if (activeSummaryRequests.get(meetingId) === controller) activeSummaryRequests.delete(meetingId);
     }
   });
 
@@ -1602,8 +1803,8 @@ function registerIpc() {
     }
     const meetingKey = typeof payload?.meetingId === "string" ? payload.meetingId : "default";
     const controller = new AbortController();
-    activeSummaryRequests.get(meetingKey)?.abort();
-    activeSummaryRequests.set(meetingKey, controller);
+    activeVisualSummaryRequests.get(meetingKey)?.abort();
+    activeVisualSummaryRequests.set(meetingKey, controller);
     try {
       return await generateVisualSummaryWithOpenAICompatible(
         profile,
@@ -1616,14 +1817,16 @@ function registerIpc() {
         controller.signal
       );
     } finally {
-      if (activeSummaryRequests.get(meetingKey) === controller) activeSummaryRequests.delete(meetingKey);
+      if (activeVisualSummaryRequests.get(meetingKey) === controller) activeVisualSummaryRequests.delete(meetingKey);
     }
   });
 
-  // summary:cancel — 取消一场会议进行中的总结请求（中止 AbortController，无付费墙）。
+  // summary:cancel — 取消一场会议进行中的总结请求（含普通纪要与视觉纪要，无付费墙）。
   trustedHandle("summary:cancel", (_event, meetingId) => {
-    const controller = typeof meetingId === "string" ? activeSummaryRequests.get(meetingId) : undefined;
-    controller?.abort();
+    if (typeof meetingId === "string") {
+      activeSummaryRequests.get(meetingId)?.abort();
+      activeVisualSummaryRequests.get(meetingId)?.abort();
+    }
     return { ok: true };
   });
 
@@ -1699,11 +1902,12 @@ function registerIpc() {
   });
   // models:delete-secret — 删除指定凭据（删除/切换档案时调用，避免密钥残留）。
   trustedHandle("models:delete-secret", (_event, secretId) => deleteSecret(secretId));
-  // models:scan-local — 扫描常见目录发现已有本地 Whisper 模型（下载目录、
-  // ~/.cache/whisper、HuggingFace 缓存），设置页本地模型发现流程调用。
+  // 模型发现也读取正式版下载目录，供使用独立 userData 的开发版复用。
+  // 下载和删除仍以 localModelDirectory() 为准。
   trustedHandle("models:scan-local", async () => discoverLocalModels({
     modelDirectory: localModelDirectory(),
     roots: [
+      ...(!app.isPackaged ? [path.join(app.getPath("appData"), "MinuteFlow", "models", "whisper")] : []),
       app.getPath("downloads"),
       path.join(homedir(), ".cache", "whisper"),
       path.join(homedir(), ".cache", "huggingface", "hub")
@@ -1848,11 +2052,12 @@ function registerIpc() {
   // imports:list — 列出导入任务及状态，导入中心/队列面板调用。
   trustedHandle("imports:list", () => listImportJobs());
   // imports:retry — 重试失败的导入任务（付费功能）。
-  trustedHandle("imports:retry", async (_event, id, sttProfileId) => {
+  trustedHandle("imports:retry", async (_event, id, sttProfileId, llmProfileId) => {
     await requireLicense();
     assertUuid(id, "任务 ID");
     if (sttProfileId) assertUuid(sttProfileId, "转录模型 ID");
-    return retryImport(id, sttProfileId, await loadPreferences());
+    if (llmProfileId) assertUuid(llmProfileId, "总结模型 ID");
+    return retryImport(id, sttProfileId, await loadPreferences(), llmProfileId);
   });
   // imports:cancel — 取消进行中/排队的导入任务（付费功能）：中止 AbortController 并杀掉子进程。
   trustedHandle("imports:cancel", async (_event, id) => { await requireLicense(); assertUuid(id, "任务 ID"); return cancelImport(id); });
@@ -2215,8 +2420,9 @@ app.whenReady().then(async () => {
     notifyMeeting: (meeting) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("imports:meeting-updated", meeting);
     },
-    // 导入/重转写与实时录音共用同一份自定义术语，避免同一专名两条路径写法不同。
-    getGlossary: async () => (await loadPreferences()).glossary ?? []
+    // 导入/重转写与实时录音共用同一份自定义术语与处理质量档位，避免行为分裂。
+    getGlossary: async () => (await loadPreferences()).glossary ?? [],
+    getPreferences: () => loadPreferences()
   });
   // 按保留策略清理过期音频；失败只记日志，不阻塞启动。
   await pruneExpiredRecordings().catch((error) => {

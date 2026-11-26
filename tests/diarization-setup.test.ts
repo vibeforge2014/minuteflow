@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { configureDiarizationModels, DIARIZATION_SETUP_MODELS, findDiarizationFiles } from "../src/lib/diarization-setup";
+import { configureDiarizationModels, DIARIZATION_SETUP_MODELS, findDiarizationFiles, prepareDiarizationModels } from "../src/lib/diarization-setup";
+import { isOnboardingDiarizationReady } from "../src/lib/onboarding";
 import type { MeetingAPI, ModelProfile } from "../src/types";
 
 const draft: ModelProfile = { name: "本地声纹识别", kind: "diarization", transport: "sherpa-onnx", baseUrl: "", model: "Pyannote + 3D-Speaker", enabled: true, options: { clusteringThreshold: 0.55 } };
@@ -21,6 +22,8 @@ describe("diarization setup persistence", () => {
     expect(second.id).toBe(first.id);
     expect(second.options.segmentationModelPath).toBe(files.segmentation.path);
     expect(second.options.embeddingModelPath).toBe(files.embedding.path);
+    expect(isOnboardingDiarizationReady(first)).toBe(false);
+    expect(isOnboardingDiarizationReady(second)).toBe(true);
   });
   it("prefers managed installed models and preserves an already configured slot", () => {
     const models = DIARIZATION_SETUP_MODELS.map((model) => ({ ...model, installed: true, localPath: `/managed/${model.fileName}` }));
@@ -29,6 +32,21 @@ describe("diarization setup persistence", () => {
     expect(detected.embedding?.path).toMatch(/^\/managed\//);
     const both = findDiarizationFiles(draft, [], { segmentation: [files.segmentation], embedding: [files.embedding] });
     expect(both).toEqual(files);
+  });
+  it("automatically reuses a detected model and downloads only the missing slot", async () => {
+    const save = vi.fn(async (profile: ModelProfile) => ({ ...profile, id: "speaker-profile" }));
+    const download = vi.fn(async () => files.embedding);
+    const onDownload = vi.fn();
+    const result = await prepareDiarizationModels(draft, {
+      catalog: async () => DIARIZATION_SETUP_MODELS,
+      scanDiarization: async () => ({ segmentation: [{ ...files.segmentation, sizeBytes: 1 }], embedding: [] }),
+      download,
+      save
+    }, onDownload);
+    expect(download).toHaveBeenCalledExactlyOnceWith(DIARIZATION_SETUP_MODELS[1].id);
+    expect(onDownload).toHaveBeenCalledExactlyOnceWith(DIARIZATION_SETUP_MODELS[1]);
+    expect(save.mock.calls[1][0].id).toBe("speaker-profile");
+    expect(isOnboardingDiarizationReady(result)).toBe(true);
   });
   it("uses the selected slot for generic model filenames instead of guessing from the name", async () => {
     const saved = await configureDiarizationModels(draft, { segmentation: { path: "/models/model.onnx", name: "model.onnx" } }, async (profile) => profile);

@@ -102,7 +102,7 @@ const visualSectionSchema = z.object({
   layout: z.enum(["table", "cards", "callout"]),
   table: z.object({
     columns: z.array(plainVisualText(40)).min(2).max(4),
-    rows: z.array(z.array(plainVisualText(160)).min(2).max(4)).max(5)
+    rows: z.array(z.array(plainVisualText(160)).min(2).max(4)).min(1).max(5)
   }).optional(),
   cards: z.array(visualCardSchema).min(1).max(4).optional(),
   callout: plainVisualText().optional()
@@ -429,7 +429,7 @@ export function validateSummary(value) {
  * 在线纪要的最小内容下限：结构合法但所有条目为空视为模型没有完成任务，
  * 抛错走本机兜底，绝不用空结果清掉已有纪要。
  */
-function validateOnlineSummary(value, sources) {
+export function validateOnlineSummary(value, sources) {
   const summary = validateSummary(value);
   const ids = new Map(sources.filter((source) => source.id).flatMap(({ id, label }) => [[label, id], [id, id]]));
   summary.discussionSections = summary.discussionSections?.map((section) => ({
@@ -537,7 +537,7 @@ function buildSummaryRequest(input, final) {
       text: `[${label} ${time}] ${segment.speakerName || "发言人"}: ${segment.text}`
     }];
   });
-  const previous = summaryDraftContext(input.previousSummary);
+  const previous = input.previousSummary?.generationMode === "local" ? {} : summaryDraftContext(input.previousSummary);
   const hasDraft = Object.keys(previous).length > 0;
   const transcript = selectSummaryTranscript(source, final || !hasDraft);
   const locked = summaryDraftContext(input.previousSummary, true);
@@ -548,6 +548,7 @@ function buildSummaryRequest(input, final) {
       ? "生成会后纪要。按事项合并各时段的讨论，将最重要的结果、变化和阻塞排在前面。"
       : "请只根据新增内容更新滚动纪要。合并对同一事项的重复汇报，已明确的新状态替换旧状态，仍有效的结论继续保留。",
     `本次纪要模板：${template.label}。${template.guidance}`,
+    ...(input.meetingTypeGuidance ? [`会议类型聚焦（${input.detectedMeetingType || "自动识别"}）：${input.meetingTypeGuidance}`] : []),
     "每条写成可独立读懂的句子。写出项目、指标或交付物的名称，用具体动作和结果代替「这个、这块、相关工作、持续推进」。保留能说明变化的基线、现值、数量、单位、口径和日期。只有上下文能明确指代时才补出名称。听不清的专名、数字或单位不得猜测；不确定且重要的事实放入未决问题。",
     "只输出一个 JSON 对象。结构：topics, keyPoints, decisions, actionItems, openQuestions, risks, nextSteps。这七个字段是数组，有依据才填写，避免同一句在各节重复。",
     "可增加 overview 字符串：一到两句交代会议范围、整体结果和最重要的限制，省略寒暄、过程性套话与纯议程复述。",
@@ -646,9 +647,29 @@ export async function refineKeyPointsWithOpenAICompatible(profile, apiKey, input
   const prompt = buildKeyPointsPrompt(input);
   const validate = (value) => {
     const summary = validateSummary(value);
-    const keyPoints = (summary.keyPoints ?? []).map((text) => String(text).trim()).filter(Boolean);
+    // 按同一索引同步过滤 keyPoints、keyPointTimes、keyPointHeadlines，
+    // 防止空文本被过滤后其余两个并行数组发生下标错位。
+    const keptIndices = [];
+    const keyPoints = [];
+    (summary.keyPoints ?? []).forEach((text, index) => {
+      const trimmed = String(text ?? "").trim();
+      if (!trimmed) return;
+      keptIndices.push(index);
+      keyPoints.push(trimmed);
+    });
     if (!keyPoints.length) throw new Error("模型没有返回可用于关键结论的内容，请重试或换用兼容性更好的模型。");
-    return { ...summary, keyPoints };
+    const keyPointTimes = summary.keyPointTimes
+      ? keptIndices.map((index) => summary.keyPointTimes[index])
+      : undefined;
+    const keyPointHeadlines = summary.keyPointHeadlines
+      ? keptIndices.map((index) => summary.keyPointHeadlines[index])
+      : undefined;
+    return {
+      ...summary,
+      keyPoints,
+      ...(keyPointTimes?.some((item) => item !== undefined) ? { keyPointTimes } : { keyPointTimes: undefined }),
+      ...(keyPointHeadlines?.some((item) => item !== undefined) ? { keyPointHeadlines } : { keyPointHeadlines: undefined })
+    };
   };
   if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
     const payload = profile.options.apiFlavor === "anthropic"
@@ -660,12 +681,17 @@ export async function refineKeyPointsWithOpenAICompatible(profile, apiKey, input
   }
   const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
   const timeoutMs = keyPointsRequestTimeoutMs(profile);
+  // 与 summarizeWithOpenAICompatible 对齐：所有兼容回退与网络重试共享同一个总超时预算。
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const generationSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const timeoutError = () => new Error(`深度提炼请求超时（${Math.round(timeoutMs / 1000)} 秒）：请稍后重试，或在「设置 → AI 总结」换用响应更快的模型。`);
   let useStream = true;
   let useResponseFormat = true;
   let transientRetries = 0;
   let lastError;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
+      generationSignal.throwIfAborted();
       const body = {
         model: profile.model,
         temperature: 0.2,
@@ -685,7 +711,7 @@ export async function refineKeyPointsWithOpenAICompatible(profile, apiKey, input
           ...(profile.options?.headers ?? {})
         },
         body: JSON.stringify(body),
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
+        signal: generationSignal
       });
       if (!response.ok) {
         const bodyText = await response.text();
@@ -721,9 +747,7 @@ export async function refineKeyPointsWithOpenAICompatible(profile, apiKey, input
       return validate(JSON.parse(extractJson(content)));
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (error?.name === "TimeoutError") {
-        throw new Error(`深度提炼请求超时（${Math.round(timeoutMs / 1000)} 秒）：请稍后重试，或在「设置 → AI 总结」换用响应更快的模型。`);
-      }
+      if (deadline.aborted || error?.name === "TimeoutError") throw timeoutError();
       if (!error.retry && error instanceof TypeError
         && /fetch failed|network|ECONN|socket|timed out/i.test(String(error.message))
         && transientRetries < 1) {
@@ -732,7 +756,14 @@ export async function refineKeyPointsWithOpenAICompatible(profile, apiKey, input
       }
       if (!error.retry || attempt === 2) throw error;
       lastError = error;
-      if (error.retry === "pause") await pauseBeforeRetry(900, signal);
+      if (error.retry === "pause") {
+        try {
+          await pauseBeforeRetry(900, generationSignal);
+        } catch (abortError) {
+          if (!signal?.aborted && deadline.aborted) throw timeoutError();
+          throw abortError;
+        }
+      }
     }
   }
   throw lastError;
@@ -769,20 +800,52 @@ export function keyPointsRequestTimeoutMs(profile) {
  * 读取一次纪要响应：SSE 流拼接 choices[0].delta.content，网关忽略 stream 时
  * 按整包 JSON 取 message.content。两种形态都交给同一套 JSON 校验。
  */
-async function readSummaryContent(response, useStream) {
+async function readSummaryContent(response, useStream, onOutput, onProgress) {
   const contentType = response.headers?.get?.("content-type") ?? "";
   if (!useStream || !contentType.includes("text/event-stream")) {
-    return extractMessageContent(await response.json());
+    const payload = await response.json();
+    if (payload?.choices?.[0]?.finish_reason === "length") {
+      const error = new Error("总结模型达到输出长度上限，未能返回完整纪要。请更换总结模型后重试。");
+      error.code = "length_limit";
+      throw error;
+    }
+    const content = extractMessageContent(payload);
+    if (content) {
+      onProgress?.("receiving");
+      onOutput?.();
+    }
+    return content;
   }
-  let content = "";
+  const accumulator = createChatStreamAccumulator();
+  let receivedContent = false;
+  let receivedReasoning = false;
   for await (const data of sseDataLines(response)) {
-    if (!data || data === "[DONE]") continue;
+    if (data === "[DONE]") break;
+    if (!data) continue;
     let chunk;
     try { chunk = JSON.parse(data); } catch { continue; }
-    const delta = chunk?.choices?.[0]?.delta?.content;
-    if (typeof delta === "string") content += delta;
+    const delta = chunk?.choices?.[0]?.delta;
+    const parsed = typeof delta?.content === "string" && delta.content
+      ? accumulator.push({ content: delta.content }) : undefined;
+    const reasoning = delta?.reasoning_content ?? delta?.reasoning;
+    if (!receivedContent && !receivedReasoning && (parsed?.reasoning || (typeof reasoning === "string" && reasoning.trim()))) {
+      receivedReasoning = true;
+      onProgress?.("reasoning");
+    }
+    if (!receivedContent && parsed?.content?.trim()) {
+      receivedContent = true;
+      onProgress?.("receiving");
+      onOutput?.();
+    }
+    const finishReason = chunk?.choices?.[0]?.finish_reason;
+    if (finishReason === "length") {
+      const error = new Error("总结模型达到输出长度上限，未能返回完整纪要。请更换总结模型后重试。");
+      error.code = "length_limit";
+      throw error;
+    }
+    if (finishReason === "stop") break;
   }
-  return content;
+  return accumulator.finish().content;
 }
 
 /** 重试前的短等待；用户点「取消生成」时立即结束，不再多等一轮。 */
@@ -790,11 +853,148 @@ async function pauseBeforeRetry(ms, signal) {
   if (signal?.aborted) throw signal.reason ?? new DOMException("已取消", "AbortError");
   const timer = AbortSignal.timeout(ms);
   await new Promise((resolve) => {
-    const done = () => resolve();
+    const done = () => {
+      timer.removeEventListener("abort", done);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
     timer.addEventListener("abort", done, { once: true });
     signal?.addEventListener("abort", done, { once: true });
   });
   if (signal?.aborted) throw signal.reason ?? new DOMException("已取消", "AbortError");
+}
+
+/**
+ * 通用的结构化 JSON 请求通道（复用于语义纠错、分章提取、全局综合、事实核验与局部重生成）。
+ * 统一处理 Anthropic / Gemini 原生协议与 OpenAI 兼容 SSE 流式、参数回退、DeepSeek 长度兜底和瞬态重试。
+ */
+export async function requestStructuredJson(profile, apiKey, {
+  systemPrompt = "只输出可解析的 JSON。",
+  userPrompt,
+  temperature = 0.2,
+  maxTokens = 8_192,
+  signal,
+  onOutput,
+  onProgress,
+  label = "模型请求失败"
+}) {
+  if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
+    const promptText = systemPrompt && systemPrompt !== "只输出可解析的 JSON。"
+      ? `${systemPrompt}\n\n${userPrompt}`
+      : userPrompt;
+    const payload = profile.options.apiFlavor === "anthropic"
+      ? await requestAnthropic(profile, apiKey, promptText, maxTokens, signal, {}, label)
+      : await requestGemini(profile, apiKey, promptText, maxTokens, signal, {}, label);
+    const content = extractMessageContent(payload);
+    if (!content) throw new Error("模型没有返回内容。");
+    onProgress?.("receiving");
+    onOutput?.();
+    return JSON.parse(extractJson(content));
+  }
+  const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
+  const destination = new URL(endpoint);
+  const officialDeepSeek = destination.origin === "https://api.deepseek.com";
+  const timeoutMs = summaryRequestTimeoutMs(profile);
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const generationSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const timeoutError = () => new Error(`${label}：请求超时（${Math.round(timeoutMs / 1000)} 秒），请稍后重试或换用响应更快的模型。`);
+  let useStream = true;
+  let useResponseFormat = true;
+  let useDeepSeekThinking = officialDeepSeek;
+  let useDeepSeekMaxTokens = officialDeepSeek && Number.isFinite(maxTokens);
+  let transientRetries = 0;
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      generationSignal.throwIfAborted();
+      const body = {
+        model: profile.model,
+        temperature,
+        ...(useDeepSeekThinking ? { thinking: { type: "disabled" } } : {}),
+        ...(useDeepSeekMaxTokens ? { max_tokens: maxTokens } : {}),
+        ...(useStream ? { stream: true } : {}),
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ]
+      };
+      if (useResponseFormat) body.response_format = { type: "json_object" };
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(useStream ? { Accept: "text/event-stream" } : {}),
+          ...authorizationHeaders(profile, apiKey),
+          ...(profile.options?.headers ?? {})
+        },
+        body: JSON.stringify(body),
+        signal: generationSignal
+      });
+      if (!response.ok) {
+        const bodyText = await response.text();
+        const error = new Error(`${label}：${friendlyHttpError(
+          response.status,
+          bodyText,
+          response.headers?.get?.("x-request-id") ?? response.headers?.get?.("request-id")
+        )}`);
+        const unsupported = [400, 404, 422].includes(response.status)
+          || /response_format|stream|thinking|max_tokens/i.test(bodyText);
+        if (unsupported && (useStream || useResponseFormat || useDeepSeekThinking || useDeepSeekMaxTokens)) {
+          let matchedSpecific = false;
+          if (/response_format/i.test(bodyText) && useResponseFormat) { useResponseFormat = false; matchedSpecific = true; }
+          if (/stream/i.test(bodyText) && useStream) { useStream = false; matchedSpecific = true; }
+          if (/thinking/i.test(bodyText) && useDeepSeekThinking) { useDeepSeekThinking = false; matchedSpecific = true; }
+          if (/max_tokens/i.test(bodyText) && useDeepSeekMaxTokens) { useDeepSeekMaxTokens = false; matchedSpecific = true; }
+          if (!matchedSpecific) {
+            useStream = false;
+            useResponseFormat = false;
+            useDeepSeekThinking = false;
+            useDeepSeekMaxTokens = false;
+          }
+          error.retry = "immediate";
+        } else if (TRANSIENT_SUMMARY_STATUSES.has(response.status) && transientRetries < 1) {
+          transientRetries += 1;
+          error.retry = "pause";
+        }
+        throw error;
+      }
+      onProgress?.("waiting_body");
+      const content = await readSummaryContent(response, useStream, onOutput, onProgress);
+      if (!content) {
+        useStream = false;
+        useResponseFormat = false;
+        const empty = new Error("模型没有返回内容。");
+        empty.retry = "immediate";
+        throw empty;
+      }
+      return JSON.parse(extractJson(content));
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      if (deadline.aborted || error?.name === "TimeoutError") throw timeoutError();
+      if (error?.code === "length_limit" && useDeepSeekMaxTokens) {
+        useDeepSeekMaxTokens = false;
+        error.retry = "immediate";
+      }
+      if (!error.retry && error instanceof TypeError
+        && /fetch failed|network|ECONN|socket|timed out/i.test(String(error.message))
+        && transientRetries < 1) {
+        transientRetries += 1;
+        error.retry = "pause";
+      }
+      if (!error.retry || attempt === 2) throw error;
+      lastError = error;
+      onProgress?.("retrying");
+      if (error.retry === "pause") {
+        try {
+          await pauseBeforeRetry(900, generationSignal);
+        } catch (abortError) {
+          if (!signal?.aborted && deadline.aborted) throw timeoutError();
+          throw abortError;
+        }
+      }
+    }
+  }
+  throw lastError;
 }
 
 /**
@@ -811,7 +1011,7 @@ async function pauseBeforeRetry(ms, signal) {
  * @param {object} input 会议上下文
  * @returns {Promise<object>} 经 validateSummary 归一化后的纪要对象
  */
-export async function summarizeWithOpenAICompatible(profile, apiKey, input, final = false, signal) {
+export async function summarizeWithOpenAICompatible(profile, apiKey, input, final = false, signal, onOutput, onProgress = undefined) {
   const { prompt, sources } = buildSummaryRequest(input, final);
   if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
     const payload = profile.options.apiFlavor === "anthropic"
@@ -819,21 +1019,34 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
       : await requestGemini(profile, apiKey, prompt, 8_192, signal);
     const content = extractMessageContent(payload);
     if (!content) throw new Error("总结模型没有返回内容。");
+    onProgress?.("receiving");
+    onOutput?.();
     return validateOnlineSummary(JSON.parse(extractJson(content)), sources);
   }
   const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
+  const destination = new URL(endpoint);
+  const officialDeepSeek = destination.origin === "https://api.deepseek.com";
   const timeoutMs = summaryRequestTimeoutMs(profile);
+  // 所有兼容性回退与网络重试共享一个截止时间，避免每次重试再等满五分钟。
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const generationSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const timeoutError = () => new Error(`总结模型请求超时（${Math.round(timeoutMs / 1000)} 秒）：请稍后重试，或在「设置 → AI 总结」换用响应更快的模型。`);
   let useStream = true;
   let useResponseFormat = true;
+  let useDeepSeekThinking = officialDeepSeek;
+  let useDeepSeekMaxTokens = officialDeepSeek;
   let transientRetries = 0;
   let lastError;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
+      generationSignal.throwIfAborted();
       const body = {
         model: profile.model,
         temperature: 0.2,
-        // 不给输出设上限：推理型模型会把思维链一起计入 max_tokens，截断后
-        // 拿到的就是半截 JSON。流式本身已解决 60 秒网关上限，无需再限长。
+        // 官方 DeepSeek 的普通纪要直接写结构化正文；若网关/模型报 thinking 不兼容或触及
+        // max_tokens 上限，则在重试中自动剥离对应参数回退。
+        ...(useDeepSeekThinking ? { thinking: { type: "disabled" } } : {}),
+        ...(useDeepSeekMaxTokens ? { max_tokens: final ? 8_192 : 4_096 } : {}),
         ...(useStream ? { stream: true } : {}),
         messages: [
           { role: "system", content: "只输出可解析的 JSON。" },
@@ -851,7 +1064,7 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
           ...(profile.options?.headers ?? {})
         },
         body: JSON.stringify(body),
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
+        signal: generationSignal
       });
       if (!response.ok) {
         const bodyText = await response.text();
@@ -863,14 +1076,19 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
           response.headers?.get?.("x-request-id") ?? response.headers?.get?.("request-id")
         )}`);
         const unsupported = [400, 404, 422].includes(response.status)
-          || /response_format|stream/i.test(bodyText);
-        if (unsupported && (useStream || useResponseFormat)) {
+          || /response_format|stream|thinking|max_tokens/i.test(bodyText);
+        if (unsupported && (useStream || useResponseFormat || useDeepSeekThinking || useDeepSeekMaxTokens)) {
           // 报错点名哪个参数就只去掉哪个；泛化的 400 一次退到最小请求体。
-          if (/response_format/i.test(bodyText)) useResponseFormat = false;
-          if (/stream/i.test(bodyText)) useStream = false;
-          if (!/response_format|stream/i.test(bodyText)) {
+          let matchedSpecific = false;
+          if (/response_format/i.test(bodyText) && useResponseFormat) { useResponseFormat = false; matchedSpecific = true; }
+          if (/stream/i.test(bodyText) && useStream) { useStream = false; matchedSpecific = true; }
+          if (/thinking/i.test(bodyText) && useDeepSeekThinking) { useDeepSeekThinking = false; matchedSpecific = true; }
+          if (/max_tokens/i.test(bodyText) && useDeepSeekMaxTokens) { useDeepSeekMaxTokens = false; matchedSpecific = true; }
+          if (!matchedSpecific) {
             useStream = false;
             useResponseFormat = false;
+            useDeepSeekThinking = false;
+            useDeepSeekMaxTokens = false;
           }
           error.retry = "immediate";
         } else if (TRANSIENT_SUMMARY_STATUSES.has(response.status) && transientRetries < 1) {
@@ -879,7 +1097,8 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
         }
         throw error;
       }
-      const content = await readSummaryContent(response, useStream);
+      onProgress?.("waiting_body");
+      const content = await readSummaryContent(response, useStream, onOutput, onProgress);
       if (!content) {
         // 声称支持 SSE 却一个 token 都不给：退回最小请求体再试一次。
         useStream = false;
@@ -893,8 +1112,11 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
       if (signal?.aborted) throw error;
       // AbortSignal.timeout 抛的是 TimeoutError：已经等满上限，别再重试一次，
       // 但要把英文 DOMException 换成用户能看懂、能操作的提示。
-      if (error?.name === "TimeoutError") {
-        throw new Error(`总结模型请求超时（${Math.round(timeoutMs / 1000)} 秒）：请稍后重试，或在「设置 → AI 总结」换用响应更快的模型。`);
+      if (deadline.aborted || error?.name === "TimeoutError") throw timeoutError();
+      // 主动限制了 max_tokens 却在长会议滚动/终稿里触顶截断：去掉 max_tokens 立即重试一次。
+      if (error?.code === "length_limit" && useDeepSeekMaxTokens) {
+        useDeepSeekMaxTokens = false;
+        error.retry = "immediate";
       }
       if (!error.retry && error instanceof TypeError
         && /fetch failed|network|ECONN|socket|timed out/i.test(String(error.message))
@@ -904,7 +1126,15 @@ export async function summarizeWithOpenAICompatible(profile, apiKey, input, fina
       }
       if (!error.retry || attempt === 2) throw error;
       lastError = error;
-      if (error.retry === "pause") await pauseBeforeRetry(900, signal);
+      onProgress?.("retrying");
+      if (error.retry === "pause") {
+        try {
+          await pauseBeforeRetry(900, generationSignal);
+        } catch (abortError) {
+          if (!signal?.aborted && deadline.aborted) throw timeoutError();
+          throw abortError;
+        }
+      }
     }
   }
   throw lastError;
@@ -1055,22 +1285,84 @@ export async function chatWithMeetingContext(profile, apiKey, { question, histor
 
 /** 第二阶段视觉纪要提示词：只消费普通纪要和会议元信息，不重复上传转录或音频。 */
 export function buildVisualSummaryPrompt(input) {
+  const summary = Object.fromEntries(
+    ["overview", "discussionSections", "keyPointHeadlines", ...SUMMARY_CONTEXT_FIELDS]
+      .map((field) => [field, input.summary?.[field]])
+  );
   return [
     "你是中文信息设计师。请把已经确认的结构化会议纪要整理成一张可由应用原生排版的视觉纪要。",
     "只输出 JSON，不要输出 Markdown、HTML、URL、CSS、图片或解释。所有文本必须是简体中文。",
     "schemaVersion 必须为 1；包含 title、subtitle、sections。sections 最多 5 个。",
     "每个 section 包含 id、number、title、tone、layout。tone 只能是 coral/amber/violet/green；layout 只能是 table/cards/callout。",
-    "table: columns 2–4 个、rows 最多 5 行且列数一致。cards: 1–4 张，每张含 title、可选 status、bullets 最多 4 条、可选 takeaway。callout: 一句最终结论。",
-    "不要为了套模板编造对比项、负责人、日期、状态或结论。没有自然对比时优先使用 cards。",
+    "layout 决定必填数据字段。每个章节只填写与 layout 对应的字段，不能只填标题与 layout。",
+    'table 必须包含嵌套对象 "table":{"columns":["对象","状态"],"rows":[["示例事项","已确认"]]}。2–4 列、1–5 行，每行与表头等宽，列名和单元格用纯文本。',
+    'cards 必须包含 "cards":[{"title":"示例事项","bullets":["可独立读懂的要点"]}]。1–4 张卡片，每张最多 4 条 bullets，也可填写 status 和 takeaway。',
+    'callout 必须包含 "callout":"一句可独立读懂的结论"。',
+    "示例只用于展示字段结构，不属于本次会议。只有普通纪要含可比较的数据时才用 table。没有合适的表格数据时，改用 cards 或 callout。不要编造数据、负责人、日期、状态或结论。",
     `会议标题：${String(input.title ?? "")}`,
     `参与者：${Array.isArray(input.participants) ? input.participants.join("、") : ""}`,
-    `普通纪要：${JSON.stringify(input.summary ?? {})}`
+    `普通纪要：${JSON.stringify(summary)}`
   ].join("\n\n");
+}
+
+const visualLayouts = ["table", "cards", "callout"];
+
+function hasVisualLayoutPayload(section) {
+  switch (section.layout) {
+    case "table": return section.table != null && (!Array.isArray(section.table.rows) || section.table.rows.length > 0);
+    case "cards": return section.cards != null && (!Array.isArray(section.cards) || section.cards.length > 0);
+    case "callout": return section.callout != null && (typeof section.callout !== "string" || Boolean(section.callout.trim()));
+    default: return true; // 错误的布局名由严格校验报告。
+  }
+}
+
+/** 只搬运模型实际返回的内容。合法内容从错误的布局标签中恢复，空章节交回模型补齐。 */
+function normalizeGeneratedVisualLayout(value) {
+  if (!Array.isArray(value?.sections)) return { draft: value, needsRetry: false };
+  let needsRetry = false;
+  const sections = value.sections.map((section) => {
+    if (!section || typeof section !== "object" || hasVisualLayoutPayload(section)) return section;
+    const flatTable = { columns: section.columns, rows: section.rows };
+    const { table, cards, callout, ...heading } = section;
+    const fields = { table: table ?? flatTable, cards, callout };
+    for (const layout of [section.layout, ...visualLayouts.filter((layout) => layout !== section.layout)]) {
+      const candidate = visualSectionSchema.safeParse({ ...heading, layout, [layout]: fields[layout] });
+      if (candidate.success) return candidate.data;
+    }
+    needsRetry = true;
+    return section;
+  });
+  return { draft: { ...value, sections }, needsRetry };
 }
 
 /** 调用已验证的在线总结模型生成视觉纪要 schema。 */
 export async function generateVisualSummaryWithOpenAICompatible(profile, apiKey, input, signal) {
   const prompt = buildVisualSummaryPrompt(input);
+  const timeoutMs = summaryRequestTimeoutMs(profile);
+  const generationSignal = requestSignal(signal, timeoutMs);
+  const metadata = { sourceSummaryUpdatedAt: input.summary?.updatedAt, providerProfileId: profile.id };
+  try {
+    const first = normalizeGeneratedVisualLayout(JSON.parse(extractJson(
+      await requestVisualSummaryContent(profile, apiKey, prompt, generationSignal)
+    )));
+    if (!first.needsRetry) return validateVisualSummary(first.draft, metadata);
+
+    // 卡片和结论的结构较简单。重试只读取同一份普通纪要，且共用首次生成的截止时间。
+    const retryPrompt = `${prompt}\n\n上次有章节缺少布局数据。本次只用 cards 或 callout。每个章节必须有非空 cards 数组或非空 callout 字符串；无法从普通纪要找到内容的章节请省略。`;
+    const retry = normalizeGeneratedVisualLayout(JSON.parse(extractJson(
+      await requestVisualSummaryContent(profile, apiKey, retryPrompt, generationSignal)
+    )));
+    if (retry.needsRetry) throw new Error("总结模型没有为部分章节返回可展示的内容，请重试生成视觉纪要。");
+    return validateVisualSummary(retry.draft, metadata);
+  } catch (error) {
+    if (!signal?.aborted && error?.name === "TimeoutError") {
+      throw new Error(`视觉纪要生成超时（${Math.round(timeoutMs / 1000)} 秒），请重试。`);
+    }
+    throw error;
+  }
+}
+
+async function requestVisualSummaryContent(profile, apiKey, prompt, signal) {
   let content;
   if (profile.options?.apiFlavor === "anthropic" || profile.options?.apiFlavor === "gemini") {
     const payload = profile.options.apiFlavor === "anthropic"
@@ -1079,7 +1371,6 @@ export async function generateVisualSummaryWithOpenAICompatible(profile, apiKey,
     content = extractMessageContent(payload);
   } else {
     const endpoint = apiUrl(profile, "chat/completions", profile.options?.chatEndpoint);
-    const timeoutMs = summaryRequestTimeoutMs(profile);
     // 与普通纪要共用流式策略：企业网关对整包响应常有 60 秒硬上限，视觉纪要
     // 也必须用 SSE 才能跑完。网关不支持 stream 时按报错回退到最小请求体。
     let useStream = true;
@@ -1088,6 +1379,7 @@ export async function generateVisualSummaryWithOpenAICompatible(profile, apiKey,
     let lastError;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
+        signal.throwIfAborted();
         const body = {
           model: profile.model,
           temperature: 0.15,
@@ -1107,7 +1399,7 @@ export async function generateVisualSummaryWithOpenAICompatible(profile, apiKey,
             ...(profile.options?.headers ?? {})
           },
           body: JSON.stringify(body),
-          signal: requestSignal(signal, timeoutMs)
+          signal
         });
         if (!response.ok) {
           const bodyText = await response.text();
@@ -1147,10 +1439,7 @@ export async function generateVisualSummaryWithOpenAICompatible(profile, apiKey,
     if (!content && lastError) throw lastError;
   }
   if (!content) throw new Error("视觉纪要模型没有返回内容。");
-  return validateVisualSummary(JSON.parse(extractJson(content)), {
-    sourceSummaryUpdatedAt: input.summary?.updatedAt,
-    providerProfileId: profile.id
-  });
+  return content;
 }
 
 /** 按中英文句末标点（。！？!?…）切分句子，供本地规则纪要做句子级匹配。 */
@@ -2348,20 +2637,26 @@ async function* sseDataLines(response) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let newlineAt;
-    while ((newlineAt = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, newlineAt).replace(/\r$/, "");
-      buffer = buffer.slice(newlineAt + 1);
-      if (line.startsWith("data:")) yield line.slice(5).trim();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newlineAt;
+      while ((newlineAt = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newlineAt).replace(/\r$/, "");
+        buffer = buffer.slice(newlineAt + 1);
+        if (line.startsWith("data:")) yield line.slice(5).trim();
+      }
     }
+    buffer += decoder.decode();
+    const tail = buffer.trim();
+    if (tail.startsWith("data:")) yield tail.slice(5).trim();
+  } finally {
+    // 纪要消费者读到 [DONE] 即可返回；代理继续保活时主动释放连接。
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
-  buffer += decoder.decode();
-  const tail = buffer.trim();
-  if (tail.startsWith("data:")) yield tail.slice(5).trim();
 }
 
 /**

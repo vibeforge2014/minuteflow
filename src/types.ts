@@ -33,6 +33,10 @@ export interface TranscriptSegment {
   speakerName: string;
   /** 转录文本。 */
   text: string;
+  /** 语义纠错或局部重识别前保留的原始 ASR 文本，用于对照或一键恢复。 */
+  rawText?: string;
+  /** 该段落是否已由 LLM 语义校对修正过。 */
+  corrected?: boolean;
   status: TranscriptStatus;
   track: AudioTrackKind;
   /** 转写引擎返回的置信度（可选）。 */
@@ -114,11 +118,27 @@ export interface VisualSummary {
   providerProfileId?: string;
 }
 
-/**
- * 纪要模板 id：只改归纳视角（提示词关注点），不改变纪要结构。
+/** 纪要模板 id：只改归纳视角（提示词关注点），不改变纪要结构。
  * 定义在 shared/summary-templates.mjs，渲染层与主进程共用。
  */
 export type SummaryTemplateId = "general" | "weekly" | "interview" | "retro";
+
+/** 处理质量模式：fast（单次快速）/ standard（自动纠错 + 长会分章提取与综合）/ high（增加独立事实核验与定点修订）。 */
+export type ProcessingQualityMode = "fast" | "standard" | "high";
+
+export interface SummaryVerificationInfo {
+  verified: boolean;
+  checkedAt: string;
+  issuesFound: number;
+  issuesFixed: number;
+  unverifiedNotes?: string[];
+}
+
+export interface SummaryPipelineStats {
+  stages: string[];
+  llmCalls: number;
+  durationMs: number;
+}
 
 /**
  * AI 会议纪要：结构化的会议产出，分为主题、要点、决定、行动项、待澄清问题、风险与下一步。
@@ -163,6 +183,14 @@ export interface MeetingSummary {
   manualLocks?: string[];
   /** 已验证在线模型生成、由应用原生排版的视觉纪要。 */
   visualSummary?: VisualSummary;
+  /** 自动识别出的会议类型（如「技术研讨会」「项目进度会」「经营分析会」）。 */
+  detectedMeetingType?: string;
+  /** 生成该纪要时使用的处理质量模式。 */
+  qualityMode?: ProcessingQualityMode;
+  /** 高精度模式下的事实核验结果。 */
+  verification?: SummaryVerificationInfo;
+  /** 多阶段流水线耗时与调用统计。 */
+  pipelineStats?: SummaryPipelineStats;
 }
 
 /**
@@ -401,6 +429,8 @@ export interface MeetingPreferences {
   defaultMode: MeetingMode;
   /** 术语表：转写时传给模型，统一专有名词写法。 */
   glossary: string[];
+  /** 常驻启用的内置领域热词包 ID（留空时按会议标题/内容自动匹配最相关领域）。 */
+  hotwordDomains?: string[];
   /** 实时转写语言：zh / en / auto；缺省按 zh 处理以兼容旧配置。 */
   transcriptionLanguage?: "zh" | "en" | "auto";
   /** 转写前音频增强（70Hz 高通 + 响度归一）；缺省开启。 */
@@ -423,6 +453,12 @@ export interface MeetingPreferences {
   modelDownloadSourceKind: "official" | "mirror" | "custom";
   /** 自定义下载源：HF 兼容站点根地址，或含 {fileName} 占位符的链接模板。 */
   modelDownloadCustomBase: string;
+  /** 转写校对与 AI 纪要质量档位：fast / standard（默认）/ high。 */
+  processingQuality?: ProcessingQualityMode;
+  /** 可选：专门用于语义纠错的模型档案 ID；留空时复用默认总结模型。 */
+  correctionProfileId?: string;
+  /** 可选：专门用于高精度事实核验的模型档案 ID；留空时复用默认总结模型。 */
+  reviewProfileId?: string;
 }
 
 /** 系统权限取值：已授权 / 拒绝 / 受限 / 未询问 / 未知。 */
@@ -695,6 +731,10 @@ export interface ImportJob {
   /** 重新转录已有会议：清空旧逐字稿后从归档录音重建（旧稿随任务存档）。 */
   retranscribe?: boolean;
   summaryComplete?: boolean;
+  summaryModelName?: string;
+  summaryStartedAt?: string;
+  summaryReceiving?: boolean;
+  summaryPhase?: "requesting" | "waiting_body" | "reasoning" | "receiving" | "retrying";
   /** waiting_for_network 期间累计的自动续跑次数；成功一块后清零。 */
   transcriptionRetryAttempts?: number;
   /** 当前正在处理的音频时间区间。 */
@@ -820,6 +860,26 @@ export interface MeetingAPI {
       /** 该轨道最近已定稿的文本，作为 initial_prompt 的前文上下文。 */
       previousText?: string;
     }): Promise<TranscriptionChunkResult>;
+    /** 受控 LLM 语义纠错：结合动态热词与上下文修复同音错别字/专有名词，保留原始 rawText。 */
+    correct(payload: {
+      meetingId: string;
+      profileId?: string;
+    }): Promise<{
+      meeting: Meeting;
+      correctedCount: number;
+      rejectedCount: number;
+      llmCalls: number;
+      durationMs: number;
+    }>;
+    /** 局部低置信段落重识别：只裁剪该段落对应的归档音频区间，带热词与前文上下文重新转写。 */
+    retranscribeSegment(payload: {
+      meetingId: string;
+      segmentId: string;
+      sttProfileId?: string;
+    }): Promise<{
+      meeting: Meeting;
+      segment: TranscriptSegment;
+    }>;
   };
   /**
    * 纪要生成：final=false 为录音中滚动增量，true 为会后最终总结；由用户手动触发的最终总结不跟随录音停止自动执行。
@@ -840,7 +900,7 @@ export interface MeetingAPI {
         /** 纪要模板：只影响提示词的归纳视角，不改变返回结构。 */
         template?: SummaryTemplateId;
       };
-    }): Promise<MeetingSummary & {
+    }, onOutput?: () => void): Promise<MeetingSummary & {
       degraded?: boolean;
       degradedReason?: string;
       visualDegraded?: boolean;
@@ -877,6 +937,15 @@ export interface MeetingAPI {
       participants: string[];
       summary: MeetingSummary;
     }): Promise<VisualSummary>;
+    /** 局部重生成单个讨论议题章节，不影响其他已核对章节与锁定条目。 */
+    regenerateSection(payload: {
+      meetingId: string;
+      sectionIndex: number;
+      profileId?: string;
+    }): Promise<{
+      meeting: Meeting;
+      section: NonNullable<MeetingSummary["discussionSections"]>[number];
+    }>;
     /** 取消一场会议进行中的总结请求（中止主进程侧的 AbortController）。 */
     cancel(meetingId: string): Promise<{ ok: true }>;
   };
@@ -955,7 +1024,7 @@ export interface MeetingAPI {
       autoSummarize?: boolean;
     }): Promise<ImportJob[]>;
     list(): Promise<ImportJob[]>;
-    retry(id: string, sttProfileId?: string): Promise<ImportJob>;
+    retry(id: string, sttProfileId?: string, llmProfileId?: string): Promise<ImportJob>;
     cancel(id: string): Promise<ImportJob>;
     /** 跳过说话人识别：保留已完成的转写并继续生成纪要。 */
     skipDiarization(id: string): Promise<ImportJob>;

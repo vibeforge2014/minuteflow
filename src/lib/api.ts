@@ -10,7 +10,7 @@
 import { DIARIZATION_SETUP_MODELS } from "./diarization-setup";
 import { LOCAL_ASR_SETUP_MODELS } from "./local-asr-setup";
 import { demoMeetings } from "../data/demo";
-import type { CreateMeetingInput, DownloadableModel, ImportCandidate, ImportJob, Meeting, MeetingAPI, MeetingPreferences, MeetingSummary, ModelProfile, VisualSummary } from "../types";
+import type { CreateMeetingInput, DownloadableModel, ImportCandidate, ImportJob, Meeting, MeetingAPI, MeetingPreferences, MeetingSummary, ModelProfile } from "../types";
 import { simplifyChinese, simplifySummary } from "./chinese";
 import { markdown } from "../../shared/export-formatters.mjs";
 
@@ -27,6 +27,7 @@ const defaultPreferences: MeetingPreferences = {
   summaryCadenceVersion: 1,
   defaultMode: "online",
   glossary: [],
+  hotwordDomains: [],
   audioEnhancement: true,
   silenceSkip: true,
   retentionDays: null,
@@ -35,7 +36,10 @@ const defaultPreferences: MeetingPreferences = {
   permissionsVersion: 0,
   permissionSetupResume: false,
   modelDownloadSourceKind: "official",
-  modelDownloadCustomBase: ""
+  modelDownloadCustomBase: "",
+  processingQuality: "standard",
+  correctionProfileId: "",
+  reviewProfileId: ""
 };
 
 /**
@@ -133,93 +137,6 @@ function saveBrowserImportJob(job: ImportJob) {
   const jobs = [job, ...loadBrowserImportJobs().filter((item) => item.id !== job.id)];
   localStorage.setItem(importJobsKey, JSON.stringify(jobs));
   importListeners.forEach((listener) => listener(job));
-}
-
-/** 浏览器预览中的本机基础纪要：压缩高信息句，避免把右侧转录原样复制到文档。 */
-function localSummary(input: {
-  goals: string[];
-  notes: string[];
-  transcript: Meeting["transcript"];
-  previousSummary: MeetingSummary;
-}): MeetingSummary {
-  const candidates = input.transcript
-    .filter((segment) => segment.status === "final")
-    .flatMap((segment) => segment.text.split(/(?<=[。！？!?])\s*/).map((text) => ({ text, startMs: segment.startMs })))
-    .map(({ text, startMs }) => ({
-      text: simplifyChinese(text).replace(/^(嗯+|啊+|呃+|然后|就是|那个)[，,。.!！\s]*/, "").trim(),
-      startMs
-    }))
-    .filter(({ text }) => text.length >= 8 && !/[？?]$/.test(text))
-    .map(({ text, startMs }) => ({
-      text,
-      startMs,
-      score: (text.match(/(确认|决定|结论|完成|进展|方案|问题|结果|计划|建议|需要|风险|负责)/g)?.length ?? 0) * 3 + text.length / 30
-    }))
-    .sort((left, right) => right.score - left.score);
-  const keyPoints: string[] = [];
-  const keyPointTimes: number[] = [];
-  for (const candidate of candidates) {
-    const normalized = candidate.text.replace(/[\s，。！？、,.!?]/g, "");
-    if (keyPoints.some((item) => item.replace(/[\s，。！？、,.!?]/g, "").includes(normalized))) continue;
-    keyPoints.push(candidate.text);
-    keyPointTimes.push(candidate.startMs);
-    if (keyPoints.length >= 6) break;
-  }
-  const sourceThroughMs = input.transcript.reduce((maximum, segment) => Math.max(maximum, segment.endMs), 0);
-  return simplifySummary({
-    ...input.previousSummary,
-    topics: input.previousSummary.topics.length ? input.previousSummary.topics : input.goals.slice(0, 3),
-    keyPoints,
-    keyPointTimes,
-    keyPointHeadlines: undefined,
-    overview: undefined,
-    discussionSections: undefined,
-    updatedAt: new Date().toISOString(),
-    generationMode: "local",
-    sourceThroughMs,
-    stale: false
-  });
-}
-
-/** 浏览器预览用的确定性视觉纪要；真实 Electron/iOS 由已验证在线模型返回同一 schema。 */
-function browserVisualSummary(title: string, summary: MeetingSummary): VisualSummary {
-  const updatedAt = summary.updatedAt || new Date().toISOString();
-  const rows = [
-    ...(summary.decisions ?? []).slice(0, 2).map((item) => ["已确认决策", item, "已决策"]),
-    ...(summary.risks ?? []).slice(0, 1).map((item) => ["主要风险", item, "需关注"]),
-    ...(summary.openQuestions ?? []).slice(0, 1).map((item) => ["待澄清", item, "待确认"])
-  ].slice(0, 5);
-  return {
-    schemaVersion: 1,
-    title,
-    subtitle: summary.topics?.length ? `聚焦 ${summary.topics.slice(0, 3).join("、")}` : "把讨论收束为清晰结论与行动",
-    sections: [
-      {
-        id: "overview", number: 1, title: "结论与风险总览", tone: "amber", layout: "table",
-        table: { columns: ["类型", "核心内容", "状态"], rows: rows.length ? rows : [["讨论重点", summary.keyPoints[0] || "暂无可视化内容", "待推进"]] }
-      },
-      {
-        id: "progress", number: 2, title: "关键进展", tone: "violet", layout: "cards",
-        cards: (summary.keyPoints ?? []).slice(0, 2).map((item, index) => ({
-          title: `进展 ${index + 1}`, status: index === 0 ? "进行中" : "已同步", bullets: [item], takeaway: summary.nextSteps?.[index]
-        }))
-      },
-      {
-        id: "actions", number: 3, title: "行动安排", tone: "green", layout: "cards",
-        cards: (summary.actionItems ?? []).slice(0, 2).map((item) => ({
-          title: item.title, status: item.done ? "已完成" : item.status === "in_progress" ? "进行中" : "待开始",
-          bullets: [`负责人：${item.owner || "待确认"}`, `截止：${item.dueDate || "待确认"}`]
-        }))
-      },
-      {
-        id: "closing", number: 4, title: "会议定调", tone: "coral", layout: "callout",
-        callout: summary.nextSteps?.[0] || summary.decisions?.[0] || summary.keyPoints?.[0] || "继续根据会议结论推进后续工作。"
-      }
-    ].filter((section) => section.layout !== "cards" || (section.cards?.length ?? 0) > 0) as VisualSummary["sections"],
-    generatedAt: new Date().toISOString(),
-    sourceSummaryUpdatedAt: updatedAt,
-    stale: false
-  };
 }
 
 /**
@@ -371,34 +288,27 @@ const browserApi: MeetingAPI = {
           track: payload.track
         }]
       };
+    },
+    async correct() {
+      throw new Error("请在桌面版配置 AI 总结模型后执行转写校对。");
+    },
+    async retranscribeSegment() {
+      throw new Error("请在桌面版对已归档录音执行单段局部重识别。");
     }
   },
   summary: {
     // 模拟 900ms 生成延迟后返回本地拼装的伪纪要。
-    async generate(payload) {
-      await new Promise((resolve) => setTimeout(resolve, 900));
-      const summary = localSummary(payload.input);
-      const profile = (JSON.parse(localStorage.getItem(profileKey) || "[]") as ModelProfile[])
-        .find((item) => item.id === payload.profileId && item.kind === "llm");
-      if (payload.final && profile?.options.visualSummaryEnabled && profile.options.visualSummaryVerifiedAt) {
-        summary.visualSummary = browserVisualSummary(payload.input.title, summary);
-      }
-      return summary;
+    async generate() {
+      throw new Error("请在桌面版配置 AI 总结模型后生成纪要。");
     },
-    async refineKeyPoints(payload) {
-      await new Promise((resolve) => setTimeout(resolve, 900));
-      const summary = localSummary(payload.input);
-      return {
-        keyPoints: summary.keyPoints,
-        keyPointTimes: summary.keyPointTimes ?? [],
-        keyPointHeadlines: summary.keyPointHeadlines ?? [],
-        generationMode: "online",
-        updatedAt: new Date().toISOString()
-      };
+    async refineKeyPoints() {
+      throw new Error("请在桌面版配置 AI 总结模型后提炼关键结论。");
     },
-    async generateVisual(payload) {
-      await new Promise((resolve) => setTimeout(resolve, 650));
-      return browserVisualSummary(payload.title, payload.summary);
+    async generateVisual() {
+      throw new Error("请在桌面版配置 AI 总结模型后生成视觉纪要。");
+    },
+    async regenerateSection() {
+      throw new Error("请在桌面版配置 AI 总结模型后重新生成章节。");
     },
     async cancel() {
       return { ok: true };
@@ -596,16 +506,23 @@ const browserApi: MeetingAPI = {
       return jobs;
     },
     async list() { return loadBrowserImportJobs(); },
-    async retry(id, sttProfileId) {
+    async retry(id, sttProfileId, llmProfileId) {
       const current = loadBrowserImportJobs().find((job) => job.id === id);
       if (!current) throw new Error("导入任务不存在。");
+      const profiles = current.stage === "summarizing" ? await browserApi.models.list() : [];
+      const preferred = profiles.find((profile) => profile.kind === "llm" && profile.isDefault
+        && profile.enabled !== false && profile.transport !== "local-summary");
       const job = {
         ...current,
         status: "queued" as const,
         sttProfileId: sttProfileId ?? current.sttProfileId,
+        llmProfileId: llmProfileId ?? preferred?.id ?? current.llmProfileId,
         progress: 0,
         error: undefined,
         transcriptionRetryAttempts: 0,
+        summaryStartedAt: undefined,
+        summaryReceiving: undefined,
+        summaryPhase: undefined,
         diarizationPhase: undefined,
         diarizationStartedAt: undefined,
         diarizationAudioDurationMs: undefined,

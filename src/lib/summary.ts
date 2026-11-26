@@ -142,3 +142,43 @@ export function mergeSummaryRevision(
   ];
   return merged;
 }
+
+/** 判断一份纪要是否包含实质内容（避免后台转写分块推送的空纪要覆盖内存里的阶段性 AI 纪要）。 */
+export function hasSummaryContent(summary?: MeetingSummary): boolean {
+  if (!summary) return false;
+  return Boolean(summary.overview?.trim() || summary.discussionSections?.length)
+    || summary.keyPoints.length > 0
+    || summary.decisions.length > 0
+    || summary.actionItems.length > 0
+    || summary.openQuestions.length > 0
+    || summary.risks.length > 0
+    || summary.nextSteps.length > 0;
+}
+
+/** 决定合并后台导入快照时应保留本地纪要还是采纳后台纪要。 */
+export function resolveImportedSummaryMerge(
+  current: MeetingSummary,
+  incoming: MeetingSummary,
+  titleChanged: boolean
+): MeetingSummary {
+  const currentHas = hasSummaryContent(current);
+  const incomingHas = hasSummaryContent(incoming);
+  // 后台每完成一个转写块或说话人校准都会推送 meeting 快照，但其中的 summary 可能还是库里
+  // 尚未落盘的旧空壳或较早版本；绝不能让空壳/旧版覆盖内存里刚生成的阶段性 AI 纪要。
+  const incomingIsOlder = Boolean(
+    currentHas
+    && incomingHas
+    && current.updatedAt
+    && (!incoming.updatedAt || incoming.updatedAt < current.updatedAt)
+  );
+  if ((currentHas && !incomingHas) || incomingIsOlder) {
+    return {
+      ...current,
+      stale: Boolean(current.stale || incoming.stale || titleChanged)
+    };
+  }
+  return {
+    ...mergeSummaryRevision(current, incoming),
+    stale: incoming.stale || (titleChanged && Boolean(incoming.updatedAt))
+  };
+}
